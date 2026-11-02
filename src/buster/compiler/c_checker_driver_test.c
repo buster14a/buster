@@ -2774,11 +2774,11 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     check_test_expect(test, parallel_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
                       "an explicit driver command takes precedence over -E");
     free(text);
-    char* const end_options[] = { compiler, "--", "-E", source, NULL };
+    char* const end_options[] = { "env", "-C", (char*)directory, compiler, "-fsyntax-only", "--", "-E", "action.c", NULL };
     text = NULL;
     const int end_status = check_test_driver_spawn(end_options, &text);
-    check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "unknown argument: --") != NULL,
-                      "-E after -- does not select preprocessing; unsupported -- is diagnosed");
+    check_test_expect(test, end_status == 0 && text != NULL && strstr(text, "./-E:") != NULL && strstr(text, "input unused") != NULL,
+                      "-E after -- is a linker input, not the preprocessing action");
     free(text);
     unlink(operand);
     unlink(output);

@@ -13,6 +13,27 @@ the semantic driver:
 ./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
 
+The default command classifies each input before reading it (#1120): `.c` and `.h` are C, `.i` is preprocessed C,
+`.s` is assembly, and `.S` is assembly preprocessed with the command's macros and include paths. Other suffixes
+are linker inputs, including `.o`, `.a` and versioned `.so` paths. `-x c`, `-x cpp-output`, `-x assembler` and
+`-x assembler-with-cpp` apply to following inputs until another `-x`; `-x none` restores suffix selection.
+Preprocessed C ignores command-line macros, forced includes and replacement predefines files.
+
+```sh
+./build/compiler -c helper.c -o helper.o
+./build/compiler main.c helper.o extra.s macros.S libsupport.a -o program
+./build/compiler main.o helper.o -o program
+```
+
+A link containing assembly or linker inputs compiles its C units together on the usual lanes, retains their ELF
+objects in memory, assembles its assembly inputs, then passes the original input order to the foreign linker with
+the normal C startup objects and runtime libraries. No temporary object files or external linker are used. The
+result is a dynamic PIE; this input-routing change does not add other link modes or raw `-Wl,`/`-Xlinker` forwarding.
+All-C commands retain the direct native path described below. With `-c`, each source produces an object; linker
+inputs are unused with a warning. Multiple emitting inputs cannot share `-o` or an inferred object filename.
+`test-source-driver` exercises the real CLI with Buster and Clang objects, archives, shared libraries, both assembly
+modes, positional languages, parallel C capture, and failures that must not publish an executable.
+
 The compiler driver accepts `-pipe` in C compilation and preprocessing; it has no effect because its stages run in
 one process. `--version` identifies a development build and prints its target, while `-dumpmachine` prints only the
 target triple. These actions need no source file and accept `-target` or `--target=` for supported x86-64 Linux GNU

@@ -295,6 +295,7 @@ int run_snapshot_benchmark(int argc, char** argv);
 #include "buster/compiler/foreign_strings.c"
 #include "buster/compiler/foreign_strings_link.c"
 #include "buster/compiler/foreign_driver.c"
+int run_prepared_foreign_link(ForeignDriverRun* run, bool release);
 #include "buster/compiler/foreign_test.c"
 #include "buster/compiler/foreign_gc_benchmark.c"
 #include "buster/compiler/foreign_unwind_dedup_benchmark.c"
@@ -464,6 +465,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_driver.c"
 // The driver's commands of several source files (#152): their units on lanes, and one executable of them all.
 #include "buster/compiler/c_checker_units.c"
+#include "buster/compiler/source_driver.c"
 #pragma clang section text = ""
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
@@ -501,6 +503,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_check_constraints_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
+#include "buster/compiler/source_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
 // #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).
 #include "buster/compiler/c_check_lanes_test.c"
@@ -756,39 +759,6 @@ static bool main_preprocessing(int count, char** arguments)
     return result;
 }
 
-// Keep the historical -c assembly spelling while sending C compilation to the semantic driver. Options which
-// take a separate argument cannot make an output or include path look like an assembly input.
-static bool main_assembly_source(int count, char** arguments)
-{
-    bool compile = false;
-    bool assembly = false;
-    bool explicit_c = false;
-    for (int i = 0; i < count; i += 1)
-    {
-        const char* argument = arguments[i];
-        if (strcmp(argument, "-c") == 0)
-        {
-            compile = true;
-        }
-        else if (strcmp(argument, "-x") == 0 && i + 1 < count)
-        {
-            explicit_c = strcmp(arguments[++i], "c") == 0;
-        }
-        else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "-I") == 0 || strcmp(argument, "-D") == 0 ||
-                  strcmp(argument, "-U") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
-                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "--predefines") == 0) && i + 1 < count)
-        {
-            i += 1;
-        }
-        else if (argument[0] != '-')
-        {
-            const uint64_t length = strlen(argument);
-            assembly = length >= 2 && (strcmp(argument + length - 2, ".s") == 0 || strcmp(argument + length - 2, ".S") == 0);
-        }
-    }
-    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments) && !main_information(count, arguments, NULL);
-}
-
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
 // is, so that the other units' branches fold to false (at the top). The driver's last branch, which no command takes,
 // runs the compiler itself.
@@ -821,7 +791,7 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_diagnostic_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && (strcmp(argv[1], "assemble") == 0 || main_assembly_source(argc - 1, argv + 1)))
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "assemble") == 0)
     {
         const int skip = strcmp(argv[1], "assemble") == 0 ? 2 : 1;
         result = run_assembler_command(argc - skip, argv + skip);
@@ -1161,6 +1131,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-asm") == 0)
     {
         result = run_checker_asm_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc == 2 && strcmp(argv[1], "test-source-driver") == 0)
+    {
+        result = run_source_driver_tests();
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
     {
@@ -1744,6 +1718,11 @@ int main_unit_link(int argc, char** argv, bool* found)
     return main_command(argc, argv, found);
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
+int run_prepared_foreign_link(ForeignDriverRun* run, bool release)
+{
+    return foreign_driver_run(run, release);
+}
+
 int main_unit_executable(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
@@ -1761,7 +1740,7 @@ int main_unit_types(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECKER
 int run_source_check_command(int count, char** arguments)
 {
-    return run_check_command_mode(count, arguments, true, false);
+    return run_source_driver(count, arguments);
 }
 
 int main_unit_checker(int argc, char** argv, bool* found)

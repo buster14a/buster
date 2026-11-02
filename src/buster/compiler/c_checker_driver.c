@@ -1547,6 +1547,18 @@ static void check_driver_lower_report(const CheckProgramCode* code, const CheckC
     }
 }
 
+// A C input of a heterogeneous driver command (#1120). Each unit owns its output arena; the caller keeps all
+// objects alive through foreign linking and releases them even after a failed compile. No file is written when
+// capture is set. The positional language selection belongs to this input, not the command's last -x option.
+typedef struct CheckDriverSource CheckDriverSource;
+struct CheckDriverSource
+{
+    Arena arena;
+    String8 bytes;
+    bool capture;
+    bool preprocessed;
+};
+
 // A unit's link kept for the link of several units (c_checker_units.c), which check_driver_object fills.
 typedef struct CheckUnitsKept CheckUnitsKept;
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
@@ -1561,7 +1573,7 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
-                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept)
+                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, CheckDriverSource* captured)
 {
     (void)scalar;
 
@@ -1652,12 +1664,24 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
                 .debug = debug ? &dwarf.object : NULL,
                 .debug_count = debug ? 1 : 0,
             };
-            const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
+            const bool capture = captured != NULL && captured->capture;
+            if (capture)
+            {
+                captured->arena = arena_reserve(UINT64_C(1) << 34);
+            }
+            const Object object = object_build(&code.link, &units, &symbols, 0, options, source, capture ? &captured->arena : scratch);
             // The optional dump consumes the same resolved Link as the object writer. Validate and render it
             // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
             valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission));
             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
-            valid = valid && object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+            if (valid && capture)
+            {
+                captured->bytes = (String8){ .pointer = (char*)object.bytes, .length = object.size };
+            }
+            else if (valid)
+            {
+                valid = object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+            }
             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
         }
         if (!valid)
@@ -2512,6 +2536,8 @@ struct CheckDriverCommand
 {
     // The preprocessor's, from -E's options on the command line, for every unit.
     PPOptions options;
+    // Optional input-order outputs/language modes for the heterogeneous driver. Each unit writes only its own.
+    CheckDriverSource* sources;
     // --scalar, --verify, --dump-typed, --dump-static, -w, -flazy-system-headers and --lower-all.
     bool scalar;
     bool verify;
@@ -2570,8 +2596,18 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
 // memory before it returns. Returns the command's exit status: 0 for a unit without errors whose outputs were written.
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
-                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release)
+                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, CheckDriverSource* source, bool release)
 {
+    PPOptions plain;
+    if (source != NULL && source->preprocessed)
+    {
+        plain = *options;
+        plain.no_standard_includes = true;
+        plain.include_count = 0;
+        plain.macro_count = 0;
+        plain.predefines_path = NULL;
+        options = &plain;
+    }
     int result = 1;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
@@ -2975,7 +3011,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
                             result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
                                                                            object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
-                                                                           scratch, stage_clock, errors, kept) ? 0 : 1;
+                                                                           scratch, stage_clock, errors, kept, source) ? 0 : 1;
                         }
                         else if (!selection)
                         {
@@ -3092,7 +3128,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     static Parser parser;
     const bool interned = intern_initialize(&identifiers);
     const int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                         run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release);
+                                         run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->command->sources, run->release);
     if (run->release)
     {
         intern_release(&identifiers);
@@ -3237,7 +3273,7 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
 // one executable of them all.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
-static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
+static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced, CheckDriverSource* sources)
 {
     arena_failure = (ArenaFailure){ 0 };
     WorkerBudget worker_budget;
@@ -3569,6 +3605,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     const CheckDriverCommand command = {
         .options = options,
+        .sources = sources,
         .scalar = scalar,
         .verify = verify,
         .dump = dump,
@@ -3694,7 +3731,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
 // The semantic driver's command (check_driver_command), run by the calling thread, or collectively by every lane of a
 // session's group (#905): lane 0 runs the command, and tells the other lanes of its flow, which they run with it, and of
 // its exit status, which they return too.
-static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
+static int run_check_command_sources(int count, char** arguments, bool executable, bool release, CheckDriverSource* sources)
 {
     int result = 1;
     // A lazy session's lane 0 learns how its lanes started before it meets them: on a failed start it is alone.
@@ -3712,7 +3749,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     else
     {
         bool announced = false;
-        result = check_driver_command(count, arguments, executable, release, &announced);
+        result = check_driver_command(count, arguments, executable, release, &announced, sources);
         if (collective && !announced)
         {
             lane_park_broadcast(0, 0);
@@ -3723,6 +3760,11 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         }
     }
     return result;
+}
+
+static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
+{
+    return run_check_command_sources(count, arguments, executable, release, NULL);
 }
 
 // Tests and other reusable callers release all owned mappings before returning. Only main's terminal source

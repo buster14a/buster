@@ -1504,7 +1504,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true);
+                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL,
+                                         command->sources != NULL ? command->sources + (unit - run->units) : NULL, true);
         arena_small_floor = 0;
         // The unit's --tier1 outcomes into the command's report, which the other lanes' units add to too.
         for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_STAGE_COUNT; k += 1)
@@ -1727,7 +1728,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             order[i] = (uint32_t)sorted[i];
         }
-        const bool named = !command->emit_object || check_units_objects(units, count, &arena);
+        const bool captured = command->sources != NULL && command->sources[0].capture;
+        const bool named = !command->emit_object || captured || check_units_objects(units, count, &arena);
         // The tables every unit's code reads, which the first to need them would build: built here, before the lanes,
         // which then only read them. The parser's are the front end's home's (main.c), which parse_initialize builds.
         // The parser starts zeroed: a refusal of the units' objects' names skips its initialization, and its release

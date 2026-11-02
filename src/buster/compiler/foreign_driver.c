@@ -1050,6 +1050,35 @@ static void foreign_driver_flow(void* argument)
 // --lanes at most one per core of its CPUs, which lane 1 counts while lane 0 opens the first inputs
 // (BUSTER_LANE_SESSION_PER_CORE), and which stay parked for the process's exit once the link is done. A session whose
 // threads can't start runs the link on one lane, --lanes or not; --time reports the lanes it ran on.
+// Runs an already parsed command. Caller-owned ForeignArgument.bytes stay alive through this call; the run's
+// arenas are consumed by foreign_driver_link. Reusable callers join the workers before releasing their memory.
+static int foreign_driver_run(ForeignDriverRun* run, bool release)
+{
+    const uint32_t cpus = foreign_driver_cpus();
+    const uint32_t asked = run->driver.lanes != 0 ? run->driver.lanes : BUSTER_FOREIGN_DRIVER_LANES;
+    run->most = asked < cpus ? asked : cpus;
+    run->arguments_end = foreign_driver_now();
+    Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
+    LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
+    const uint32_t per_core = run->driver.lanes == 0 ? BUSTER_LANE_SESSION_PER_CORE : 0;
+    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | (release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END) | per_core;
+    if (session == NULL || lane_session_run(session, run->succeeded && !run->driver.help ? run->most : 1, NULL, foreign_driver_flow, run, flags) == 0)
+    {
+        run->session_lanes = 1;
+        run->lanes_end = foreign_driver_now();
+        const Lane group = lane_alone();
+        lane_flow_begin(&run->flow);
+        run->result = foreign_driver_link(run);
+        lane_flow_end(&run->flow);
+        lane_restore(group);
+    }
+    if (release)
+    {
+        arena_release(&memory);
+    }
+    return run->result;
+}
+
 static int run_foreign_link(int argc, char** argv)
 {
     ForeignDriverRun run = { .begin = foreign_driver_now(), .result = 1 };
@@ -1060,25 +1089,5 @@ static int run_foreign_link(int argc, char** argv)
     {
         foreign_driver_usage();
     }
-    const uint32_t cpus = foreign_driver_cpus();
-    const uint32_t asked = run.driver.lanes != 0 ? run.driver.lanes : BUSTER_FOREIGN_DRIVER_LANES;
-    run.most = asked < cpus ? asked : cpus;
-    run.arguments_end = foreign_driver_now();
-    // The session in an arena of its own, in base pages (a static one's first touch faults in a huge page of .bss),
-    // which the process's exit releases with the lanes parked on it.
-    Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
-    LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
-    const uint32_t per_core = run.driver.lanes == 0 ? BUSTER_LANE_SESSION_PER_CORE : 0;
-    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_PARK_AT_END | per_core;
-    if (session == NULL || lane_session_run(session, run.succeeded && !run.driver.help ? run.most : 1, NULL, foreign_driver_flow, &run, flags) == 0)
-    {
-        run.session_lanes = 1;
-        run.lanes_end = foreign_driver_now();
-        const Lane group = lane_alone();
-        lane_flow_begin(&run.flow);
-        run.result = foreign_driver_link(&run);
-        lane_flow_end(&run.flow);
-        lane_restore(group);
-    }
-    return run.result;
+    return foreign_driver_run(&run, false);
 }
