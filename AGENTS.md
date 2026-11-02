@@ -334,8 +334,9 @@ designs and the compilers already built this way.
   `--oracle-every N`), mutants included, and `test-tier1-cfg-source` every one
   of real C. The emitter checks its allocations under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set (a
-  refusal fails `--tier1 --verify`'s compile). #938's harness gates on
-  `tier1_problem_certify`. `benchmark-tier1-certificate [--only VARIANT]
+  refusal fails `--tier1 --verify`'s compile). `tier1_problem_certify` is the
+  gate #938's quality publisher must call; no publisher exists yet.
+  `benchmark-tier1-certificate [--only VARIANT]
   [-E's options] file...` times allocation, publication, check and
   `tier1_cfg_verify` per IR instruction with the certificates' sizes, under the
   9700X's lock on CPU 2. [The certificate guide](docs/tier1-certificate.md)

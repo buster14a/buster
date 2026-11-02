@@ -97,8 +97,9 @@ static bool tier1_cert_cfg_refuse(Tier1CertCfgBuild* build, uint32_t block, uint
 }
 
 // The allocation's shape, before anything reads through it: every column in range, the intervals and fragments in
-// order, each fragment kind's field meaningful, the moves' extents and the splits inside blocks, each edge's placement
-// consistent with its moves and degrees. Values' meanings are left to the checker.
+// order, each offset bounded before it bounds a read, each fragment kind's field meaningful (a register only on a
+// register fragment, a slot only where the allocation has slots), the moves' extents and the splits inside blocks,
+// each edge's placement consistent with its moves and degrees. Values' meanings are left to the checker.
 static bool tier1_cert_cfg_shape(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
 {
     const Tier1AllocationInput* intervals = &result->intervals;
@@ -115,18 +116,18 @@ static bool tier1_cert_cfg_shape(const Tier1CfgInput* input, const Tier1CfgAlloc
     }
     for (uint32_t v = 0; valid && v < values; v += 1)
     {
-        valid = result->value_interval_offsets[v] <= result->value_interval_offsets[v + 1];
+        valid = result->value_interval_offsets[v] <= result->value_interval_offsets[v + 1] && result->value_interval_offsets[v + 1] <= intervals->count;
         for (uint32_t i = result->value_interval_offsets[v]; valid && i < result->value_interval_offsets[v + 1]; i += 1)
         {
             valid = intervals->values[i] == v && intervals->starts[i] < intervals->ends[i] && intervals->ends[i] <= input->position_count;
             valid = valid && (i == result->value_interval_offsets[v] || intervals->ends[i - 1] <= intervals->starts[i]);
-            valid = valid && allocation->fragment_offsets[i] < allocation->fragment_offsets[i + 1];
+            valid = valid && allocation->fragment_offsets[i] < allocation->fragment_offsets[i + 1] && allocation->fragment_offsets[i + 1] <= allocation->fragment_count;
             uint32_t position = intervals->starts[i];
             for (uint32_t f = valid ? allocation->fragment_offsets[i] : 0; valid && f < allocation->fragment_offsets[i + 1]; f += 1)
             {
                 valid = allocation->starts[f] == position && allocation->ends[f] > position && allocation->kinds[f] <= BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
-                valid = valid && (allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_REGISTER || allocation->registers[f] < 32);
-                valid = valid && (allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v));
+                valid = valid && (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER ? allocation->registers[f] < 32 : allocation->registers[f] == UINT8_MAX);
+                valid = valid && (allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_count != 0 && allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v));
                 position = allocation->ends[f];
             }
             valid = valid && position == intervals->ends[i];
@@ -697,6 +698,7 @@ static Tier1CertError tier1_certificate_cfg(const Tier1CfgInput* input, const Ti
     {
         const uint32_t first_source = source_count;
         const uint32_t first_code = code_count;
+        const uint64_t first_split_moves = tally.split_moves;
         // A block that block 0 doesn't reach never runs: its positions publish nothing.
         for (uint32_t q = input->block_starts[b]; error == TIER1_CERT_OK && numbers[b] != BUSTER_CERT_NONE && q < input->block_starts[b + 1]; q += 1)
         {
@@ -852,10 +854,10 @@ static Tier1CertError tier1_certificate_cfg(const Tier1CfgInput* input, const Ti
                 block->edge_count += 1;
             }
             tally.sources += block->source_count;
-            tally.transitions += block->code_count - block->source_count;
+            // The block's edits but its splits' moves, which are counted apart; both are in its code.
+            tally.transitions += block->code_count - block->source_count - (tally.split_moves - first_split_moves);
         }
     }
-    tally.transitions -= tally.split_moves;
     if (error == TIER1_CERT_OK)
     {
         *program = (Tier1CertProgram){

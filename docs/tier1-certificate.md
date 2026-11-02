@@ -174,9 +174,11 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
     each value its intervals carry into the block, at
     `tier1_cfg_entry_location`. A value recomputed there gets a recipe fact.
   - **Shape.** Every column is in range, intervals and fragments are in order,
-    and each edge's placement agrees with its moves and degrees. Publication
-    validates only this shape; whether the values arrive is the checker's to
-    prove.
+    and each edge's placement agrees with its moves and degrees. Each offset is
+    bounded before it bounds a read. A fragment carries a register only if it
+    is a register's (`UINT8_MAX` otherwise), and a slot only where the
+    allocation has slots. Publication validates only this shape; whether the
+    values arrive is the checker's to prove.
 
 Storage is what the source declares, for each class that has values: its
 allocatable, scratch and fixed-range registers, at the class's width (8 bytes
@@ -208,7 +210,10 @@ moved into k0 for a fragment no instruction reads is harmless, since no
 instruction reads it there. Two SSA names in one register at a block's start
 are harmless where they hold the same contents on every incoming edge, as a
 phi and its own operand can. Every other mutant `test-tier1-cfg` makes fails
-both checkers.
+both checkers. That includes the malformed shapes: an interval map or an
+interval's fragments forged past their columns, a spill where the allocation
+has no slot columns, and a register left on a slot's fragment. Both checkers
+refuse each before reading through it.
 
 ## Slow oracle
 
@@ -327,10 +332,13 @@ evidence is still required before selecting a production fast-path policy.
     guide](tier1-outcomes.md)). A refusal is an internal failure and capacity a
     resource failure, so either fails the compile rather than leaving the body
     to Tier 0, which would hide it.
-- **#938's harness** gates each allocation of an imported problem on
-  `tier1_problem_certify` (`tier1_problem_intervals.c`). That runs the fragment
-  checker on the adapter's one-block problems and names a refusal
-  `certificate-rejected` in the tally.
+- **#938's quality publisher** gets its gate: `tier1_problem_certify`
+  (`tier1_problem_intervals.c`). That runs the fragment checker on an
+  allocation of the adapter's one-block problems and names a refusal
+  `certificate-rejected` in the tally. No publisher calls it yet: #938's
+  campaign, the publisher that would refuse a result without a proof, doesn't
+  exist in this repository. The fuzz and seed harnesses check the codec alone.
+  `tests/tier1-problem/test.c` tests the gate on its fixtures.
 
 ## Tests and current integration
 
@@ -417,6 +425,29 @@ several times smaller. The checker's scratch is 44 bytes per IR instruction.
 [The frozen record](https://github.com/buster14a/buster-performance/tree/b468d3c8a50ef36de1a56bc622af4098e3f26ed5/docs/measurements/tier1-certificate-939-2026-11-02)
 has the run, the sizes by record and the limitations. It is one process in one
 job.
+
+### Why the checker is scalar
+
+The checker and the publication have no vector path or twin. This is a
+recorded decision, not a measured loss: no vector candidate has been built or
+timed. The reasons it waits:
+
+- **It is off the compile path.** Only `--verify` and the tests run it
+  (`Tier1EmitOptions.certify`). A default `-c` or link never pays its 171 ns
+  per IR instruction.
+- **Within a block, its work is a dependent walk.** Each stream instruction
+  reads the storage state the one before it wrote. The checker runs at 4.59 IPC
+  on the 9700X, with 10.7 million unit reads and 17.7 million unit writes for
+  `sqlite3.c`'s 778 thousand stream instructions. The independent work lies
+  across blocks, not across one block's instructions.
+- **Its data-parallel axis is the block.** The design needs no fixpoint: each
+  block is checked from its own entry facts, and each edge from its
+  predecessor's exit state. So blocks, and functions, can be checked
+  independently: on lanes, or as batches of blocks of one shape.
+
+If certification moves onto the default path, a candidate along that axis must
+be measured against this scalar baseline on the 9700X. Until then, the scalar
+checker is the only path, and the oracle is its independent check.
 
 ## What the certificate proves
 

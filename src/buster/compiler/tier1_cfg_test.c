@@ -87,6 +87,11 @@ struct Tier1CfgTestTally
     uint64_t destination_killed;
     uint64_t k0_mutants;
     uint64_t k0_killed;
+    // #1142's review: allocations of a malformed shape (an interval map or an interval's fragments past their columns,
+    // a spill fragment where the allocation has no slots, a register left on a fragment without one), which both
+    // checkers must refuse before reading through them.
+    uint64_t shape_mutants;
+    uint64_t shape_killed;
     // #939: allocations whose certificate the checker proved, those the oracle checked too, and the certificates' sizes;
     // the mutants each certificate checker refused, by kind, and where the two checkers judged a mutant apart from
     // tier1_cfg_verify, which checks the allocation's constraints as well as its values.
@@ -101,6 +106,7 @@ struct Tier1CfgTestTally
     uint64_t definition_refused;
     uint64_t destination_refused;
     uint64_t k0_refused;
+    uint64_t shape_refused;
     uint64_t certificate_only;
     uint64_t verifier_only;
     // Whether the current case's certificates go to the slow oracle too: every fixture's, and every --oracle-every'th
@@ -539,9 +545,13 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     const bool required = use < input->use_offsets[v + 1] && input->use_positions[use] == input->definitions[v] && input->use_required[use] != 0;
                     if (required && result.intervals.starts[i] == input->definitions[v] && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->spill_ids[v] < allocation->spill_count)
                     {
+                        // A well-formed slot fragment (no register), so that the definition, not the shape, refuses it.
+                        const uint8_t reg = allocation->registers[first];
                         allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_SPILL;
+                        allocation->registers[first] = UINT8_MAX;
                         const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->definition_refused);
                         allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_REGISTER;
+                        allocation->registers[first] = reg;
                         tally->definition_mutants += 1;
                         tally->definition_killed += rejected;
                         tried += 1;
@@ -585,6 +595,56 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                             tally->k0_killed += rejected;
                             tried += 1;
                         }
+                    }
+                }
+                // Shape: each column's bound forged past it, read by nothing once refused.
+                const uint32_t intervals = result.intervals.count;
+                if (input->value_count >= 2 && result.value_interval_offsets[1] < intervals)
+                {
+                    const uint32_t kept = result.value_interval_offsets[1];
+                    result.value_interval_offsets[1] = intervals + 1;
+                    tally->shape_killed += tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->shape_refused);
+                    tally->shape_mutants += 1;
+                    result.value_interval_offsets[1] = kept;
+                }
+                if (intervals >= 2)
+                {
+                    const uint32_t kept = allocation->fragment_offsets[1];
+                    allocation->fragment_offsets[1] = allocation->fragment_count + 1;
+                    tally->shape_killed += tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->shape_refused);
+                    tally->shape_mutants += 1;
+                    allocation->fragment_offsets[1] = kept;
+                }
+                // A spill fragment where the allocation has no slots, its columns absent; and a register left on a
+                // slot's or a recomputation's fragment. The first fragment of each kind.
+                bool spilled = false;
+                bool stale = false;
+                for (uint32_t f = 0; (!spilled || !stale) && f < allocation->fragment_count; f += 1)
+                {
+                    const uint8_t kind = allocation->kinds[f];
+                    const uint8_t reg = allocation->registers[f];
+                    const Tier1Allocation kept = *allocation;
+                    if (!spilled && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
+                    {
+                        allocation->kinds[f] = BUSTER_TIER1_ALLOCATE_SPILL;
+                        allocation->registers[f] = UINT8_MAX;
+                        allocation->spill_count = 0;
+                        allocation->spill_ids = 0;
+                        allocation->spill_values = 0;
+                        spilled = true;
+                    }
+                    else if (!stale && kind != BUSTER_TIER1_ALLOCATE_REGISTER)
+                    {
+                        allocation->registers[f] = 0;
+                        stale = true;
+                    }
+                    if (allocation->kinds[f] != kind || allocation->registers[f] != reg)
+                    {
+                        tally->shape_killed += tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->shape_refused);
+                        tally->shape_mutants += 1;
+                        *allocation = kept;
+                        allocation->kinds[f] = kind;
+                        allocation->registers[f] = reg;
                     }
                 }
                 Tier1CfgCheck again;
@@ -1315,8 +1375,10 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
         tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused), "the certificate refuses no mutant the verifier accepts");
+        // A malformed shape must fail both, before either reads through it (#1142's review).
+        tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0 (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, seed, count);
-        printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);
