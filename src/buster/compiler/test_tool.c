@@ -383,20 +383,23 @@ static void test_tool_check_skip(const TestTool* tool, const char* section, cons
     free(text);
 }
 
+// A usage error for the test-tool command's unexpected arguments. `errors` is where it goes (stderr for the command),
+// so that the helper's test can compare it; it doesn't call the helper's checks, which keeps the command's call graph
+// acyclic for the repository's check.
+static int test_tool_refuse(FILE* errors, int count, char** arguments)
+{
+    if (count != 0 && errors != 0)
+    {
+        fprintf(errors, "test-tool: unexpected argument '%s'\nusage: test-tool\n", arguments[0]);
+    }
+    return 1;
+}
+
 // The test-tool command's arguments: the helper's checks with none, and a usage error for any other. `errors` is where
 // the error goes (stderr for the command), so that the helper's test can compare it.
 static int test_tool_command_to(FILE* errors, int count, char** arguments)
 {
-    int result = 1;
-    if (count == 0)
-    {
-        result = test_tool_test() == 0 ? 0 : 1;
-    }
-    else if (errors != 0)
-    {
-        fprintf(errors, "test-tool: unexpected argument '%s'\nusage: test-tool\n", arguments[0]);
-    }
-    return result;
+    return count == 0 ? (test_tool_test() == 0 ? 0 : 1) : test_tool_refuse(errors, count, arguments);
 }
 
 static int test_tool_command(int count, char** arguments)
@@ -505,7 +508,7 @@ static uint32_t test_tool_test(void)
     size_t usage_length = 0;
     FILE* usage_stream = open_memstream(&usage, &usage_length);
     char* extra[] = { "extra" };
-    bool refused = usage_stream != 0 && test_tool_command_to(usage_stream, 1, extra) == 1;
+    bool refused = usage_stream != 0 && test_tool_refuse(usage_stream, 1, extra) == 1;
     if (usage_stream != 0)
     {
         refused = fclose(usage_stream) == 0 && refused && usage != 0 && strcmp(usage, "test-tool: unexpected argument 'extra'\nusage: test-tool\n") == 0;
