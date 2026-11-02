@@ -7,8 +7,8 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
-  stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering, Tier 0, branch sizing,
-  encoding, the object's build and write, the direct path's runtime, binding and write, with the write's phases on
+  stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering and its phases (#1048),
+  Tier 0, branch sizing, encoding, the object's build and write, the direct path's runtime, binding and write, with the write's phases on
   `time-write` lines (#778), the release; on several lanes their run is one stage, `lanes`), with its system time,
   page faults and peak resident set added, and the process's resource use, with the lanes its session asked for and
   ran on (#905: `lanes-asked` and `lanes`); off by default, its laps test a null pointer. `measure-compile [--runs N]

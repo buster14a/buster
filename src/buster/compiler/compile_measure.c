@@ -13,7 +13,8 @@
 // it is not an executable-only peak. Only --time-stages supplies a separate approximate post-exec RSS report.
 // It prints every run, each compile's medians with their ranges, what --time-stages costs (its median against the
 // default's), the default against the reference, and each stage's median, its range and its share of the median
-// span (the preprocessor's phases and the reader's expressions' walk, `check-input.expressions`, under their stages),
+// span (the preprocessor's phases, the reader's expressions' walk, `check-input.expressions`, and the lowering's phases,
+// under their stages),
 // ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and exit). Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
 // be whole, or the command fails. The caller pins it (taskset): the processes inherit its CPUs. DIR is a new directory
 // under --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
@@ -145,7 +146,7 @@ static double measure_compile_median(double* values, uint32_t count)
     return count != 0 ? values[count / 2] : 0;
 }
 
-// A run's row of --time-stages' report: each stage's milliseconds, the preprocessor's rows, the span, the process's
+// A run's row of --time-stages' report: each stage's milliseconds, the preprocessor's and the lowering's rows, the span, the process's
 // wall time outside it, each stage's system milliseconds, minor faults and peak KB added, and the reader's
 // expressions' walk inside its stage (#1038).
 #define BUSTER_MEASURE_SPAN (CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES)
@@ -268,11 +269,14 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             sum += median[s];
             printf("  %-22s %9.3f  (%.3f to %.3f)  %5.1f%%  %8.3f  %7.0f  %8.0f\n", check_stage_names[s], median[s], low[s], high[s],
                    span > 0 ? median[s] * 100.0 / span : 0.0, used[0], used[1], used[2]);
-            for (uint32_t p = 0; s == CHECK_STAGE_PREPROCESS && p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
+            for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
             {
                 const uint32_t index = CHECK_STAGE_COUNT + p;
-                printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", check_clock_phase_names[p], median[index], low[index], high[index],
-                       span > 0 ? median[index] * 100.0 / span : 0.0);
+                if (check_clock_phase_stages[p] == s)
+                {
+                    printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", check_clock_phase_names[p], median[index], low[index], high[index],
+                           span > 0 ? median[index] * 100.0 / span : 0.0);
+                }
             }
             if (s == CHECK_STAGE_CHECK_INPUT)
             {

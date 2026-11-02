@@ -10970,6 +10970,9 @@ struct CheckLowerShared
     bool templates_allowed;
     bool template_check;
     bool templates;
+    // Whether the parts read the TSC for --time-stages' lowering rows (CheckLowerPart.statement_ticks): the emission sets
+    // it with a clock, after check_lower_prepare.
+    bool timed;
     // The runtime's functions: each one's symbol where the unit declares it (check_lower_runtime), 0 for none, and the
     // first of the provisional symbols the lowering's own take until check_lower_finish numbers them, the helpers' end.
     SymbolId declared_runtimes[CHECK_LOWER_RUNTIMES];
@@ -11015,6 +11018,12 @@ struct CheckLowerPart
     uint64_t template_entries;
     uint64_t template_fast;
     uint64_t template_mismatches;
+    // The TSC's ticks of its bodies' statements (their controls and tasks' loops), of the rest of its bodies' walks, and
+    // of its calling conventions and functions' validation: --time-stages' lower.statements, lower.bodies and
+    // lower.validate (check_clock_lower).
+    uint64_t statement_ticks;
+    uint64_t body_ticks;
+    uint64_t validate_ticks;
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
@@ -11693,6 +11702,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->template_spliced_entries = 0;
     writer->template_fast_nodes = 0;
     writer->template_mismatches = 0;
+    // With a clock (CheckLowerShared.timed), two TSC reads a body's statements and three a part
+    // (CheckLowerPart.statement_ticks); without one, none.
+    const bool timed = shared->timed;
+    const uint64_t walk_start = timed ? __rdtsc() : 0;
+    part->statement_ticks = 0;
     for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
@@ -12025,6 +12039,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // Each statement's nodes are prefetched a statement before the tasks' loop expands them, the first two's before the
         // first (check_lower_prefetch).
         uint32_t prefetched = 0;
+        const uint64_t statements_start = timed ? __rdtsc() : 0;
         for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
             if (sources)
@@ -12054,6 +12069,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_drain(writer);
             }
         }
+        part->statement_ticks += timed ? __rdtsc() - statements_start : 0;
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
                                                                             writer->count == 0 || (writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN &&
@@ -12265,6 +12281,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             writer->local_map[input->objects[parameter]] = BUSTER_CHECK_NONE;
         }
     }
+    const uint64_t walked = timed ? __rdtsc() : 0;
+    part->body_ticks = walked - walk_start - part->statement_ticks;
     part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_BODY : CHECK_LOWER_STAGE_NONE;
     part->final_token = writer->token;
     AbiLocation* locations = part->stage == CHECK_LOWER_STAGE_NONE ? BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, (uint64_t)abi->argument_count + 1) : 0;
@@ -12344,6 +12362,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_FRAME : CHECK_LOWER_STAGE_NONE;
     }
+    part->validate_ticks = timed ? __rdtsc() - walked : 0;
     part->status = part->stage == CHECK_LOWER_STAGE_ROOM ? CHECK_PROGRAM_RESOURCE : status->status;
     part->token = part->stage == CHECK_LOWER_STAGE_ROOM ? BUSTER_CHECK_NONE : status->token;
     part->backend_node = status->backend_node;

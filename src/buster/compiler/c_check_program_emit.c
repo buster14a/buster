@@ -743,6 +743,9 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         check_lower_part(&lane->writer, run->shared, &part->lower, lane->output, lane->scratch);
     }
     check_clock_lap(run->stage_clock, CHECK_STAGE_LOWER);
+    check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_STATEMENTS, part->lower.statement_ticks);
+    check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_BODIES, part->lower.body_ticks);
+    check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
     const uint32_t end = part->lower.end;
     part->tier0_failed = end;
     part->code_failed = end;
@@ -1716,7 +1719,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool lowering = valid;
     if (valid)
     {
+        const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
         valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
+        check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
+        shared.timed = stage_clock != NULL;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
