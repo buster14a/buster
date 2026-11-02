@@ -3538,6 +3538,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
     unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
+    // Syntax-only takes precedence over -c, whichever came first.
+    emit_object = emit_object && !syntax_only;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
@@ -3616,6 +3618,29 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+    }
+    // Predefines model these options even without code generation. Decide from their resolved state, not from
+    // seeing an enabling argument: a later -fno-sanitize= or -fno-openmp may have canceled it. Refuse before any
+    // source, worker session or output is opened. libgomp still requests OpenMP even though it defines no _OPENMP.
+    else if ((emit_object || link) && (options.predefines.sanitizers != 0 || options.predefines.sanitize_coverage || options.predefines.openmp_enabled))
+    {
+        if (options.predefines.sanitizers != 0)
+        {
+            char spelling[1024];
+            const char* option = predefines_sanitizer_last(&options.predefines, options.predefines.sanitizers, spelling, sizeof(spelling));
+            fprintf(stderr, "error: unsupported code generation option '%s' (sanitizer instrumentation is not implemented)\n",
+                    option[0] != 0 ? option : "-fsanitize");
+        }
+        else if (options.predefines.sanitize_coverage)
+        {
+            fprintf(stderr, "error: unsupported code generation option '-fsanitize-coverage' (coverage instrumentation is not implemented)\n");
+        }
+        else
+        {
+            const char* runtime = options.predefines.openmp_runtime;
+            fprintf(stderr, "error: unsupported code generation option '-fopenmp%s%s' (OpenMP code generation is not implemented)\n",
+                    runtime != NULL ? "=" : "", runtime != NULL ? runtime : "");
+        }
     }
     else if (unsupported_pic != NULL)
     {

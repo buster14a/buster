@@ -2786,11 +2786,13 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 }
 
 #include "c_check_pic_driver_test.c"
+#include "c_check_instrumentation_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
 {
     check_test_driver_pic(test, executable, directory);
+    check_test_driver_instrumentation(test, executable, directory);
     static const char source_text[] = "int main(void) { return 0; }\n";
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
