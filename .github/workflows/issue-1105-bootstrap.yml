@@ -1,0 +1,31 @@
+name: Issue 1105 documentation preparation
+
+on:
+  push:
+    branches: [agent/1105-bootstrap]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Inventory the documentation to split
+        shell: bash
+        run: |
+          set -euo pipefail
+          wc -lc AGENTS.md CLAUDE.md
+          awk '/^## / { if (title != "") print start, NR - start, title; title=$0; start=NR } END { print start, NR + 1 - start, title }' AGENTS.md
+          printf '\nMODULE BULLETS\n'
+          awk '/^## Current repository and exact smoke commands/ { active=1; next } active && /^## / { active=0 } active && /^- / { print NR, $0 }' AGENTS.md
+          printf '\nROOT INSTRUCTION FILES\n'
+          git ls-files '*AGENTS.md' '*CLAUDE.md'
+          printf '\nMARKDOWN REFERENCES TO AGENTS\n'
+          git grep -n 'AGENTS.md#' -- '*.md' || true
+          printf '\nCOMMAND DISPATCH\n'
+          grep -n -E 'test-|benchmark-|measure-|cores|usage' src/buster/compiler/main.c | head -220 || true
