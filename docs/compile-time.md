@@ -1087,6 +1087,10 @@ byte main's. The ranges are over placements and copies.
 | this change | -1.15% (-1.80% to -0.69%) | -1.58% | -3.27% |
 | this change, `BUSTER_PGO=1` | -5.15% (-5.93% to -4.51%) | -7.04% | -7.24% |
 
+The record ([buster-performance#222](https://github.com/buster14a/buster-performance/pull/222),
+[`pgo-port-880-2026-11-02`](https://github.com/buster14a/buster-performance/tree/ff44d0e6baf2231a30d454555abb4694ac06549b/docs/measurements/pgo-port-880-2026-11-02))
+has the scripts, every variant's counts, the call and taken-branch samples, and the executables' hashes.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
