@@ -381,6 +381,9 @@ struct CheckInput
     uint8_t x86_range_severities[2];
     bool x86_range_quiet;
     bool x86_range_policy;
+    // -Wfatal-errors: a command-line or default error is fatal before a source pragma can map it, while a source
+    // pragma's own error stays an error, as clang's does.
+    bool fatal_errors;
     uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
@@ -571,7 +574,8 @@ typedef enum CheckInputExpressionCode
     CHECK_INPUT_CODE_PREFIX,
     // A binary operator's role, or a comma's.
     CHECK_INPUT_CODE_BINARY,
-    // A separator: a comma operator where the walk's expression_commas says so, a list otherwise.
+    // A separator that is no comma operator (CheckInputReader.expression_commas): a list. A comma operator's separator is a
+    // BINARY.
     CHECK_INPUT_CODE_SEPARATOR,
     // A group's closing parenthesis: its one value.
     CHECK_INPUT_CODE_GROUP,
@@ -586,6 +590,11 @@ typedef enum CheckInputExpressionCode
     CHECK_INPUT_CODE_CONDITION,
     // A call's closing parenthesis: its callee's and its arguments' values.
     CHECK_INPUT_CODE_CALL,
+    // A string literal operand: a VALUE node of its string's object.
+    CHECK_INPUT_CODE_STRING,
+    // A return statement's keyword: its value converted to the function's return type (CONVERT), or a report of a missing
+    // one. goto, break and continue, of the same role, are the walk's.
+    CHECK_INPUT_CODE_RETURN,
     // In check_input_role_codes alone: an operand's role, whose class its kind gives.
     CHECK_INPUT_CODE_OPERAND,
 } CheckInputExpressionCode;
@@ -708,6 +717,22 @@ static const uint8_t check_input_kind_tests[128] __attribute__((aligned(64))) =
     [PARSE_KIND_GOTO] = BUSTER_CHECK_KIND_RESOLVE | BUSTER_CHECK_KIND_EXPRESSION,
     [PARSE_KIND_CONTINUE] = BUSTER_CHECK_KIND_EXPRESSION,
     [PARSE_KIND_BREAK] = BUSTER_CHECK_KIND_EXPRESSION,
+};
+
+// The classes whose actions leave a builtin's token (CheckInputReader.builtins) to the walk's visit, a byte each by class:
+// the classes' pass makes such a token's class the walk's (check_input_expression_fold), so that their actions test no
+// builtin at the token as the walk reaches it (#1038).
+static const uint8_t check_input_builtin_codes[64] __attribute__((aligned(64))) =
+{
+    [CHECK_INPUT_CODE_PREFIX] = 1,
+    [CHECK_INPUT_CODE_BINARY] = 1,
+    [CHECK_INPUT_CODE_CAST] = 1,
+    [CHECK_INPUT_CODE_TERNARY] = 1,
+    [CHECK_INPUT_CODE_SUBSCRIPT] = 1,
+    [CHECK_INPUT_CODE_MEMBER] = 1,
+    [CHECK_INPUT_CODE_POSTFIX] = 1,
+    [CHECK_INPUT_CODE_CONDITION] = 1,
+    [CHECK_INPUT_CODE_CALL] = 1,
 };
 
 // The expressions' walk's class of a token of the role that isn't ignored and that no sparse column has an entry for
@@ -6511,6 +6536,22 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
 #include "c_check_region_input.c"
 
 
+// The class `code` of `token`, by its role and kind, as the columns the reader wrote before the walk refine it (#1038): a
+// separator is a comma operator's BINARY where expression_commas says so; a BINARY that is an initializer's assignment,
+// a builtin's token of a class whose action leaves builtins to the walk (check_input_builtin_codes) and an intrinsic's
+// call are the walk's. Each class's action then tests none of these columns at the token as the walk reaches it, where
+// each was a load the walk's serial order waited for (an intrinsic's id, at a call, a miss in a column no other pass
+// reads). The scalar twin of check_input_expression_classes' folds.
+static uint8_t check_input_expression_fold(const CheckInputReader* reader, uint32_t token, uint8_t code)
+{
+    const uint32_t* intrinsics = reader->output->intrinsic_ids;
+    uint8_t result = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[token] != 0 ? CHECK_INPUT_CODE_BINARY : code;
+    result = result == CHECK_INPUT_CODE_BINARY && reader->initializers[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
+    result = check_input_builtin_codes[result] != 0 && reader->builtins[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
+    result = result == CHECK_INPUT_CODE_CALL && intrinsics != NULL && intrinsics[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
+    return result;
+}
+
 // The walk's class of `token` (CheckInputExpressionCode), by its own tests in their order: the twin of
 // check_input_role_codes' lookups. `sparse` says a sparse column has an entry for it and `list` that its role is one an
 // ignored token passes its values on by. A type query that finishes at the token makes its class the walk's visit too.
@@ -6535,7 +6576,12 @@ static uint8_t check_input_expression_code(const CheckInputReader* reader, uint3
     else if (role == PARSE_ROLE_OPERAND)
     {
         code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
-               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL : CHECK_INPUT_CODE_SCALAR;
+               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL :
+               kind == PARSE_KIND_STRING ? CHECK_INPUT_CODE_STRING : CHECK_INPUT_CODE_SCALAR;
+    }
+    else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_RETURN)
+    {
+        code = CHECK_INPUT_CODE_RETURN;
     }
     else if (role == PARSE_ROLE_PREFIX)
     {
@@ -6599,7 +6645,7 @@ static uint8_t check_input_expression_code(const CheckInputReader* reader, uint3
     {
         code = refused ? CHECK_INPUT_CODE_SCALAR : CHECK_INPUT_CODE_DROP;
     }
-    return code;
+    return check_input_expression_fold(reader, token, code);
 }
 
 // The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
@@ -6655,6 +6701,8 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
     const __m512i role_codes_low = _mm512_load_si512(check_input_role_codes);
     const __m512i role_codes_high = _mm512_load_si512(check_input_role_codes + 64);
+    const __m512i builtin_codes = _mm512_load_si512(check_input_builtin_codes);
+    const uint32_t* intrinsics = reader->output->intrinsic_ids;
     const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
     uint32_t result = 0;
     uint32_t token = 0;
@@ -6685,10 +6733,23 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
                                      _mm512_set1_epi8(CHECK_INPUT_CODE_IDENTIFIER));
         codes = _mm512_mask_mov_epi8(codes, operand & _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_LITERAL)),
                                      _mm512_set1_epi8(CHECK_INPUT_CODE_LITERAL));
+        codes = _mm512_mask_mov_epi8(codes, operand & _mm512_cmpeq_epi8_mask(kind, _mm512_set1_epi8(PARSE_KIND_STRING)), _mm512_set1_epi8(CHECK_INPUT_CODE_STRING));
+        codes = _mm512_mask_mov_epi8(codes, _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_RETURN)) & _mm512_cmpeq_epi8_mask(kind, _mm512_set1_epi8(PARSE_KIND_RETURN)),
+                                     _mm512_set1_epi8(CHECK_INPUT_CODE_RETURN));
         codes = _mm512_mask_mov_epi8(codes, other & ~refused, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
         codes = _mm512_mask_mov_epi8(codes, other & refused, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
         codes = _mm512_mask_mov_epi8(codes, skipped & ~list, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
         codes = _mm512_mask_mov_epi8(codes, skipped & list, _mm512_set1_epi8(CHECK_INPUT_CODE_LIST));
+        // The folds (check_input_expression_fold): comma operators' separators, initializers' assignments, builtins'
+        // tokens and intrinsics' calls, from the columns the reader wrote before the walk.
+        const __mmask32 low = (__mmask32)lanes;
+        const __mmask32 high = (__mmask32)(lanes >> 32);
+        const __m512i builtins_low = _mm512_maskz_loadu_epi16(low, reader->builtins + token);
+        const __m512i builtins_high = _mm512_maskz_loadu_epi16(high, reader->builtins + token + 32);
+        const uint64_t builtin = (uint64_t)_mm512_test_epi16_mask(builtins_low, builtins_low) | (uint64_t)_mm512_test_epi16_mask(builtins_high, builtins_high) << 32;
+        const __m512i commas = _mm512_maskz_loadu_epi8(lanes, reader->expression_commas + token);
+        const __m512i initializers = _mm512_maskz_loadu_epi8(lanes, reader->initializers + token);
+        uint64_t intrinsic = 0;
         uint64_t acts = 0;
         uint64_t specified = 0;
         for (uint32_t part = 0; part < length; part += 16)
@@ -6704,8 +6765,19 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const uint32_t part_specified = (uint32_t)_mm512_test_epi64_mask(jobs_low, jobs_low) | (uint32_t)_mm512_test_epi64_mask(jobs_high, jobs_high) << 8;
             acts |= (uint64_t)part_acts << part;
             specified |= (uint64_t)part_specified << part;
+            if (intrinsics != NULL)
+            {
+                const __m512i ids = _mm512_maskz_loadu_epi32(parts, intrinsics + at);
+                intrinsic |= (uint64_t)_mm512_test_epi32_mask(ids, ids) << part;
+            }
         }
-        codes = _mm512_mask_mov_epi8(codes, sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+        const uint64_t comma = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_SEPARATOR)) & _mm512_test_epi8_mask(commas, commas);
+        codes = _mm512_mask_mov_epi8(codes, comma, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY));
+        const uint64_t assigned = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY)) & _mm512_test_epi8_mask(initializers, initializers);
+        const __m512i declines = _mm512_permutexvar_epi8(codes, builtin_codes);
+        const uint64_t declined = _mm512_test_epi8_mask(declines, declines) & builtin;
+        const uint64_t called = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_CALL)) & intrinsic;
+        codes = _mm512_mask_mov_epi8(codes, assigned | declined | called | sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
         // Every class is below 32, so each byte's shift stays in its byte.
         const __m512i classes = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
                                                                 _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE))),
@@ -7812,6 +7884,14 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
 // One pass over the tokens' kinds, roles and names for every count check_input_run needs before it reads (#529), where
 // it made one pass for each, and for the walk's syntax bits of each token, which `syntax` (count + 1 bytes, or null for
 // none) receives, and its marks (check_input_visit_of), which `visits` (count + 1 bytes, or null for none) receives.
+// A name of the overloadable attribute's counts only inside an attribute list (#1038): with more of the lists'
+// openings (PARSE_ROLE_OPEN_ATTRIBUTE_LIST) up to it than closings before it, which, a subtree being a run of tokens,
+// is in a list's closing's subtree, where every GNU and standard attribute's name is (check_input_attribute_read_item
+// reads them from such lists alone). A member or a variable named overloadable, which main.c has, gave its unit
+// overload tables, which made every function declaration a candidate. An attribute's argument is inside the list too,
+// a superset that costs a unit at most the tables. Without roles, every name counts. The vector path keeps the depth
+// of the lists a 64-token block at a time, from the counts of its openings and closings, and the scalar path a token
+// at a time, so that each name's test is one count however deep the tree.
 // The vector path tests 64 tokens' kinds and roles and 16 tokens' names at once, and looks up 64 roles' and kinds'
 // tests in tables (check_input_role_tests); the scalar path, its twin, tests a token at a time. A name of 0 counts no
 // token: tokens without a name have 0. Without roles, every token is marked.
@@ -7849,12 +7929,16 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
     uint32_t token = 0;
+    // The attribute lists open at the token, signed: a unit whose roles don't pair can't go below zero unseen.
+    int64_t attribute_depth = 0;
     for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + token);
         const __m512i role = roles != 0 ? _mm512_maskz_loadu_epi8(lanes, roles + token) : _mm512_setzero_si512();
+        const uint64_t list_opens = roles != 0 ? _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_ATTRIBUTE_LIST)) : 0;
+        const uint64_t list_closes = roles != 0 ? _mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_CLOSE_ATTRIBUTE_LIST)) : 0;
         result.subscripts += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)));
         result.asms += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_ASM)));
         result.asm_groups += roles != NULL ? (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_ASM))) : 0;
@@ -7891,7 +7975,15 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             }
             for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
             {
-                result.groups[group] += (uint32_t)__builtin_popcount(matched[group]);
+                result.groups[group] += group != CHECK_INPUT_COUNT_OVERLOADABLE ? (uint32_t)__builtin_popcount(matched[group]) : 0;
+            }
+            // overloadable's names count where they are inside an attribute list: the lists opened up to the name, in
+            // this block and before it, less those closed before it.
+            for (uint32_t bits = matched[CHECK_INPUT_COUNT_OVERLOADABLE]; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t lane = part + (uint32_t)__builtin_ctz(bits);
+                const int64_t depth = attribute_depth + __builtin_popcountll(_bzhi_u64(list_opens, lane + 1)) - __builtin_popcountll(_bzhi_u64(list_closes, lane));
+                result.groups[CHECK_INPUT_COUNT_OVERLOADABLE] += roles == 0 || depth > 0;
             }
             __mmask16 syntax_matched[3] = { 0 };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
@@ -7935,9 +8027,11 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             }
             _mm512_mask_storeu_epi8(visits + token, lanes, _mm512_maskz_mov_epi8(visit, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX)));
         }
+        attribute_depth += __builtin_popcountll(list_opens) - __builtin_popcountll(list_closes);
     }
     for (; token < count; token += 1)
     {
+        attribute_depth += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
         result.subscripts += kinds[token] == PARSE_KIND_L_SQUARE;
         result.asms += kinds[token] == PARSE_KIND_ASM;
         result.asm_groups += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ASM;
@@ -7953,8 +8047,9 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         }
         for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
         {
-            result.groups[group] += matched[group];
+            result.groups[group] += matched[group] && (group != CHECK_INPUT_COUNT_OVERLOADABLE || roles == NULL || attribute_depth > 0);
         }
+        attribute_depth -= roles != NULL && roles[token] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
         const uint8_t bits = check_input_syntax_of(parser, token);
         if (syntax != 0)
         {
@@ -8036,7 +8131,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
-                         .implicit_function_system = pp->options.implicit_function_system };
+                         .implicit_function_system = pp->options.implicit_function_system,
+                         .fatal_errors = pp->options.fatal_errors };
     check_input_warning_policy(input, &pp->options);
     // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
     // inlines 16-byte atomics (cx16), which the lock-free queries read.
