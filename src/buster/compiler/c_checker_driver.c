@@ -711,8 +711,8 @@ static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity,
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
-static const char* check_driver_pointer_sign_message(Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                     uint32_t token, Arena* scratch)
+static const char* check_driver_pointer_sign_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                     const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, Arena* scratch)
 {
     const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
     const char* result = "converts between pointers to integer types with different sign";
@@ -720,11 +720,13 @@ static const char* check_driver_pointer_sign_message(Preprocessor* pp, const Che
     {
         const uint32_t left = stream->graph->operand0[node];
         const uint32_t right = stream->graph->operand1[node];
-        const String8 left_name = left < stream->count ? check_driver_warning_type(pp, types, scratch, check_stream_type(stream, left)) : (String8){ 0 };
-        const String8 right_name = right < stream->count ? check_driver_warning_type(pp, types, scratch, check_stream_type(stream, right)) : (String8){ 0 };
+        const String8 left_name = left < stream->count ?
+                                  check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, left), 0) : (String8){ 0 };
+        const String8 right_name = right < stream->count ?
+                                   check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), 0) : (String8){ 0 };
         if (left_name.length != 0 && right_name.length != 0)
         {
-            result = check_warning_text(scratch, "assigning to '%.*s' from '%.*s' converts between pointers to integer types with different sign",
+            result = check_warning_text(scratch, "assigning to %.*s from %.*s converts between pointers to integer types with different sign",
                                         (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
         }
     }
@@ -754,6 +756,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
     const uint64_t mark = scratch->length;
     const bool scalar = parser->options.scalar;
     const uint32_t count = parser->tokens.count;
+    CheckWarningSpelling spell = { 0 };
     // Every token key is at most count, so all of its possible radix digits are known without gather-loop state.
     const uint32_t varying = count != 0 ? UINT32_MAX >> __builtin_clz(count) : 0;
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
@@ -1014,7 +1017,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                          promoted ? " [-Werror]" : "";
                     if (suffix != NULL)
                     {
-                        const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN ? check_driver_pointer_sign_message(pp, input, stream, types, token, scratch) :
+                        const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN ?
+                                              check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                               check_diagnostic_message(warning_flag);
                         pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase, "%s%s", message, suffix);
                     }

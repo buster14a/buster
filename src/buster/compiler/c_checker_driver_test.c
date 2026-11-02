@@ -3287,6 +3287,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
 {
     const uint64_t mark = scratch->length;
     const uint32_t count = parser->tokens.count;
+    CheckWarningSpelling spell = { 0 };
     const bool reports = input->report_count != 0 || (stream != 0 && stream->report_count != 0) || extra_count != 0;
     uint64_t* first = reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : NULL;
     const bool show_warnings = !quiet;
@@ -3389,7 +3390,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                     const bool promoted = severity >= CHECK_WARNING_ERROR;
                     const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) :
                                          promoted ? " [-Werror]" : "";
-                    const char* message = warning == CHECK_WARNING_POINTER_SIGN ? check_driver_pointer_sign_message(pp, input, stream, types, token, scratch) :
+                    const char* message = warning == CHECK_WARNING_POINTER_SIGN ?
+                                          check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {

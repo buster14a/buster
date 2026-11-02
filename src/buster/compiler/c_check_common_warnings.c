@@ -74,16 +74,25 @@ static void check_common_report(const Parser* parser, Preprocessor* pp, const Ch
 }
 
 // A type's spelling with clang's decayed type for a format argument: an array prints as a pointer to its element.
-static String8 check_common_type_text(const Preprocessor* pp, TypeTable* types, Arena* scratch, TypeId type)
+static String8 check_common_type_text(const Parser* parser, Preprocessor* pp, const CheckInput* input, TypeTable* types, CheckWarningSpelling* spell,
+                                      Arena* scratch, TypeId type)
 {
-    String8 result = check_driver_warning_type(pp, types, scratch, type);
+    String8 result = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, 0);
     const TypeId stripped = type != 0 ? type_strip_aligned(types, type) : 0;
     if (stripped != 0 && type_kind_is_array(type_kind(types, type_unqualified(stripped))) && result.length != 0)
     {
-        const String8 element = check_driver_warning_type(pp, types, scratch, type_element(types, type_unqualified(stripped)));
+        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch,
+                                                          type_element(types, type_unqualified(stripped)), 0);
         if (element.length != 0)
         {
-            result = (String8){ .pointer = (char*)check_warning_text(scratch, "%.*s *", (int)element.length, element.pointer), .length = element.length + 2 };
+            const char* text = element.pointer;
+            uint64_t length = element.length;
+            if (length >= 2 && text[0] == '\'' && text[length - 1] == '\'')
+            {
+                text += 1;
+                length -= 2;
+            }
+            result = (String8){ .pointer = (char*)check_warning_text(scratch, "'%.*s *'", (int)length, text), .length = length + 4 };
         }
     }
     return result;
@@ -625,7 +634,7 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
 }
 
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                        TypeTable* types, Arena* scratch)
+                                        TypeTable* types, CheckWarningSpelling* spell, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     for (uint32_t node = 0; node < graph->count; node += 1)
@@ -666,8 +675,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 __int128 converted = 0;
                 if (check_common_conversion_changes(types, value->type, target, value, &converted))
                 {
-                    const String8 source_name = check_driver_warning_type(pp, types, scratch, value->type);
-                    const String8 target_name = check_driver_warning_type(pp, types, scratch, target);
+                    const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
+                    const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, 0);
                     if (source_name.length != 0 && target_name.length != 0)
                     {
                         char original[48];
@@ -680,7 +689,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                         check_common_integer(types, target, &target_width, &target_signed);
                         check_common_number(original, sizeof(original), check_common_integer_value(value, source_width, source_signed));
                         check_common_number(changed, sizeof(changed), converted);
-                        const char* message = check_warning_text(scratch, "implicit conversion from '%.*s' to '%.*s' changes value from %s to %s",
+                        const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
                                                                   (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
                                                                   original, changed);
                         check_common_report(parser, pp, input, graph->tokens[source], CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
@@ -699,10 +708,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                     right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
                     left_value.offset == 0 && right_value.offset == 0)
                 {
-                    const String8 type_name = check_driver_warning_type(pp, types, scratch, left_value.type);
+                    const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
                     if (type_name.length != 0)
                     {
-                        const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type '%.*s' to itself",
+                        const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
                                                                   (int)type_name.length, type_name.pointer);
                         check_common_report(parser, pp, input, token, CHECK_WARNING_ID_SELF_ASSIGN, true, message, NULL, 0, scratch);
                     }
@@ -731,11 +740,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                         const bool before = value < 0;
                         if (past || before)
                         {
-                            const String8 array_name = check_driver_warning_type(pp, types, scratch, array_type);
+                            const String8 array_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, array_type, 0);
                             char number[48];
                             check_common_number(number, sizeof(number), value);
                             const char* message = past && array_name.length != 0 ?
-                                check_warning_text(scratch, "array index %s is past the end of the array (that has type '%.*s')", number,
+                                check_warning_text(scratch, "array index %s is past the end of the array (that has type %.*s)", number,
                                                    (int)array_name.length, array_name.pointer) :
                                 array_name.length != 0 ? check_warning_text(scratch, "array index %s is before the beginning of the array", number) : NULL;
                             CheckCommonNote note = { 0 };
@@ -812,11 +821,11 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             const bool constant_operand = check_common_integer_constant(stream, left) || check_common_integer_constant(stream, right);
             if (integer && (simple || constant_operand) && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
             {
-                const String8 left_name = check_driver_warning_type(pp, types, scratch, check_stream_type(stream, left));
-                const String8 right_name = check_driver_warning_type(pp, types, scratch, check_stream_type(stream, right));
+                const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, left), 0);
+                const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), 0);
                 if (left_name.length != 0 && right_name.length != 0)
                 {
-                    const char* message = check_warning_text(scratch, "comparison of integers of different signs: '%.*s' and '%.*s'",
+                    const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
                                                               (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
                     check_common_report(parser, pp, input, token, CHECK_WARNING_ID_SIGN_COMPARE, true, message, NULL, 0, scratch);
                 }
@@ -1004,18 +1013,18 @@ static void check_common_format_report_offset(const Parser* parser, Preprocessor
 }
 
 static void check_common_format_report_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                            TypeTable* types, const CheckGraph* graph, uint32_t offset, uint32_t argument, uint32_t format_token,
-                                            const char* expected, bool width, Arena* scratch)
+                                            TypeTable* types, CheckWarningSpelling* spell, const CheckGraph* graph, uint32_t offset, uint32_t argument,
+                                            uint32_t format_token, const char* expected, bool width, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
-    const String8 actual = check_common_type_text(pp, types, scratch, type);
+    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
     if (actual.length != 0)
     {
         const char* message = width ? check_warning_text(scratch, "field width should have type 'int', but argument has type '%.*s'",
                                                           (int)actual.length, actual.pointer) :
-                                     check_warning_text(scratch, "format specifies type %s but the argument has type '%.*s'",
+                                     check_warning_text(scratch, "format specifies type %s but the argument has type %.*s",
                                                         expected, (int)actual.length, actual.pointer);
         if (message != NULL)
         {
@@ -1025,15 +1034,15 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
 }
 
 static void check_common_format_width_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                             TypeTable* types, const CheckGraph* graph, uint32_t offset, uint32_t argument, uint32_t format_token,
-                                             uint64_t literal_offset, bool precision, Arena* scratch)
+                                             TypeTable* types, CheckWarningSpelling* spell, const CheckGraph* graph, uint32_t offset, uint32_t argument,
+                                             uint32_t format_token, uint64_t literal_offset, bool precision, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
-    const String8 actual = check_common_type_text(pp, types, scratch, type);
+    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type);
     if (actual.length != 0)
     {
-        const char* message = check_warning_text(scratch, "field %s should have type 'int', but argument has type '%.*s'",
+        const char* message = check_warning_text(scratch, "field %s should have type 'int', but argument has type %.*s",
                                                   precision ? "precision" : "width", (int)actual.length, actual.pointer);
         if (message != NULL)
         {
@@ -1043,7 +1052,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
 }
 
 static void check_common_format(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                TypeTable* types, const CheckProgram* program, Arena* scratch)
+                                TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     for (uint32_t node = 0; node < graph->count; node += 1)
@@ -1120,7 +1129,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
                         if (!check_common_format_width(types, width_type))
                         {
-                            check_common_format_width_report(parser, pp, input, stream, types, graph, offset, argument, format_token, at + 1, false, scratch);
+                            check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, argument, format_token, at + 1, false, scratch);
                         }
                         argument += 1;
                         at += 1;
@@ -1149,7 +1158,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             const TypeId width_type = width_node < graph->count ? check_stream_type(stream, width_node) : 0;
                             if (!check_common_format_width(types, width_type))
                             {
-                                check_common_format_width_report(parser, pp, input, stream, types, graph, offset, argument, format_token, at, true, scratch);
+                                check_common_format_width_report(parser, pp, input, stream, types, spell, graph, offset, argument, format_token, at, true, scratch);
                             }
                             argument += 1;
                             at += 1;
@@ -1244,7 +1253,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                         if (!accepted)
                         {
-                            check_common_format_report_type(parser, pp, input, stream, types, graph, offset, argument, format_token, expected, false, scratch);
+                            check_common_format_report_type(parser, pp, input, stream, types, spell, graph, offset, argument, format_token, expected, false, scratch);
                         }
                         argument += 1;
                     }
@@ -1941,12 +1950,13 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         return;
     }
+    CheckWarningSpelling spell = { 0 };
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, scratch);
-    check_common_graph_warnings(parser, pp, input, stream, types, scratch);
+    check_common_graph_warnings(parser, pp, input, stream, types, &spell, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
     check_common_uninitialized(parser, pp, input, stream, types, scratch);
-    check_common_format(parser, pp, input, stream, types, program, scratch);
+    check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
 }
