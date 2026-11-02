@@ -570,8 +570,11 @@ that poison every caller-saved register (`tier1_call_test.c`):
   values live past both, and **the carries**: the second call stores none of
   them in a block whose one predecessor comes first, and stores again at a join
   and past a later predecessor.
-- **Six values live past a call** take the six callee-saved registers, `rbp`
-  among them, and with a frame pointer leave `rbp` to the frame. In
+- **Values live past a call** take the callee-saved registers the frame
+  leaves. Six take all six, `rbp` among them, without a frame pointer. With
+  one, five take exactly `rbx` and `r12` to `r15`, the frame pushing them and
+  `rbp` as its pointer. (Six would split one there, which discards the
+  preference whole, so they only run.) In
   `test-check-debug --cross-check`'s Tier 1 fixture, `six` is such a function,
   with a branch and a join that keep it on the CFG consumer, since the
   straight-line consumer takes no callee-saved register. Its FDE must save

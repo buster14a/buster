@@ -75,9 +75,9 @@ struct Tier1CallFixture
     uint32_t dominance_enter[3];
     uint32_t dominance_leave[3];
     bool dominated;
-    // A call past which six computed values live, which the six callee-saved registers take, rbp among them unless the
-    // frame keeps a frame pointer (tier1_call_callee_fixture).
-    bool callee_six;
+    // A call past which this many computed values live (six or five, else none), which the callee-saved registers take
+    // (tier1_call_callee_fixture).
+    uint32_t callee_values;
     // A function that returns its parameter truncated to this narrow type (I8 or I16, else none), without calls.
     IrType return_type;
     // Divisions, remainders and shifts by a register of the four parameters, without calls, whose operands that live on
@@ -581,7 +581,6 @@ static bool tier1_call_run_fixture(Tier1EmitTest* test, Tier1CallFixture* fixtur
 #define TIER1_CALL_CARRY 1
 #define TIER1_CALL_CARRY_JOIN 2
 #define TIER1_CALL_CARRY_LATER 3
-#define BUSTER_TIER1_CALL_CALLEE_VALUES 6
 
 // Two calls through the first two parameters in two blocks (#1116): the first, of the third parameter, in block P, and
 // the second, of the first's result, in block B; then the second's result plus the fourth parameter, which lives past
@@ -671,13 +670,13 @@ static bool tier1_call_carry_fixture(Tier1EmitTest* test, Tier1CallFixture* fixt
     return ready;
 }
 
-// A call through the first parameter, of no arguments, past which six values live, each the second parameter plus its
-// own constant, which the function adds to the call's result (#1116). The CFG consumer's callee-saved preference
-// (tier1_emit_cfg_callee) gives them its six registers, rbp among them, where the frame keeps no frame pointer; with
-// BUSTER_TIER1_FRAME_KEEP_POINTER, rbp is the frame's and none of them takes it.
-static bool tier1_call_callee_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+// A call through the first parameter, of no arguments, past which `values` values live (six or five), each the second
+// parameter plus its own constant, which the function adds to the call's result (#1116). The CFG consumer's
+// callee-saved preference (tier1_emit_cfg_callee) gives each a callee-saved register: six take all six, rbp among them,
+// where the frame keeps no frame pointer, and five take rbx and r12 to r15 where BUSTER_TIER1_FRAME_KEEP_POINTER makes
+// rbp the frame's.
+static bool tier1_call_callee_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture, uint32_t values)
 {
-    const uint32_t values = BUSTER_TIER1_CALL_CALLEE_VALUES;
     const IrSizes sizes = {
         .instruction_count = 2 + 3 * values + 2,
         .block_count = 1,
@@ -716,7 +715,7 @@ static bool tier1_call_callee_fixture(Tier1EmitTest* test, Tier1CallFixture* fix
         fixture->arguments = 0;
         fixture->helper_count = 1;
         fixture->indirect = true;
-        fixture->callee_six = true;
+        fixture->callee_values = values;
     }
     return ready;
 }
@@ -1020,11 +1019,11 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
             counts[1] = 1;
             expected = tier1_call_mix(passed[1], 1, 8) + arguments[3];
         }
-        else if (fixture->callee_six)
+        else if (fixture->callee_values != 0)
         {
             arguments[0] = addresses[0];
             expected = tier1_call_mix(passed[0], 0, 8);
-            for (uint32_t k = 0; k < BUSTER_TIER1_CALL_CALLEE_VALUES; k += 1)
+            for (uint32_t k = 0; k < fixture->callee_values; k += 1)
             {
                 expected += arguments[1] + tier1_call_term(k);
             }
@@ -1240,15 +1239,28 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
                     fprintf(stderr, "  run=%u carry=%u: stores before the first call %u, between the calls %u\n", fixture->run, fixture->carry, before, between);
                 }
             }
-            else if (fixture->callee_six)
+            else if (fixture->callee_values != 0)
             {
-                // The six values take the six callee-saved registers (rbp among them) and no call-save row; with a frame
-                // pointer rbp is the frame's, and the frame pushes it for that alone (#1116).
+                // Each value takes a callee-saved register, which the frame pushes, and no call-save row (#1116). Without a
+                // frame pointer, six take all six, rbp among them, and five any five. With one, rbp is the frame's (its
+                // own push, not a saved register's), and five take exactly the other five. Six values past those five
+                // would split one, which discards the preference whole (tier1_emit_cfg_callee), so that case only runs:
+                // its registers prove nothing about rbp.
                 const uint32_t rbp = 1u << X86_REGISTER_RBP;
+                const uint32_t others = (1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15);
                 const bool pointer = (frame_flags & BUSTER_TIER1_FRAME_KEEP_POINTER) != 0;
-                tier1_emit_test_expect(test, emitted.general && emitted.frame.frame_pointer == pointer &&
-                                       (pointer ? (emitted.callee_used & rbp) == 0 : (emitted.callee_used & rbp) != 0 && (emitted.frame.saved_registers & rbp) != 0 && emitted.call_stores == 0),
-                                       "rbp is a callee-saved register for values live past a call, unless the frame keeps a frame pointer in it");
+                const uint32_t used = emitted.callee_used;
+                const uint32_t saved = emitted.frame.saved_registers;
+                const bool six = fixture->callee_values == 6;
+                const bool registers = pointer ? six || (used == others && (saved & others) == others && (saved & rbp) == 0) :
+                                       six ? used == (others | rbp) && (saved & used) == used :
+                                             __builtin_popcount(used) == 5 && (used & ~(others | rbp)) == 0 && (saved & used) == used;
+                tier1_emit_test_expect(test, emitted.general && emitted.frame.frame_pointer == pointer && registers && ((pointer && six) || emitted.call_stores == 0),
+                                       "values live past a call take the callee-saved registers the frame leaves: rbp without a frame pointer, the other five with one");
+                if (test->failures < 20 && !registers)
+                {
+                    fprintf(stderr, "  callee values=%u pointer=%u: callee_used=%#x saved=%#x call_stores=%u\n", fixture->callee_values, pointer, used, saved, emitted.call_stores);
+                }
             }
             else if (fixture->indirect)
             {
@@ -1483,9 +1495,9 @@ static void tier1_call_cases(Tier1EmitTest* test)
         arena_pop_to(&test->input, 0);
     }
     // The mixed cycles, the dirty I32, I8 and I16 call results, the I8 and I16 parameters, the indirect call, the I8
-    // and I16 returns, the 64- and 32-bit divisions and shifts, a run of calls, the three carries and the six callee-saved
-    // registers' values.
-    for (uint32_t shape = 0; shape < 17; shape += 1)
+    // and I16 returns, the 64- and 32-bit divisions and shifts, a run of calls, the three carries, and six and five values
+    // in callee-saved registers.
+    for (uint32_t shape = 0; shape < 18; shape += 1)
     {
         Tier1CallFixture fixture = {
             .narrow_type = shape == 3 ? IR_I8 : shape == 4 ? IR_I16 : 0,
@@ -1496,7 +1508,7 @@ static void tier1_call_cases(Tier1EmitTest* test)
         const bool ready = shape < 2 ? tier1_call_mixed_fixture(test, &fixture, shape != 0) : shape < 5 ? tier1_call_narrow_fixture(test, &fixture) :
                            shape < 7 ? tier1_call_parameter_fixture(test, &fixture) : shape == 7 ? tier1_call_indirect_fixture(test, &fixture) :
                            shape < 10 ? tier1_call_return_fixture(test, &fixture) : shape < 12 ? tier1_call_fixed_fixture(test, &fixture) :
-                           shape == 12 ? tier1_call_run_fixture(test, &fixture) : shape < 16 ? tier1_call_carry_fixture(test, &fixture, shape - 12) : tier1_call_callee_fixture(test, &fixture);
+                           shape == 12 ? tier1_call_run_fixture(test, &fixture) : shape < 16 ? tier1_call_carry_fixture(test, &fixture, shape - 12) : tier1_call_callee_fixture(test, &fixture, shape == 16 ? 6 : 5);
         tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle, dirty narrow return or narrow parameter fixture");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
