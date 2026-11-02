@@ -131,7 +131,7 @@ jobs:
     # 120-minute bound rather than the sanitizer rows' 360.
     timeout-minutes: ${{ matrix.sanitizer == 'none' && 120 || 360 }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         host_arch: [x86-64, native]
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, and pushes
@@ -403,7 +403,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - entry: frontend
@@ -1574,6 +1574,58 @@ jobs:
           persist-credentials: false
       - name: Exercise Git hooks in isolated repositories
         run: sh .githooks/test-sign-off.sh
+
+  # Matrix fail-fast handles siblings of one matrix only. The dependent cancellation
+  # jobs start after the failing job finishes, preserving its failure and artifacts
+  # before stopping other independent jobs in this run. Fork/Dependabot PR tokens
+  # cannot get Actions write access; their matrices still fail fast on their own.
+  cancel-on-changes-failure:
+    name: Cancel remaining CI after changes fails
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cancel-failed-ci.yml
+
+  cancel-on-test-failure:
+    name: Cancel remaining CI after test fails
+    needs: test
+    if: ${{ !cancelled() && needs.test.result == 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cancel-failed-ci.yml
+
+  cancel-on-fuzz-failure:
+    name: Cancel remaining CI after fuzz fails
+    needs: fuzz
+    if: ${{ !cancelled() && needs.fuzz.result == 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cancel-failed-ci.yml
+
+  cancel-on-benchmarks-failure:
+    name: Cancel remaining CI after benchmarks fails
+    needs: benchmarks
+    if: ${{ !cancelled() && needs.benchmarks.result == 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cancel-failed-ci.yml
+
+  cancel-on-agent-guide-size-failure:
+    name: Cancel remaining CI after agent-guide-size fails
+    needs: agent-guide-size
+    if: ${{ !cancelled() && needs.agent-guide-size.result == 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cancel-failed-ci.yml
+
+  cancel-on-dco-hooks-failure:
+    name: Cancel remaining CI after dco-hooks fails
+    needs: dco-hooks
+    if: ${{ !cancelled() && needs.dco-hooks.result == 'failure' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cancel-failed-ci.yml
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated

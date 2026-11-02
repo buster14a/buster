@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         arch: [x86-64, native]
     steps:
