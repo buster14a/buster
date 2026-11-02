@@ -521,8 +521,10 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
     bool okay = intel != 0 && att != 0;
     if (okay)
     {
-        fputs(".intel_syntax noprefix\n.text\n", intel);
-        fputs(".text\n", att);
+        // MPX's bnd prefix (the bnd call and jmp forms), which binutils 2.46 takes only where .arch enables MPX, as the
+        // encoder tests' --print-assembly does.
+        fputs(".intel_syntax noprefix\n.arch .mpx\n.text\n", intel);
+        fputs(".arch .mpx\n.text\n", att);
         // The lines are the round trip's own, kept outside the arenas the paths reset for each line.
         Arena kept = arena_reserve((uint64_t)capacity * sizeof(AsmRoundTripLine));
         AsmRoundTripLine* copies = BUSTER_ARENA_PUSH_ARRAY(&kept, AsmRoundTripLine, capacity);
