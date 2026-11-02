@@ -16,8 +16,8 @@
 // 0 when every commit has a well-formed Signed-off-by in its trailer block or a supplied current-head record covers it,
 // 1 when some don't, 2 when the input is incomplete (shallow or missing history, a short or stale API listing) or the
 // command is wrong. A trailer is a recorded claim, not proof of authority: the report says so and verifies nothing
-// about who made it. Git's own parser (git interpret-trailers --parse) finds the trailer block, so the audit counts
-// what the commit-msg hook writes.
+// about who made it. Git's own parser finds the trailer block, run as the commit-msg hook runs it (--no-divider, the
+// repository's comment prefix), so the audit counts what the hook writes.
 //
 // compose handles two layouts. With core.hooksPath unset and hooks in the common .git/hooks, it keeps an existing
 // commit-msg as commit-msg.buster-dco-chained and installs an adapter there (dco_adapter_text). With core.hooksPath
@@ -200,20 +200,31 @@ static char *dco_line(const char *const argv[])
     return result;
 }
 
-static bool dco_write_file(const char *path, const char *text, mode_t mode)
+// Writes `text` to PATH.buster-dco-new, replacing a leftover one, and names it in `temporary`.
+static bool dco_write_temporary(const char *path, const char *text, mode_t mode, char temporary[BUSTER_DCO_PATH_BYTES])
 {
-    char temporary[BUSTER_DCO_PATH_BYTES];
-    bool result = (size_t)snprintf(temporary, sizeof(temporary), "%s.buster-dco-new", path) < sizeof(temporary);
+    bool result = (size_t)snprintf(temporary, BUSTER_DCO_PATH_BYTES, "%s.buster-dco-new", path) < BUSTER_DCO_PATH_BYTES && (unlink(temporary) == 0 || errno == ENOENT);
     FILE *file = result ? fopen(temporary, "wbx") : NULL;
     result = file != NULL && fputs(text, file) >= 0;
     if (file != NULL)
     {
-        result = fclose(file) == 0 && result;
-        result = result && chmod(temporary, mode) == 0 && rename(temporary, path) == 0;
+        result = fclose(file) == 0 && result && chmod(temporary, mode) == 0;
         if (!result)
         {
             unlink(temporary);
         }
+    }
+    return result;
+}
+
+static bool dco_write_file(const char *path, const char *text, mode_t mode)
+{
+    char temporary[BUSTER_DCO_PATH_BYTES];
+    bool result = dco_write_temporary(path, text, mode, temporary);
+    if (result && rename(temporary, path) != 0)
+    {
+        unlink(temporary);
+        result = false;
     }
     return result;
 }
@@ -434,11 +445,32 @@ static bool dco_line_in(const char *lines, size_t lines_size, const char *line, 
     return found != 0;
 }
 
-static bool dco_classify(const char *message, DcoTrailers *trailers)
+// The comment prefix as Git resolves it here, as the commit-msg hook derives it; `#` outside a repository.
+static char *dco_comment_prefix(void)
 {
-    const char *directory = getenv("TMPDIR");
+    const char *const argv[] = {"sh", "-c", "echo x | git stripspace --comment-lines", NULL};
+    char *result = dco_line(argv);
+    size_t size = result == NULL ? 0 : strlen(result);
+    if (size > 2 && strcmp(result + size - 2, " x") == 0)
+    {
+        result[size - 2] = 0;
+    }
+    else
+    {
+        free(result);
+        result = dco_copy("#", 1);
+    }
+    return result;
+}
+
+// `prefix` is the comment prefix the hook saw (dco_comment_prefix), so that both parse a message alike.
+static bool dco_classify(const char *message, const char *prefix, DcoTrailers *trailers)
+{
+    const char *variable = getenv("TMPDIR");
+    char *directory = variable != NULL && *variable != 0 ? realpath(variable, NULL) : NULL;
     char template[BUSTER_DCO_PATH_BYTES];
-    snprintf(template, sizeof(template), "%s/buster-dco-message-XXXXXX", directory != NULL && *directory != 0 ? directory : "/tmp");
+    snprintf(template, sizeof(template), "%s/buster-dco-message-XXXXXX", directory != NULL ? directory : "/tmp");
+    free(directory);
     int descriptor = mkstemp(template);
     size_t size = strlen(message);
     bool result = descriptor >= 0 && write(descriptor, message, size) == (ssize_t)size;
@@ -449,7 +481,9 @@ static bool dco_classify(const char *message, DcoTrailers *trailers)
     PerfBuffer parsed = {0};
     if (result)
     {
-        const char *const argv[] = {"git", "-c", "core.commentChar=\001", "interpret-trailers", "--parse", template, NULL};
+        char comment[64];
+        snprintf(comment, sizeof(comment), "core.commentChar=%s", prefix);
+        const char *const argv[] = {"git", "-c", comment, "interpret-trailers", "--parse", "--no-divider", template, NULL};
         result = dco_run(argv, NULL, &parsed, false, true) == 0 && dco_string(&parsed) != NULL;
     }
     if (descriptor >= 0)
@@ -876,11 +910,12 @@ static int dco_audit(int argc, char **argv)
     size_t missing = 0;
     size_t covered = 0;
     size_t findings = 0;
+    char *prefix = result == 0 ? dco_comment_prefix() : NULL;
     for (size_t i = 0; result == 0 && i < commits.count; ++i)
     {
         DcoCommit *commit = &commits.items[i];
         DcoTrailers trailers = {0};
-        if (!dco_classify(commit->message, &trailers))
+        if (!dco_classify(commit->message, prefix, &trailers))
         {
             printf("INCOMPLETE: git interpret-trailers failed on %s\n", commit->sha);
             result = 2;
@@ -939,6 +974,7 @@ static int dco_audit(int argc, char **argv)
         free(commits.items[i].message);
     }
     free(commits.items);
+    free(prefix);
     return result;
 }
 
@@ -1036,6 +1072,21 @@ static bool dco_link_hooks(const char *dispatcher, const char *original)
     return result;
 }
 
+// Removes the dispatcher's links and the three files compose writes, then the directory if nothing else is in it.
+static bool dco_clear_dispatcher(const char *dispatcher)
+{
+    char path[BUSTER_DCO_PATH_BYTES];
+    const char *const argv[] = {"find", dispatcher, "-mindepth", "1", "-maxdepth", "1", "-type", "l", "-lname", "dispatch", "-delete", NULL};
+    bool result = dco_run(argv, NULL, NULL, false, false) == 0;
+    const char *names[] = {"dispatch", "original", "restore"};
+    for (size_t i = 0; i < 3; ++i)
+    {
+        result = dco_path(path, dispatcher, names[i]) && (unlink(path) == 0 || errno == ENOENT) && result;
+    }
+    result = result && rmdir(dispatcher) == 0;
+    return result;
+}
+
 static int dco_compose(void)
 {
     DcoReport report = {0};
@@ -1087,12 +1138,29 @@ static int dco_compose(void)
             printf("dco compose: unsupported: %s\n", linked ? "the hooks directory is a symbolic link, possibly shared with other repositories" : "commit-msg.buster-dco-chained already exists");
             result = 1;
         }
-        else if ((dco_exists(path) && rename(path, kept) != 0) || !dco_write_file(path, dco_adapter_text, 0755))
-        {
-            printf("dco compose: failed to install %s: %s\n", path, strerror(errno));
-            result = 1;
-        }
         else
+        {
+            // The adapter is written first, so a failure leaves the existing commit-msg where it was.
+            char temporary[BUSTER_DCO_PATH_BYTES];
+            bool keeping = dco_exists(path);
+            bool installed = dco_write_temporary(path, dco_adapter_text, 0755, temporary);
+            installed = installed && (!keeping || rename(path, kept) == 0);
+            if (installed && rename(temporary, path) != 0)
+            {
+                installed = false;
+                if (keeping)
+                {
+                    rename(kept, path);
+                }
+            }
+            if (!installed)
+            {
+                printf("dco compose: failed to install %s, so nothing changed: %s\n", path, strerror(errno));
+                unlink(temporary);
+                result = 1;
+            }
+        }
+        if (result == 0 && valid)
         {
             printf("dco compose: installed %s%s; the other hooks there run as before\n", path, dco_exists(kept) ? ", keeping the existing commit-msg as commit-msg.buster-dco-chained" : "");
         }
@@ -1121,7 +1189,11 @@ static int dco_compose(void)
             written = written && mkdir(dispatcher, 0755) == 0 && dco_path(path, dispatcher, "dispatch") && dco_write_file(path, dco_dispatch_text, 0755) && dco_path(path, dispatcher, "original") && dco_write_file(path, (const char *)original.data, 0644) && dco_path(path, dispatcher, "restore") && dco_write_file(path, (const char *)restore.data, 0644) && dco_link_hooks(dispatcher, directory);
             const char *const set_argv[] = {"git", "config", target, "core.hooksPath", dispatcher, NULL};
             written = written && dco_run(set_argv, NULL, NULL, false, false) == 0;
-            printf(written ? "dco compose: core.hooksPath (%s) now names %s, which runs the hooks of %s\n" : "dco compose: failed while composing %s, %s and %s; run dco uncompose\n", target + 2, dispatcher, directory);
+            if (!written && dco_exists(dispatcher))
+            {
+                dco_clear_dispatcher(dispatcher);
+            }
+            printf(written ? "dco compose: core.hooksPath (%s) now names %s, which runs the hooks of %s\n" : "dco compose: failed while composing %s, %s and %s, so nothing changed\n", target + 2, dispatcher, directory);
             result = written ? 0 : 1;
             free(restore.data);
             free(original.data);
@@ -1132,12 +1204,51 @@ static int dco_compose(void)
     return result;
 }
 
+// A record compose wrote: `original` is one non-empty line; `restore` is a scope (--local or --worktree), then
+// `present` and the one previous value, or `absent`. Anything else was edited, and uncompose leaves it alone.
+static bool dco_dispatcher_records(const char *dispatcher, char *restore, char **target, char **state, char **value)
+{
+    char path[BUSTER_DCO_PATH_BYTES];
+    PerfBuffer original = {0};
+    bool result = dco_path(path, dispatcher, "original") && perf_read_file(path, &original) && dco_string(&original) != NULL;
+    const char *line_end = result ? strchr((const char *)original.data, '\n') : NULL;
+    result = result && line_end != NULL && line_end != (const char *)original.data && line_end[1] == 0;
+    char *first = strchr(restore, '\n');
+    char *second = first == NULL ? NULL : strchr(first + 1, '\n');
+    char *third = second == NULL ? NULL : strchr(second + 1, '\n');
+    if (result && second != NULL)
+    {
+        *first = 0;
+        *second = 0;
+        *target = restore;
+        *state = first + 1;
+        *value = second + 1;
+        bool scope = strcmp(*target, "--local") == 0 || strcmp(*target, "--worktree") == 0;
+        bool absent = strcmp(*state, "absent") == 0 && **value == 0;
+        bool present = strcmp(*state, "present") == 0 && third != NULL && third != *value && third[1] == 0;
+        if (present)
+        {
+            *third = 0;
+        }
+        result = scope && (absent || present);
+    }
+    else
+    {
+        result = false;
+    }
+    free(original.data);
+    return result;
+}
+
 static bool dco_remove_dispatcher(const char *dispatcher, bool *left)
 {
     char path[BUSTER_DCO_PATH_BYTES];
     PerfBuffer restore = {0};
+    char *target = NULL;
+    char *state = NULL;
+    char *value = NULL;
     bool found = dco_path(path, dispatcher, "dispatch") && dco_exists(path);
-    bool ours = found && dco_file_is(path, dco_dispatch_text) && dco_path(path, dispatcher, "restore") && perf_read_file(path, &restore) && dco_string(&restore) != NULL;
+    bool ours = found && dco_file_is(path, dco_dispatch_text) && dco_path(path, dispatcher, "restore") && perf_read_file(path, &restore) && dco_string(&restore) != NULL && dco_dispatcher_records(dispatcher, (char *)restore.data, &target, &state, &value);
     if (found && !ours)
     {
         printf("dco uncompose: %s changed since compose; left alone\n", dispatcher);
@@ -1145,44 +1256,26 @@ static bool dco_remove_dispatcher(const char *dispatcher, bool *left)
     }
     if (ours)
     {
-        char *target = (char *)restore.data;
-        char *state = strchr(target, '\n');
-        char *value = state == NULL ? NULL : strchr(state + 1, '\n');
-        if (value != NULL)
-        {
-            *state++ = 0;
-            *value++ = 0;
-            value[strcspn(value, "\n")] = 0;
-        }
+        bool present = strcmp(state, "present") == 0;
         const char *const current_argv[] = {"git", "config", target, "--get", "core.hooksPath", NULL};
-        char *current = value == NULL ? NULL : dco_line(current_argv);
+        char *current = dco_line(current_argv);
         if (current != NULL && strcmp(current, dispatcher) == 0)
         {
             const char *const set_argv[] = {"git", "config", target, "core.hooksPath", value, NULL};
             const char *const unset_argv[] = {"git", "config", target, "--unset", "core.hooksPath", NULL};
-            bool restored = dco_run(strcmp(state, "present") == 0 ? set_argv : unset_argv, NULL, NULL, false, false) == 0;
-            printf("dco uncompose: %s core.hooksPath (%s)%s%s\n", restored ? "restored" : "failed to restore", target + 2, strcmp(state, "present") == 0 ? " to " : ", unset as before", strcmp(state, "present") == 0 ? value : "");
+            bool restored = dco_run(present ? set_argv : unset_argv, NULL, NULL, false, false) == 0;
+            printf("dco uncompose: %s core.hooksPath (%s)%s%s\n", restored ? "restored" : "failed to restore", target + 2, present ? " to " : ", unset as before", present ? value : "");
             *left = *left || !restored;
         }
         else
         {
             printf("dco uncompose: core.hooksPath no longer names %s; left as it is\n", dispatcher);
         }
-        PerfBuffer listing = {0};
-        const char *const argv[] = {"find", dispatcher, "-mindepth", "1", "-maxdepth", "1", "-type", "l", "-lname", "dispatch", "-delete", NULL};
-        bool removed = dco_run(argv, NULL, &listing, false, false) == 0;
-        const char *names[] = {"dispatch", "original", "restore"};
-        for (size_t i = 0; removed && i < 3; ++i)
-        {
-            removed = dco_path(path, dispatcher, names[i]) && unlink(path) == 0;
-        }
-        removed = removed && rmdir(dispatcher) == 0;
-        if (!removed)
+        if (!dco_clear_dispatcher(dispatcher))
         {
             printf("dco uncompose: left %s, which holds files compose didn't write\n", dispatcher);
             *left = true;
         }
-        free(listing.data);
         free(current);
     }
     free(restore.data);

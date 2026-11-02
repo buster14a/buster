@@ -456,6 +456,19 @@ if "$dco" audit --base HEAD > audit 2>&1; then
 fi
 echo 'PASS: head records cover their head alone, stale ones show, and missing history is incomplete'
 
+new_repository
+git config core.hooksPath .githooks
+git commit --allow-empty -qm 'Base'
+BUSTER_DCO_SIGN_OFF=davidgmbb git commit --allow-empty -qm 'Divider' -m 'Body' -m '---
+Signed-off-by: A U Thor <author@example.invalid>'
+signed
+BUSTER_DCO_SIGN_OFF=davidgmbb git commit --allow-empty -qm 'Comment after the trailers' -m 'Signed-off-by: A U Thor <author@example.invalid>' -m '# note'
+git log -1 --format=%B | grep -Fqx "$trailer" || fail 'the hook did not sign before a comment line'
+mkdir relative-temporary
+TMPDIR=relative-temporary "$dco" audit --base HEAD~2 --head HEAD > audit || fail 'audit: what the hook signed is not a sign-off'
+grep -q '^summary: 2 signed, 0 missing' audit || fail 'audit: divider and comment shapes'
+echo 'PASS: audit parses trailers as the hook does (a --- line, a trailing comment) and takes a relative TMPDIR'
+
 cd "$temporary"
 one=1111111111111111111111111111111111111111
 two=2222222222222222222222222222222222222222
@@ -669,3 +682,40 @@ cd "$temporary/scoped tree"
 "$dco" uncompose > /dev/null
 [ "$(git config --worktree core.hooksPath)" = "$temporary/hook dir" ] || fail 'uncompose: worktree scope'
 echo 'PASS: a worktree-scoped hooks path composes in that worktree alone'
+
+new_repository
+sh .githooks/enable-sign-off.sh --maintainer-session > /dev/null 2>&1
+git config --unset core.hooksPath
+printf '#!/bin/sh\nexit 0\n' > .git/hooks/commit-msg
+chmod +x .git/hooks/commit-msg
+cp .git/hooks/commit-msg kept-copy
+chmod a-w .git/hooks
+status=0
+"$dco" compose > compose-output 2>&1 || status=$?
+chmod u+w .git/hooks
+[ "$status" = 1 ] && grep -q 'nothing changed' compose-output || fail 'compose: a failed install'
+cmp .git/hooks/commit-msg kept-copy && [ ! -e .git/hooks/commit-msg.buster-dco-chained ] || fail 'a failed compose moved the existing commit-msg'
+echo leftover > .git/hooks/commit-msg.buster-dco-new
+"$dco" compose > /dev/null || fail 'compose: a leftover temporary file'
+[ ! -e .git/hooks/commit-msg.buster-dco-new ] && cmp .git/hooks/commit-msg.buster-dco-chained kept-copy || fail 'compose: the retry'
+echo 'PASS: a failed compose leaves the existing commit-msg in place, and a retry succeeds'
+
+new_repository
+mkdir .custom-hooks
+git config core.hooksPath .custom-hooks
+"$dco" compose > /dev/null
+dispatcher="$(git rev-parse --path-format=absolute --git-common-dir)/buster-dco-hooks"
+sed -i 's/^--local$/--global/' "$dispatcher/restore"
+status=0
+"$dco" uncompose > compose-output || status=$?
+[ "$status" = 1 ] && grep -q 'changed since compose; left alone' compose-output || fail 'uncompose trusted an edited restore record'
+[ "$(git config core.hooksPath)" = "$dispatcher" ] && [ -f "$dispatcher/restore" ] || fail 'uncompose acted on an edited restore record'
+sed -i 's/^--global$/--local/' "$dispatcher/restore"
+printf '.custom-hooks\nextra\n' > "$dispatcher/original"
+status=0
+"$dco" uncompose > compose-output || status=$?
+[ "$status" = 1 ] && [ -f "$dispatcher/original" ] || fail 'uncompose removed an edited original record'
+printf '.custom-hooks\n' > "$dispatcher/original"
+"$dco" uncompose > /dev/null
+[ "$(git config core.hooksPath)" = .custom-hooks ] && [ ! -e "$dispatcher" ] || fail 'uncompose after the records were restored'
+echo 'PASS: uncompose leaves edited dispatcher records alone'
