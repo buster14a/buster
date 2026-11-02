@@ -72,11 +72,11 @@ alone, never on the machine or `--jobs`, so the N shards run every command once.
 lines and `#` comments aside): its time times the CPUs it held, as a runner's
 report gives both, then its title as its heading has it. A command without a
 line costs its CPUs times 10 s, and a line whose title the list doesn't have is
-left out, so a stale file only unbalances the shards. `tools/ci/correctness.costs`
-holds the hosted plain rows' costs; refresh it from a hosted run's report when
-the shards' times drift apart. The report's first line names the shard: `parallel:
-shard K of N, M of T commands, at most J CPUs at once`. A shard may have no
-commands (N past the list's), which passes.
+left out, so a stale file only unbalances the shards.
+`tools/ci/correctness.costs` holds the hosted plain rows' costs; refresh it from
+a hosted run's report when the shards' times drift apart. The report's first
+line names the shard: `parallel: shard K of N, M of T commands, at most J CPUs
+at once`. A shard may have no commands (N past the list's), which passes.
 
 The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
 test through it, with `--timeout 600`, before the benchmarks, which run one at
@@ -202,13 +202,14 @@ as expected with its times and CPU times written as `*`:
   them without a line (each its CPUs times 10 s) and a line for a command the
   list doesn't have, each shard's commands in the list's order and every command
   in exactly one; 2 shards without costs; a shard without commands, which
-  passes; the most shards (4294967295), the first with the costliest command
-  and the last with none, which the deal takes without room for each shard
-  (past the list's commands, no shard gets one); then each error of the options (`--shard` 0/2, 3/2, 1/0, 2, a/b, /2,
-  twice and without a value, and `--costs` without `--shard`, each with the
-  usage) and of the costs, at its line (letters for seconds, a title without its
-  blank, none, a '.' without digits, four digits after it, a sign, too many
-  seconds, a title twice and a NUL byte), and costs that can't be read;
+  passes; the most shards (4294967295), the first with the costliest command and
+  the last with none, which the deal takes without room for each shard (past the
+  list's commands, no shard gets one); then each error of the options (`--shard`
+  0/2, 3/2, 1/0, 2, a/b, /2, twice and without a value, and `--costs` without
+  `--shard`, each with the usage) and of the costs, at its line (letters for
+  seconds, a title without its blank, none, a '.' without digits, four digits
+  after it, a sign, too many seconds, a title twice and a NUL byte), and costs
+  that can't be read;
 - the command: its report and exit status for lists on standard input and in a
   file that pass and fail, a report with no reader (the run stops, and the
   runner ends at once with its command killed), with SIGPIPE at its default and
