@@ -62,6 +62,7 @@ struct CheckUnitsUnit
     bool unbuffered;
     bool compiled;
     CheckUnitsKept kept;
+    DependencyOutput dependency;
 };
 
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
@@ -1504,7 +1505,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true);
+                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
         arena_small_floor = 0;
         // The unit's --tier1 outcomes into the command's report, which the other lanes' units add to too.
         for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_STAGE_COUNT; k += 1)
@@ -1853,8 +1854,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 CheckProgramLanes writers = { .lanes = active, .budget = lanes->budget, .units_flow = lanes->units_flow };
                 const bool linked = check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
                                                             command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
-                                                            stage_clock, units, count);
+                                                            stage_clock, units, count, command->runtime_kind);
                 result = linked ? 0 : 1;
+            }
+            for (uint32_t u = 0; result == 0 && u < count; u += 1)
+            {
+                result = dependency_publish(&units[u].dependency, stderr) ? 0 : 1;
             }
             for (uint32_t l = 0; l < active; l += 1)
             {

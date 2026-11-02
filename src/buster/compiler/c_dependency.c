@@ -52,6 +52,7 @@ struct DependencyRule
     bool include_system;
     bool phony;
     bool scalar;
+    bool omit_source; // Stdin has no filesystem prerequisite; all other sources remain required.
 };
 
 typedef enum DependencyStatus
@@ -241,8 +242,12 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
         }
         dependency_text(sink, targets[i].text, targets[i].quote, scalar, true);
     }
-    dependency_append(sink, ": ", 2);
-    dependency_text(sink, source, true, scalar, false);
+    dependency_append(sink, ":", 1);
+    if (!rule->omit_source)
+    {
+        dependency_append(sink, " ", 1);
+        dependency_text(sink, source, true, scalar, false);
+    }
     for (uint32_t i = 0; i < file_count && sink->status == DEPENDENCY_OK; i += 1)
     {
         const DependencyFile file = files[i];

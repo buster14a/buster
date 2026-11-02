@@ -5,6 +5,8 @@
 // the driver runs in a child so its real diagnostic renderer and return status are observed together. Supplying
 // --executable also tests the production command's default C route, independently of its explicit check command.
 
+#include "c_driver_compatibility_test.c"
+
 typedef struct CheckDriverFixture CheckDriverFixture;
 struct CheckDriverFixture
 {
@@ -6218,6 +6220,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_identification(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_expect(&test, driver_compatibility_tests(executable, clang) == 0, "CC dependency, stdin, probe and link-mode compatibility");
             }
             if (!lazy && check_test_driver_takes())
             {

@@ -2163,7 +2163,7 @@ static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t co
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
                                      bool unwind, const CheckDriverLibraries* libraries, CheckProgramLanes* lanes, Arena* scratch, CheckClock* stage_clock,
-                                     const CheckUnitsUnit* units, uint32_t unit_count)
+                                     const CheckUnitsUnit* units, uint32_t unit_count, RuntimeKind runtime_kind)
 {
     (void)scalar;
 
@@ -2175,7 +2175,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
     {
         again = false;
         Runtime runtime;
-        const SnapshotResult opened = runtime_open_cache(&runtime, cached ? cache : NULL, RUNTIME_KIND_DYNAMIC);
+        const SnapshotResult opened = runtime_open_cache(&runtime, cached ? cache : NULL, runtime_kind);
         // The libraries -l names, imported for this runtime, whose version indices theirs follow.
         static RuntimeLibraries named;
         const bool naming = libraries->count != 0 && opened.error == RUNTIME_ERROR_NONE;
@@ -2328,11 +2328,24 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             }
         }
         ExecutableDynamic dynamic = { 0 };
+        ExecutableRuntime static_inputs = { 0 };
         if (valid)
         {
             // Several units' bound link is checked on their lanes (#778).
             const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
-            valid = checked == LINK_ERROR_NONE && dynamic_inputs(&dynamic, &runtime, &bind, &arena);
+            valid = checked == LINK_ERROR_NONE;
+            if (valid && runtime_kind == RUNTIME_KIND_STATIC)
+            {
+                dynamic_static_inputs(&static_inputs, &runtime, &bind);
+            }
+            else if (valid && runtime_kind == RUNTIME_KIND_STATIC_PIE)
+            {
+                dynamic_static_pie_inputs(&dynamic, &static_inputs, &runtime, &bind);
+            }
+            else if (valid)
+            {
+                valid = dynamic_inputs(&dynamic, &runtime, &bind, &arena);
+            }
             // An import the code reaches other than through the GOT, by a call or from data, which a shared library's
             // data needs without copy relocations, which the direct path makes none of (#84). Tier 0 reaches every symbol
             // the unit doesn't define through the GOT (check_program_emit's access column), so this is the compiler's
@@ -2383,7 +2396,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 .options = {
                     .path = { .pointer = (char*)output_path, .length = strlen(output_path) },
                     .entry = dynamic_global(&runtime, &bind, "_start"),
-                    .dynamic = &dynamic,
+                    .dynamic = runtime_kind != RUNTIME_KIND_STATIC ? &dynamic : NULL,
+                    .runtime = runtime_kind == RUNTIME_KIND_STATIC || runtime_kind == RUNTIME_KIND_STATIC_PIE ? &static_inputs : NULL,
                     .debug = debug ? &dwarf.attach : NULL,
                     .symbols = selected != NULL ? &symbols : NULL,
                     .exact = BUSTER_SCALAR_PATH(scalar),
@@ -2494,7 +2508,7 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
     if (result)
     {
         // The names it found, whether or not the unit preprocesses without errors: the command's own run reports them.
-        pp_run(pp, path);
+        pp_run_input(pp, path);
     }
     if (pp != NULL)
     {
@@ -2538,6 +2552,7 @@ struct CheckDriverCommand
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
+    RuntimeKind runtime_kind;
     // -g's source rows, with -c or a link, and the functions' unwind tables.
     bool source_rows;
     bool unwind_tables;
@@ -2570,7 +2585,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
 // memory before it returns. Returns the command's exit status: 0 for a unit without errors whose outputs were written.
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
-                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release)
+                             uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena)
 {
     int result = 1;
     Arena type_arena = { 0 };
@@ -2615,7 +2630,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         bool original_pragmas_printed = false;
         check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
         pp->options.collect_diagnostics = true;
-        ready = pp_run(pp, path);
+        pp_driver_verbose(options, path);
+        ready = pp_run_input(pp, path);
         if (!ready && pp->errors != 0 && !pp->diagnostic_collection_failed && !pp->history_failed)
         {
             // Only the produced source prefix is parsed after a real preprocessing fatal. Nonfatal errors
@@ -2997,7 +3013,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if (selection && result == 0)
                         {
                             result = check_driver_executable(&selected.program, &selected.data, checking, pp, &types, output != 0 ? output : "a.out", scalar, verify,
-                                                             source_rows, unwind_tables, command->libraries, lanes, scratch, stage_clock, NULL, 0) ? 0 : 1;
+                                                             source_rows, unwind_tables, command->libraries, lanes, scratch, stage_clock, NULL, 0, command->runtime_kind) ? 0 : 1;
                         }
                         else if (!selection)
                         {
@@ -3050,6 +3066,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
     result = pp->errors != 0 ? 1 : result;
+    if (result == 0 && options->dependencies.enabled)
+    {
+        result = pp_dependencies(pp, path, output, dependency_arena, dependency, errors) ? 0 : 1;
+    }
     if (release)
     {
         parse_release(parser);
@@ -3091,8 +3111,13 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     static Preprocessor pp;
     static Parser parser;
     const bool interned = intern_initialize(&identifiers);
-    const int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                         run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release);
+    DependencyOutput dependency = { 0 };
+    int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena);
+    if (result == 0)
+    {
+        result = dependency_publish(&dependency, stderr) ? 0 : 1;
+    }
     if (run->release)
     {
         intern_release(&identifiers);
@@ -3269,12 +3294,15 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // first, as it reads -E's one file, and the others are each a unit too.
     char** inputs = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t input_count = 0;
+    uint32_t stdin_count = 0;
+    bool end_options = false;
     bool scalar = false;
     // --verify checks every function's records with x86_validate (the c-testsuite harness passes it).
     bool verify = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
+    RuntimeKind runtime_kind = RUNTIME_KIND_DYNAMIC;
     bool syntax_only = false;
     bool quiet = false;
     bool return_warning = true;
@@ -3326,6 +3354,22 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool has_pack_value = false;
     for (int i = 0; filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
+        if (!end_options && strcmp(arguments[i], "--") == 0)
+        {
+            end_options = true;
+            filtered[filtered_count++] = arguments[i];
+            continue;
+        }
+        if (end_options)
+        {
+            if (input_count == 0)
+            {
+                filtered[filtered_count++] = arguments[i];
+            }
+            stdin_count += strcmp(arguments[i], "-") == 0;
+            inputs[input_count++] = arguments[i];
+            continue;
+        }
         scalar |= strcmp(arguments[i], "--scalar") == 0;
         quiet |= strcmp(arguments[i], "-w") == 0;
         // An option that takes the next argument as its value (pp_option_takes_value: pp_parse_options' and
@@ -3410,6 +3454,19 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             else
             {
                 libraries.directories[libraries.directory_count++] = text;
+            }
+        }
+        else if (strcmp(arguments[i], "-static") == 0 || strcmp(arguments[i], "-static-pie") == 0 || strcmp(arguments[i], "-pie") == 0)
+        {
+            // Clang gives -static-pie priority over -static, and either static request priority over -pie,
+            // irrespective of their argv order. Never downgrade a static request to shared-library resolution.
+            if (strcmp(arguments[i], "-static-pie") == 0)
+            {
+                runtime_kind = RUNTIME_KIND_STATIC_PIE;
+            }
+            else if (strcmp(arguments[i], "-static") == 0 && runtime_kind != RUNTIME_KIND_STATIC_PIE)
+            {
+                runtime_kind = RUNTIME_KIND_STATIC;
             }
         }
         else if (strcmp(arguments[i], "-fno-stack-protector") == 0 || strcmp(arguments[i], "-fstack-protector") == 0 ||
@@ -3525,13 +3582,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else
         {
             // A source file: the first goes to pp_parse_options in its place, and each is a unit.
-            const bool source = arguments[i][0] != '-';
+            const bool source = arguments[i][0] != '-' || strcmp(arguments[i], "-") == 0;
             if (!source || input_count == 0)
             {
                 filtered[filtered_count++] = arguments[i];
             }
             if (source)
             {
+                stdin_count += strcmp(arguments[i], "-") == 0;
                 inputs[input_count++] = arguments[i];
             }
         }
@@ -3546,8 +3604,19 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* output = 0;
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
-    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+    bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
                         pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
+    {
+        fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
+        parsed = false;
+    }
+    parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
+    if (parsed && stdin_count != 0)
+    {
+        parsed = driver_read_stdin(&arena, &options.stdin_source);
+        options.stdin_ready = parsed;
+    }
     // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
     // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
     const char* unsupported_pic = parsed && (emit_object || link) ?
@@ -3585,6 +3654,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .shared_parts = shared_parts,
         .emit_object = emit_object,
         .link = link,
+        .runtime_kind = runtime_kind,
         .source_rows = source_rows,
         .unwind_tables = unwind_tables,
         .output = output,

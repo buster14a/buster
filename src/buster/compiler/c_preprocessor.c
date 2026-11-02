@@ -91,6 +91,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include "host_isa.h"
+#include "c_dependency_driver.c"
 #include "c_builtin_catalog.c"
 #include "c_builtin_fortify.c"
 #include "c_builtin_library.c"
@@ -253,6 +254,12 @@ typedef enum PPRawStrings
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
+    DependencyOptions dependencies;
+    // Frozen command-owned stdin bytes, shared read-only by a unit and its diagnostic replay.
+    String8 stdin_source;
+    bool stdin_ready;
+    bool explicit_language;
+    bool verbose;
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
@@ -508,6 +515,8 @@ struct PPFileData
     // A translation unit's copy: the file cache's record it copies, or BUSTER_PP_NONE for a file the unit made (the
     // predefines, the command line), which isn't in the cache.
     uint32_t record;
+    // First observed dependency + 1 in this unit, never in the shared cache; zero means unobserved.
+    uint32_t dependency;
     uint32_t token_count;
     // The exceptional tokens the lexer reads with an error (an invalid raw string literal's UNKNOWN token, or a token with
     // a named UCN), sorted by token; emission waits until their source context is known.
@@ -1332,6 +1341,8 @@ struct Preprocessor
     bool owns_cache;
     PPFileData* datas;
     uint32_t data_count;
+    DependencyFile* dependencies;
+    uint32_t dependency_count;
     uint32_t* record_data;
     PPFile* files;
     uint32_t file_count;
@@ -11087,6 +11098,34 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
 
 static uint64_t pp_has_embed(Preprocessor* pp, const PPTokens* tokens, uint32_t first, uint32_t last, uint32_t location);
 
+// Dependency observations are semantic reads: an active include (even guard/once-skipped), or a successful
+// __has_include probe. Speculative cache opens do not reach this helper. The index lives in the unit's data copy,
+// deduplicating aliases by the cache's device/inode identity; the first spelling and first-observation order survive.
+static void pp_dependency_observe(Preprocessor* pp, uint32_t file, uint32_t parent)
+{
+    if (pp->dependencies != NULL && file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
+    {
+        PPFileData* data = &pp->datas[pp->files[file].data];
+        if (data->record != BUSTER_PP_NONE)
+        {
+            const uint32_t note = parent != BUSTER_PP_NONE ? pp->ranges[parent].last_line_directive : BUSTER_PP_NONE;
+            const uint8_t inherited = parent == BUSTER_PP_NONE ? BUSTER_PP_USER_FILE : note != BUSTER_PP_NONE ? pp->line_directives[note].system : pp->ranges[parent].system;
+            const bool system = pp->files[file].system != BUSTER_PP_USER_FILE || inherited != BUSTER_PP_USER_FILE;
+            if (data->dependency == 0)
+            {
+                // At most one observation per data record, whose capacity admission already bounded.
+                const uint32_t index = pp->dependency_count++;
+                data->dependency = index + 1;
+                pp->dependencies[index] = (DependencyFile){ .path = dependency_prerequisite(pp->files[file].path), .used = true, .system = system };
+            }
+            else
+            {
+                pp->dependencies[data->dependency - 1].system &= system;
+            }
+        }
+    }
+}
+
 // A feature query's or __has_include's answer, from its operand's tokens [first, last) of `tokens` (expanded, unless
 // __has_include's is a header name as written). A place __has_include's search can't look in is clang's fatal error at
 // the name, as #include's is (pp_find_include).
@@ -11115,6 +11154,7 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
                                               includer != 0 ? includer->search_index : BUSTER_PP_NONE, &found_in, tokens->locations[first]);
         pp->diagnostic_origin = saved_origin;
         result = file != BUSTER_PP_NONE;
+        pp_dependency_observe(pp, file, includer != NULL ? includer->range : BUSTER_PP_NONE);
     }
     else if (include)
     {
@@ -12478,6 +12518,7 @@ static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t 
 static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index, uint32_t name_location,
                           uint32_t name_origin)
 {
+    pp_dependency_observe(pp, file, parent);
     PPFileData* data = &pp->datas[pp->files[file].data];
     const bool guarded = data->guarded && data->guard != 0 && !pp->options.no_guard_skip && pp_is_defined(pp, data->guard);
     const bool skipped = data->prepared && (data->once || guarded);
@@ -16123,6 +16164,7 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         }
         else
         {
+            pp_dependency_observe(pp, file, context->range);
             // clang::offset first, then limit.
             const uint32_t size = pp->datas[source].length;
             const uint32_t offset = parameters.offset < size ? (uint32_t)parameters.offset : size;
@@ -17776,6 +17818,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
              pp_tokens_reserve(&pp->captures, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->expansions, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift));
     pp->ranges = pp_array(pp, &result, (BUSTER_PP_MAX_RANGES >> pp->capacity_shift), sizeof(PPRange));
     pp->datas = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFileData));
+    pp->dependencies = options->dependencies.enabled ? pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(DependencyFile)) : NULL;
     pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
     pp->files = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFile));
     pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS >> pp->capacity_shift, sizeof(uint32_t));
@@ -18237,6 +18280,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
     options.quiet = !report;
     options.timing = false;
     options.files = pp->cache;
+    options.dependencies.enabled = false;
     const bool initialized = replay != 0 && pp_initialize(replay, &options, pp->table);
     bool same = initialized;
     if (initialized)
@@ -18384,6 +18428,28 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_run_source(Preprocessor* pp, const char* name,
     const bool result = pp_preprocess_source(pp, name, bytes, length);
     pp_history_report(pp, result);
     return result && !pp->fatal;
+}
+
+// The driver has read stdin once before starting unit lanes. Its source bytes also outlive diagnostic replay.
+BUSTER_PREPROCESSOR_ENTRY bool pp_run_input(Preprocessor* pp, const char* path)
+{
+    const bool input_stdin = strcmp(path, "-") == 0;
+    return input_stdin ? pp->options.stdin_ready && pp_run_source(pp, "<stdin>", (const uint8_t*)pp->options.stdin_source.pointer, (uint32_t)pp->options.stdin_source.length) : pp_run(pp, path);
+}
+
+// Build only, never publish, a unit's dependency output before releasing its source/cache. Remove the main source
+// by identity, including an alias seen in the prelude; the serializer places its command-line spelling first.
+BUSTER_PREPROCESSOR_ENTRY bool pp_dependencies(Preprocessor* pp, const char* source, const char* primary, Arena* arena, DependencyOutput* output, FILE* errors)
+{
+    if (pp->options.dependencies.enabled && pp->main_file < pp->file_count)
+    {
+        const uint32_t index = pp->datas[pp->files[pp->main_file].data].dependency;
+        if (index != 0)
+        {
+            pp->dependencies[index - 1].used = false;
+        }
+    }
+    return dependency_prepare(output, &pp->options.dependencies, pp->dependencies, pp->dependency_count, source, primary, pp->options.scalar, arena, errors);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -20488,6 +20554,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     bool implicit_no_error = false;
     bool implicit_everything = false;
     bool warning_errors = false;
+    bool end_options = false;
+    uint32_t dependency_modes = 0;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
     const char* error_limit = 0;
@@ -20500,6 +20568,20 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
     {
+        if (!end_options && strcmp(arguments[i], "--") == 0)
+        {
+            end_options = true;
+            continue;
+        }
+        if (end_options)
+        {
+            result = *input == NULL;
+            if (result)
+            {
+                *input = arguments[i];
+            }
+            continue;
+        }
         // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
         const char* argument = predefines_alias(arguments[i]);
         if (strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
@@ -20509,7 +20591,45 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         const char* next = i + 1 < count ? arguments[i + 1] : 0;
         // The target's options and the others that change the predefined macros (c_predefines.c) come first.
         const PredefinesParse predefined = predefines_option(&options->predefines, argument, next);
-        if (predefined != PREDEFINES_PARSE_UNKNOWN)
+        if (strcmp(argument, "-M") == 0 || strcmp(argument, "-MM") == 0 || strcmp(argument, "-MD") == 0 || strcmp(argument, "-MMD") == 0)
+        {
+            dependency_modes |= strcmp(argument, "-M") == 0 ? 1u : strcmp(argument, "-MM") == 0 ? 2u : strcmp(argument, "-MD") == 0 ? 4u : 8u;
+        }
+        else if (strcmp(argument, "-MP") == 0)
+        {
+            options->dependencies.phony = true;
+        }
+        else if (strncmp(argument, "-MF", 3) == 0 || strncmp(argument, "-MT", 3) == 0 || strncmp(argument, "-MQ", 3) == 0)
+        {
+            const char* value = argument[3] != 0 ? argument + 3 : next;
+            i += argument[3] == 0;
+            result = value != NULL;
+            if (!result)
+            {
+                fprintf(stderr, "error: missing argument to '%s'\n", argument);
+            }
+            else if (argument[2] == 'F')
+            {
+                options->dependencies.path = value;
+            }
+            else
+            {
+                if (options->dependencies.targets == NULL)
+                {
+                    options->dependencies.targets = BUSTER_ARENA_PUSH_ARRAY(arena, DependencyTarget, (uint64_t)count + 1);
+                }
+                result = options->dependencies.targets != NULL;
+                if (result)
+                {
+                    options->dependencies.targets[options->dependencies.target_count++] = (DependencyTarget){ .text = { .pointer = (char*)value, .length = strlen(value) }, .quote = argument[2] == 'Q' };
+                }
+            }
+        }
+        else if (strcmp(argument, "-v") == 0)
+        {
+            options->verbose = true;
+        }
+        else if (predefined != PREDEFINES_PARSE_UNKNOWN)
         {
             result = predefined != PREDEFINES_PARSE_ERROR;
             i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
@@ -20686,6 +20806,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         }
         else if (strcmp(argument, "-x") == 0 && next != 0 && (strcmp(next, "c") == 0 || strcmp(next, "assembler-with-cpp") == 0))
         {
+            options->explicit_language = true;
             options->assembly = strcmp(next, "assembler-with-cpp") == 0;
             i += 1;
         }
@@ -20746,7 +20867,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                 }
             }
         }
-        else if (argument[0] != '-' && *input == 0)
+        else if ((argument[0] != '-' || strcmp(argument, "-") == 0) && *input == 0)
         {
             *input = argument;
         }
@@ -20756,6 +20877,12 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             result = false;
         }
     }
+    // Clang's driver tests presence, not last occurrence: side effects beat dependency-only output, -MM beats -M,
+    // and an explicit -M/-MM controls system-header inclusion even alongside -MD/-MMD.
+    options->dependencies.enabled = dependency_modes != 0;
+    options->dependencies.only = dependency_modes != 0 && (dependency_modes & 12u) == 0;
+    options->dependencies.include_system = (dependency_modes & 3u) != 0 ? (dependency_modes & 2u) == 0 : (dependency_modes & 8u) == 0;
+    options->suppress_warnings |= (dependency_modes & 3u) != 0;
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;
@@ -20787,63 +20914,138 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     return result && *input != 0;
 }
 
-// `compiler -E [options] file.c`: preprocesses the file and prints the result, as clang -E does.
+static bool pp_option_takes_value(const char* argument);
+
+// Verbose output describes the integrated stages rather than inventing external cc1/as/ld subprocesses. It goes to
+// stderr, so preprocessing, macro queries, dependency rules and generated stdout remain machine-readable.
+static void pp_driver_verbose(const PPOptions* options, const char* input)
+{
+    if (options->verbose)
+    {
+        char target[256];
+        predefines_target_triple(&options->predefines, target, sizeof(target));
+        fprintf(stderr, "buster (development build)\nTarget: %s\nbuster: preprocessing %s\n", target, strcmp(input, "-") == 0 ? "<stdin>" : input);
+    }
+}
+
+// `compiler -E/-M/-MM`: option operands are never inputs or actions. Each input has a private preprocessor and rule;
+// explicit -o requires a single input, while shared -MF publication follows argv order after all units succeed.
 static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
     arena_failure = (ArenaFailure){ 0 };
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
-    PPOptions options;
-    const char* input;
-    const char* output;
+    PPOptions options = { 0 };
+    const char* input = NULL;
+    const char* output = NULL;
     bool markers = true;
-    const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    char** filtered = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
+    char** inputs = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
+    DependencyOutput* dependencies = BUSTER_ARENA_PUSH_ARRAY(&arena, DependencyOutput, (uint64_t)count + 1);
+    uint32_t input_count = 0;
+    uint32_t filtered_count = 0;
+    uint32_t stdin_count = 0;
+    bool end_options = false;
+    for (int i = 0; filtered != NULL && inputs != NULL && i < count; i += 1)
+    {
+        const char* argument = arguments[i];
+        if (!end_options && strcmp(argument, "--") == 0)
+        {
+            end_options = true;
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (!end_options && pp_option_takes_value(argument))
+        {
+            filtered[filtered_count++] = arguments[i];
+            if (i + 1 < count)
+            {
+                filtered[filtered_count++] = arguments[++i];
+            }
+        }
+        else if (end_options || argument[0] != '-' || strcmp(argument, "-") == 0)
+        {
+            if (input_count == 0)
+            {
+                filtered[filtered_count++] = arguments[i];
+            }
+            inputs[input_count++] = arguments[i];
+            stdin_count += strcmp(argument, "-") == 0;
+        }
+        else
+        {
+            filtered[filtered_count++] = arguments[i];
+        }
+    }
+    bool parsed = filtered != NULL && inputs != NULL && dependencies != NULL && pp_parse_options((int)filtered_count, filtered, &options, &arena, &input, &output, &markers);
     options.expansion_starts = markers;
-    // -E reads no history but its diagnostics' notes, which record it when there are diagnostics.
     options.defer_history = true;
-    if (arena.base == 0 || (!parsed && arena_failure.bytes != 0))
+    if (parsed && ((output != NULL && input_count > 1) || stdin_count > 1))
+    {
+        fprintf(stderr, "error: -o and standard input each require a single output/input respectively\n");
+        parsed = false;
+    }
+    parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, false, false, &arena);
+    if (parsed && stdin_count != 0)
+    {
+        parsed = driver_read_stdin(&arena, &options.stdin_source);
+        options.stdin_ready = parsed;
+    }
+    if (arena.base == NULL || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [--embed-dir=dir] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
-                        "[-g...] [-pthread] [-nostdinc] [-nobuiltininc] [--buster-headers] [-undef] [--predefines file] [--clang-features] [--scalar] file\n");
+        fprintf(stderr, "usage: compiler -E/-M/-MM [-MD/-MMD] [-MF file] [-MT target] [-MQ target] [-MP] [-P] [-o file] [-x c] [-I dir] [-isystem dir] [-D name[=value]] [-U name] [-include file] [-dM] [options] file...\n");
     }
     else
     {
         static InternTable table;
         static Preprocessor pp;
-        if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))
+        result = 0;
+        for (uint32_t unit = 0; unit < input_count; unit += 1)
         {
-            // A failure pp_initialize reported (a location space too small for its first spellings) or memory.
-            if (!pp.fatal)
+            input = inputs[unit];
+            dependencies[unit] = (DependencyOutput){ 0 };
+            pp_driver_verbose(&options, input);
+            if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table))
             {
-                arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
+                if (!pp.fatal)
+                {
+                    arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
+                }
+                result = 1;
+            }
+            else
+            {
+                const bool preprocessed = pp_run_input(&pp, input);
+                bool printed = true;
+                if (!options.dependencies.only)
+                {
+                    FILE* stream = output != NULL && strcmp(output, "-") != 0 ? fopen(output, "w") : stdout;
+                    printed = stream != NULL && (options.dump_macros ? pp_print_macros(&pp, stream) : pp_print(&pp, stream, markers));
+                    if (stream != NULL)
+                    {
+                        printed = (stream == stdout ? fflush(stream) : fclose(stream)) == 0 && printed;
+                    }
+                    if (!printed)
+                    {
+                        fprintf(stderr, "error: can't write preprocessor output%s%s\n", output != NULL ? " " : "", output != NULL ? output : "");
+                    }
+                }
+                const bool prepared = preprocessed && printed && pp_dependencies(&pp, input, output, &arena, dependencies + unit, stderr);
+                result = prepared ? result : 1;
+                pp_diagnostic_summary(&pp);
+            }
+            if (release || unit + 1 < input_count)
+            {
+                pp_release(&pp);
+                intern_release(&table);
             }
         }
-        else
+        for (uint32_t unit = 0; result == 0 && unit < input_count; unit += 1)
         {
-            const bool preprocessed = pp_run(&pp, input);
-            FILE* stream = output != 0 ? fopen(output, "w") : stdout;
-            const bool printed = stream != 0 && (options.dump_macros ? pp_print_macros(&pp, stream) : pp_print(&pp, stream, markers));
-            if (stream != 0 && stream != stdout)
-            {
-                fclose(stream);
-            }
-            if (stream == 0)
-            {
-                fprintf(stderr, "can't write %s\n", output);
-            }
-            result = preprocessed && printed ? 0 : 1;
-            pp_diagnostic_summary(&pp);
-        }
-        // What a failed reservation left reserved too.
-        if (release)
-        {
-            pp_release(&pp);
-            intern_release(&table);
+            result = dependency_publish(dependencies + unit, stderr) ? 0 : 1;
         }
     }
     if (release)
@@ -20930,7 +21132,7 @@ static bool pp_clang_fallback_links(const char* ours, char* links)
 // Is `argument` an option whose value is the next argument (pp_parse_options)?
 static bool pp_option_takes_value(const char* argument)
 {
-    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target" };
+    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target", "-MF", "-MT", "-MQ" };
     bool result = pp_own_option_with_value(argument);
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
     {

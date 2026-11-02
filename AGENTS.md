@@ -524,6 +524,14 @@ designs and the compilers already built this way.
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both, and the subset again with `--tier1`, which compiles them by the
   driver's `--tier1` and runs both paths' programs. [The c-testsuite guide](docs/c-testsuite.md) has the details.
+- The C driver's dependency options (`-M/-MM/-MD/-MMD/-MF/-MT/-MQ/-MP`) collect semantic
+  include observations, not speculative cache opens, and publish complete rules
+  from the command owner after successful units/linking. `c_dependency_driver.c`
+  owns naming and publication; `c_driver_information.c` owns information probes.
+  `c_driver_compatibility_test.c`, called by `test-checker-driver`, exercises actual
+  executable invocations against Clang and GNU Make, stdin, failure preservation
+  and static/PIE runtime selection. [The CC driver guide](docs/cc-driver.md) states
+  the remaining #1113 limits; do not treat depfile support as full CC compatibility.
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
   for anything else the semantic driver (`run_check_command`, in
   `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
