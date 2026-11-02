@@ -747,6 +747,8 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint64_t prepared = 0;
     uint64_t acted = 0;
     uint64_t visited = 0;
+    // A coded unit's actions timed by class where the options ask (CheckInput.expression_class_ticks).
+    const bool timed = coded && reader->pp->options.expression_timing;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = 0; first < count && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
@@ -760,9 +762,24 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
         uint32_t i = 0;
-        for (; i < acting && !reader->output->resource; i += 1)
+        if (!timed)
         {
-            check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &visited);
+            for (; i < acting && !reader->output->resource; i += 1)
+            {
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &visited);
+            }
+        }
+        else
+        {
+            // Each token's action timed by its class, and a pair of reads after it, whose ticks are the timing's own.
+            for (; i < acting && !reader->output->resource; i += 1)
+            {
+                const uint64_t before = __rdtsc();
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &visited);
+                const uint64_t after = __rdtsc();
+                reader->output->expression_class_ticks[(classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += after - before;
+                reader->output->expression_class_overhead += __rdtsc() - after;
+            }
         }
         for (uint32_t k = 0; coded && k < i; k += 1)
         {

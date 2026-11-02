@@ -500,6 +500,11 @@ struct CheckInput
     uint64_t expression_faults;
     uint64_t expression_system_us;
     bool expression_usage_failed;
+    // Under PPOptions.expression_timing alone, the TSC's ticks of the coded walk's actions by class (the walk's visits of
+    // the tokens a class's action leaves among them), and the ticks of a TSC read's pair after each token, which the
+    // report takes off every token's as the timing's own cost (benchmark-checker-bindings).
+    uint64_t expression_class_ticks[BUSTER_CHECK_EXPRESSION_CODES];
+    uint64_t expression_class_overhead;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -617,6 +622,29 @@ typedef enum CheckInputExpressionCode
     // In check_input_role_codes alone: an operand's role, whose class its kind gives.
     CHECK_INPUT_CODE_OPERAND,
 } CheckInputExpressionCode;
+
+// The classes' names, as test-checker's coverage and benchmark-checker-bindings' report give them.
+static const char* const check_input_expression_code_names[BUSTER_CHECK_EXPRESSION_CODES] __attribute__((unused)) = {
+    [CHECK_INPUT_CODE_SCALAR] = "scalar",
+    [CHECK_INPUT_CODE_LIST] = "list",
+    [CHECK_INPUT_CODE_DROP] = "drop",
+    [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
+    [CHECK_INPUT_CODE_LITERAL] = "literal",
+    [CHECK_INPUT_CODE_PREFIX] = "prefix",
+    [CHECK_INPUT_CODE_BINARY] = "binary",
+    [CHECK_INPUT_CODE_SEPARATOR] = "separator",
+    [CHECK_INPUT_CODE_GROUP] = "group",
+    [CHECK_INPUT_CODE_CAST] = "cast",
+    [CHECK_INPUT_CODE_TERNARY] = "ternary",
+    [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
+    [CHECK_INPUT_CODE_MEMBER] = "member",
+    [CHECK_INPUT_CODE_POSTFIX] = "postfix",
+    [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
+    [CHECK_INPUT_CODE_CONDITION] = "condition",
+    [CHECK_INPUT_CODE_CALL] = "call",
+    [CHECK_INPUT_CODE_STRING] = "string",
+    [CHECK_INPUT_CODE_RETURN] = "return",
+};
 
 _Static_assert(CHECK_INPUT_CODE_OPERAND << BUSTER_CHECK_EXPRESSION_CODE_SHIFT <= BUSTER_CHECK_EXPRESSION_CODE_MASK, "the classes fit their bits");
 _Static_assert(BUSTER_CHECK_EXPRESSION_CODE_MASK >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == BUSTER_CHECK_EXPRESSION_CODES - 1, "a counter per code the bits hold");

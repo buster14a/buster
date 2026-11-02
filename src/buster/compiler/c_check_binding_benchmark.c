@@ -531,6 +531,35 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
             }
         }
     }
+    // The expressions' walk by class (#1038): runs of the default handoff of their own after the samples, with
+    // PPOptions.expression_timing, on the plain run alone (not --only's, --after-scalar's or --pipeline's conditioned
+    // scopes). Each class's ticks are its median over the passes, less the timing's own (the median pass's pairs after
+    // each token, per token), in nanoseconds by the TSC's rate over the same runs.
+    const bool classes_timed = only == CHECK_INPUT_BINDING_MODES && after == 0 && !pipeline;
+    static uint64_t class_ticks[BUSTER_CHECK_EXPRESSION_CODES][BUSTER_CHECK_SOURCE_MAX_PASSES];
+    static uint64_t class_overheads[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint32_t class_tokens[BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+    uint32_t class_left[BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+    uint64_t timed_ticks = 0;
+    uint64_t timed_ns = 0;
+    for (uint32_t pass = 0; valid && classes_timed && pass < passes; pass += 1)
+    {
+        CheckInput input;
+        uint64_t elapsed = 0;
+        pp.options.expression_timing = true;
+        const uint64_t start = __rdtsc();
+        valid = check_binding_benchmark_run(&benchmark, CHECK_INPUT_BINDINGS_DIRECT, &input, &elapsed);
+        timed_ticks += __rdtsc() - start;
+        timed_ns += elapsed;
+        pp.options.expression_timing = false;
+        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+        {
+            class_ticks[code][pass] = input.expression_class_ticks[code];
+            class_tokens[code] = input.expression_acted[code] + input.expression_left[code];
+            class_left[code] = input.expression_left[code];
+        }
+        class_overheads[pass] = input.expression_class_overhead;
+    }
     // The handoff's pieces alone, on the retained events: the reader's (both resolvers) and the parser's replay.
     enum
     {
@@ -638,6 +667,35 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
                    isolated_names[piece], median, check_binding_benchmark_extreme(isolated[piece], samples, false),
                    check_binding_benchmark_extreme(isolated[piece], samples, true), check_binding_benchmark_per(median, denominator),
                    footprints[piece][0], footprints[piece][1]);
+        }
+        uint64_t reached = 0;
+        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+        {
+            reached += class_tokens[code];
+        }
+        if (classes_timed && samples != 0 && reached != 0)
+        {
+            const double ticks_per_ns = timed_ns != 0 ? (double)timed_ticks / (double)timed_ns : 1.0;
+            const double overhead = (double)check_source_median(class_overheads, samples) / (double)reached;
+            double class_ns[BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+            double total = 0;
+            for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+            {
+                const double ticks = (double)check_source_median(class_ticks[code], samples) - overhead * (double)class_tokens[code];
+                class_ns[code] = ticks > 0 ? ticks / ticks_per_ns : 0;
+                total += class_ns[code];
+            }
+            printf("expression-classes: mode=direct passes=%u tokens=%" PRIu64 " ns=%.0f ns_per_token=%.3f tsc_ticks_per_ns=%.4f timing_ticks_per_token=%.1f\n",
+                   samples, reached, total, total / (double)reached, ticks_per_ns, overhead);
+            for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+            {
+                if (class_tokens[code] != 0)
+                {
+                    const char* name = check_input_expression_code_names[code] != NULL ? check_input_expression_code_names[code] : "other";
+                    printf("expression-class: class=%s tokens=%u left=%u ns=%.0f ns_per_token=%.3f share=%.1f%%\n", name, class_tokens[code],
+                           class_left[code], class_ns[code], class_ns[code] / (double)class_tokens[code], total > 0 ? class_ns[code] * 100.0 / total : 0.0);
+                }
+            }
         }
     }
     if (counter >= 0)

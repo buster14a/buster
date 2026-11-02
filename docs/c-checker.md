@@ -3760,7 +3760,15 @@ the oracle.
   where it can decline, leave a token; a full run prints both counts per class.
   `benchmark-checker-bindings` prints a file's tokens acted at by class
   (`expression_classed`), declined by their classes' actions
-  (`expression_declined`) and of the walk's own class (`expression_scalar`). Every comparison of the two paths compares the
+  (`expression_declined`) and of the walk's own class (`expression_scalar`).
+  Its plain run (not `--only`, `--after-scalar` or `--pipeline`) then times
+  the walk by class in runs of the default handoff of their own, after its
+  samples, with `PPOptions.expression_timing` (three TSC reads a token, which
+  no compile sets): an `expression-classes` line with the walk's actions'
+  nanoseconds and the timing's own ticks a token, which it takes off every
+  class's, and an `expression-class` line per class with its tokens, those its
+  action left (whose visits its time includes), its nanoseconds (the median
+  over the passes) and its share. Every comparison of the two paths compares the
   graphs, leaves, argument slices, overload calls and `token_nodes`:
   - `test-checker`, for every source fixture
     (`check_test_source_graphs_equal`), with the overload heads;
