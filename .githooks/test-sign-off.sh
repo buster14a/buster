@@ -31,6 +31,7 @@ new_repository()
     mkdir "$temporary/repo-$number"
     cd "$temporary/repo-$number"
     git init -q --template= -b main
+    mkdir .git/hooks
     git config user.name 'DCO test agent'
     git config user.email agent@example.invalid
     git config core.commentChar '#'
@@ -40,7 +41,7 @@ new_repository()
 signed()
 {
     git log -1 --format=%B > actual-message
-    [ "$(grep -Fxc "$trailer" actual-message || :)" = 1 ] || fail 'expected exactly one maintainer trailer'
+    [ "$(grep -Fxc "$trailer" actual-message || :)" ] = 1 || fail 'expected exactly one maintainer trailer'
     [ "$(sed '/^$/d' actual-message | tail -n 1)" = "$trailer" ] || fail 'maintainer trailer must be last'
     [ "$(git log -1 --format=%ae)" = agent@example.invalid ] || fail 'author identity changed'
 }
