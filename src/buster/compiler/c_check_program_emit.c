@@ -422,10 +422,12 @@ static bool check_tier1_ready = false;
 // Defined in c_check_tier1.c, after Tier 1's modules: a body's code by Tier 1's pipeline on `lane`'s arenas, from its
 // typed stream `function` whose result has the typed class `result_class` (check_program_result_class), its records,
 // branch columns and references in `output`, into *code (with `scalar` each step's twin). Returns
-// an explicit success, unsupported, resource or internal outcome. A failed attempt leaves output unchanged and
-// clears code/counts, retaining its cause and location by value.
+// an explicit success, unsupported, resource or internal outcome. With `certify` (--verify), each allocation must
+// pass its certificate (#939, Tier1EmitOptions.certify): a refusal is an internal failure, and the checker's capacity a
+// resource failure. A failed attempt leaves output unchanged and clears code/counts, retaining its cause and location
+// by value.
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
+                                           bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
@@ -722,7 +724,7 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     fault = fault != NULL && fault->body == b + 1 ? fault : NULL;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                            !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
+                                                            !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
     outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
     run->tier1_outcomes[b] = outcome;
     return outcome;

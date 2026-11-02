@@ -66,3 +66,38 @@ requirements. [Command index](README.md).
   records the actual contract and the remaining declaration/initializer,
   control-flow, corpus and downstream integration still needed
   for #133; this module does not establish whole-compiler semantic coverage.
+
+## Unsupported hardening requests
+
+The semantic C driver refuses the option families `-ftrivial-auto-var-init`,
+`-ftrapv`, `-fzero-call-used-regs`, `-fsanitize-coverage`, `-fsplit-stack` and
+`-mcmodel` by name (#1125). It does not yet implement the requested automatic
+initialization, overflow traps, return-register clearing, coverage callbacks,
+split-stack prologues or alternative code models. Family-prefix matching also
+refuses bare flags, empty or unknown values and auxiliary hardening options;
+unknown values never silently select a weaker default.
+
+Only the complete spellings `-ftrivial-auto-var-init=uninitialized`,
+`-fzero-call-used-regs=skip`, `-fsanitize-coverage=0` and `-mcmodel=small` are
+admitted as the existing inactive/default behavior. Negative flags retain their
+existing handling. Within these families, any unsupported request is an error
+even when a later option requests an inactive/default form; this is not
+Clang's last-option-wins policy. Unlike `-fstack-protector*` and
+`-fcf-protection=*`, which are resolved separately and do honor a later
+disabling spelling, a later inactive spelling cannot cancel an earlier request.
+The diagnostic retains the first unsupported spelling from this refusal table.
+
+Refusal happens before reading a translation unit or opening an output, for
+both tiers, the scalar and vector paths, `-c`, direct linking and the explicit
+`check` command. Syntax-only checks and typed/static dumps use the same refusal
+policy. Pure preprocessing (`-E`) remains a separate action and is not a promise
+of code-generation support. Option values such as `-include -ftrapv` remain
+filenames, not hardening requests.
+
+`c_check_hardening_driver_test.c`, included in `test-checker-driver --executable
+./build/compiler`, checks all six reported options, missing and existing output
+files, a missing source, option-looking include and output names, both tiers
+and paths, non-emitting actions, malformed/auxiliary forms and exact inactive
+defaults. This closes these option families, not the driver's entire unknown
+`-f`/`-m` acceptance policy; the wider allowlist audit and #1112, #1123 and
+#1124 remain separate work.
