@@ -1876,7 +1876,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release), but the last one's in a
-            // -c command that doesn't release its memory: the kept links are all the link reads.
+            // command without a link that doesn't release its memory: the kept links are all the link reads.
             for (uint32_t l = 0; run.release && l < active; l += 1)
             {
                 check_units_lane_release(states + l);
