@@ -100,7 +100,8 @@ struct Tier1CfgInput
     const uint32_t* use_positions;
     const uint8_t* use_required;
     // Block b's phis are phi_values[phi_offsets[b] .. phi_offsets[b + 1]); phi k's operand from its block's j-th
-    // predecessor is phi_operands[phi_operand_offsets[k] + j].
+    // predecessor is phi_operands[phi_operand_offsets[k] + j], or BUSTER_TIER1_CFG_NONE for an undefined one (the IR's
+    // undef): any value is the phi's along that edge, so the edge moves nothing for it and nothing is live for it there.
     const uint32_t* phi_offsets;
     const uint32_t* phi_values;
     const uint32_t* phi_operand_offsets;
@@ -261,7 +262,7 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
             for (uint32_t j = 0; valid && j < predecessors; j += 1)
             {
                 const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
-                valid = operand < input->value_count && input->classes[operand] == input->classes[v];
+                valid = operand == BUSTER_TIER1_CFG_NONE || (operand < input->value_count && input->classes[operand] == input->classes[v]);
             }
             if (valid)
             {
@@ -571,7 +572,11 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         }
         for (uint32_t o = 0; ready && o < input->phi_operand_offsets[input->phi_count]; o += 1)
         {
-            dense[input->phi_operands[o]] = 0;
+            const uint32_t operand = input->phi_operands[o];
+            if (operand != BUSTER_TIER1_CFG_NONE)
+            {
+                dense[operand] = 0;
+            }
         }
         for (uint32_t v = 0; ready && v < values; v += 1)
         {
@@ -600,7 +605,8 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             uint32_t nearest = 0;
-            for (uint32_t j = 0; j < input->predecessor_offsets[b + 1] - input->predecessor_offsets[b]; j += 1)
+            const uint32_t predecessors = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+            for (uint32_t j = 0; j < predecessors; j += 1)
             {
                 const uint32_t p = input->predecessors[input->predecessor_offsets[b] + j];
                 const uint32_t best = input->predecessors[input->predecessor_offsets[b] + nearest];
@@ -608,7 +614,13 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
             }
             for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
             {
-                phi_hints[input->phi_values[k]] = input->phi_operands[input->phi_operand_offsets[k] + nearest];
+                // An undefined operand hints nothing: then the first defined one, if any.
+                uint32_t hint = input->phi_operands[input->phi_operand_offsets[k] + nearest];
+                for (uint32_t j = 0; hint == BUSTER_TIER1_CFG_NONE && j < predecessors; j += 1)
+                {
+                    hint = input->phi_operands[input->phi_operand_offsets[k] + j];
+                }
+                phi_hints[input->phi_values[k]] = hint;
             }
         }
         // And a value a phi takes along a back edge (defined after it, in its loop), hinted to the phi, which has its
@@ -621,7 +633,10 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
                 {
                     const uint32_t operand = input->phi_operands[o];
-                    phi_hints[operand] = phi_hints[operand] == BUSTER_TIER1_CFG_NONE && input->definitions[operand] > input->definitions[phi] ? phi : phi_hints[operand];
+                    if (operand != BUSTER_TIER1_CFG_NONE)
+                    {
+                        phi_hints[operand] = phi_hints[operand] == BUSTER_TIER1_CFG_NONE && input->definitions[operand] > input->definitions[phi] ? phi : phi_hints[operand];
+                    }
                 }
             }
         }
@@ -663,7 +678,11 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                     for (uint32_t j = 0; j < input->phi_operand_offsets[k + 1] - input->phi_operand_offsets[k]; j += 1)
                     {
                         const uint32_t predecessor = input->predecessors[input->predecessor_offsets[b] + j];
-                        tier1_cfg_set(passed + (uint64_t)predecessor * words, dense[input->phi_operands[input->phi_operand_offsets[k] + j]]);
+                        const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                        if (operand != BUSTER_TIER1_CFG_NONE)
+                        {
+                            tier1_cfg_set(passed + (uint64_t)predecessor * words, dense[operand]);
+                        }
                     }
                 }
             }
@@ -1078,7 +1097,8 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 }
                 for (uint32_t k = input->phi_offsets[target]; ready && k < input->phi_offsets[target + 1]; k += 1)
                 {
-                    ready = tier1_cfg_edge_value(input, &candidate, &edge, input->phi_values[k], input->phi_operands[input->phi_operand_offsets[k] + j], exit, entry);
+                    const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                    ready = operand == BUSTER_TIER1_CFG_NONE || tier1_cfg_edge_value(input, &candidate, &edge, input->phi_values[k], operand, exit, entry);
                 }
                 ready = ready && tier1_cfg_edge_stage(input, spills, &edge, scratch, sources, destinations, staged, bound + 2, &staged_count, &candidate.temp_slots);
                 error = ready ? error : TIER1_CFG_INVALID;
@@ -1315,7 +1335,10 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                     for (uint32_t j = 0; j < input->phi_operand_offsets[k + 1] - input->phi_operand_offsets[k]; j += 1)
                     {
                         const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
-                        if (pass == 0)
+                        if (operand == BUSTER_TIER1_CFG_NONE)
+                        {
+                        }
+                        else if (pass == 0)
                         {
                             pass_offsets[operand + 1] += 1;
                         }
@@ -1735,6 +1758,8 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 const uint32_t k = phi ? input->phi_offsets[s] + i - live_offsets[s + 1] : 0;
                 const uint32_t v = phi ? input->phi_values[k] : live[i];
                 const uint32_t expected = phi ? input->phi_operands[input->phi_operand_offsets[k] + j] : v;
+                // An undefined operand: whatever the phi's location holds is its value along the edge.
+                const bool undefined = expected == BUSTER_TIER1_CFG_NONE;
                 uint32_t location = 0;
                 uint8_t kind = 0;
                 valid = tier1_cfg_entry_location(result, v, s_entry, &location, &kind) || tier1_cfg_fail(check, "a value live at a block's start without a location", s, v, s_entry);
@@ -1744,7 +1769,7 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 }
                 else if (valid)
                 {
-                    valid = tier1_cfg_state_get(&edge, location) == expected || tier1_cfg_fail(check, phi ? "an edge that doesn't bring a phi its operand" : "an edge that doesn't bring a live value", s, v, s_entry);
+                    valid = undefined || tier1_cfg_state_get(&edge, location) == expected || tier1_cfg_fail(check, phi ? "an edge that doesn't bring a phi its operand" : "an edge that doesn't bring a live value", s, v, s_entry);
                 }
                 check->checks += 1;
             }

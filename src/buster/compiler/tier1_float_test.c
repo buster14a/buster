@@ -18,6 +18,10 @@
 //   F64, an I64 and an F32 argument, a floating value live across the call; the exit calls a variadic C function with
 //   three doubles, its al 3. The callees note whether the stack was aligned at their calls.
 //
+// - tier1_float_undefined_text is a loop, in the IR's text, whose join's phis take undef along one edge (#141): a local
+//   a block assigns on one path only and reads on that path, as promotion leaves it after the block's lifetime start.
+//   The CFG consumer moves nothing for an undefined operand, and the code computes C's result.
+//
 // The code runs in a bounded child (tier1_float_tests).
 
 #define BUSTER_TIER1_FLOAT_SAMPLES 24u
@@ -428,6 +432,78 @@ static __attribute__((no_sanitize("function"))) double tier1_float_call_loop(con
 }
 
 // A double from the sequence: a moderate value with a fraction, where `nonnegative` asks it to be 0 or more.
+// tier1_float_undefined_oracle's loop in the IR, whose x and k are undefined along b2's edge into b4.
+static const char tier1_float_undefined_text[] =
+    "function (ptr, i64) -> f64 {\n"
+    "b0:\n"
+    "  %0 = param.ptr 0\n"
+    "  %1 = param.i64 1\n"
+    "  %2 = const.i64 0x00000000000000000000000000000000\n"
+    "  %3 = const.f64 0x00000000000000000000000000000000\n"
+    "  %4 = undef.f64\n"
+    "  %5 = undef.i64\n"
+    "  %6 = const.i64 0x00000000000000000000000000000001\n"
+    "  %7 = br.void b1\n"
+    "b1:\n"
+    "  %8 = phi.i64 [%2, b0], [%29, b7]\n"
+    "  %9 = phi.f64 [%3, b0], [%28, b7]\n"
+    "  %10 = icmp.i1 %8, %1 ult\n"
+    "  %11 = cbr.void %10, b2, b8\n"
+    "b2:\n"
+    "  %12 = address.ptr %0 + %8 * 8 offset=0\n"
+    "  %13 = load.f64 %12 align=8\n"
+    "  %14 = and.i64 %8, %6\n"
+    "  %15 = icmp.i1 %14, %2 ne\n"
+    "  %16 = cbr.void %15, b3, b4\n"
+    "b3:\n"
+    "  %17 = fmul.f64 %13, %13\n"
+    "  %18 = br.void b4\n"
+    "b4:\n"
+    "  %19 = phi.f64 [%4, b2], [%17, b3]\n"
+    "  %20 = phi.i64 [%5, b2], [%8, b3]\n"
+    "  %21 = cbr.void %15, b5, b6\n"
+    "b5:\n"
+    "  %22 = sitofp.f64 %20\n"
+    "  %23 = fadd.f64 %19, %22\n"
+    "  %24 = fadd.f64 %9, %23\n"
+    "  %25 = br.void b7\n"
+    "b6:\n"
+    "  %26 = fsub.f64 %9, %13\n"
+    "  %27 = br.void b7\n"
+    "b7:\n"
+    "  %28 = phi.f64 [%24, b5], [%26, b6]\n"
+    "  %29 = add.i64 %8, %6\n"
+    "  %30 = br.void b1\n"
+    "b8:\n"
+    "  %31 = ret.void %9\n"
+    "}\n";
+
+static double tier1_float_undefined_oracle(const double* p, int64_t n)
+{
+    double sum = 0.0;
+    for (int64_t i = 0; i < n; i += 1)
+    {
+        const double element = p[i];
+        if ((i & 1) != 0)
+        {
+            const double square = element * element;
+            const double term = square + (double)i;
+            sum = sum + term;
+        }
+        else
+        {
+            sum = sum - element;
+        }
+    }
+    return sum;
+}
+
+static __attribute__((no_sanitize("function"))) double tier1_float_call_undefined(const void* code, const double* p, int64_t n)
+{
+    double (*function)(const double*, int64_t) = (double (*)(const double*, int64_t))code;
+    return function(p, n);
+}
+
 static double tier1_float_value(uint64_t* random, bool nonnegative)
 {
     const uint64_t bits = tier1_emit_test_random(random);
@@ -444,7 +520,9 @@ static bool tier1_float_same(double left, double right)
 static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t vector_mask, bool keep_pointer)
 {
     IrFunction function;
-    const bool created = fixture == 0 ? tier1_float_mixed_function(&test->input, &function) : tier1_float_loop_function(&test->input, &function);
+    const String8 undefined = { .pointer = (char*)tier1_float_undefined_text, .length = sizeof(tier1_float_undefined_text) - 1 };
+    const bool created = fixture == 0 ? tier1_float_mixed_function(&test->input, &function) : fixture == 1 ? tier1_float_loop_function(&test->input, &function) :
+                                                                                            ir_parse(undefined, &test->input, &test->scratch, &function).error == IR_PARSE_OK;
     const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the floating fixture is valid IR");
     IrDominance dominance;
@@ -531,6 +609,22 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
                     }
                     tier1_emit_test_expect(test, same, "every floating rule's result is C's, bit for bit");
                 }
+                else if (fixture == 2)
+                {
+                    double elements[BUSTER_TIER1_FLOAT_ELEMENTS];
+                    for (uint32_t v = 0; v < BUSTER_TIER1_FLOAT_ELEMENTS; v += 1)
+                    {
+                        elements[v] = tier1_float_value(&random, false) / 256.0;
+                    }
+                    const int64_t n = sample % (BUSTER_TIER1_FLOAT_ELEMENTS + 1);
+                    const double oracle = tier1_float_undefined_oracle(elements, n);
+                    const double got = tier1_float_call_undefined(executable, elements, n);
+                    if (!tier1_float_same(oracle, got) && test->failures < 20)
+                    {
+                        fprintf(stderr, "  float undefined vector=%u remat=%u mask=%x pointer=%u n=%" PRId64 " result %a vs %a\n", vector, rematerialize, vector_mask, keep_pointer, n, got, oracle);
+                    }
+                    tier1_emit_test_expect(test, tier1_float_same(oracle, got), "phis with undefined operands give C's result, bit for bit");
+                }
                 else
                 {
                     double elements[BUSTER_TIER1_FLOAT_ELEMENTS];
@@ -566,11 +660,11 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->terms = 0;
     test->width = 8;
     test->selects = false;
-    for (uint32_t fixture = 0; fixture < 2; fixture += 1)
+    for (uint32_t fixture = 0; fixture < 3; fixture += 1)
     {
         // Few xmm registers: the mixed fixture's eight parameters, which their definitions take at once, and one more;
-        // the loop's three, which its variadic call's doubles take at once. The other values go to their slots, and those
-        // live across a call too.
+        // the loop's three, which its variadic call's doubles take at once (and the undefined operands' fixture's too).
+        // The other values go to their slots, and those live across a call too.
         const uint32_t few = fixture == 0 ? 0x1ffu : 0x7u;
         for (uint32_t variant = 0; variant < 16; variant += 1)
         {

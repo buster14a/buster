@@ -751,13 +751,18 @@ designs and the compilers already built this way.
   verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
   and both promoted forms, with and without frame objects and copies.
   `test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS]
-  [--steps N] [--keep] [preprocessor options] [file...]` (`ssa_source_test.c`,
-  #134) promotes every function `-c` compiles of C files, and of random
-  programs of structured and unstructured control flow (`ssa_source_generate.c`,
-  each built by clang -O0 for its output), by both paths with `ssa_verify`'s
-  checks on each promotion (`ssa_ir_promote_verified`), then runs each program
-  with a main by the shared IR's interpreter in its three forms (every local in
-  memory, and each path's SSA), which must agree and give its expected output.
+  [--steps N] [--lifetimes] [--keep] [preprocessor options] [file...]`
+  (`ssa_source_test.c`, #134) promotes every function `-c` compiles of C files,
+  and of random programs of structured and unstructured control flow
+  (`ssa_source_generate.c`, each built by clang -O0 for its output), by both paths
+  with `ssa_verify`'s checks on each promotion (`ssa_ir_promote_verified`), then
+  runs each program with a main by the shared IR's interpreter in its three forms
+  (every local in memory, and each path's SSA), which must agree and give its
+  expected output. With `--lifetimes`, the IR has the blocks' lifetime markers, as
+  `--tier1`'s has, and promotion makes a block's locals undefined at each start
+  of their block (#141: `ssa_ir_accesses`, the [SSA guide](docs/ssa.md)'s
+  adapter), which Tier 1's CFG consumer moves nothing for (`tier1_cfg.c`'s
+  undefined phi operands).
   Tier 1's code joins that comparison once Tier 1 compiles general CFGs (#138).
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by

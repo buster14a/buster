@@ -3,8 +3,8 @@
 //
 // #134's acceptance on real and generated C (test-ssa-source):
 //
-//   build/compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--keep]
-//                                  [preprocessor options] [file...]
+//   build/compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes]
+//                                  [--keep] [preprocessor options] [file...]
 //   build/compiler test-ssa-source --self-test [--keep]
 //
 // Each file's functions, as -c compiles them (ir_source_prepare, test-ir-source's preparation, with the program kept),
@@ -22,6 +22,10 @@
 // whose control flow is structured and unstructured (gotos into and out of loops, switches whose cases fall through,
 // breaks and continues at depth): each is compiled by clang -O0 (--clang's, through the oracle cache) and run, and its
 // output and status are what each of its IR forms must give; then it is checked as a file is.
+//
+// --lifetimes asks each program for its blocks' objects' lifetimes, as the C driver's --tier1 does (#177): the lowered IR
+// has their markers, and promotion makes a local undefined at each start of its block's (#141), which the form with
+// every local in memory, whose markers read and write nothing, must agree with on every program C defines.
 //
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
 // with its functions, each path's phis and its runs, a line per failure, and the totals; the exit status is 1 on any
@@ -93,6 +97,8 @@ struct SsaSourceLimits
 {
     uint32_t timeout;
     uint64_t steps;
+    // The programs' lifetimes (--lifetimes, ir_source_prepare's `lifetimes`).
+    bool lifetimes;
 };
 
 // What a run of a form gave: its process, its wait status (-1 if it couldn't be waited for), its output (malloc's), and
@@ -603,7 +609,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
                             const char* work, const SsaSourceLimits* limits, bool keep, int* statuses)
 {
     IrSourceFile file;
-    ir_source_prepare(&file, name, options, option_count, &arenas->lowered, &arenas->tables, true);
+    ir_source_prepare(&file, name, options, option_count, &arenas->lowered, &arenas->tables, true, limits->lifetimes);
     if (file.status != IR_SOURCE_PREPARED)
     {
         totals->left_out += file.status == IR_SOURCE_LEFT_OUT;
@@ -929,6 +935,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     uint64_t steps = BUSTER_SSA_SOURCE_STEPS;
     const char* clang = "clang";
     bool keep = false;
+    bool lifetimes = false;
     bool self_test = false;
     bool valid = options != 0 && files != 0;
     for (int i = 0; valid && i < count; i += 1)
@@ -962,6 +969,10 @@ static int run_ssa_source_tests(int count, char** arguments)
         {
             keep = true;
         }
+        else if (strcmp(arguments[i], "--lifetimes") == 0)
+        {
+            lifetimes = true;
+        }
         else if (arguments[i][0] != '-')
         {
             files[file_count++] = arguments[i];
@@ -994,7 +1005,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     snprintf(work, sizeof(work), "%s/ssa-source-XXXXXX", temporary != 0 && temporary[0] == '/' ? temporary : "/tmp");
     valid = valid && mkdtemp(work) != 0;
     const bool epoch = valid && oracle_epoch_begin();
-    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps };
+    const SsaSourceLimits limits = { .timeout = (uint32_t)timeout, .steps = steps, .lifetimes = lifetimes };
     SsaSourceTotals totals = { 0 };
     const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work);
     for (uint32_t i = 0; valid && i < file_count; i += 1)
@@ -1026,7 +1037,7 @@ static int run_ssa_source_tests(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--keep] [preprocessor options] "
+        fprintf(stderr, "usage: compiler test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS] [--steps N] [--lifetimes] [--keep] [preprocessor options] "
                         "[file...]\n       compiler test-ssa-source --self-test [--keep]\n");
     }
     oracle_epoch_end(epoch);

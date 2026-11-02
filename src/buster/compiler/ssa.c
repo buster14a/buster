@@ -74,7 +74,9 @@ struct SsaInput
     const uint32_t* successor_offsets;
     const uint32_t* successors;
     // Each instruction is a VALUE (opaque ordinary value), READ, WRITE or ADDRESS. A READ defines its original id;
-    // a WRITE assigns operands[i] to locals[i] and defines no value; ADDRESS defines a pointer to locals[i].
+    // a WRITE assigns operands[i] to locals[i] and defines no value; ADDRESS defines a pointer to locals[i]. A WRITE's
+    // operand may also be its own local's undef (instruction_count + locals[i]): the local's value becomes indeterminate
+    // there, as a block-scope object's does each time its block is entered (C17 6.2.4p6), which ends its liveness.
     // All local accesses, including address-taking discovered late in a body, must appear here. Volatile, atomic and
     // aggregate locals stay in memory. Parameters are VALUEs and WRITEs in the entry; all other locals start undef.
     const uint8_t* kinds;
@@ -175,6 +177,12 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
     return work->input->instruction_count + local;
 }
 
+// The value a WRITE's operand stands for in `result`: an instruction's replacement, or its local's undef as it is.
+static uint32_t ssa_written(const SsaWork* work, const SsaResult* result, uint32_t operand)
+{
+    return operand < work->input->instruction_count ? result->replacements[operand] : operand;
+}
+
 // This is a memory budget, not a measured scalar/vector crossover. The shared analyzer's retained frontier
 // reservation and temporary dominator matrix occupy distinct regions, so their combined payload is bounded here.
 #define BUSTER_SSA_DOMINANCE_BYTES (16ull << 20)
@@ -259,7 +267,8 @@ static SsaError ssa_check_input(const SsaInput* input)
             else if (kind == BUSTER_SSA_WRITE)
             {
                 const uint32_t value = input->operands[i];
-                if (value >= input->instruction_count || input->kinds[value] == BUSTER_SSA_WRITE || input->types[value] != input->local_types[local])
+                const bool undefined = value == input->instruction_count + local;
+                if (!undefined && (value >= input->instruction_count || input->kinds[value] == BUSTER_SSA_WRITE || input->types[value] != input->local_types[local]))
                 {
                     error = SSA_ERROR_INVALID;
                 }
@@ -501,7 +510,8 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
     for (uint32_t i = 0; error == SSA_OK && i < input->instruction_count; i += 1)
     {
         const uint32_t block = work->instruction_blocks[i];
-        if (input->kinds[i] == BUSTER_SSA_WRITE && work->result.reachable[block] != 0)
+        // A write of its local's undef has no definition to dominate it.
+        if (input->kinds[i] == BUSTER_SSA_WRITE && input->operands[i] < input->instruction_count && work->result.reachable[block] != 0)
         {
             const uint32_t value = input->operands[i];
             const uint32_t origin = work->instruction_blocks[value];
@@ -1515,7 +1525,7 @@ static SsaCheck ssa_verify_equations(SsaWork* work, const SsaResult* result)
                         ssa_check_fail(&check, input->block_offsets[block], "entry value changed");
                     }
                     const uint32_t last = work->last[cell];
-                    const uint32_t exit = last == BUSTER_SSA_NONE ? value : result->replacements[last];
+                    const uint32_t exit = last == BUSTER_SSA_NONE ? value : ssa_written(work, result, last);
                     if (exit != BUSTER_SSA_NONE && outgoing[cell] == BUSTER_SSA_NONE)
                     {
                         outgoing[cell] = exit;
@@ -1559,7 +1569,7 @@ static SsaCheck ssa_verify_equations(SsaWork* work, const SsaResult* result)
                     {
                         if (kind == BUSTER_SSA_WRITE)
                         {
-                            current[dense] = result->replacements[input->operands[i]];
+                            current[dense] = ssa_written(work, result, input->operands[i]);
                         }
                         else if (current[dense] == BUSTER_SSA_NONE || result->replacements[i] != current[dense])
                         {

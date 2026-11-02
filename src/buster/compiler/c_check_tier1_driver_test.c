@@ -1960,6 +1960,163 @@ static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang
     unlink(reference);
 }
 
+// The scopes' fixture (#141): an interpreter loop shaped as Lua's luaV_execute, its handlers reached through a computed
+// goto, each declaring `double n1, n2` (or `long long i1`) in its block and assigning them on some paths only, as Lua's
+// tonumberns does, then calling C. Without the blocks' lifetimes, promotion carries every handler's locals around the
+// dispatch loop, and each call saves the floating ones; with them, a block's start ends its locals' liveness. Both
+// builds, by each path, print clang -O0's output; with lifetimes, Tier 1 saves fewer values around calls.
+static const char check_test_tier1_scopes_source[] =
+    "#include <stdio.h>\n"
+    "\n"
+    "typedef struct Value { int tag; union { double number; long long integer; } u; } Value;\n"
+    "\n"
+    "static __attribute__((noinline)) double scale(double x) { return x * 0.5; }\n"
+    "static __attribute__((noinline)) long long step(long long x) { return x * 3 + 1; }\n"
+    "\n"
+    "#define TONUMBER(v, n) ((v)->tag == 1 ? ((n) = (v)->u.number, 1) : ((v)->tag == 2 ? ((n) = (double)(v)->u.integer, 1) : 0))\n"
+    "\n"
+    "double run(const unsigned char* code, Value* registers, int count)\n"
+    "{\n"
+    "    static void* dispatch[] = { &&op_add, &&op_multiply, &&op_subtract, &&op_step, &&op_halt };\n"
+    "    int pc = 0;\n"
+    "    double total = 0.0;\n"
+    "    goto *dispatch[code[pc]];\n"
+    "op_add:\n"
+    "    {\n"
+    "        double n1;\n"
+    "        double n2;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        Value* b = &registers[code[pc + 2] % count];\n"
+    "        if (TONUMBER(a, n1) && TONUMBER(b, n2)) { total += scale(n1 + n2); a->tag = 1; a->u.number = n1 + n2; }\n"
+    "        pc += 3;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_multiply:\n"
+    "    {\n"
+    "        double n1;\n"
+    "        double n2;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        Value* b = &registers[code[pc + 2] % count];\n"
+    "        if (TONUMBER(a, n1) && TONUMBER(b, n2)) { total += scale(n1 * n2); }\n"
+    "        pc += 3;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_subtract:\n"
+    "    {\n"
+    "        double n1;\n"
+    "        double n2;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        Value* b = &registers[code[pc + 2] % count];\n"
+    "        if (TONUMBER(a, n1) && TONUMBER(b, n2)) { total -= scale(n1 - n2); b->tag = 1; b->u.number = n2 - n1; }\n"
+    "        pc += 3;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_step:\n"
+    "    {\n"
+    "        long long i1;\n"
+    "        Value* a = &registers[code[pc + 1] % count];\n"
+    "        if (a->tag == 2) { i1 = a->u.integer; }\n"
+    "        if (a->tag == 2) { a->u.integer = step(i1); total += (double)a->u.integer; }\n"
+    "        pc += 2;\n"
+    "        goto *dispatch[code[pc]];\n"
+    "    }\n"
+    "op_halt:\n"
+    "    return total;\n"
+    "}\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned char code[400];\n"
+    "    int length = 0;\n"
+    "    for (int k = 0; k < 60; k += 1)\n"
+    "    {\n"
+    "        const int op = (k * 7 + 3) % 4;\n"
+    "        code[length++] = (unsigned char)op;\n"
+    "        code[length++] = (unsigned char)(k * 5 + 1);\n"
+    "        if (op != 3) { code[length++] = (unsigned char)(k * 11 + 2); }\n"
+    "    }\n"
+    "    code[length++] = 4;\n"
+    "    for (int round = 0; round < 4; round += 1)\n"
+    "    {\n"
+    "        Value registers[7];\n"
+    "        for (int r = 0; r < 7; r += 1)\n"
+    "        {\n"
+    "            registers[r].tag = (r + round) % 3;\n"
+    "            if (registers[r].tag == 1) { registers[r].u.number = 0.25 * (r + 1) + round; } else { registers[r].u.integer = r * 2 + round; }\n"
+    "        }\n"
+    "        printf(\"%.17g\\n\", run(code, registers, 7));\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// The scopes' fixture by --tier1 (`lifetimes` or not, by each path) into `output`, its report's values saved around calls
+// into *saves: whether it compiled with run Tier 1's.
+static bool check_test_tier1_scopes_build(const char* executable, const char* source, const char* output, bool lifetimes, bool scalar, uint64_t* saves)
+{
+    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
+    uint32_t count = 5;
+    if (!lifetimes)
+    {
+        arguments[count++] = "--tier1-no-lifetimes";
+    }
+    if (scalar)
+    {
+        arguments[count++] = "--scalar";
+    }
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)output;
+    arguments[count++] = (char*)source;
+    arguments[count] = NULL;
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    *saves = 0;
+    const bool reported = check_test_tier1_field(text, "call_stores", saves);
+    const bool taken = text != NULL && strstr(text, "tier1-refused\trun\t") == NULL;
+    if (status != 0 && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    return status == 0 && reported && taken;
+}
+
+static void check_test_driver_tier1_scopes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-scopes.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-scopes-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_scopes_source, sizeof(check_test_tier1_scopes_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the scopes' fixture runs");
+    uint64_t saves[2][2] = { { 0 } };
+    for (uint32_t lifetimes = 0; ran && lifetimes < 2; lifetimes += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char output[512];
+            snprintf(output, sizeof(output), "%s/tier1-scopes-%u-%u", directory, lifetimes, path);
+            const bool built = check_test_tier1_scopes_build(executable, source, output, lifetimes != 0, path != 0, &saves[lifetimes][path]);
+            check_test_expect(test, built, "the scopes' fixture compiles by --tier1, its interpreter Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0, "the scopes' fixture prints clang's build's output");
+            unlink(output);
+        }
+    }
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        check_test_expect(test, saves[1][path] < saves[0][path], "a block's start ends its locals' liveness: fewer values saved around calls");
+        printf("  Tier 1's saves around calls in the scopes' fixture, %s path: %" PRIu64 " with lifetimes, %" PRIu64 " without\n", path == 0 ? "vector" : "scalar", saves[1][path], saves[0][path]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
 // The floating values' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
 // function Tier 1's (main's conditional expression of doubles among them), linked with its other unit compiled by clang
 // -O2, prints what clang -O0's build of both prints, bit for bit in its %.17g digits.

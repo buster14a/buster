@@ -85,6 +85,8 @@ struct Tier1CfgTestTally
     uint64_t destination_killed;
     uint64_t k0_mutants;
     uint64_t k0_killed;
+    // Phi operands that are undefined (BUSTER_TIER1_CFG_NONE, the IR's undef, #141).
+    uint64_t undefined_operands;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -327,6 +329,10 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
         Tier1CfgAllocation result = { 0 };
         const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(input, output, scratch, &result) : tier1_cfg_allocate_scalar(input, output, scratch, &result);
         errors[path] = error;
+        for (uint32_t o = 0; path == 0 && o < input->phi_operand_offsets[input->phi_count]; o += 1)
+        {
+            tally->undefined_operands += input->phi_operands[o] == BUSTER_TIER1_CFG_NONE;
+        }
         tier1_cfg_test_expect(tally, error == TIER1_CFG_OK || error == TIER1_CFG_CONSTRAINT, name);
         tier1_cfg_test_expect(tally, error == TIER1_CFG_OK || output->length == output_saved, "a failed allocation restores the output arena");
         if (error == TIER1_CFG_OK)
@@ -739,10 +745,65 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
                 found = builder->classes[v] == class && (home == p || dominators_dominates(&dominance, home, p));
                 chosen = found ? v : chosen;
             }
-            builder->phi_operand[k][j] = chosen;
+            // One in six undefined: the IR's undef, which the edge moves nothing for (#141).
+            builder->phi_operand[k][j] = tier1_cfg_test_random(&random) % 6 == 0 ? BUSTER_TIER1_CFG_NONE : chosen;
         }
     }
     return valid;
+}
+
+// A loop's phi whose operand from the entry is undefined (#141): a local a block assigns before reading it, carried
+// around the loop. Both paths allocate it, the checker accepts it, and the entry's edge moves nothing for the phi; with
+// every operand undefined, no edge moves anything.
+static void tier1_cfg_test_undefined(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        Tier1CfgTestBuilder* loop = &builder;
+        memset(loop, 0, sizeof(*loop));
+        loop->block_count = 4;
+        loop->instructions[0] = 1;
+        loop->instructions[1] = 1;
+        loop->instructions[2] = 2;
+        loop->instructions[3] = 1;
+        tier1_cfg_test_edge(loop, 0, 1);
+        tier1_cfg_test_edge(loop, 2, 1);
+        tier1_cfg_test_edge(loop, 1, 2);
+        tier1_cfg_test_edge(loop, 2, 3);
+        loop->registers[0] = 0x000f;
+        loop->registers[1] = 0x000f;
+        loop->scratch[0] = 11;
+        loop->scratch[1] = 15;
+        const uint32_t next = tier1_cfg_test_value(loop, 2, 0, 0, 0x000f);
+        const uint32_t operands[] = {
+            BUSTER_TIER1_CFG_NONE,
+            pass == 0 ? next : BUSTER_TIER1_CFG_NONE,
+        };
+        const uint32_t x = tier1_cfg_test_phi(loop, 1, 0, operands);
+        tier1_cfg_test_use(loop, x, 2, 0, true);
+        tier1_cfg_test_use(loop, x, 3, 0, true);
+        tier1_cfg_test_definition_use(loop, next);
+        const uint64_t saved = output->length;
+        Tier1CfgInput input;
+        const bool built = tier1_cfg_test_build(loop, output, &input);
+        tier1_cfg_test_expect(tally, built, "the undefined operands' input");
+        for (uint32_t path = 0; built && path < 2; path += 1)
+        {
+            const uint64_t mark = output->length;
+            Tier1CfgAllocation result = { 0 };
+            const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+            Tier1CfgCheck check;
+            tier1_cfg_test_expect(tally, error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check), "a phi of undefined operands allocates and checks");
+            // The entry's edge is the first: block 0's only successor.
+            const uint32_t entry_moves = error == TIER1_CFG_OK ? result.edge_move_offsets[1] - result.edge_move_offsets[0] : 1;
+            tier1_cfg_test_expect(tally, entry_moves == 0, "the entry's edge moves nothing for an undefined operand");
+            tier1_cfg_test_expect(tally, error != TIER1_CFG_OK || pass == 0 || result.move_count == 0, "a phi of undefined operands alone moves nothing");
+            arena_pop_to(output, mark);
+        }
+        tier1_cfg_test_case(tally, &input, output, scratch, "undefined phi operands", true, 0, 0, true);
+        arena_pop_to(output, saved);
+    }
 }
 
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
@@ -1188,6 +1249,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         if (output.base != 0 && scratch.base != 0 && work.base != 0)
         {
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
+            tier1_cfg_test_undefined(&tally, &output, &scratch);
             Tier1CfgTestBuilder* builder = arena_push(&work, sizeof(Tier1CfgTestBuilder), _Alignof(Tier1CfgTestBuilder));
             tier1_cfg_test_expect(&tally, builder != 0, "builder memory");
             for (uint64_t sample = 0; builder != 0 && sample < count; sample += 1)
@@ -1214,6 +1276,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.definition_mutants != 0, "the random programs' required definitions reach the definition mutant");
         tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.destination_mutants != 0 && tally.k0_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
+        tier1_cfg_test_expect(&tally, count < 100 || tally.undefined_operands != 0, "the cases reach undefined phi operands");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0 (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, seed, count);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);

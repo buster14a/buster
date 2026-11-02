@@ -295,7 +295,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         IrSourceFile file;
-        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
+        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
             tier1_cfg_source_check(&totals, &file, files[i], print, simd, &lowered_output, &promoted_output, &problem_arena, &output, &scratch);

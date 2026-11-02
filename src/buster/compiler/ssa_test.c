@@ -269,6 +269,12 @@ static bool ssa_test_interpret(const SsaInput* input, const SsaResult* result, A
                     const uint32_t value = result->replacements[i];
                     valid = value < values && ssa_test_value_equal(original[i], renamed[value]);
                 }
+                else if (input->operands[i] >= input->instruction_count)
+                {
+                    // A write of the local's undef (#141): its memory's value is indeterminate from here.
+                    memory[local] = undef;
+                    retained[local] = undef;
+                }
                 else
                 {
                     const uint32_t operand = input->operands[i];
@@ -511,6 +517,63 @@ static void ssa_test_fixtures(SsaTestTally* tally, SsaTestSpace* space)
     fixture.operands[1] = BUSTER_SSA_NONE;
     ssa_test_run(tally, space, &fixture.input, true, false);
 
+    // A loop whose body writes its local's undef first (a block-scope object's start, #141), then defines it on one path
+    // of a diamond and reads it after: the read's phi is the join's, of the definition and the undef, and the loop's
+    // header has none, the body's start ending the local's liveness around the loop. The header's write before the loop
+    // would otherwise reach it on the diamond's other path.
+    tally->name = "a write of undef ends a loop-carried local";
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        ssa_test_fixture_begin(&fixture, 6, 1);
+        ssa_test_fixture_block(&fixture, 0);
+        left = ssa_test_emit(&fixture, BUSTER_SSA_VALUE, 0, BUSTER_SSA_NONE);
+        ssa_test_emit(&fixture, BUSTER_SSA_WRITE, 0, left);
+        ssa_test_fixture_edge(&fixture, 0, 1);
+        ssa_test_fixture_block(&fixture, 1);
+        if (pass == 0)
+        {
+            ssa_test_emit(&fixture, BUSTER_SSA_WRITE, 0, BUSTER_SSA_NONE);
+        }
+        ssa_test_fixture_edge(&fixture, 1, 2);
+        ssa_test_fixture_edge(&fixture, 1, 3);
+        ssa_test_fixture_block(&fixture, 2);
+        right = ssa_test_emit(&fixture, BUSTER_SSA_VALUE, 0, BUSTER_SSA_NONE);
+        ssa_test_emit(&fixture, BUSTER_SSA_WRITE, 0, right);
+        ssa_test_fixture_edge(&fixture, 2, 3);
+        ssa_test_fixture_block(&fixture, 3);
+        ssa_test_emit(&fixture, BUSTER_SSA_READ, 0, BUSTER_SSA_NONE);
+        ssa_test_fixture_edge(&fixture, 3, 1);
+        ssa_test_fixture_edge(&fixture, 3, 4);
+        ssa_test_fixture_block(&fixture, 4);
+        ssa_test_fixture_edge(&fixture, 4, 5);
+        ssa_test_fixture_block(&fixture, 5);
+        ssa_test_fixture_finish(&fixture);
+        // The kill's operand is its local's undef, which needs the instruction count.
+        for (uint32_t i = 0; i < fixture.input.instruction_count; i += 1)
+        {
+            fixture.operands[i] = fixture.kinds[i] == BUSTER_SSA_WRITE && fixture.operands[i] == BUSTER_SSA_NONE ? fixture.input.instruction_count : fixture.operands[i];
+        }
+        ssa_test_run(tally, space, &fixture.input, false, true);
+        arena_pop_to(&space->output, 0);
+        arena_pop_to(&space->twin, 0);
+        SsaResult vector = { 0 };
+        SsaResult scalar = { 0 };
+        const bool built = ssa_build(&fixture.input, &space->output, &space->scratch, &vector) == SSA_OK && ssa_build_scalar(&fixture.input, &space->twin, &space->scratch, &scalar) == SSA_OK;
+        bool header = false;
+        bool join = false;
+        for (uint32_t path = 0; built && path < 2; path += 1)
+        {
+            const SsaResult* result = path == 0 ? &vector : &scalar;
+            for (uint32_t phi = 0; phi < result->phi_count; phi += 1)
+            {
+                header |= result->phi_blocks[phi] == 1;
+                join |= result->phi_blocks[phi] == 3;
+            }
+        }
+        ssa_test_expect(tally, built && join, "the join's read keeps its phi");
+        ssa_test_expect(tally, built && header == (pass == 1), pass == 0 ? "the body's undef ends the local's loop phi" : "without the undef the loop carries the local");
+    }
+
     tally->name = "late address and memory exclusions";
     ssa_test_fixture_begin(&fixture, 1, 6);
     fixture.local_flags[1] = BUSTER_SSA_LOCAL_ADDRESS_TAKEN;
@@ -581,6 +644,21 @@ static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_
         if (ssa_test_expect(tally, ssa_generate(&space->input, blocks, locals, shape, random, &input), "generate random input"))
         {
             ssa_test_run(tally, space, &input, false, false);
+            // The same program with every fourth write one of its local's undef instead (#141's lifetime starts).
+            uint32_t kills = 0;
+            for (uint32_t w = 0; w < input.instruction_count; w += 1)
+            {
+                if (input.kinds[w] == BUSTER_SSA_WRITE && ssa_program_random(&random) % 4 == 0)
+                {
+                    ((uint32_t*)input.operands)[w] = input.instruction_count + input.locals[w];
+                    kills += 1;
+                }
+            }
+            if (kills != 0)
+            {
+                tally->name = "random program with writes of undef";
+                ssa_test_run(tally, space, &input, false, false);
+            }
         }
     }
 }
@@ -731,6 +809,16 @@ static void ssa_test_invalid(SsaTestTally* tally, SsaTestSpace* space)
     tally->name = "write operand type mismatch";
     fixture.operands[2] = 0;
     fixture.types[0] = BUSTER_SSA_TYPE_F64;
+    ssa_test_reject(tally, space, &fixture.input);
+    tally->name = "write of another local's undef";
+    ssa_test_fixture_begin(&fixture, 1, 2);
+    ssa_test_fixture_block(&fixture, 0);
+    ssa_test_emit(&fixture, BUSTER_SSA_WRITE, 0, BUSTER_SSA_NONE);
+    ssa_test_fixture_finish(&fixture);
+    fixture.operands[0] = fixture.input.instruction_count + 1;
+    ssa_test_reject(tally, space, &fixture.input);
+    tally->name = "write past the undefs";
+    fixture.operands[0] = fixture.input.instruction_count + 2;
     ssa_test_reject(tally, space, &fixture.input);
     tally->name = "empty CFG with locals";
     ssa_test_fixture_begin(&fixture, 0, 1);

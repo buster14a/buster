@@ -11,13 +11,16 @@
 // whose case labels may sit inside the loops and blocks of their bodies (as Duff's device's do), gotos forward and
 // backward to labels anywhere in the function, into loops and switches and out of them, and early returns. Its locals:
 // those promotion takes (integers of every width and signedness, _Bool, unsigned __int128, float, double, long double, a
-// pointer) and those it leaves in memory (an address-taken integer, a volatile one, an array and a struct).
+// pointer) and those it leaves in memory (an address-taken integer, a volatile one, an array and a struct). And each block
+// opens with locals of its own (#141), an integer and a double, assigned under a condition and read under the same one, as
+// Lua's interpreter assigns and reads its handlers' numbers: their values reach no other round of the loops around the
+// block, which the blocks' lifetimes (test-ssa-source --lifetimes) tell promotion.
 //
 // Everything is defined behavior in C: arithmetic is on unsigned values, and a signed or narrow local takes its value by
 // a conversion (implementation-defined, alike in both compilers); divisors are made odd, and shift counts and array
 // indices masked; floating locals stay nonnegative and small, so that their conversions to unsigned are defined; every
-// local is set where it is declared, at the top of its function, so that a goto past a declaration skips no
-// initialization; expressions have no side effects, so that the order their operands are evaluated in can't matter;
+// function's local is set where it is declared, at the top of its function, so that a goto past a declaration skips no
+// initialization (a block's own locals have no initializer, and are read only right after their assignments); expressions have no side effects, so that the order their operands are evaluated in can't matter;
 // and the program ends. Each loop's body starts with a decrement of the function's fuel, and so does each label, so that
 // every cycle of the control flow decrements it, and the function returns when it reaches zero; and a call, which goes
 // to an earlier function only, takes one of a global budget that main sets before each of its calls.
@@ -70,9 +73,11 @@ struct SsaGenerator
     uint64_t random;
     // Whether the text or an expression ran out of room: the program is then incomplete.
     bool overflow;
-    // The function being generated, which may call those before it, and its labels placed, a bit each.
+    // The function being generated, which may call those before it, and its labels placed, a bit each; and its blocks,
+    // which number their own locals.
     uint32_t function;
     uint32_t placed;
+    uint32_t blocks;
     char pieces[BUSTER_SSA_GENERATE_TERMS][BUSTER_SSA_GENERATE_PIECE];
     char combined[BUSTER_SSA_GENERATE_PIECE];
     char expressions[3][BUSTER_SSA_GENERATE_PIECE];
@@ -460,7 +465,14 @@ static void ssa_generate_open(SsaGenerator* g, SsaGenerateConstruct* stack, uint
     ssa_generate_expression(g, 0, 3);
     if (kind == BUSTER_SSA_GENERATE_BLOCK)
     {
-        ssa_generate_text(g, "{\n");
+        // The block's own locals, assigned where the condition holds and read where it holds again: nothing between the
+        // two ifs changes the condition's operands.
+        const uint32_t block = g->blocks;
+        g->blocks += 1;
+        ssa_generate_expression(g, 1, 3);
+        ssa_generate_expression(g, 2, 3);
+        ssa_generate_text(g, "{ unsigned t%u; double z%u; if ((%s) & 1u) { t%u = %s; z%u = (double)((%s) & 255u); } if ((%s) & 1u) { u%u += t%u; d0 = d0 * 0.5 + z%u; }\n",
+                          block, block, g->expressions[0], block, g->expressions[1], block, g->expressions[2], g->expressions[0], ssa_generate_below(g, 4), block, block);
     }
     else if (kind == BUSTER_SSA_GENERATE_IF)
     {
@@ -550,6 +562,7 @@ static void ssa_generate_function(SsaGenerator* g, uint32_t f)
 {
     g->function = f;
     g->placed = 0;
+    g->blocks = 0;
     ssa_generate_text(g,
                       "static unsigned fn%u(unsigned p0, unsigned p1, unsigned p2)\n{\n"
                       "    unsigned fuel = 40u + (p0 & 15u);\n"

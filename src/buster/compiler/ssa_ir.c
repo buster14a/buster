@@ -237,6 +237,10 @@ static IrCheck ssa_ir_check_dominance(SsaIrWork* work)
     return check;
 }
 
+// A promoted slot's loads read it and its stores write it. Its lifetime's start writes its undef: a block-scope object's
+// value is indeterminate each time its block is entered (C17 6.2.4p6), so the value it had before is dead there. Without
+// it, a local that a block assigns on some paths only, as Lua's `lua_Number n1` in each of its interpreter's handlers,
+// reaches back through the block's entry around every loop that holds it, a phi at each join (#141).
 static void ssa_ir_accesses(SsaIrWork* work)
 {
     const IrFunction* f = work->input;
@@ -251,6 +255,12 @@ static void ssa_ir_accesses(SsaIrWork* work)
                 work->locals[i] = slot;
                 work->operands[i] = f->op[i] == IR_STORE ? f->b[i] : BUSTER_SSA_NONE;
             }
+        }
+        else if (f->op[i] == IR_LIFETIME && f->b[i] == 0 && work->work.result.promoted[f->a[i]] != 0)
+        {
+            work->kinds[i] = BUSTER_SSA_WRITE;
+            work->locals[i] = f->a[i];
+            work->operands[i] = f->instruction_count + f->a[i];
         }
     }
 }

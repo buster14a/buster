@@ -696,8 +696,11 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                             const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
                             incoming = entry[0] == source ? entry[1] : incoming;
                         }
-                        const uint32_t v = incoming < count ? node_values[incoming] : BUSTER_TIER1_CFG_NONE;
-                        error = v != BUSTER_TIER1_CFG_NONE ? error : TIER1_EMIT_INVALID;
+                        // An undef operand is no value: the edge moves nothing for it (tier1_cfg.c), and the plan
+                        // computes no undef for it (tier1_select_plan).
+                        const bool undefined = incoming < count && function->op[incoming] == IR_UNDEF;
+                        const uint32_t v = undefined ? BUSTER_TIER1_CFG_NONE : incoming < count ? node_values[incoming] : BUSTER_TIER1_CFG_NONE;
+                        error = v != BUSTER_TIER1_CFG_NONE || undefined ? error : TIER1_EMIT_INVALID;
                         phi_operands[operand] = v;
                         operand += 1;
                     }

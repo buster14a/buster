@@ -311,7 +311,17 @@ the location it gives the value.
 Liveness is `dataflow.c`'s solve over the values used outside their block, phi
 operands among them. A phi operand is a use on its edge: it joins its
 predecessor's use row unless that block defines it, and the predecessor's
-live-out row after the solve. Each value then gets an interval per block it is
+live-out row after the solve.
+
+A phi operand may be undefined (`BUSTER_TIER1_CFG_NONE`, #141): the IR's `undef`,
+which the CFG consumer passes as no value. Any value is the phi's along that edge,
+so the operand is no use, keeps nothing live, hints nothing, and the edge moves
+nothing for it; `tier1_cfg_verify` checks nothing of the phi's location on that
+edge. Without it, the one `undef` per local that promotion puts in the entry
+block was live from there to every join that read it: around a loop, everywhere.
+Promotion makes such operands where a block's lifetime start kills a local
+([the SSA guide](ssa.md)'s adapter), and Lua's `luaV_execute` had hundreds of
+them. Each value then gets an interval per block it is
 defined in or live into, from its definition or the block's start to its last
 use there, or to the block's end where it stays live. A value's blocks come
 block by block from the live-in rows, counted and then filled, so building the

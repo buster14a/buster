@@ -3360,6 +3360,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         // walks went. A node is final when the walk back reaches it if every node that reads it precedes it. One a later
         // node reads only after the walk passed it (a value of a later block that an earlier block reads, a computed goto's
         // dispatch block's, #789) goes on a worklist, which marks its values once the walk ends, and theirs (#1016's review).
+        // A phi's undef operand isn't computed: its edge moves nothing for it (tier1_emit_cfg.c).
         uint8_t* needed = plan.covered;
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -3367,7 +3368,8 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             needed[node] |= function->op[node] == IR_PHI ? 1 : 0;
             for (uint32_t p = 0; p < operand_count; p += 1)
             {
-                needed[ir_operand(function, node, p, blocks[node]).value] = 1;
+                const uint32_t value = ir_operand(function, node, p, blocks[node]).value;
+                needed[value] |= function->op[value] != IR_UNDEF ? 1 : 0;
             }
         }
         uint32_t pending_count = 0;

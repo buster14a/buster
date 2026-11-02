@@ -71,7 +71,7 @@ static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tie
 static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, const char* name, char** options, uint32_t option_count, Arena* lowered, Arena* table, Arena* kept, Arena* output, Arena* scratch)
 {
     IrSourceFile file;
-    ir_source_prepare(&file, name, options, option_count, lowered, table, false);
+    ir_source_prepare(&file, name, options, option_count, lowered, table, false, false);
     bool valid = file.status == IR_SOURCE_PREPARED;
     if (!valid)
     {

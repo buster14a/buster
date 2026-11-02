@@ -151,7 +151,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
                                   Arena* output, Arena* scratch)
 {
     IrSourceFile file;
-    ir_source_prepare(&file, name, options, option_count, lowered, table, false);
+    ir_source_prepare(&file, name, options, option_count, lowered, table, false, false);
     bool joined = file.status == IR_SOURCE_PREPARED && corpus->count + file.count <= corpus->capacity;
     uint64_t bytes = 0;
     uint64_t instructions = 0;

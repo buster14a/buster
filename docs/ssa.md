@@ -27,12 +27,13 @@ promotion needs:
 | --- | --- |
 | `VALUE` | An ordinary instruction, opaque to this pass. Its own ID names its result. |
 | `READ` | Read `locals[i]`; the original instruction ID names the loaded value. |
-| `WRITE` | Assign original value `operands[i]` to `locals[i]`; this instruction defines no value. |
+| `WRITE` | Assign original value `operands[i]` to `locals[i]`, or with `operands[i]` the local's own undef (`instruction_count + locals[i]`) make it undefined; this instruction defines no value. |
 | `ADDRESS` | Produce the address of `locals[i]`, excluding that local from promotion. |
 
 All source instructions remain in the view, so original value IDs do not need
 renumbering before construction. The pass checks that every WRITE's source
-dominates it and has the local's type. The full IR verifier must check hidden
+dominates it and has the local's type, or is the local's own undef, which has no
+definition to dominate it. The full IR verifier must check hidden
 VALUE operands, terminators, memory semantics and every other IR rule.
 
 The type column distinguishes scalar integer widths, floating types and pointers
@@ -177,6 +178,18 @@ values), which promotes with the agreed type. Eligibility relies on the supplied
 metadata; the source producer is responsible for marking volatility and
 address-taking correctly.
 
+A promoted slot's `lifetime start` marker (#177's, which `--tier1` asks the
+checked program for) is a WRITE of the slot's undef (#141): C makes a block-scope
+object's value indeterminate each time its block is entered (C17 6.2.4p6), so
+the value it had before is dead there. Without it, a local that a block assigns on
+some paths only and reads where it assigned it, as Lua 5.4's `lua_Number n1` in
+each of `luaV_execute`'s handlers, is live (path-insensitively) through the
+block's entry and around every loop that holds it: a phi at each loop header
+and dispatch block, whose values Tier 1 then kept in registers and slots across
+the whole interpreter and saved around every call. A block that a jump can enter
+past its opening has no lifetimes, so no marker kills a value such a jump still
+carries. The marker goes with the slot, as its STACK_ADDR does.
+
 Block 0 must have no incoming edge. The current typed-stream adapter already
 provides a parameter/slot preheader, and sends source-entry backedges to the
 following block. A different producer must provide the same precondition.
@@ -288,8 +301,15 @@ shared IR's interpreter (#176).
 ```sh
 ./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 ./build/compiler test-ssa-source --generate 48 --clang clang
+./build/compiler test-ssa-source --generate 24 --seed 141 --lifetimes --clang clang
 ./build/compiler test-ssa-source [preprocessor options] sqlite3.c
 ```
+
+`--lifetimes` prepares each file with its blocks' lifetimes, as the C driver's
+`--tier1` does, so that the lowered IR has their markers and promotion makes a
+block's locals undefined at each start of their block (above). The form with every
+local in memory reads and writes nothing at a marker, so on a program C defines it
+must agree with both SSA forms.
 
 ### The checks
 
@@ -377,7 +397,13 @@ labels anywhere in the function, into loops and switches and out of them, and
 early returns. Their locals: integers of every width and signedness, `_Bool`,
 `unsigned __int128`, float, double, long double and a pointer, which promotion
 takes, and an address-taken integer, a volatile one, an array and a struct,
-which stay in memory. Everything is defined behavior (the generator's header
+which stay in memory. Each block opens with locals of its own (#141), an
+`unsigned` and a `double` without initializers, assigned under a condition and
+read under the same condition, as Lua's handlers assign and read their numbers:
+with `--lifetimes`, their values reach no other round of the loops around the
+block. On seed 134's 48 programs, `--lifetimes` takes their phis from 53,317 to
+47,501 (in a cloud container, both paths alike, every program clang's output in
+all three forms). Everything is defined behavior (the generator's header
 has its rules), and every cycle of a function's control flow decrements its
 fuel, which ends the function at zero.
 
