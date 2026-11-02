@@ -184,15 +184,18 @@ definition. Its flags and edges:
   statements, an `if` of a constant condition by its taken arm, a `while`, a
   `for` (its first clause such a statement) or a `do` whose constant condition
   is false, or a `switch` of a constant condition without a `case`. A read of
-  an object (`n;`), a static declaration, a `return` or other jump the
-  evaluation reaches, and a loop that runs keep both arms. Some shapes that
-  clang folds keep both arms here, which runs alike: a statement expression
-  with a jump in code its evaluation skips (`if (0) return 0;`, a `goto` in a
-  `while (0)`) or that initializes a `volatile` object, which the checker
-  counts as side effects of the statement expression; a constant `switch` with
-  a `case` or `default` label, which the walk doesn't model; a `const` local's
-  read as its value, which the checker gives no constant; and an address the
-  walk doesn't take (an element's, a variable-length array's decay). The
+  an object (`n;`), a static declaration, a `return` or `goto` the evaluation
+  reaches, and a loop that runs keep both arms. Some shapes that clang folds
+  keep both arms here, which runs alike: a statement expression with a jump in
+  code its evaluation skips (`if (0) return 0;`, a `return` or `goto` in a
+  loop whose condition is false or in a constant `switch`'s body before any
+  label) or that initializes a `volatile` object, which the checker counts as
+  side effects of the statement expression; a loop that a `break` leaves
+  (`while (1) { break; }`, `do { break; } while (0)`) and a constant `switch`
+  with a `case` or `default` label, which the walk doesn't model; a `const`
+  local's read as its value, which the checker gives no constant; and an
+  address the walk doesn't take (an element's, a variable-length array's
+  decay). The
   condition and the dead arm are left out with their
   references, their block-scope statics (a `used` one is no root either) and
   their statement expressions, whose regions are written empty

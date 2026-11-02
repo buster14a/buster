@@ -378,12 +378,17 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
           "int tested(int n){if((n,0))n=a(n);if(({(n,0);0;}))n=b(n);if(({int x=(n,0);0;}))n=c(n);if((1,0))n=d(n);if((sizeof(n),0))n=d(n);"
           "return n;}", 4, 0 },
         // Conservative where the checker's verdict on a statement expression is a side effect (a return in its dead
-        // if, a volatile object's initialization) or the walk doesn't model the statement (a switch's case): both arms
-        // are kept, which runs as clang's build runs.
+        // if, in a loop that never runs or in a switch's body before any case; a volatile object's initialization) or
+        // the walk doesn't model the statement (a switch's case, a loop that a break leaves): both arms are kept,
+        // which runs as clang's build runs.
         { "folded-if-statement-expression-kept-arms",
-          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}"
-          "int tested(int n){if(({if(0)return 0;0;}))n=a(n);if(({volatile int x=1;0;}))n=b(n);if(({switch(0){case 0:;}0;}))n=c(n);return n;}",
-          4, 0, 0, true },
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}"
+          "static int e(int n){return n+5;}static int g(int n){return n+6;}static int h(int n){return n+7;}static int i(int n){return n+8;}"
+          "static int j(int n){return n+9;}static int k(int n){return n+10;}"
+          "int tested(int n){if(({if(0)return 0;0;}))n=a(n);if(({volatile int x=1;0;}))n=b(n);if(({switch(0){case 0:;}0;}))n=c(n);"
+          "if(({while(1){break;}0;}))n=d(n);if(({for(;;){break;}0;}))n=e(n);if(({do{break;}while(0);0;}))n=g(n);if(({while(1){if(1)break;}0;}))n=h(n);"
+          "if(({while(0){return 0;}0;}))n=i(n);if(({for(;0;){return 0;}0;}))n=j(n);if(({switch(0){return 0;}0;}))n=k(n);return n;}",
+          11, 0, 0, true },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
