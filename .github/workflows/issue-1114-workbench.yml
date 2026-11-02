@@ -1,0 +1,21 @@
+name: Issue 1114 isolated workbench
+on:
+  push:
+    branches: [agent/1114-dwarf-workbench]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive tracked public source only
+        run: git archive --format=tar.gz HEAD > source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1114-source
+          path: source.tar.gz
+          retention-days: 1
