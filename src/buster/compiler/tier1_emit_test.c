@@ -225,6 +225,7 @@ static void tier1_emit_test_pressure(Tier1EmitTest* test)
                         if (selected == TIER1_SELECT_OK)
                         {
                             const Tier1EmitOptions options = {
+                                .certify = true,
                                 .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),
                                 .frame_flags = size % 3 == 0 ? 0 : size % 3 == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK,
                                 .vector = vector != 0,
@@ -292,7 +293,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         const uint64_t scratch_mark = test->scratch.length;
         for (uint32_t failure = 0; failure < 4; failure += 1)
         {
-            Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true };
+            Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true, .certify = true };
             Tier1EmitError wanted = TIER1_EMIT_INVALID;
             Arena limited = test->output;
             uint8_t* denied = calloc(X86_FORM_COUNT, 1);
@@ -341,7 +342,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         if (ready)
         {
             // The entry is its own loop's header: the CFG consumer puts a block before it and jumps back to the loop.
-            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true };
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .certify = true };
             Tier1EmitResult output;
             const bool emitted = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &output, &node) == TIER1_EMIT_OK;
             tier1_emit_test_expect(test, emitted, "a loop through the entry goes through the CFG consumer");
@@ -359,7 +360,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     ready = ir_create(&test->input, &empty_sizes, &function) == IR_OK && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
     if (ready)
     {
-        const Tier1EmitOptions options = { .vector = true };
+        const Tier1EmitOptions options = { .vector = true, .certify = true };
         Tier1EmitResult output;
         const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &output, &node);
         tier1_emit_test_expect(test, error == TIER1_EMIT_OK && output.code.count == 0 && output.allocation.spill_count == 0, "empty pipeline accepts null columns");
@@ -594,6 +595,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                 if (selected == TIER1_SELECT_OK)
                 {
                     const Tier1EmitOptions options = {
+                        .certify = true,
                         .register_mask = tier1_liveness_register_mask(),
                         .frame_flags = shape == 2 && flags == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
                         .vector = vector != 0,
@@ -778,6 +780,7 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
             if (selected == TIER1_SELECT_OK)
             {
                 const Tier1EmitOptions options = {
+                    .certify = true,
                     .register_mask = tier1_liveness_register_mask(),
                     .vector = vector != 0,
                     .rematerialize = true,
@@ -872,6 +875,7 @@ static void tier1_emit_test_object_overflow(Tier1EmitTest* test)
         if (created && selected == TIER1_SELECT_OK)
         {
             const Tier1EmitOptions options = {
+                .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
                 .frame_flags = BUSTER_TIER1_FRAME_NO_RED_ZONE,
                 .vector = vector != 0,
@@ -997,7 +1001,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
             uint32_t node = BUSTER_IR_NONE;
             const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
             tier1_emit_test_expect(test, planned, "overlong fixture selects");
-            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector != 0 };
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector != 0, .certify = true };
             Tier1EmitResult base;
             const bool based = planned && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &base, &node) == TIER1_EMIT_OK && base.general == (branching != 0);
             tier1_emit_test_expect(test, based, "overlong fixture emits through its consumer");

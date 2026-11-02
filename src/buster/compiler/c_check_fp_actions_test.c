@@ -6,6 +6,8 @@
 #ifndef BUSTER_C_CHECK_FP_ACTIONS_TEST_INCLUDED
 #define BUSTER_C_CHECK_FP_ACTIONS_TEST_INCLUDED
 
+#include "c_check_pragma_extensions_test.c"
+
 // The call guard must not clear an inherited witness, mark integer-only actions, or disturb an error.
 // Mix those cases with newly sensitive arithmetic/conversions across complete and partial action batches.
 static void check_test_fp_action_guards(CheckTest* test, TypeTable* table)
@@ -198,6 +200,7 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
 
 static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
 {
+    check_test_pragma_extensions(test);
     check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
     check_test_fp_graph(test, table);
