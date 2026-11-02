@@ -296,6 +296,263 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
     return count;
 }
 
+// A chunk's number literals' values, found before its actions (#1038). A literal whose spelling is a plain decimal, one
+// to nine digits without a leading zero but for 0 itself, is an int of that value: what check_input_literal makes of it
+// (check_literal_integer's first case), its spelling its source's bytes, among which no splice, trigraph, digit
+// separator or suffix can be; and so is an integer the preprocessor made (BUSTER_PP_KIND_INTEGER: __LINE__'s, say) up to
+// INT_MAX, spelled in decimal. The chunk's literals are read at once, their spellings' bytes by gathers of the aligned
+// words that hold them, and each literal's action takes its value from here rather than spell and parse it as the walk
+// reaches it. It parses every other literal (check_input_literal).
+typedef struct CheckInputLiterals CheckInputLiterals;
+struct CheckInputLiterals
+{
+    // Per literal of the chunk, in its order: its value, or BUSTER_CHECK_NONE for a literal of another form.
+    uint32_t values[BUSTER_CHECK_EXPRESSION_CHUNK];
+};
+
+// The most digits a plain decimal has here: nine, whose largest value is an int.
+#define BUSTER_CHECK_LITERAL_PLAIN_DIGITS 9u
+
+// The range of `pp`'s source that holds `location`: `cursor`'s if it does, else the one pp_find_range finds. A chunk's
+// literals, in source order but for macros' bodies, are mostly in the range of the one before.
+static uint32_t check_input_literal_range(const Preprocessor* pp, uint32_t location, uint32_t cursor)
+{
+    const bool held = cursor < pp->range_count && location - pp->ranges[cursor].base < pp->ranges[cursor].length;
+    return held ? cursor : pp_find_range(pp, location);
+}
+
+// The literal `token`'s value where its spelling is a plain decimal or the preprocessor's int (CheckInputLiterals), else
+// BUSTER_CHECK_NONE, with `*cursor` the range of its spelling's source after: the scalar twin of
+// check_input_expression_literals' vector path.
+static uint32_t check_input_literal_plain(const CheckInputReader* reader, uint32_t token, uint32_t* cursor)
+{
+    const Parser* parser = reader->parser;
+    const Preprocessor* pp = reader->pp;
+    const uint32_t source = parser->tokens.sources[token];
+    const uint8_t kind = pp->output.kinds[source];
+    const uint32_t length = pp->output.values[source] - pp->output.locations[source];
+    const bool unnamed = parser->tokens.names[token] == 0;
+    const bool number = unnamed && kind == C_TOKEN_NUMERIC_CONSTANT && length - 1 < BUSTER_CHECK_LITERAL_PLAIN_DIGITS;
+    const uint32_t range = number ? check_input_literal_range(pp, pp->output.locations[source], *cursor) : BUSTER_PP_NONE;
+    *cursor = range < pp->range_count ? range : *cursor;
+    const uint8_t* bytes = range < pp->range_count ? pp->ranges[range].bytes + (pp->output.locations[source] - pp->ranges[range].base) : NULL;
+    bool plain = bytes != NULL && (bytes[0] != '0' || length == 1);
+    uint32_t value = 0;
+    for (uint32_t i = 0; plain && i < length; i += 1)
+    {
+        const uint32_t digit = (uint32_t)bytes[i] - '0';
+        plain = digit < 10;
+        value = value * 10 + digit;
+    }
+    const bool integer = unnamed && kind == BUSTER_PP_KIND_INTEGER && pp->output.values[source] <= (uint32_t)INT32_MAX;
+    return integer ? pp->output.values[source] : plain ? value : BUSTER_CHECK_NONE;
+}
+
+// The spellings of four tokens of 1 to 9 digits, one a 128-bit lane: each lane's two words hold its token's bytes from
+// its byte `offsets`, for `lengths` bytes (both the lane's in each of its dwords). Returns each spelling's value in its
+// lane's first dword, and in `*bad` the bytes of the lanes whose spellings are no plain decimal: a byte no digit, or a
+// leading zero of more than one digit. One shuffle right-aligns each spelling; its digits are multiplied out in pairs,
+// then quads, then the lane's four quads (of which the first is a 9-digit spelling's zero).
+static inline __m512i check_input_literal_digits(__m512i words, __m512i offsets, __m512i lengths, uint64_t* bad)
+{
+    const __m512i iota = _mm512_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+                                         15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m512i splat = _mm512_set1_epi32(0x01010101);
+    // In every byte of its lane: where the spelling's first digit goes (16 - length), the shift from its bytes' place to
+    // there (offset + length - 16, from -15 to 0), and its length.
+    const __m512i first = _mm512_mullo_epi32(_mm512_sub_epi32(_mm512_set1_epi32(16), lengths), splat);
+    const __m512i shift = _mm512_mullo_epi32(_mm512_and_si512(_mm512_sub_epi32(_mm512_add_epi32(offsets, lengths), _mm512_set1_epi32(16)), _mm512_set1_epi32(0xff)),
+                                             splat);
+    const __m512i length = _mm512_mullo_epi32(lengths, splat);
+    const __mmask64 before = _mm512_cmplt_epu8_mask(iota, first);
+    const __m512i control = _mm512_mask_mov_epi8(_mm512_add_epi8(iota, shift), before, _mm512_set1_epi8((char)0x80));
+    const __m512i aligned = _mm512_shuffle_epi8(words, control);
+    const __mmask64 spelled = ~before;
+    const __m512i digits = _mm512_mask_sub_epi8(_mm512_setzero_si512(), spelled, aligned, _mm512_set1_epi8('0'));
+    const __mmask64 leading = _mm512_cmpeq_epi8_mask(iota, first) & _mm512_cmpgt_epu8_mask(length, _mm512_set1_epi8(1));
+    *bad = _mm512_mask_cmpgt_epu8_mask(spelled, digits, _mm512_set1_epi8(9)) | _mm512_mask_cmpeq_epi8_mask(leading, aligned, _mm512_set1_epi8('0'));
+    const __m512i pairs = _mm512_maddubs_epi16(digits, _mm512_set1_epi16(0x010a));
+    const __m512i quads = _mm512_madd_epi16(pairs, _mm512_set1_epi32(0x00010064));
+    const __m512i scaled = _mm512_mullo_epi32(quads, _mm512_set_epi32(1, 10000, 100000000, 0, 1, 10000, 100000000, 0, 1, 10000, 100000000, 0, 1, 10000, 100000000, 0));
+    const __m512i halves = _mm512_add_epi32(scaled, _mm512_shuffle_epi32(scaled, _MM_SHUFFLE(1, 0, 3, 2)));
+    return _mm512_add_epi32(halves, _mm512_shuffle_epi32(halves, _MM_SHUFFLE(2, 3, 0, 1)));
+}
+
+// The entries of the chunk's literals, the `acting` tokens and classes whose class is CHECK_INPUT_CODE_LITERAL, in their
+// order into `literals`; returns how many. The vector path compresses the literals 16 tokens at a time, then reads them in
+// stages, each over all of the chunk's literals 16 at a time, so that the loads of one stage, which mostly miss the
+// cache (a chunk's literals are far apart in the preprocessor's columns and the source), wait together rather than in
+// one chain a literal: their names and sources; the sources' kinds, locations and ends; the numbers' ranges, which are
+// pp_find_range's (one of the two the last numbers were in, else found by a search of the ranges' bases that all lanes
+// take in step), and the spellings' addresses where their ranges hold them; then the two aligned words that hold each spelling's bytes, four tokens a vector, and their digits
+// (check_input_literal_digits). The preprocessor's ints take their values. The scalar path, the twin, takes
+// check_input_literal_plain for every literal. An aligned word holds a byte of the spelling, so is on its page.
+static uint32_t check_input_expression_literals(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+                                                CheckInputLiterals* literals, bool scalar)
+{
+    const Parser* parser = reader->parser;
+    const Preprocessor* pp = reader->pp;
+    const uint32_t literal = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+    // Gathers index by signed 32-bit offsets: the tokens' (the compaction checked them), the preprocessor's tokens' and
+    // the ranges' bytes.
+    const bool indexed = parser->tokens.count <= (uint32_t)INT32_MAX - 4 && pp->output.count <= (uint32_t)INT32_MAX - 4 &&
+                         (uint64_t)pp->range_count * sizeof(PPRange) <= (uint64_t)INT32_MAX;
+    const uint8_t* table = (const uint8_t*)pp->ranges;
+    // The stages' columns, a literal each: its token then its source, its spelling's location then its address, its
+    // spelling's length, and its end (the preprocessor's int's value); and a group's numbers, the preprocessor's ints and
+    // the numbers whose ranges hold them.
+    uint32_t found[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint32_t places[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint32_t lengths[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK];
+    uint64_t spellings[BUSTER_CHECK_EXPRESSION_CHUNK];
+    __mmask16 numbers[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+    __mmask16 integers[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+    __mmask16 inside[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+    uint32_t count = 0;
+    uint32_t position = 0;
+    uint32_t cursor = BUSTER_PP_NONE;
+    for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < acting; position += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, acting - position < 16 ? acting - position : 16);
+        const __mmask16 matched = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, classes + position), _mm512_set1_epi32((int32_t)literal));
+        _mm512_mask_compressstoreu_epi32(found + count, matched, _mm512_maskz_loadu_epi32(lanes, tokens + position));
+        count += (uint32_t)__builtin_popcount(matched);
+    }
+    const __m512i zero = _mm512_setzero_si512();
+    // The names and the sources: an unnamed token's source in `found`, a named one's none of the numbers' or ints'.
+    for (uint32_t at = 0; at < count; at += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at < 16 ? count - at : 16);
+        const __m512i token = _mm512_maskz_loadu_epi32(lanes, found + at);
+        const __mmask16 unnamed = _mm512_mask_testn_epi32_mask(lanes, _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.names, 4),
+                                                              _mm512_set1_epi32(-1));
+        _mm512_mask_storeu_epi32(found + at, lanes, _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.sources, 4));
+        numbers[at / 16] = unnamed;
+    }
+    // The sources' kinds, locations and ends: the numbers and the ints.
+    for (uint32_t at = 0; at < count; at += 16)
+    {
+        const __mmask16 unnamed = numbers[at / 16];
+        const __m512i source = _mm512_maskz_loadu_epi32(unnamed, found + at);
+        const __m512i kinds = check_input_gather_bytes(unnamed, source, pp->output.kinds);
+        const __m512i location = _mm512_mask_i32gather_epi32(zero, unnamed, source, pp->output.locations, 4);
+        const __m512i end = _mm512_mask_i32gather_epi32(zero, unnamed, source, pp->output.values, 4);
+        const __m512i length = _mm512_sub_epi32(end, location);
+        numbers[at / 16] = _mm512_mask_cmpeq_epi32_mask(unnamed, kinds, _mm512_set1_epi32(C_TOKEN_NUMERIC_CONSTANT)) &
+                           _mm512_cmplt_epu32_mask(_mm512_sub_epi32(length, _mm512_set1_epi32(1)), _mm512_set1_epi32((int32_t)BUSTER_CHECK_LITERAL_PLAIN_DIGITS));
+        integers[at / 16] = _mm512_mask_cmpeq_epi32_mask(unnamed, kinds, _mm512_set1_epi32(BUSTER_PP_KIND_INTEGER)) &
+                            _mm512_cmple_epu32_mask(end, _mm512_set1_epi32(INT32_MAX));
+        _mm512_storeu_si512(places + at, location);
+        _mm512_storeu_si512(lengths + at, length);
+        _mm512_storeu_si512(ends + at, end);
+    }
+    // The numbers' ranges: one of the two the last numbers were in, where it holds the location (most of a chunk's numbers
+    // are in one range or two), else the last whose base is at most the location, found by halving the ranges in step,
+    // which is then the first of the two. Where the range holds the location, the spelling's address.
+    const __m512i stride = _mm512_set1_epi32((int32_t)sizeof(PPRange));
+    uint32_t cursors[2] = { BUSTER_PP_NONE, BUSTER_PP_NONE };
+    for (uint32_t at = 0; at < count; at += 16)
+    {
+        const __mmask16 ranged = pp->range_count != 0 ? numbers[at / 16] : 0;
+        const __m512i location = _mm512_loadu_si512(places + at);
+        __m512i addresses[2] = { zero, zero };
+        __mmask16 held = 0;
+        for (uint32_t c = 0; c < 2; c += 1)
+        {
+            const PPRange* range = cursors[c] < pp->range_count ? &pp->ranges[cursors[c]] : NULL;
+            const __m512i place = _mm512_sub_epi32(location, _mm512_set1_epi32(range != NULL ? (int32_t)range->base : 0));
+            const __mmask16 in = range != NULL ? _mm512_mask_cmplt_epu32_mask(ranged & ~held, place, _mm512_set1_epi32((int32_t)range->length)) : 0;
+            const __m512i bytes = _mm512_set1_epi64(range != NULL ? (int64_t)(uintptr_t)range->bytes : 0);
+            addresses[0] = _mm512_mask_add_epi64(addresses[0], (__mmask8)in, bytes, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(place)));
+            addresses[1] = _mm512_mask_add_epi64(addresses[1], (__mmask8)(in >> 8), bytes, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(place, 1)));
+            held |= in;
+        }
+        const __mmask16 others = ranged & ~held;
+        if (others != 0)
+        {
+            __m512i range = zero;
+            for (uint32_t size = pp->range_count; size > 1; size -= size / 2)
+            {
+                const __m512i probe = _mm512_add_epi32(range, _mm512_set1_epi32((int32_t)(size / 2)));
+                const __m512i bases = _mm512_mask_i32gather_epi32(zero, others, _mm512_mullo_epi32(probe, stride), table + offsetof(PPRange, base), 1);
+                range = _mm512_mask_mov_epi32(range, _mm512_mask_cmple_epu32_mask(others, bases, location), probe);
+            }
+            const __m512i entry = _mm512_mullo_epi32(range, stride);
+            const __m512i place = _mm512_sub_epi32(location, _mm512_mask_i32gather_epi32(zero, others, entry, table + offsetof(PPRange, base), 1));
+            const __mmask16 found_in = _mm512_mask_cmplt_epu32_mask(others, place, _mm512_mask_i32gather_epi32(zero, others, entry, table + offsetof(PPRange, length), 1));
+            addresses[0] = _mm512_mask_add_epi64(addresses[0], (__mmask8)found_in,
+                                                 _mm512_mask_i32gather_epi64(zero, (__mmask8)found_in, _mm512_castsi512_si256(entry), table + offsetof(PPRange, bytes), 1),
+                                                 _mm512_cvtepu32_epi64(_mm512_castsi512_si256(place)));
+            addresses[1] = _mm512_mask_add_epi64(addresses[1], (__mmask8)(found_in >> 8),
+                                                 _mm512_mask_i32gather_epi64(zero, (__mmask8)(found_in >> 8), _mm512_extracti64x4_epi64(entry, 1), table + offsetof(PPRange, bytes), 1),
+                                                 _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(place, 1)));
+            held |= found_in;
+            uint32_t ranges[16];
+            _mm512_storeu_si512(ranges, range);
+            cursors[1] = found_in != 0 ? cursors[0] : cursors[1];
+            cursors[0] = found_in != 0 ? ranges[__builtin_ctz(found_in)] : cursors[0];
+        }
+        inside[at / 16] = held;
+        _mm512_storeu_si512(spellings + at, addresses[0]);
+        _mm512_storeu_si512(spellings + at + 8, addresses[1]);
+    }
+    // The spellings' digits.
+    for (uint32_t at = 0; at < count; at += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at < 16 ? count - at : 16);
+        const __mmask16 held = inside[at / 16];
+        __m512i values = _mm512_mask_mov_epi32(_mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE), integers[at / 16], _mm512_loadu_si512(ends + at));
+        if (held != 0)
+        {
+            const __m512i addresses[2] = {
+                _mm512_loadu_si512(spellings + at),
+                _mm512_loadu_si512(spellings + at + 8),
+            };
+            const __m512i offsets = _mm512_and_si512(_mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(addresses[0])), _mm512_cvtepi64_epi32(addresses[1]), 1),
+                                                     _mm512_set1_epi32(7));
+            const __m512i length = _mm512_mask_mov_epi32(_mm512_set1_epi32(1), held, _mm512_loadu_si512(lengths + at));
+            // A token's second word holds its spelling's bytes past the first's eight.
+            const __mmask16 seconds = _mm512_mask_cmpgt_epu32_mask(held, _mm512_add_epi32(offsets, length), _mm512_set1_epi32(8));
+            __m512i groups[4];
+            uint32_t bad = 0;
+            for (uint32_t group = 0; group < 4; group += 1)
+            {
+                const int64_t b = (int64_t)(group & 1) * 4;
+                const __m512i pick = _mm512_set_epi64(b + 3, b + 3, b + 2, b + 2, b + 1, b + 1, b, b);
+                const __m512i words = _mm512_add_epi64(_mm512_andnot_si512(_mm512_set1_epi64(7), _mm512_permutexvar_epi64(pick, addresses[group >> 1])),
+                                                       _mm512_set_epi64(8, 0, 8, 0, 8, 0, 8, 0));
+                const __mmask8 loaded = (__mmask8)(_pdep_u32((held >> (group * 4)) & 0xf, 0x55) | _pdep_u32((seconds >> (group * 4)) & 0xf, 0xaa));
+                const __m512i gathered = _mm512_mask_i64gather_epi64(zero, loaded, words, (const void*)0, 1);
+                const int32_t g = (int32_t)group * 4;
+                const __m512i lane = _mm512_set_epi32(g + 3, g + 3, g + 3, g + 3, g + 2, g + 2, g + 2, g + 2, g + 1, g + 1, g + 1, g + 1, g, g, g, g);
+                uint64_t wrong = 0;
+                groups[group] = check_input_literal_digits(gathered, _mm512_permutexvar_epi32(lane, offsets), _mm512_permutexvar_epi32(lane, length), &wrong);
+                // A lane's bit where any byte of its 16 is wrong.
+                const uint64_t nibbles = wrong | wrong >> 1 | wrong >> 2 | wrong >> 3;
+                const uint64_t sixteens = nibbles | nibbles >> 4 | nibbles >> 8 | nibbles >> 12;
+                bad |= (uint32_t)_pext_u64(sixteens, 0x0001000100010001ull) << (group * 4);
+            }
+            // Each lane's value from its group's first dwords.
+            const __m512i firsts = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 28, 24, 20, 16, 12, 8, 4, 0);
+            const __m512i low = _mm512_permutex2var_epi32(groups[0], firsts, groups[1]);
+            const __m512i high = _mm512_permutex2var_epi32(groups[2], firsts, groups[3]);
+            const __m512i read = _mm512_permutex2var_epi32(low, _mm512_set_epi32(23, 22, 21, 20, 19, 18, 17, 16, 7, 6, 5, 4, 3, 2, 1, 0), high);
+            values = _mm512_mask_mov_epi32(values, (__mmask16)(held & ~bad), read);
+        }
+        _mm512_mask_storeu_epi32(literals->values + at, lanes, values);
+    }
+    for (; position < acting; position += 1)
+    {
+        if (classes[position] == literal)
+        {
+            literals->values[count] = check_input_literal_plain(reader, tokens[position], &cursor);
+            count += 1;
+        }
+    }
+    return count;
+}
+
 // An identifier operand, the chunk's identifier `at`: a VALUE node of its declaration and its leaf, or nothing for one
 // without a declared type. In a unit with overload tables the leaf holds the use's overload head, which the reader's run
 // wrote at the token, and which the walk's action writes back there unchanged. A K&R unit's identifiers, whose types a
@@ -332,15 +589,20 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
     return (status & BUSTER_CHECK_IDENTIFIER_ACTED) != 0;
 }
 
-// A number or a character operand: its literal's VALUE node, or the report of an invalid one; in a unit with overload
-// tables, its token's head is its leaf's, none. A function's name is the walk's, as its tests take it after the literals.
-static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token)
+// A number or a character operand, the chunk's literal `at`: its literal's VALUE node, or the report of an invalid one; in
+// a unit with overload tables, its token's head is its leaf's, none. A plain decimal's value the chunk's literals hold
+// (CheckInputLiterals); every other literal is parsed here. A function's name is the walk's, as its tests take it after
+// the literals.
+static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token, const CheckInputLiterals* literals, uint32_t at)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
     if (acted)
     {
-        CheckLiteral literal;
-        check_input_literal(reader, token, &literal);
+        CheckLiteral literal = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
+        if (literals->values[at] == BUSTER_CHECK_NONE)
+        {
+            check_input_literal(reader, token, &literal);
+        }
         if (!literal.valid)
         {
             check_input_report(reader, token, check_input_literal_report(&literal));
@@ -636,7 +898,7 @@ static bool check_input_expression_call(CheckInputReader* reader, uint32_t token
 // both of which the walk's visit writes again as they were. In a coded unit, the visit's ticks are added to `*visited`
 // (BUSTER_CHECK_EXPRESSION_PART_VISITS); in another, the caller times its whole chunk as visits.
 static void check_input_expression_coded(CheckInputReader* reader, uint32_t token, uint8_t classes, bool coded, const CheckInputIdentifiers* identifiers,
-                                         uint32_t* identifier, uint64_t* visited)
+                                         uint32_t* identifier, const CheckInputLiterals* literals, uint32_t* literal, uint64_t* visited)
 {
     const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     bool acted = coded && code != CHECK_INPUT_CODE_SCALAR;
@@ -656,7 +918,8 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
                 *identifier += 1;
                 break;
             case CHECK_INPUT_CODE_LITERAL:
-                acted = check_input_expression_literal(reader, token);
+                acted = check_input_expression_literal(reader, token, literals, *literal);
+                *literal += 1;
                 break;
             case CHECK_INPUT_CODE_PREFIX:
                 acted = check_input_expression_prefix(reader, token, values);
@@ -740,6 +1003,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
+    CheckInputLiterals literals;
     // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
     // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms
     // that a chunk's run of one class doesn't make a chain of: those the classes' actions acted at are the rest of the
@@ -758,15 +1022,17 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         if (coded)
         {
             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
+            check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
         }
         const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
+        uint32_t literal = 0;
         uint32_t i = 0;
         if (!timed)
         {
             for (; i < acting && !reader->output->resource; i += 1)
             {
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &visited);
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
             }
         }
         else
@@ -775,7 +1041,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
             for (; i < acting && !reader->output->resource; i += 1)
             {
                 const uint64_t before = __rdtsc();
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &visited);
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
                 const uint64_t after = __rdtsc();
                 reader->output->expression_class_ticks[(classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += after - before;
                 reader->output->expression_class_overhead += __rdtsc() - after;

@@ -6314,6 +6314,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_identifier_leaves(&test);
+                check_test_literal_values(&test);
             }
             if (check_test_takes())
             {
