@@ -68,15 +68,39 @@ its capacity bounds the total available and borrowed explicit tokens. The
 recovery storage is private to the clean guardian and is released before its
 acknowledgement completes.
 
-The lease and team size stay fixed for the emission phase. Tokens which another
-file returns after dispatch cannot enlarge an already running team. In an uneven
-build, two large files can receive seven lanes and one lane; when the first team
-finishes, the one-lane team can leave capacity idle at the tail. Active-team
-resizing and changes to the existing profitability rule remain separate work.
-This ownership policy uses no machine-wide idle sampling or racy retuning.
+### A team that grows
+
+A team the jobserver gives fewer lanes than its bodies pay for grows while it
+runs (`CheckEmitGrowth`, `c_check_program_emit.c`): in an uneven build two
+large files reach their emissions together, the first takes the six spare
+tokens and the second none, and without growth the second ran its bodies on one
+lane after the first team had given its tokens back. Such a team, in the C
+driver's flow and under a jobserver, cuts its bodies' parts for every lane it may
+take (the lane rule's, the explicit cap's and the session's), costliest first in
+one order. Lane 0 takes them alone, or in a round of all those lanes once it has
+admitted another, where each lane past the admitted ones sleeps on the
+admission's word until lane 0 admits it. Between its parts, at most every
+100 µs, lane 0 reads the jobserver's spare tokens (`FIONREAD`,
+`worker_budget_available`). It takes them under a lease of its own
+(`worker_budget_grow`, a guardian like the first's), up to the lanes it may
+take and the parts left, when the parts left pay for the guardian's start:
+their tokens on the admitted lanes less on that many more must be at least
+`BUSTER_CHECK_EMIT_GROW_TOKENS`, about a guardian's 160 µs of one lane's
+emission. With `--lanes N` the team grows whatever the parts left pay. A team
+holds up to eight leases. When lane 0 finds no part left it closes the
+admission, so that the lanes still asleep leave, and the round ends as every
+round does. Every lease is returned after the round, before a serial retry or
+the merge. The output is one lane's, whatever lanes took the parts.
+
+A team that never grows takes its parts on lane 0 alone, without waking a lane,
+at the cost of the clock read per part and a `FIONREAD` per 100 µs.
+Ownership stays the jobserver's: a team takes only spare tokens, never waits
+for one, and no machine-wide idle sampling decides anything.
 
 With `--time-stages`, `worker-budget` reports the external mode, explicit cap,
-requested and granted workers, attempted active team and serial-fallback reason.
+requested and granted workers, the team at its end, the lanes it grew by, the
+lanes that took a part (never more than the team) and the serial-fallback
+reason.
 This also identifies pipe-style recipes whose descriptors were unavailable;
 ordinary source diagnostics retain their previous bytes and ordering.
 
@@ -330,10 +354,17 @@ that takes the largest body takes at least as long as it. #113's deferred reader
   empty and partial supplies, exact exceptional bytes, caps, malformed and
   overridden flags, escaped paths, stale/reused descriptor numbers, resource
   limits, unchanged inherited flags, caller signal state, ignored SIGCHLD,
-  and whole compiler-process-group SIGTERM/SIGKILL;
+  and whole compiler-process-group SIGTERM/SIGKILL; and growth: no guardian
+  without a spare byte, each growth bounded by what it asks for and what the
+  pipe holds, the start's report kept, every lease's bytes returned once, and
+  none on a dry run or without a jobserver;
 - budgeted real emissions and their failed-start/resource retries, by both
   paths with and without rows/unwind: one lane's objects or failures, with
   every owned byte returned once;
+- a growing team in the driver, under a jobserver pipe of no byte or one,
+  whose lane 0 supplies more after its first part: the team reported at its
+  end and its growth, up to `--lanes 4`, one lane's object, and every byte
+  back once, those it had no lane for never taken;
 
 - generated programs of up to 600 functions of many kinds, among them
   libgcc's functions in random first-use orders, computed gotos through static
