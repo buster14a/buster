@@ -240,9 +240,12 @@ variable-length arrays' and `alloca`'s allocations, and the stack's position
 saved and restored around their scopes, in a frame with a frame pointer whose
 places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
 from rsp around it (the selection guide's "The dynamic stack"). Still refused:
-long double, selects of floating values, switches, and the convention's rarer
-aggregate shapes (a part in a stack slot, a high or low eightbyte alone, a
-vector's or the x87's register).
+long double and the 128-bit integers (`sqlite3.c`'s `sqlite3Multiply128` and
+`sqlite3Multiply160`), vectors, and the convention's rarer aggregate shapes (a
+part in a stack slot, a high or low eightbyte alone, a vector's or the x87's
+register). The IR's switches and selects of floating values are refused too,
+but the C driver's lowering makes neither: a `switch` comes as compares or a
+jump table, which Tier 1 takes, and `?:` as branches.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
@@ -263,7 +266,7 @@ slot carries values of several types stay in memory (single-type ones promote
 since #983); a frame
 object's address is a `lea` rather than part of its users' memory operands; the
 pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
-function, is Tier 0's (its switch). 80 of #142's programs, 40 per generator, gave
+function, was Tier 0's then (its switch). 80 of #142's programs, 40 per generator, gave
 66 passes at both tiers and 14 failures, all in clang's own steps, and 40 more by
 the scalar path alone 36 passes and 4 such failures. The default path's compile
 time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
