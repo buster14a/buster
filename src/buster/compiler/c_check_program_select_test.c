@@ -285,6 +285,9 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
         const char* source;
         uint32_t functions;
         uint32_t objects;
+        // The objects clang's model selects, 0 for the same as -c's: the model counts the operands that a constant
+        // condition never evaluates, and so the statics of their statement expressions, which no code emits.
+        uint32_t model_objects;
     };
     static const CheckFoldedIf fixtures[] = {
         { "folded-if-sizeof-chain",
@@ -336,6 +339,19 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
         { "folded-if-builtin-constant-p",
           "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}"
           "int tested(int n){if(__builtin_constant_p(n))n=a(n);if(__builtin_constant_p(5))n=b(n);else n=c(n);return n;}", 3, 0 },
+        // #1154's re-review: a statement expression condition folds where clang's evaluator takes each statement before
+        // its value (declarations of automatic objects initialized with constants, or not at all, and constant
+        // expressions); a nonconstant initializer, a static (used or not) or __builtin_constant_p of a variable, its value
+        // or a statement's, keeps both arms, and the statics. And a block-scope static in an operand that a constant
+        // condition never evaluates, or sizeof's, is emitted by no code.
+        { "folded-if-statement-expression-conditions",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}"
+          "static int e(int n){return n+5;}static int g(int n){return n+6;}static int h(int n){return n+7;}"
+          "int tested(int n){if(({int x=n;0;}))n=a(n);if(({static int s=1;0;}))n=b(n);if(({static int u __attribute__((used))=2;0;}))n=c(n);"
+          "if(({__builtin_constant_p(n);}))n=d(n);if(({(void)__builtin_constant_p(n);0;}))n=e(n);if(({int y=1;int z;1;0;}))n=g(n);"
+          "if(({0;}))n=h(n);return n;}", 6, 2 },
+        { "unevaluated-operand-block-scope-statics",
+          "int tested(int n){return n+(0&&({static int x=1;x;}))+(1||({static int y __attribute__((used))=2;y;}))+(int)sizeof(({static int z=3;z;}));}", 1, 0, 2 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
@@ -343,7 +359,10 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
         char name[160];
         check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, false);
         snprintf(name, sizeof(name), "%s-in-clangs-model", fixture->name);
-        check_test_program_selection_run(test, fixture->source, name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang, clang, 0, true);
+        // A model that selects other objects than clang's object defines is compared by its counts alone, and run.
+        const uint32_t model_objects = fixture->model_objects != 0 ? fixture->model_objects : fixture->objects;
+        check_test_program_selection_run(test, fixture->source, name, fixture->functions, model_objects, CHECK_PROGRAM_OK, clang,
+                                         model_objects == fixture->objects ? clang : 0, 0, true);
     }
 }
 

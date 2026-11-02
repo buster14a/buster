@@ -170,14 +170,22 @@ definition. Its flags and edges:
   operand too). A condition whose `&&` or `||` leaves an operand unevaluated is
   a constant, a call in that operand among them: `main.c`'s
   `BUSTER_IN_UNIT(X) && argc >= 2 && strcmp(...) == 0` branches. The
-  condition is its source value, as clang's constant evaluation has it, not a
-  builtin query's runtime value: `__builtin_constant_p(n)` of a variable folds
-  nothing, `__builtin_constant_p(5)` does. The condition and the dead arm are
-  left out with their references, their block-scope statics (a `used` one is no
-  root either) and their statement expressions, whose regions are written empty
+  condition is its source value, where clang's constant evaluation would fold
+  it outside a constant context too (`check_control_foldable`): not where it
+  evaluates `__builtin_constant_p` of a variable (`__builtin_constant_p(5)`
+  folds), nor a statement expression with a statement before its value that
+  the evaluator refuses. Such a statement expression keeps both arms; one
+  folds whose statements declare automatic objects initialized with constants
+  or not at all (a variable-length array among them), or are constant
+  expressions. The condition and the dead arm are left out with their
+  references, their block-scope statics (a `used` one is no root either) and
+  their statement expressions, whose regions are written empty
   (`CheckProgram.dropped_ranges`, their token ranges), and the lowering gives
   their locals no place, so a variable-length array declared there needs no
-  allocation. So a function that only a dead arm calls is neither selected nor
+  allocation. A block-scope static declared in a statement expression that its
+  body's references never reach, in an operand a constant condition never
+  evaluates or in `sizeof`'s, isn't selected either
+  (`CheckProgram.region_reached`). So a function that only a dead arm calls is neither selected nor
   lowered, nor checked by code generation's target features (#775):
   `if (BUSTER_VECTOR_PATH(vector))` in a baseline build no longer emits the
   AVX-512 kernel it calls. A variable-length array's address is read only after

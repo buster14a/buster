@@ -248,6 +248,10 @@ struct CheckProgram
     CheckProgramBody* bodies;
     CheckProgramCase* cases;
     CheckProgramRegion* regions;
+    // Per region, whether its body's references reach it (check_program_references, #1108): a statement expression in an
+    // operand that a constant condition never evaluates, in sizeof's or in code the writer left out is reached by none,
+    // and no code emits the block-scope statics it declares (check_program_select_mode). Null in a unit without regions.
+    uint8_t* region_reached;
     uint32_t* references;
     uint32_t* builtin_nodes;
     uint32_t* asm_offsets;
@@ -1213,25 +1217,90 @@ static bool check_control_enterable(const CheckControlWriter* writer, uint32_t a
     return arm != BUSTER_CHECK_NONE && check_control_labeled(writer, low, high);
 }
 
+// Pushes `node` on the fold walk's stack (check_control_foldable), which takes a node a visit: whether it had room.
+static bool check_control_fold_push(const CheckControlWriter* writer, uint32_t* depth, uint32_t visits, uint32_t node)
+{
+    const bool room = *depth < writer->fold_capacity && visits + *depth < writer->fold_capacity;
+    if (room)
+    {
+        writer->fold_stack[(*depth)++] = node;
+    }
+    return room;
+}
+
+// Whether `value` is one that clang's evaluator gives a statement expression's statement (an expression's or an
+// automatic object's initializer's): an integer or floating constant without side effects or faults.
+static bool check_control_fold_value(const CheckValue* value)
+{
+    return (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING) && value->fault == CHECK_FAULT_NONE &&
+           (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+}
+
+// Whether clang's evaluator takes `statement`, of a statement expression before its value (VisitStmtExpr's
+// EvaluateStmt): an empty one, an expression whose value is a constant without side effects, or a declaration of
+// automatic objects whose initializers' values are such constants, or none, a variable-length array's among them. Their
+// expressions go on the walk's stack, for the __builtin_constant_p it may meet. A static or extern declaration, an
+// asm statement, a jump, a typeof's operand or any other statement is none it folds, nor is one without room.
+static bool check_control_fold_statement(const CheckControlWriter* writer, uint32_t statement, uint32_t* depth, uint32_t visits)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const Parser* parser = writer->parser;
+    uint32_t low = 0;
+    uint32_t high = 0;
+    check_control_extent(writer, statement, &low, &high);
+    bool foldable = parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR && (writer->asm_statements == NULL || writer->asm_statements[statement] == BUSTER_CHECK_NONE) &&
+                    (input->evaluation_nodes == NULL || input->evaluation_nodes[statement] == BUSTER_CHECK_NONE);
+    for (uint32_t token = low; foldable && token <= high; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool object = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT;
+        foldable = kind != PARSE_KIND_RETURN && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_BREAK && kind != PARSE_KIND_CONTINUE &&
+                   !(object && (input->static_objects[token] || input->linkage[token] != 0));
+    }
+    // Its declarations' initializers (check_control_drain's plans), or else its expressions, each a value at its token.
+    const uint32_t first_plan = foldable && program->initializers != NULL && check_program_bit(writer->planned, statement) ? writer->plan_first[statement] : BUSTER_CHECK_NONE;
+    for (uint32_t i = first_plan; foldable && i != BUSTER_CHECK_NONE; i = writer->plan_next[i])
+    {
+        const CheckInitializer* plan = program->initializers->plans + i;
+        for (uint32_t part = 0; foldable && part < plan->count; part += 1)
+        {
+            const CheckInitPart* write = plan->parts + part;
+            foldable = write->kind != CHECK_INIT_VALUE ||
+                       (check_control_fold_value(&write->value) && (write->node >= input->graph.count || check_control_fold_push(writer, depth, visits, write->node)));
+        }
+    }
+    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? writer->token_first[statement] : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
+         node = writer->node_next[node])
+    {
+        uint32_t operand = node;
+        while (operand != BUSTER_CHECK_NONE && (input->graph.ops[operand] == CHECK_OP_CAST || input->graph.ops[operand] == CHECK_OP_CONVERT))
+        {
+            operand = input->graph.operand0[operand];
+        }
+        const CheckValue value = operand < input->graph.count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
+        foldable = check_control_fold_value(&value) && check_control_fold_push(writer, depth, visits, operand);
+    }
+    return foldable;
+}
+
 // Whether clang's constant evaluation folds the condition `expression`, whose source value is an integer constant,
 // outside a constant context too (CodeGenFunction::ConstantFoldsToSimpleInteger's Expr::EvaluateAsInt): not where it
 // evaluates a __builtin_constant_p of an argument that is no constant and has no side effect, which the evaluator
-// refuses there, though a constant context's value, the checker's source value, is 0. The walk takes the operands the
-// evaluation takes: not those that a constant condition of &&, || or ?: skips, nor sizeof's, _Alignof's, a query's or
-// a statement expression's. Without room on the writer's fold stack (a node a visit), it says no.
+// refuses there, though a constant context's value, the checker's source value, is 0; nor a statement expression with
+// a statement before its value that the evaluator refuses (check_control_fold_statement). The walk takes the operands
+// the evaluation takes: not those that a constant condition of &&, || or ?: skips, nor sizeof's, _Alignof's or a
+// query's. Without room on the writer's fold stack (a node a visit), it says no.
 static bool check_control_foldable(const CheckControlWriter* writer, uint32_t expression)
 {
     const CheckProgram* program = writer->program;
-    const CheckGraph* graph = &program->input->graph;
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
     const CheckStream* stream = program->stream;
     uint32_t* stack = writer->fold_stack;
     uint32_t depth = 0;
     uint32_t visits = 0;
-    bool foldable = expression < graph->count && writer->fold_capacity != 0;
-    if (foldable)
-    {
-        stack[depth++] = expression;
-    }
+    bool foldable = expression < graph->count && check_control_fold_push(writer, &depth, visits, expression);
     while (foldable && depth != 0)
     {
         const uint32_t node = stack[--depth];
@@ -1245,7 +1314,21 @@ static bool check_control_foldable(const CheckControlWriter* writer, uint32_t ex
             foldable = index == BUSTER_CHECK_NONE || stream->queries[index].source_proof != CHECK_BUILTIN_QUERY_PROOF_ZERO ||
                        (argument < graph->count && (check_stream_flags(stream, argument) & BUSTER_CHECK_SIDE_EFFECT) != 0);
         }
-        else if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF && op != CHECK_OP_STATEMENT_VALUE)
+        else if (op == CHECK_OP_STATEMENT_VALUE)
+        {
+            // Its statements before its value, then its value.
+            const uint32_t token = graph->tokens[node];
+            const uint32_t region = input->region_count != 0 && token < input->token_count ? input->expression_regions[token] : 0;
+            const CheckInputRegion* source = region != 0 && region <= input->region_count ? input->regions + region - 1 : NULL;
+            foldable = source != NULL && source->block < input->token_count && source->result < graph->count;
+            for (uint32_t child = foldable ? writer->first[source->block] : BUSTER_CHECK_NONE; foldable && child != BUSTER_CHECK_NONE; child = writer->next[child])
+            {
+                const bool statement = child != source->final_statement && writer->parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK;
+                foldable = !statement || check_control_fold_statement(writer, child, &depth, visits);
+            }
+            foldable = foldable && check_control_fold_push(writer, &depth, visits, source->result);
+        }
+        else if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
         {
             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             bool truth = false;
@@ -1262,11 +1345,7 @@ static bool check_control_foldable(const CheckControlWriter* writer, uint32_t ex
             for (uint32_t k = 0; foldable && k < BUSTER_ARRAY_LENGTH(operands) + arguments; k += 1)
             {
                 const uint32_t operand = k < BUSTER_ARRAY_LENGTH(operands) ? operands[k] : graph->argument_nodes[graph->argument_offsets[node] + k - BUSTER_ARRAY_LENGTH(operands)];
-                foldable = operand >= graph->count || (depth < writer->fold_capacity && visits + depth < writer->fold_capacity);
-                if (foldable && operand < graph->count)
-                {
-                    stack[depth++] = operand;
-                }
+                foldable = operand >= graph->count || check_control_fold_push(writer, &depth, visits, operand);
             }
         }
     }
@@ -2460,6 +2539,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 else
                 {
                     const CheckProgramRegion* region = program->regions + selected - 1;
+                    program->region_reached[selected - 1] = 1;
                     reference_count = check_program_reference_roots(program, controls + region->first, region->count, epoch,
                                                                     nodes, stack, &depth, seen, references, needed, reference_count);
                 }
@@ -3390,6 +3470,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint32_t switch_capacity = program->case_count / 4;
     program->switches = valid && switch_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, switch_capacity) : 0;
     program->regions = valid && input->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramRegion, input->region_count) : 0;
+    program->region_reached = valid && input->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, input->region_count) : 0;
     program->region_count = input->region_count;
     program->object_symbols = valid ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, (uint64_t)count + 1) : 0;
     program->object_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
@@ -3415,12 +3496,17 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     program->asm_target_count = valid ? (uint32_t)asm_targets : 0;
     program->asm_targets = valid && asm_targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, asm_targets) : 0;
     valid = valid && (body_count == 0 || program->bodies != 0) && (switch_capacity == 0 || program->switches != 0) &&
-            (input->region_count == 0 || program->regions != 0) && program->object_symbols != 0 && program->object_declarations != 0 &&
-            (asm_targets == 0 || program->asm_targets != 0);
-    // An asm statement in an arm the writer leaves out has no entry, which fills its targets: none.
+            (input->region_count == 0 || (program->regions != 0 && program->region_reached != 0)) && program->object_symbols != 0 &&
+            program->object_declarations != 0 && (asm_targets == 0 || program->asm_targets != 0);
+    // An asm statement in an arm the writer leaves out has no entry, which fills its targets: none. No region is reached
+    // before the bodies' references are walked.
     if (valid && asm_targets != 0)
     {
         memset(program->asm_targets, 0xff, asm_targets * sizeof(uint32_t));
+    }
+    if (valid && input->region_count != 0)
+    {
+        memset(program->region_reached, 0, input->region_count);
     }
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {

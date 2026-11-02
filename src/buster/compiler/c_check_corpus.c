@@ -1749,7 +1749,8 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
     {
         const CheckProgramRegion* x = a->regions + i;
         const CheckProgramRegion* y = b->regions + i;
-        equal = x->first == y->first && x->count == y->count && x->body == y->body && x->node == y->node && x->result == y->result;
+        equal = x->first == y->first && x->count == y->count && x->body == y->body && x->node == y->node && x->result == y->result &&
+                a->region_reached[i] == b->region_reached[i];
     }
     for (uint32_t i = 0; equal && i < a->object_count; i += 1)
     {
