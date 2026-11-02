@@ -12351,7 +12351,14 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
         }
         else
         {
+            // A parser diagnostic's location can be before the next token or at the unit's end. Its publication
+            // boundary is where the parser knew it: at the token it read next, so a preprocessing diagnostic between
+            // the previous token and that one sorts first, as clang's interleaved parse does.
+            uint32_t position = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
+            const uint32_t saved = pp->diagnostic_position;
+            pp->diagnostic_position = position;
             pp_diagnose(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic), "%s", text);
+            pp->diagnostic_position = saved;
         }
     }
     if (parser->fatal != PARSE_MESSAGE_NONE)
