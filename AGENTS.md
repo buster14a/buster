@@ -1277,7 +1277,7 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -1296,6 +1296,7 @@ designs and the compilers already built this way.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
+  `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
@@ -1303,6 +1304,18 @@ designs and the compilers already built this way.
   records the actual contract and the remaining declaration/initializer,
   control-flow, corpus and downstream integration still needed
   for #133; this module does not establish whole-compiler semantic coverage.
+- `src/buster/compiler/c_check_request.c` is one request's configuration
+  (#1057): the code generation and layout options the driver refuses
+  (`check_request_scan`, `check_request_refusal`), a client's reading of its
+  options (`check_request_read`, `check_request_parse`), a checked program's
+  target, predefines and identifiers from its preprocessor
+  (`check_request_program_options`) and a measurement's receipt
+  (`check_request_receipt`). `c_check_source_prepare.c` prepares a real file as
+  `-c` does for `benchmark-backend-source`, `benchmark-check-lanes`,
+  `benchmark-lowering-source` and `ir_source_prepare`. Build a new real-source
+  client's options with them, never by copying fields.
+  [The request guide](docs/compilation-requests.md) has the contract,
+  lifetimes, overrides and the series' discontinuities.
 - `src/buster/compiler/calling_convention.c` is the System V AMD64 calling
   convention (#137, contract 3 for #136): every `TypeId`'s classes as clang 23
   classifies them, a row of 16 offsets per type, records and arrays folded

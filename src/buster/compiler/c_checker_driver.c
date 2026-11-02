@@ -1552,6 +1552,48 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
+// The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
+// atom, or null), as -c writes it: its link checked, its temporaries (the jump tables' symbols and their labels', the
+// unit's own) left out, as clang's .L labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error
+// is OBJECT_ERROR_FULL where the link isn't valid or memory ran out before the build. check_driver_object writes it;
+// #1057's parity tests build their preparation's so, to compare it with -c's file byte for byte.
+static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
+{
+    ObjectUnits units = { 0 };
+    ObjectSymbols symbols = { 0 };
+    bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch);
+    // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
+    // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
+    // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
+    const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
+    uint8_t* temporary = valid && (switch_symbols != 0 || code->unit_temporary_count != 0) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
+    valid = valid && ((switch_symbols == 0 && code->unit_temporary_count == 0) || temporary != 0);
+    if (temporary != 0)
+    {
+        memset(temporary, 0, code->link.symbols.count);
+        memset(temporary + code->lowered.case_symbol_base, 1, switch_symbols);
+        for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
+        {
+            temporary[code->unit_temporary[s]] = 1;
+        }
+    }
+    Object result = { .error = OBJECT_ERROR_FULL };
+    if (valid)
+    {
+        const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
+        const ObjectOptions options = {
+            .atom_sections = sections,
+            .atom_section_count = sections != 0 ? code->link.atoms.count : 0,
+            .temporary_symbols = temporary,
+            .temporary_symbol_count = temporary != 0 ? code->link.symbols.count : 0,
+            .debug = debug,
+            .debug_count = debug != NULL ? 1 : 0,
+        };
+        result = object_build(&code->link, &units, &symbols, 0, options, source, scratch);
+    }
+    return result;
+}
+
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
 // units that link into one executable, c_checker_units.c), its link, kept for theirs. Its functions compile on `lanes`
 // (check_program_emit_lanes). With `debug` (-g), the object carries DWARF: the unit the executable's would
@@ -1622,40 +1664,12 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     else if (valid)
     {
-        ObjectUnits units = { 0 };
-        ObjectSymbols symbols = { 0 };
-        valid = link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) &&
-                object_map_symbols(&symbols, &code.link, scratch);
-        // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
-        // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
-        // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
-        const uint32_t switch_symbols = code.lowered.table_count + code.lowered.case_symbol_count;
-        uint8_t* temporary = valid && (switch_symbols != 0 || code.unit_temporary_count != 0) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code.link.symbols.count) : 0;
-        valid = valid && ((switch_symbols == 0 && code.unit_temporary_count == 0) || temporary != 0);
-        if (temporary != 0)
+        const Object object = check_driver_object_build(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch);
+        // The optional dump consumes the same resolved Link as the object writer. Validate and render it
+        // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
+        valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission));
+        if (object.error == OBJECT_ERROR_NONE)
         {
-            memset(temporary, 0, code.link.symbols.count);
-            memset(temporary + code.lowered.case_symbol_base, 1, switch_symbols);
-            for (uint32_t s = 0; s < code.unit_temporary_count; s += 1)
-            {
-                temporary[code.unit_temporary[s]] = 1;
-            }
-        }
-        if (valid)
-        {
-            const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const ObjectOptions options = {
-                .atom_sections = sections,
-                .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
-                .temporary_symbols = temporary,
-                .temporary_symbol_count = temporary != 0 ? code.link.symbols.count : 0,
-                .debug = debug ? &dwarf.object : NULL,
-                .debug_count = debug ? 1 : 0,
-            };
-            const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
-            // The optional dump consumes the same resolved Link as the object writer. Validate and render it
-            // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
-            valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission));
             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
             valid = valid && object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
@@ -2899,19 +2913,18 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         result = 1;
                     }
                     check_clock_mark(stage_clock, CHECK_STAGE_STATIC_DATA);
-                    const CheckProgramOptions program_options = {
+                    // The identifiers, the target and the predefines are the unit's preprocessor's, as every client's
+                    // program takes them (check_request_program_options, #1057).
+                    const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
                         .initializers = &initializers,
                         .asms = &asms,
                         .prepared_data = result == 0 && (emit_object || link) && !prefix_only ? &data : NULL,
-                        .identifiers = pp->table,
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
                         .scalar = scalar,
-                        .target = options->target,
-                        .predefines = &options->predefines,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
-                    };
+                    });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
                          !pp->diagnostic_collection_failed && !pp->history_failed);
@@ -3206,32 +3219,6 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
-// These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
-// still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
-// differently instrumented object. Negative/default forms that do not request those behaviors are left alone.
-static bool check_driver_unsupported_codegen_option(const char* argument)
-{
-    static const char* const exact[] = {
-        "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
-        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
-        "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
-        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
-    };
-    static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
-                                            "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
-                                            "-fprofile-generate-cold-function-coverage=" };
-    bool unsupported = false;
-    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
-    {
-        unsupported = strcmp(argument, exact[i]) == 0;
-    }
-    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
-    {
-        unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
-    }
-    return unsupported;
-}
-
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
@@ -3299,9 +3286,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
     };
     bool missing_value = false;
-    const char* unsupported_codegen = NULL;
-    const char* unsupported_stack_protector = NULL;
-    const char* unsupported_cf_protection = NULL;
+    // The code generation and ABI layout options the driver refuses, read as every client of the request reads them
+    // (c_check_request.c, #1057).
+    CheckRequestScan request = { 0 };
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per core of the CPUs the
     // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
     // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
@@ -3317,13 +3304,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // 1's functions spilling the values it would recompute (#178's comparison: the report's spills and frames).
     bool tier1_report = false;
     bool tier1_gvn = false;
-    // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
-    // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
-    const char* short_enums = NULL;
-    const char* packed_bare = NULL;
-    const char* packed_value = NULL;
-    const char* invalid_pack = NULL;
-    bool has_pack_value = false;
     for (int i = 0; filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
@@ -3334,41 +3314,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         if (!valued)
         {
             const char* argument = arguments[i];
-            if (strcmp(argument, "-fshort-enums") == 0 || strcmp(argument, "-fno-short-enums") == 0)
-            {
-                short_enums = strcmp(argument, "-fshort-enums") == 0 ? argument : NULL;
-            }
-            else if (strcmp(argument, "-fpack-struct") == 0 || strcmp(argument, "-fno-pack-struct") == 0)
-            {
-                packed_bare = strcmp(argument, "-fpack-struct") == 0 ? argument : NULL;
-            }
-            else if (strncmp(argument, "-fpack-struct=", sizeof("-fpack-struct=") - 1) == 0)
-            {
-                const char* digits = argument + sizeof("-fpack-struct=") - 1;
-                uint32_t base = 10;
-                if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X' || digits[1] == 'b' || digits[1] == 'B'))
-                {
-                    base = digits[1] == 'x' || digits[1] == 'X' ? 16 : 2;
-                    digits += 2;
-                }
-                else if (digits[0] == '0')
-                {
-                    base = 8;
-                }
-                bool valid = *digits != 0;
-                uint64_t value = 0;
-                for (const char* digit = digits; *digit != 0; digit += 1)
-                {
-                    const uint32_t number = *digit >= '0' && *digit <= '9' ? (uint32_t)(*digit - '0') :
-                                            *digit >= 'a' && *digit <= 'f' ? (uint32_t)(*digit - 'a' + 10) :
-                                            *digit >= 'A' && *digit <= 'F' ? (uint32_t)(*digit - 'A' + 10) : UINT32_MAX;
-                    valid &= number < base && value <= (UINT32_MAX - (uint64_t)number) / base;
-                    value = valid ? value * base + number : 0;
-                }
-                has_pack_value = true;
-                invalid_pack = valid ? NULL : argument;
-                packed_value = value == 0 && valid ? NULL : argument;
-            }
             if (strcmp(argument, "-Wreturn-type") == 0 || strcmp(argument, "-Werror=return-type") == 0)
             {
                 return_warning = true;
@@ -3412,21 +3357,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 libraries.directories[libraries.directory_count++] = text;
             }
         }
-        else if (strcmp(arguments[i], "-fno-stack-protector") == 0 || strcmp(arguments[i], "-fstack-protector") == 0 ||
-                 strcmp(arguments[i], "-fstack-protector-strong") == 0 || strcmp(arguments[i], "-fstack-protector-all") == 0)
+        else if (!check_request_scan(&request, arguments[i]))
         {
-            unsupported_stack_protector = strcmp(arguments[i], "-fno-stack-protector") == 0 ? NULL : arguments[i];
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-fcf-protection") == 0 || strncmp(arguments[i], "-fcf-protection=", 16) == 0)
-        {
-            unsupported_cf_protection = strcmp(arguments[i], "-fcf-protection=none") == 0 ? NULL : arguments[i];
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (check_driver_unsupported_codegen_option(arguments[i]))
-        {
-            // Values of options above are already consumed, so an output name like -pg is never treated as a flag.
-            unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : arguments[i];
+            // An option that asks for code generation the driver doesn't implement, which the preprocessor doesn't model:
+            // refused below (check_request_refusal). The stack protector's, -fcf-protection's and the layout options go
+            // on to pp_parse_options as the other options do, for their predefined macros. Values of options above are
+            // already consumed, so an output name like -pg is never treated as a flag.
         }
         else if (strcmp(arguments[i], "--verify") == 0)
         {
@@ -3536,8 +3472,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
     }
-    // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
-    unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
+    // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
+    // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested.
+    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, false);
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
@@ -3546,13 +3483,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* output = 0;
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
-    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+    const bool parsed = reserved && arguments_ready && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value && !invalid_lanes && !invalid_id_order &&
                         pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
-    // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
-    // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
-    const char* unsupported_pic = parsed && (emit_object || link) ?
-        (options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
-         options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
+    // The rest of what the request asks for that the driver doesn't implement, refused before any unit or output is
+    // opened: position-independent code when it emits code (the parser already resolves the last PIC/PIE option; Tier 0
+    // can't yet emit shared-library-safe symbol and TLS accesses, #811; non-emitting actions keep PIC), the ABI layouts
+    // the checker doesn't implement, never emitted silently, and a language or target it doesn't take.
+    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -3608,27 +3545,22 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         arena_report_failure(stderr, "checker arguments", (uint64_t)(count + 1) * sizeof(char*));
     }
-    else if (unsupported_codegen != NULL)
+    else if (codegen.error != CHECK_REQUEST_ACCEPTED)
     {
-        fprintf(stderr, "error: unsupported code generation option '%s'\n", unsupported_codegen);
+        fprintf(stderr, "error: ");
+        check_request_describe(stderr, codegen);
+        fprintf(stderr, "\n");
     }
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
-    else if (unsupported_pic != NULL)
+    else if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
-        fprintf(stderr, "error: unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)\n", unsupported_pic);
-    }
-    else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
-    {
-        const char* unsupported = invalid_pack != NULL ? invalid_pack : short_enums != NULL ? short_enums : has_pack_value ? packed_value : packed_bare;
-        fprintf(stderr, "error: unsupported option '%s' (the checker does not implement its ABI layout)\n", unsupported);
-    }
-    else if (!check_input_target_supported(&options))
-    {
-        fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
+        fprintf(stderr, "error: ");
+        check_request_describe(stderr, refusal);
+        fprintf(stderr, "\n");
     }
     else if ((tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
     {

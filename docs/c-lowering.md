@@ -374,8 +374,11 @@ compare 348 files.
 ./build/compiler benchmark-lowering-source [--passes N] [preprocessor options] file...
 ```
 
-checks each file as the driver does, outside the time, then times in turns the
-two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
+prepares each file as `-c` does (the shared preparation, [the request
+guide](compilation-requests.md): its options refused as the driver refuses
+them, its program for their target and predefines, `-c`'s target-feature check
+of its selection), outside the time, prints its configuration's receipt, then
+times in turns the two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
 the static data's publication, section/symbol preparation and building the
 object in memory. Unwind generation and verification are disabled in this
 benchmark; preprocessing, checking, program/static-data preparation, the outer

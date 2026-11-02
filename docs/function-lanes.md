@@ -384,7 +384,11 @@ emission of a file's checked program on each lane count and by the rule, with
 the steps apart (`CheckProgramLanes.timing`). The program is the one `-c`
 compiles for the target its options give (`-march` and the `-m` flags, and the
 predefines a function's `target` attribute resolves against); before #1045 it
-was always the baseline x86-64 profile's. `test-checker` runs it on a unit of
+was always the baseline x86-64 profile's. Since #1057 the file is prepared by
+the preparation the source clients share ([the request
+guide](compilation-requests.md)), which refuses what the driver refuses and
+runs `-c`'s target-feature check, and the report gives its configuration's
+receipt. `test-checker` runs it on a unit of
 512-bit vectors (`c_check_lanes_benchmark_test.c`), measured with
 `-march=znver5` and refused for the baseline profile, as `-c` refuses it, and
 on a baseline unit whose function's `target("avx2")` attribute takes a 32-byte

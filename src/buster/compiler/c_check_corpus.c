@@ -948,14 +948,12 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     if (path->initialized)
     {
         path->phase = "control";
-        const CheckProgramOptions options = {
+        // The identifiers, the target and the predefines are the unit's preprocessor's (check_request_program_options).
+        const CheckProgramOptions options = check_request_program_options(pp, (CheckProgramOptions){
             .initializers = &path->initializers,
             .asms = &path->asms,
-            .identifiers = pp->table,
             .scalar = BUSTER_SCALAR_PATH(scalar),
-            .target = pp->options.target,
-            .predefines = &pp->options.predefines,
-        };
+        });
         path->programmed = check_program(&path->program, view, &path->input, &path->stream, &path->types, options,
                                          &path->output_arena, &path->scratch);
         path->resource |= path->program.status == CHECK_PROGRAM_RESOURCE;
@@ -1548,15 +1546,12 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
                  check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, parser->options.scalar, &path->output_arena, &path->scratch);
-    CheckProgramOptions options = {
+    CheckProgramOptions options = check_request_program_options(pp, (CheckProgramOptions){
         .initializers = &path->initializers,
         .asms = &path->asms,
-        .identifiers = pp->table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
-        .target = pp->options.target,
-        .predefines = &pp->options.predefines,
-    };
+    });
     valid = valid && check_program(&program, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&selected, &program, &data, false, &path->output_arena, &path->scratch);
     options.unselected_operands = true;

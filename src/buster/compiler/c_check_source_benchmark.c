@@ -620,12 +620,18 @@ static int run_checker_source_benchmark(int count, char** arguments)
             own[used++] = arguments[i];
         }
     }
+    // The options read and refused as the driver's -fsyntax-only reads and refuses them (check_request_read, #1057).
     PPOptions pp_options;
     const char* file = 0;
-    const char* output_file = 0;
-    bool markers = false;
+    CheckRequestRefusal refusal = { .error = CHECK_REQUEST_ACCEPTED };
     valid = valid && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES && iterations <= 1000000 && after <= 1000 &&
-            pp_parse_options((int)used, own, &pp_options, &option_arena, &file, &output_file, &markers) && output_file == 0 && file != 0;
+            check_request_read(&pp_options, &refusal, &file, own, used, false, &option_arena) && file != 0;
+    if (refusal.error != CHECK_REQUEST_ACCEPTED)
+    {
+        fprintf(stderr, "error: ");
+        check_request_describe(stderr, refusal);
+        fprintf(stderr, "\n");
+    }
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];

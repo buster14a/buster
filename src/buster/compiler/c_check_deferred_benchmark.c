@@ -132,22 +132,17 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     static Preprocessor pp;
     static Parser parser;
     Arena option_arena = arena_reserve(UINT64_C(1) << 24);
-    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
-    bool valid = own != 0;
-    for (uint32_t i = 0; valid && i < option_count; i += 1)
-    {
-        own[i] = options[i];
-    }
+    // The options read and refused as the driver's -fsyntax-only reads and refuses them (check_request_parse, #1057).
     PPOptions pp_options;
     const char* input = 0;
-    const char* output_file = 0;
-    bool markers = false;
-    if (valid)
+    CheckRequestRefusal refusal = { .error = CHECK_REQUEST_ACCEPTED };
+    bool valid = check_request_parse(&pp_options, &refusal, &input, file, options, option_count, false, &option_arena);
+    if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
-        own[option_count] = (char*)file;
+        fprintf(stderr, "error: ");
+        check_request_describe(stderr, refusal);
+        fprintf(stderr, "\n");
     }
-    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
-    pp_options.semantic_pragmas = true;
     valid = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
     Arena arenas[4] = { arena_reserve(UINT64_C(1) << 36), arena_reserve(UINT64_C(1) << 34), arena_reserve(UINT64_C(1) << 36), arena_reserve(UINT64_C(1) << 36) };
     static uint64_t parses[BUSTER_CHECK_SOURCE_MAX_PASSES];

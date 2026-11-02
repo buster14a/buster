@@ -5851,6 +5851,7 @@ static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
+static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
@@ -5877,6 +5878,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
+    bool requests = false;
     bool sizeof_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -5937,6 +5939,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             sizeof_only = true;
         }
+        else if (strcmp(argv[i], "--requests") == 0)
+        {
+            requests = true;
+        }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
             clang = argv[++i];
@@ -5962,9 +5968,9 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || sizeof_only));
+                                                           program_library || embed_initializers || requests || sizeof_only));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5987,6 +5993,15 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && embed_initializers)
         {
             check_test_embed_initializers(&test, clang);
+        }
+        else if (initialized && requests)
+        {
+            // #1057: one request's configuration and the shared source preparation against the driver, then the source
+            // benchmarks' preparations, which share them.
+            check_test_requests(&test);
+            check_test_lowering_source_benchmark(&test);
+            check_test_backend_source_benchmark(&test);
+            check_test_check_lanes_benchmark(&test);
         }
         else if (initialized && program_initializers)
         {
@@ -6460,6 +6475,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_check_lanes_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_requests(&test);
             }
             if (check_test_takes())
             {

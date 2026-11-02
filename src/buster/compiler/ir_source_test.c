@@ -98,7 +98,7 @@ static IrType ir_source_result(const Tier0Function* function, const CheckProgram
     return class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[class];
 }
 
-// Checks, selects and emits `file` read with `options` as benchmark-backend-source does (backend_source_file), into
+// Prepares, selects and emits `file` read with `options` as benchmark-backend-source does (backend_source_file), into
 // `*result`: its functions' streams in `lowered`, their table and names in `arena`. Both arenas keep what they hold
 // for the caller; everything else the file needed is released. With `keep_program`, the program is kept for a run of
 // it too: the emission's link and its symbols' sizes (IrSourceFile.link and .sizes), and its functions' labels
@@ -106,65 +106,42 @@ static IrType ir_source_result(const Tier0Function* function, const CheckProgram
 BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena, bool keep_program)
 {
     memset(result, 0, sizeof(*result));
-    // The file's own state, on an arena of its own that the file's end releases: an entry point, which main.c's other
-    // units see as an inline definition, holds no static object.
-    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
-    InternTable* identifiers = BUSTER_ARENA_PUSH_ARRAY(&option_arena, InternTable, 1);
-    Preprocessor* pp = BUSTER_ARENA_PUSH_ARRAY(&option_arena, Preprocessor, 1);
-    Parser* parser = BUSTER_ARENA_PUSH_ARRAY(&option_arena, Parser, 1);
-    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
-    const bool allocated = identifiers != 0 && pp != 0 && parser != 0 && own != 0;
-    bool valid = allocated;
-    for (uint32_t i = 0; valid && i < option_count; i += 1)
-    {
-        own[i] = options[i];
-    }
-    PPOptions pp_options = {0};
-    const char* input = 0;
-    const char* output_file = 0;
-    bool markers = false;
-    if (valid)
-    {
-        own[option_count] = (char*)file;
-    }
-    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
-    pp_options.semantic_pragmas = true;
-    CheckCorpusPath path = { 0 };
-    const bool preprocessed = valid && intern_initialize(identifiers) && pp_initialize(pp, &pp_options, identifiers) && pp_run(pp, input);
-    const bool accepted = preprocessed && check_corpus_check_policy(&path, parser, pp, false, pp_options.quiet);
-    const bool exhausted = preprocessed && !accepted && path.resource;
-    CheckDataPrepared data = { 0 };
-    CheckProgram program = { 0 };
-    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser->options.scalar, &path.output_arena, &path.scratch);
-    // The intern table as allocated (pp_initialize keeps it as pp->table): nothing here reads pp unless it was.
-    const CheckProgramOptions program_options = {
-        .initializers = &path.initializers,
-        .asms = &path.asms,
-        .identifiers = identifiers,
-        .initializer_references = data.references,
-        .initializer_reference_count = data.reference_count,
-        .target = pp_options.target,
-    };
-    prepared = prepared && check_program(&program, parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
-    const bool unsupported = accepted && !prepared && program.status == CHECK_PROGRAM_UNSUPPORTED;
-    CheckProgramSelection selected = { 0 };
+    // The file prepared as -c prepares it (c_check_source_prepare.c, #1057), as the source benchmarks prepare theirs:
+    // its options read and refused as the driver reads and refuses them, checked as the driver checks it (the vector
+    // path), its checked program made with the options' target and the predefines its functions' target attributes
+    // resolve against (CheckProgram.body_targets, IrSourceFunction.target_features), its referenced definitions
+    // selected and their target features checked. The source's state lives in an arena of its own that the file's end
+    // releases: an entry point, which main.c's other units see as an inline definition, holds no static object.
+    CheckSource source;
+    const bool chosen = check_source_prepare(&source, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true });
+    const bool allocated = source.pp != 0;
+    const bool valid = source.stage != CHECK_SOURCE_OPTIONS;
+    const bool preprocessed = valid && source.stage != CHECK_SOURCE_PREPROCESS;
+    const bool accepted = preprocessed && source.stage != CHECK_SOURCE_CHECK;
+    const bool exhausted = preprocessed && !accepted && source.path.resource;
+    const bool prepared = accepted && source.stage != CHECK_SOURCE_PROGRAM;
+    const bool unsupported = accepted && !prepared && source.program.status == CHECK_PROGRAM_UNSUPPORTED;
+    // -c's target-feature errors leave the file out, as -c refuses it; the check's running out of memory fails it.
+    const bool features = prepared && source.stage == CHECK_SOURCE_TARGET_FEATURES && source.target_feature_errors != 0;
+    const Parser* parser = source.parser;
+    const InternTable* identifiers = allocated ? source.pp->table : 0;
+    CheckCorpusPath* path = &source.path;
+    const CheckProgramSelection* selected = &source.selected;
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
-    const bool chosen = prepared && bytes.base != 0 &&
-                        check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    const bool emitted = chosen && check_program_emit(&code, &selected.program, parser, identifiers, selected.data.capacity, false, lowered, &bytes,
-                                                      &path.scratch, NULL, NULL, false, false);
+    const bool emitted = chosen && bytes.base != 0 && check_program_emit(&code, &selected->program, parser, identifiers, selected->data.capacity, false, lowered,
+                                                                         &bytes, &path->scratch, NULL, NULL, false, false);
     const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
     uint8_t* defined = 0;
-    const bool accessed = emitted && check_program_access(&code, &selected.program, lowered, &path.scratch, &defined);
-    const uint32_t count = accessed ? selected.program.body_count : 0;
+    const bool accessed = emitted && check_program_access(&code, &selected->program, lowered, &path->scratch, &defined);
+    const uint32_t count = accessed ? selected->program.body_count : 0;
     result->functions = accessed ? BUSTER_ARENA_PUSH_ARRAY(arena, IrSourceFunction, (uint64_t)count + 1) : 0;
     bool named = result->functions != 0;
     for (uint32_t b = 0; named && b < count; b += 1)
     {
         const Tier0Function* function = &code.lowered.functions[b];
         const bool naked = code.lowered.asms.naked != 0 && code.lowered.asms.naked[b].planned;
-        const SymbolId symbol = selected.program.object_symbols[selected.program.bodies[b].object];
+        const SymbolId symbol = selected->program.object_symbols[selected->program.bodies[b].object];
         const NameId name = code.link.symbols.name[symbol];
         const uint32_t length = code.link.names.length[name];
         uint8_t* spelling = arena_push(arena, (uint64_t)length + 1, 1);
@@ -173,15 +150,15 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
         {
             memcpy(spelling, code.link.names.bytes[name], length);
             spelling[length] = 0;
-            const uint32_t body_target = selected.program.body_targets != 0 ? selected.program.body_targets[b] : 0;
-            const X86Target target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? selected.program.target : selected.program.targets[body_target - 1];
+            const uint32_t body_target = selected->program.body_targets != 0 ? selected->program.body_targets[b] : 0;
+            const X86Target target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? selected->program.target : selected->program.targets[body_target - 1];
             result->functions[b] = (IrSourceFunction){
                 .function = function,
                 .name = spelling,
                 .name_length = length,
                 .symbol_count = function->symbol_count != 0 ? function->symbol_count : code.link.symbols.count,
                 .symbol = symbol,
-                .result_type = ir_source_result(function, &selected.program, b, naked),
+                .result_type = ir_source_result(function, &selected->program, b, naked),
                 .target_features = target.features,
             };
         }
@@ -194,18 +171,18 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     // (CheckProgramLowered.label_symbols), each function's after the last's. An ifunc, whose resolver a run would have
     // to call where its symbol is called, which the IR's interpreter doesn't, leaves the file out.
     bool ifunc = false;
-    for (uint32_t k = 0; keep_program && named && k < selected.program.alias_count; k += 1)
+    for (uint32_t k = 0; keep_program && named && k < selected->program.alias_count; k += 1)
     {
-        ifunc |= selected.program.aliases[k].kind == CHECK_PROGRAM_IFUNC;
+        ifunc |= selected->program.aliases[k].kind == CHECK_PROGRAM_IFUNC;
     }
     named = named && !ifunc;
     bool kept = true;
     if (keep_program && named)
     {
         CheckDataResult published = { 0 };
-        kept = check_data_publish(&selected.data, &path.types, selected.program.stream, selected.program.object_symbols, selected.program.object_count, &code.link, 0,
-                                  &bytes, &path.scratch, &published) &&
-               check_program_define_aliases(&code, &selected.program);
+        kept = check_data_publish(&selected->data, &path->types, selected->program.stream, selected->program.object_symbols, selected->program.object_count, &code.link, 0,
+                                  &bytes, &path->scratch, &published) &&
+               check_program_define_aliases(&code, &selected->program);
         Link* link = kept ? BUSTER_ARENA_PUSH_ARRAY(arena, Link, 1) : 0;
         const uint32_t label_count = code.lowered.label_symbol_count;
         SymbolId* labels = kept && label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, label_count) : 0;
@@ -220,7 +197,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
             }
             // The program's symbols come first in the link, symbol s + 1 its symbol s's (check_program_emit).
             memset(sizes, 0, (uint64_t)code.link.symbols.count * sizeof(uint64_t));
-            const CheckProgram* checked = &selected.program;
+            const CheckProgram* checked = &selected->program;
             for (uint32_t s = 0; s < checked->symbol_count && s + 1 < code.link.symbols.count; s += 1)
             {
                 const uint32_t declaration = checked->object_declarations[checked->symbol_objects[s]];
@@ -258,12 +235,16 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     named = named && kept;
     result->count = named ? count : 0;
     result->tokens = accepted ? parser->tokens.count : 0;
-    const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
+    const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen && !features) ||
                         (chosen && !emitted && !refused) || (emitted && !named && !ifunc);
     result->status = failed ? IR_SOURCE_FAILED : named ? IR_SOURCE_PREPARED : IR_SOURCE_LEFT_OUT;
     if (!allocated)
     {
         snprintf(result->reason, sizeof(result->reason), "memory ran out for its preprocessor and parser");
+    }
+    else if (!valid && source.refusal.error != CHECK_REQUEST_ACCEPTED)
+    {
+        check_request_describe_text(source.refusal, result->reason, sizeof(result->reason));
     }
     else if (!valid)
     {
@@ -279,16 +260,22 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     }
     else if (!accepted)
     {
-        snprintf(result->reason, sizeof(result->reason), "rejected: %s:%u:%u: %s", path.file, path.line, path.column, path.message);
+        snprintf(result->reason, sizeof(result->reason), "rejected: %s:%u:%u: %s", path->file, path->line, path->column, path->message);
     }
     else if (!prepared)
     {
         snprintf(result->reason, sizeof(result->reason), "%s",
                  unsupported ? "its checked program has an unsupported C statement" : "its static data or checked program couldn't be prepared");
     }
+    else if (features)
+    {
+        snprintf(result->reason, sizeof(result->reason), "rejected: code generation's target-feature check: %u errors, as -c reports them",
+                 source.target_feature_errors);
+    }
     else if (!chosen)
     {
-        snprintf(result->reason, sizeof(result->reason), "its definitions couldn't be selected");
+        snprintf(result->reason, sizeof(result->reason), "%s", source.stage == CHECK_SOURCE_SELECT ? "its definitions couldn't be selected" :
+                                                                                                        "its definitions' target features couldn't be checked");
     }
     else if (!emitted)
     {
@@ -303,14 +290,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
         snprintf(result->reason, sizeof(result->reason), "%s", kept ? "memory ran out for its functions' names" : "its program couldn't be kept for a run");
     }
     arena_release(&bytes);
-    check_corpus_close(&path);
-    if (valid)
-    {
-        parse_release(parser);
-        pp_release(pp);
-        intern_release(identifiers);
-    }
-    arena_release(&option_arena);
+    check_source_release(&source);
 }
 
 // What the command found, over every file.

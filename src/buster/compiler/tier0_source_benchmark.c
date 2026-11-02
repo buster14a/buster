@@ -8,10 +8,13 @@
 //   build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 //                                           [--after-scalar MS] [preprocessor options] file...
 //
-// Each file is checked as the driver checks it (the vector path, check_corpus_check_policy), and its reachable
-// definitions (check_program_select_mode's C_LOWERING_REACHABLE) lowered and emitted by check_program_emit, outside the time,
-// for the target its options give (-march and the -m features: PPOptions.target), and each function for its target
-// attribute's, as -c compiles them (#1041).
+// Each file is prepared as -c prepares it (check_source_prepare, #1057: its options read and refused as the driver reads
+// and refuses them, checked as the driver checks it, the vector path's), and its reachable definitions
+// (check_program_select_mode's C_LOWERING_REACHABLE), their target features checked as -c checks them, lowered and
+// emitted by check_program_emit, outside the time, for the target its options give (-march and the -m features:
+// PPOptions.target), and each function for its target attribute's, as -c compiles them (#1041). Each file's line
+// before its outcome gives the configuration measured (check_request_receipt): its digest, its resolved target and
+// language, -c's own output requirements, and what the benchmark does otherwise (no unwind tables or rows).
 // Admission ends at function emission: static-data publication and object-section placement (including descriptors
 // for assembled file-scope atoms) are outside this benchmark. A valid typed function stream can be measured when
 // whole-object publication is unsupported; use the driver/corpus object checks to establish that eligibility.
@@ -20,8 +23,8 @@
 // benchmark-backend measures generated ones: both paths must give each function the same records, then the medians of
 // BUSTER_TIER0_BENCHMARK_PASSES passes per typed entry and per record, and the share of entries the vector path
 // defers. A file the checker rejects, or whose checked program or emission refuses a feature by name
-// (CHECK_PROGRAM_UNSUPPORTED), is left out with the reason. Any other failure fails the benchmark, with the file left
-// out: a file that doesn't preprocess, a resource that runs out, an emission that fails otherwise, and a function that
+// (CHECK_PROGRAM_UNSUPPORTED), or whose target features -c's check refuses, is left out with the reason. Any other
+// failure fails the benchmark, with the file left out: options the driver refuses, a file that doesn't preprocess, a resource that runs out, an emission that fails otherwise, and a function that
 // doesn't join the corpus (the paths disagree on it, Tier 0 refuses it now, or memory runs out). So does a run with no
 // function to measure, and a measurement whose runs failed on a function (tier0_benchmark_measure). Run it under the
 // 9700X's lock pinned to one CPU (taskset -c 2 ...). It is a benchmark outside the compile path, with no vector path of
@@ -65,72 +68,36 @@ struct BackendSource
 // `refuse`, for the tests, turns the file's emission into a refusal by name, as the backend's own refusals are made.
 static bool backend_source_file(BackendSource* source, const char* file, char** options, uint32_t option_count, bool refuse)
 {
-    static InternTable identifiers;
-    static Preprocessor pp;
-    static Parser parser;
-    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
-    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
-    bool valid = own != 0;
-    for (uint32_t i = 0; valid && i < option_count; i += 1)
-    {
-        own[i] = options[i];
-    }
-    PPOptions pp_options = { 0 };
-    const char* input = 0;
-    const char* output_file = 0;
-    bool markers = false;
-    if (valid)
-    {
-        own[option_count] = (char*)file;
-    }
-    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
-    pp_options.semantic_pragmas = true;
-    CheckCorpusPath path = { 0 };
-    const bool preprocessed = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
-    const bool accepted = preprocessed && check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
-    // The checker's rejection of the file is a result; its running out of a resource is the benchmark's failure.
-    const bool exhausted = preprocessed && !accepted && path.resource;
-    CheckDataPrepared data = { 0 };
-    CheckProgram program = { 0 };
-    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
-    const CheckProgramOptions program_options = {
-        .initializers = &path.initializers,
-        .asms = &path.asms,
-        .identifiers = pp.table,
-        .initializer_references = data.references,
-        .initializer_reference_count = data.reference_count,
-        // The options' target (-march, the -m features), as -c and ir_source_prepare compile for it: without it the
-        // functions would be the baseline profile's, and a unit of wider vectors would be refused (#1041). And the
-        // options it came from, against which a function's target attribute resolves (CheckProgram.body_targets), as -c
-        // resolves it: without them every function would be the unit's target.
-        .target = pp_options.target,
-        .predefines = &pp_options.predefines,
-    };
-    prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
-    // A statement the checked program refuses by name leaves the file out, as -c refuses it.
-    const bool unsupported = accepted && !prepared && program.status == CHECK_PROGRAM_UNSUPPORTED;
-    CheckProgramSelection selected = { 0 };
+    // The file prepared as -c prepares it (c_check_source_prepare.c, #1057), outside the time: its options read and
+    // refused as the driver reads and refuses them, its checked program made for the options' target (-march, the -m
+    // features), with the predefines its functions' target attributes resolve against (#1041), its referenced
+    // definitions selected and their target features checked. The checker's rejection of the file, a refusal by name
+    // and -c's target-feature errors are results; a refused request, a file that doesn't preprocess and a resource
+    // that runs out are the benchmark's failures.
+    CheckSource prepared;
+    const bool chosen = check_source_prepare(&prepared, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true });
+    const bool valid = prepared.stage != CHECK_SOURCE_OPTIONS || prepared.refusal.error != CHECK_REQUEST_ACCEPTED;
+    const CheckProgramSelection* selected = &prepared.selected;
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
-    const bool chosen = prepared && bytes.base != 0 &&
-                        check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
+    const bool reserved = bytes.base != 0;
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    bool emitted = chosen && check_program_emit(&code, &selected.program, &parser, pp.table, selected.data.capacity, false, &source->lowered, &bytes,
-                                                &path.scratch, NULL, NULL, false, false);
+    bool emitted = chosen && reserved && check_program_emit(&code, &selected->program, prepared.parser, prepared.pp->table, selected->data.capacity, false,
+                                                            &source->lowered, &bytes, &prepared.path.scratch, NULL, NULL, false, false);
     if (emitted && refuse)
     {
         emitted = false;
         code.status = CHECK_PROGRAM_UNSUPPORTED;
         code.reason = "the tests' injection";
     }
-    const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
-    const uint32_t count = selected.program.body_count;
+    const bool refused = chosen && reserved && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
+    const uint32_t count = selected->program.body_count;
     // Every function the emission compiled must join the corpus: one Tier 0 refuses now, or that the paths disagree
     // on, or for which memory runs out, fails the file.
     const Tier0BenchmarkCorpus before = source->corpus;
     Tier0BenchmarkAdd outcome = TIER0_BENCHMARK_ADDED;
     uint32_t b = 0;
     uint8_t* defined = 0;
-    bool added = emitted && check_program_access(&code, &selected.program, &source->lowered, &path.scratch, &defined);
+    bool added = emitted && check_program_access(&code, &selected->program, &source->lowered, &prepared.path.scratch, &defined);
     outcome = emitted && !added ? TIER0_BENCHMARK_MEMORY : outcome;
     while (added && b < count)
     {
@@ -140,31 +107,24 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     }
     // A file is measured whole or not at all: one that fails partway takes its functions out again.
     source->corpus = emitted && !added ? before : source->corpus;
-    const bool failed = (valid && !preprocessed) || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
-                        (chosen && !emitted && !refused) || (emitted && !added);
+    const bool failed = valid && (check_source_failed(&prepared) || (chosen && !reserved) || (chosen && reserved && !emitted && !refused) || (emitted && !added));
     source->failures += failed;
     source->left_out += valid && !failed && !added;
     source->files += added;
-    if (valid && !preprocessed)
+    if (chosen)
     {
-        printf("backend-source: file=%s failed=\"it couldn't be preprocessed\"\n", file);
+        // The configuration measured (#1057): -c's for these options, but for the emission's tables and rows, which -c
+        // writes and the benchmark's emission doesn't.
+        const CheckRequestReceipt receipt = check_request_receipt(prepared.pp, "path:vector,selection:reachable,unwind:off,debug:off");
+        printf("backend-source: file=%s %s\n", file, receipt.text);
     }
-    else if (valid && exhausted)
+    if (valid && !chosen)
     {
-        printf("backend-source: file=%s failed=\"the checker ran out of a resource\"\n", file);
+        check_source_report(stdout, "backend-source", file, &prepared);
     }
-    else if (valid && !accepted)
+    else if (valid && !reserved)
     {
-        printf("backend-source: file=%s rejected=\"%s:%u:%u: %s\"\n", file, path.file, path.line, path.column, path.message);
-    }
-    else if (valid && !prepared)
-    {
-        printf("backend-source: file=%s %s\n", file,
-               unsupported ? "unsupported=\"its checked program: an unsupported C statement\"" : "failed=\"its static data or checked program couldn't be prepared\"");
-    }
-    else if (valid && !chosen)
-    {
-        printf("backend-source: file=%s failed=\"its definitions couldn't be selected\"\n", file);
+        printf("backend-source: file=%s failed=\"its arenas couldn't be reserved\"\n", file);
     }
     else if (valid && !emitted)
     {
@@ -183,11 +143,7 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
                source->corpus.entries - before.entries, source->corpus.records - before.records);
     }
     arena_release(&bytes);
-    check_corpus_close(&path);
-    parse_release(&parser);
-    pp_release(&pp);
-    intern_release(&identifiers);
-    arena_release(&option_arena);
+    check_source_release(&prepared);
     return valid;
 }
 
