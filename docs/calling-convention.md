@@ -1820,6 +1820,31 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   base's; alone, the vector paths are up to 4% faster (the batches of 4 and
   `assign`), and the twin as fast. The clock is 5.55 GHz throughout.
 
+## Other calling conventions
+
+The type table keeps a function type's calling convention from its attribute
+(`ms_abi`, `vectorcall`, `regcall`, `preserve_most`, `preserve_all`,
+`preserve_none`, or `sysv_abi`, which is System V's: `TypeFunctionABI`), and
+the module classifies and assigns System V's alone. clang 23 on x86-64 Linux
+compiles each of the six. `ms_abi`, `vectorcall`, `regcall` and
+`preserve_none` pass arguments in registers of their own. `preserve_most` and
+`preserve_all` pass System V's arguments in System V's registers, and their
+callee keeps more registers than System V's callee does.
+
+The producer refuses each convention by name
+(`check_lower_convention`):
+
+- a definition of any of the six;
+- a call through a function type of any of the first four, directly or
+  through a pointer.
+
+A call of a `preserve_most` or `preserve_all` function compiles as a System V
+call, since its callee keeps everything a System V caller expects.
+`test-checker-driver` checks each refusal against clang, which compiles every
+one of them. It also runs both paths' calls of clang's `preserve_most` and
+`preserve_all` callees against clang's build, with values live across the
+calls.
+
 ## Next steps
 
 - **#136's use:** call sequences, prologues and `va_arg` from these

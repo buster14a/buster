@@ -770,6 +770,30 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
     check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
 }
 
+// A function type's calling convention that the backend doesn't compile, named for the diagnostic, or NULL for
+// System V's (#137, #147): clang 23 compiles ms_abi, vectorcall, regcall and preserve_none on x86-64 Linux with their
+// own argument registers, and preserve_most and preserve_all with System V's arguments but more registers preserved by
+// the callee. A definition of any of them is refused, and so is a call through any but the last two, whose callees
+// keep whatever a System V caller expects. `call` is whether the type is a call's callee's rather than a definition's.
+static const char* check_lower_convention(const TypeTable* types, TypeId function, bool call)
+{
+    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    const char* result = NULL;
+    switch (convention)
+    {
+        case TYPE_FUNCTION_ABI_MICROSOFT: result = "functions of the ms_abi calling convention"; break;
+        case TYPE_FUNCTION_ABI_VECTOR: result = "functions of the vectorcall calling convention"; break;
+        case TYPE_FUNCTION_ABI_REG: result = "functions of the regcall calling convention"; break;
+        case TYPE_FUNCTION_ABI_PRESERVE_NONE: result = "functions of the preserve_none calling convention"; break;
+        case TYPE_FUNCTION_ABI_PRESERVE_MOST: result = call ? NULL : "functions of the preserve_most calling convention"; break;
+        case TYPE_FUNCTION_ABI_PRESERVE_ALL: result = call ? NULL : "functions of the preserve_all calling convention"; break;
+        case TYPE_FUNCTION_ABI_SYSV:
+        case TYPE_FUNCTION_ABI_COUNT:
+        case TYPE_FUNCTION_ABI_INVALID: break;
+    }
+    return result;
+}
+
 // A vector type's bytes, where Tier 0 takes its values (BUSTER_TYPED_CLASS_VECTOR): GNU C's and Clang's extended
 // vectors of 4, 8, 16, 32 or 64 bytes, as the intrinsics' __m64 and __m128 to __m512i and the narrow vectors of their
 // shuffles and conversions, of elements other than bool (whose extended vectors pack a bit per element); 0 for any
@@ -5324,8 +5348,8 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
     CheckLowerAbi* abi = writer->abi;
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
-    // its address, and its bytes go where abi_assign puts them).
-    const char* passed = NULL;
+    // its address, and its bytes go where abi_assign puts them), after the callee's calling convention.
+    const char* passed = check_lower_convention(types, type, true);
     for (uint32_t a = 0; a < parameters && passed == NULL; a += 1)
     {
         passed = halves ? check_lower_passed(writer, parameter_types[a]) : check_lower_call_passed(writer, parameter_types[a]);
@@ -11872,10 +11896,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // the address each return gives (Tier0Function.result_size).
         const bool aggregate_result = check_lower_aggregate(writer, result);
         const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
+        const char* convention = bare ? NULL : check_lower_convention(types, type, false);
         if (body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS)
         {
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
             check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
+        }
+        else if (convention != NULL)
+        {
+            check_lower_unsupported(writer, convention);
         }
         else if (bare && naked->reason != NULL)
         {
