@@ -62,15 +62,14 @@ that David directs a session. Other contributors never use his
 sign-off. An explicit instruction not to sign, or an effective opt-out, takes
 precedence; do not undo it or add the trailer manually instead.
 
-- **Local Git:** before the first commit of an authorized session, run
+- **Local Git:** before an authorized session's first commit, run
   `sh .githooks/enable-sign-off.sh --maintainer-session`. It enables this
   worktree alone, for every commit made in it by any author (`--revoke`
   before another contributor uses it), and installs `.githooks` without
-  replacing hooks. A present `BUSTER_DCO_SIGN_OFF` decides alone: only
-  `davidgmbb` enables. Git configuration only opts out. If setup reports
-  other hooks, compose them as it says, or append the trailer yourself, last.
-  Before handoff, `build/dco audit` checks the PR's trailers. CONTRIBUTING.md
-  has the details.
+  replacing hooks. A present `BUSTER_DCO_SIGN_OFF` decides alone (only
+  `davidgmbb` enables); Git configuration only opts out. If setup reports
+  other hooks, compose them as it says, or append the trailer last yourself.
+  Before handoff, `build/dco audit` checks the PR's trailers.
 - **Commit messages:** `.githooks/commit-msg` adds the trailer once, after
   existing trailers. Do not duplicate it, use `git commit -s` with an agent's
   committer identity, or bypass hooks with `--no-verify`. With
