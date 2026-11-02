@@ -521,8 +521,8 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
         for (uint32_t e = 0; !pp->fatal && e < effect->range_event_count; e += 1)
         {
             const uint32_t token = check_diagnostic_x86_token(input, effect->node);
-            const CheckWarningSeverity severity = check_diagnostic_severity(input, token, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE);
             const CheckBuiltinX86RangeEvent* event = effect->range_events + e;
+            const CheckWarningSeverity severity = check_diagnostic_range_severity(input, token, event->default_error);
             // A failed/incomplete program cannot prove deadness. Report any still-deferred event conservatively.
             if (event->disposition != CHECK_BUILTIN_X86_SUPPRESSED && severity != CHECK_WARNING_IGNORE && token < parser->tokens.count)
             {
