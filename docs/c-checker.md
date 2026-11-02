@@ -1103,8 +1103,9 @@ at least 16 (a small graph's takes 2 KB, and 256 bytes of slots to clear),
 since `sqlite3.c`'s bodies took one per 19, and grows by doubling within a
 quarter of the room the run's scratch had left. An array's pages are touched
 only as its entries fill them, but the slots are cleared whole. Where its first
-size doesn't fit, it starts with at most 1,024 entries; where even that
-doesn't, the run takes the regions; where it can't grow, it stops inserting.
+size doesn't fit, it starts with at most 1,024 entries, and then with 16; where
+even that doesn't, the run takes the regions; where it can't grow, it stops
+inserting.
 
 `CheckOptions.verify_transitions` runs each hit's action too, keeps its answer
 and counts a difference (`CheckStatistics.transition_mismatches`), which fails
@@ -1122,9 +1123,11 @@ oracle's. A fixture of vector members, which the table doesn't take, puts them
 in windows past the first. Each fixture's hits, misses, folds and entries are
 pinned. The windows' keys and hashes must be `check_transition_key`'s and
 `check_transition_hash`'s for every node. A source of 1,500 structs runs in a
-sweep of scratch arenas from too small for the run, through too small for the
-table and too small for its growth, to room enough, each run that checks
-giving the oracle's stream.
+sweep of scratch arenas from too small for the table's growth to room enough,
+then at the least room the run checks in, found by bisection, and in steps of
+512 bytes past it, where not even 16 entries fit and the regions run. Each run
+that checks gives the oracle's stream, and the sweep must reach the regions, a
+table that stops inserting and one that takes every entry.
 
 #### Node order or windows
 
@@ -1228,14 +1231,16 @@ they were keyed and took 15% less time, and `lparser.c`, `lstrlib.c` and
 Ryzen 9 7940HS (Zen 4), the review of #1146 measured the same: `lvm.c` 10 to
 20% faster, 5,000 small functions much faster, and `sqlite3.c` no faster.
 
-Whole compiles on the VM, each with and without `--check-transitions` as whole
-processes in a rotating order (`time-runs`), were within its noise: `sqlite3.c`
-(`-c`, one CPU, 21 runs) 287.5 against 287.8 ms at the fastest (its medians,
-346.8 and 316.8 ms, spread from 288 to 1,016 ms), `lvm.c` (one CPU, 21 runs)
-29.5 against 29.3 ms, and Lua's 32 units in one command (`-c` on the VM's 4
-CPUs, 11 runs) 199.0 against 203.7 ms, with 220 against 233 ms of user time: a
-unit's table starts empty, so small units pay their misses for few hits. Every
-object was the same bytes.
+Whole compiles on the VM, each without and with `--check-transitions` as whole
+processes in a rotating order (`time-runs`), were too noisy there to decide:
+`sqlite3.c` (`-c`, one CPU, 21 runs) took 287.5 against 287.8 ms at the
+fastest, but 346.8 against 316.8 ms at the median, its runs spreading from 288
+to 1,016 ms. `lvm.c` (one CPU, 21 runs) took 29.5 against 29.3 ms at the
+median, and Lua's 32 units in one command (`-c` on the VM's 4 CPUs, 11 runs)
+199.0 against 203.7 ms, with 220 against 233 ms of user time: a unit's table
+starts empty, so small units pay their misses for few hits. Every object was
+the same bytes. The 9700X job's `time-runs` comparison is the measurement that
+decides.
 
 The table takes 148 bytes an entry (128 for the entry, 16 for its two slots and
 4 for its hash). On `sqlite3.c`'s bodies its 32,768 entries' room took the run's

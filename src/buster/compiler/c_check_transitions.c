@@ -328,7 +328,7 @@ static bool check_transitions_fit(const CheckTransitions* table, uint64_t bytes)
 // BUSTER_CHECK_TRANSITION_SMALLEST, so that it seldom grows, whose copies would take as much memory again: an array's
 // pages are only touched as its entries fill them, and a small graph's table is small (16 entries take 2 KB, and their
 // slots 256 bytes to clear). Where that much doesn't fit within the limit, room for at most
-// BUSTER_CHECK_TRANSITION_FALLBACK; false where even that doesn't.
+// BUSTER_CHECK_TRANSITION_FALLBACK, then for BUSTER_CHECK_TRANSITION_SMALLEST; false where even that doesn't.
 static bool check_transitions_initialize(CheckTransitions* table, Arena* arena, uint32_t nodes)
 {
     *table = (CheckTransitions){
@@ -341,9 +341,9 @@ static bool check_transitions_initialize(CheckTransitions* table, Arena* arena, 
         capacity *= 2;
     }
     bool result = false;
-    for (uint32_t attempt = 0; !result && attempt < 2; attempt += 1)
+    bool trying = true;
+    while (trying)
     {
-        capacity = attempt == 0 || capacity < BUSTER_CHECK_TRANSITION_FALLBACK ? capacity : BUSTER_CHECK_TRANSITION_FALLBACK;
         const uint64_t slots = (uint64_t)capacity * 2;
         const uint64_t bytes = slots * sizeof(uint64_t) + (uint64_t)capacity * (sizeof(CheckTransitionEntry) + sizeof(uint32_t)) + 256;
         result = check_transitions_fit(table, bytes);
@@ -361,6 +361,8 @@ static bool check_transitions_initialize(CheckTransitions* table, Arena* arena, 
             table->capacity = capacity;
             table->hash_capacity = capacity;
         }
+        trying = !result && capacity > BUSTER_CHECK_TRANSITION_SMALLEST;
+        capacity = capacity > BUSTER_CHECK_TRANSITION_FALLBACK ? BUSTER_CHECK_TRANSITION_FALLBACK : BUSTER_CHECK_TRANSITION_SMALLEST;
     }
     return result;
 }

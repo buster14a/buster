@@ -209,6 +209,30 @@ static bool check_test_transition_wide_source(Arena* text, uint32_t count)
     return end != NULL;
 }
 
+// One run of the limit's sweep, by the transitions in a view of `scratch` with `room` bytes: whether it checks, its stream the
+// oracle's, and what its table did in `seen` (1: the regions ran, 2: the table stopped inserting, 4: it took all `entries`).
+static bool check_test_transition_room(CheckTest* test, TypeTable* table, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckStream* oracle,
+                                       uint64_t room, uint32_t entries, uint32_t* seen)
+{
+    const CheckOptions full = { .transitions = true, .verify_transitions = true };
+    const uint64_t output_mark = output->length;
+    Arena view = *scratch;
+    view.capacity = scratch->length + room;
+    CheckStream stream;
+    const bool checked = check_graph_run(table, graph, output, &view, &full, &stream);
+    scratch->committed = view.committed > scratch->committed ? view.committed : scratch->committed;
+    scratch->peak = view.peak > scratch->peak ? view.peak : scratch->peak;
+    if (checked)
+    {
+        const uint32_t taken = stream.statistics.transition_entries;
+        *seen |= (taken == 0 && stream.statistics.transition_hits == 0 ? 1u : 0u) | (taken != 0 && taken < entries ? 2u : 0u) | (taken == entries ? 4u : 0u);
+        check_test_expect(test, check_test_stream_equal(oracle, &stream, graph->argument_count) && stream.statistics.transition_mismatches == 0,
+                          "the table's limit: a run within the room's stream is the oracle's");
+    }
+    arena_pop_to(output, output_mark);
+    return checked;
+}
+
 // The table's limit: the wide source's graph run with scratch arenas whose room goes from too little for the run, through
 // too little for the table (the regions run) and room for its first entries (insertion stops), to room for all of them.
 // Each run that checks gives the oracle's stream; the sweep must reach the last three.
@@ -250,30 +274,33 @@ static void check_test_transition_limit(CheckTest* test)
                             check_test_stream_equal(&oracle, &whole, input.graph.argument_count),
                       "the table's limit: with room, the table passes its first entries");
     arena_pop_to(&output, output_mark);
-    bool fell_back = false;
-    bool stopped = false;
-    bool grew = false;
+    // Views of the scratch arena with room enough for the run's own arrays and the table, then for its growth.
+    uint32_t seen = 0;
     for (uint64_t room = UINT64_C(1) << 16; ready && room <= UINT64_C(1) << 26; room += room / 8)
     {
-        // A view of the scratch arena with `room` bytes: too few for the run's own arrays at first (the run fails, which the
-        // regions would too), then too few for the table's too, then for its growth.
-        Arena view = scratch;
-        view.capacity = scratch.length + room;
-        CheckStream stream;
-        const bool checked = check_graph_run(&types.table, &input.graph, &output, &view, &full, &stream);
-        scratch.committed = view.committed > scratch.committed ? view.committed : scratch.committed;
-        scratch.peak = view.peak > scratch.peak ? view.peak : scratch.peak;
-        if (checked)
-        {
-            const uint32_t taken = stream.statistics.transition_entries;
-            fell_back |= taken == 0 && stream.statistics.transition_hits == 0;
-            stopped |= taken != 0 && taken < entries;
-            grew |= taken == entries;
-            check_test_expect(test, check_test_stream_equal(&oracle, &stream, input.graph.argument_count) && stream.statistics.transition_mismatches == 0,
-                              "the table's limit: a run within the room's stream is the oracle's");
-        }
-        arena_pop_to(&output, output_mark);
+        check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, room, entries, &seen);
     }
+    // The least room the run checks in, by bisection (it fails in less, as the regions would), and the rooms just past it,
+    // 512 bytes apart, where a quarter of what the run's own arrays leave holds no table of even 16 entries: the regions run.
+    uint64_t low = UINT64_C(1) << 12;
+    uint64_t high = UINT64_C(1) << 26;
+    uint32_t ignored = 0;
+    bool bounded = ready && !check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, low, entries, &ignored) &&
+                   check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, high, entries, &ignored);
+    while (bounded && high - low > 64)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        const bool checked = check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, middle, entries, &seen);
+        high = checked ? middle : high;
+        low = checked ? low : middle;
+    }
+    for (uint64_t room = high; bounded && room < high + (UINT64_C(1) << 15); room += 512)
+    {
+        check_test_transition_room(test, &types.table, &input.graph, &output, &scratch, &oracle, room, entries, &seen);
+    }
+    const bool fell_back = (seen & 1) != 0;
+    const bool stopped = (seen & 2) != 0;
+    const bool grew = (seen & 4) != 0;
     char description[256];
     snprintf(description, sizeof(description), "the table's limit: the sweep falls back (%d), stops inserting (%d) and grows whole (%d)", fell_back, stopped, grew);
     // A scalar host's runs take the scalar path (check_graph_run), whose streams the sweep still compares.
