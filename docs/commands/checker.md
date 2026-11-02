@@ -37,10 +37,15 @@ requirements. [Command index](README.md).
   semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
   `benchmark-checker-source` measures checking of real
-  source bodies by the scalar schedule, the vector path's postorder batches and its level order
-  (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
-  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests]` compares fresh scalar/vector tables,
+  source bodies by the scalar schedule, the vector path's postorder batches (`vector`), its level order
+  (`levels`, `CheckOptions.level_order`), its memoized transitions in node order (`transitions`,
+  `CheckOptions.transitions`, #1050, `c_check_transitions.c`) and its transitions keyed in 16-lane windows
+  (`windows`, `CheckOptions.transition_windows`): #133's question of which order wins, which the postorder
+  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder"), and #1050's ("Memoized
+  transitions"), opt-in (the driver's `--check-transitions`) since they saved 4% of `sqlite3.c`'s graph run
+  there. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
+  transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
+  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -56,6 +61,7 @@ requirements. [Command index](README.md).
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
+  `--transitions` selects the memoized transitions' fixtures, keys and table limits alone (`c_check_transitions_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
