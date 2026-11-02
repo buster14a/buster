@@ -110,14 +110,17 @@ struct CheckRequestReceipt
 // still take them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
 // differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values and
 // their auxiliary options; only the exact inactive or default requests below are admitted. This doesn't yet audit every
-// -f or -m option. Negative options outside these families keep their existing handling.
+// -f or -m option. Negative options outside these families keep their existing handling. -fsanitize-coverage= isn't one
+// of them: the predefines resolve its features as clang does, a later -fno-sanitize-coverage= among them, and
+// check_request_refusal refuses what is left where the request emits code (CHECK_REQUEST_COVERAGE); only the bare
+// spelling, which clang doesn't take, is refused here by name.
 static bool check_request_codegen_option(const char* argument)
 {
     static const char* const exact[] = {
         "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
         "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
-        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double", "-fsanitize-coverage",
     };
     static const char* const prefixes[] = {
         "-fstack-protector",
@@ -131,7 +134,6 @@ static bool check_request_codegen_option(const char* argument)
         "-ftrivial-auto-var-init",
         "-ftrapv",
         "-fzero-call-used-regs",
-        "-fsanitize-coverage",
         "-fsplit-stack",
         "-mcmodel",
     };
@@ -151,7 +153,6 @@ static bool check_request_codegen_option(const char* argument)
     static const char* const inactive[] = {
         "-ftrivial-auto-var-init=uninitialized",
         "-fzero-call-used-regs=skip",
-        "-fsanitize-coverage=0",
         "-mcmodel=small",
     };
     for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
