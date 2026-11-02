@@ -1635,6 +1635,16 @@ arguments and 88,733 checks; against GCC at 16, 4,800 of 28,849 and 90,863;
 against clang at 64, 4,800 of 29,242 and 91,609; and against GCC at 64, 4,800
 of 28,388 and 89,309.
 
+Again on the 9700X (2026-11-02, the same compilers), once the producer passed
+vectors of 1 and 2 bytes and of `bool` by their bytes (#137) and the compiled
+worlds drew them (clang's of `bool` too), every run passes at seeds 1 to 12.
+The compiled runs make, against clang at 16 bytes, 4,800 signatures of 28,824
+arguments and 90,508 checks; against GCC at 16, 4,800 of 28,792 and 90,415;
+against clang at 64, 4,800 of 28,820 and 90,623; and against GCC at 64, 4,800
+of 28,323 and 89,183. At seed 1 the compiled clang runs' callees take 23 and
+17 vectors of 1 or 2 bytes and 13 and 17 of `bool` themselves (at 16 and 64
+bytes), and more in records and aligned typedefs.
+
 With the defaults (seed 1), each run of random signatures has 400 of 2,100 to
 2,600 arguments, and the ten make about 55,000 checks, besides the two
 extension runs' 1,004 each; on the 9700X the six record runs took 4.8 s, about
