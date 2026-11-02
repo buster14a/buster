@@ -294,13 +294,15 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                                       C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_BUILTIN_LINE, C_NAME_BUILTIN_COLUMN,
                                       C_NAME_BUILTIN_FILE, C_NAME_BUILTIN_FILE_NAME, C_NAME_BUILTIN_FUNCTION, C_NAME_BUILTIN_VECTORELEMENTS,
                                       C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN, C_NAME_NORETURN, C_NAME_NONNULL, C_NAME_NULLABLE,
-                                      C_NAME_NULLABLE_RESULT, C_NAME_NULL_UNSPECIFIED, C_NAME_FUNC, C_NAME_FUNCTION, C_NAME_PRETTY_FUNCTION };
+                                      C_NAME_NULLABLE_RESULT, C_NAME_NULL_UNSPECIFIED, C_NAME_FUNC, C_NAME_FUNCTION, C_NAME_PRETTY_FUNCTION,
+                                      C_NAME_BUILTIN_AVAILABLE, C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR };
     const uint8_t syntax_bits[] = { BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED,
                                     BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED,
                                     BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED,
                                     BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
                                     BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
-                                    BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING };
+                                    BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING,
+                                    BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED };
     const uint8_t role_values[] = { PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_SEPARATOR,
                                     PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_SPECIFIER, PARSE_ROLE_MEMBER, PARSE_ROLE_TAG,
                                     PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_RETURN, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE,
@@ -436,6 +438,9 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             expected.vector_members += kinds[i] == PARSE_KIND_PERIOD && roles[i] == PARSE_ROLE_MEMBER_OPERATOR;
             expected.operands += roles[i] == PARSE_ROLE_OPERAND;
             expected.calls += roles[i] == PARSE_ROLE_CLOSE_CALL || roles[i] == PARSE_ROLE_CLOSE_FUNCTION;
+            // The place's and the type queries' builtins are counted in the first group, the constants', by their span of
+            // names (__builtin_COLUMN's to __builtin_vectorelements', with the two others the syntax names add).
+            expected.groups[0] += names[i] >= C_NAME_BUILTIN_COLUMN && names[i] <= C_NAME_BUILTIN_VECTORELEMENTS;
             switch (names[i])
             {
                 case 7: case 9: expected.groups[0] += 1; break;

@@ -554,6 +554,26 @@ static bool check_input_source_builtin(uint32_t name)
            name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN;
 }
 
+// The span of predefined names (c_intern.c's order) that holds those builtins: __builtin_COLUMN's to
+// __builtin_vectorelements', with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
+// them. The token count tests a name against the span with one comparison (check_input_count_tokens, and its twin
+// check_input_syntax_of), where a comparison per builtin cost the count's vector loop 8.4 million instructions of a
+// sqlite3.c -c (#148); the span's other names only make a few more tokens visited and the table of constants larger.
+#define BUSTER_CHECK_SOURCE_BUILTIN_FIRST ((uint32_t)C_NAME_BUILTIN_COLUMN)
+#define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN + 1))
+_Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_BUILTIN_VECTORELEMENTS && C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN < 16 &&
+               C_NAME_BUILTIN_LINE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_LINE < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_FILE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_FILE_NAME > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE_NAME < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_FUNCTION > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FUNCTION < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS,
+               "the builtins of constants the walk works out lie in one short span of predefined names");
+
+static bool check_input_source_builtin_span(uint32_t name)
+{
+    return name - BUSTER_CHECK_SOURCE_BUILTIN_FIRST < BUSTER_CHECK_SOURCE_BUILTIN_SPAN;
+}
+
 // Which tokens the two walks' vector paths visit (#529), and what they test there: CheckInputReader.visits, a byte a
 // token. Before the walk in source order (check_input_resolve_range), the reasons it may act at the token, a bit each,
 // where 0 says it does nothing there: its syntax (check_input_count_tokens), or a write ahead of the walk to one of
@@ -7915,7 +7935,7 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
     const uint32_t name = parser->tokens.names[token];
     const bool named = name == C_NAME_BUILTIN_VA_ARG || name == C_NAME_BUILTIN_CONVERTVECTOR || name == C_NAME_BUILTIN_BIT_CAST || name == C_NAME_GENERIC ||
                        name == C_NAME_BUILTIN_CHOOSE_EXPR || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF ||
-                       check_input_source_builtin(name);
+                       check_input_source_builtin_span(name);
     const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING || check_input_function_name_token(parser, token);
     return (uint8_t)((named ? BUSTER_CHECK_SYNTAX_NAMED : 0) | (check_input_attribute_starts(parser, token, parser->tokens.count) ? BUSTER_CHECK_SYNTAX_ATTRIBUTE : 0) |
                      (string ? BUSTER_CHECK_SYNTAX_STRING : 0));
@@ -7942,13 +7962,6 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         C_NAME_BUILTIN_CHOOSE_EXPR,
         C_NAME_BUILTIN_TYPES_COMPATIBLE_P,
         C_NAME_BUILTIN_OFFSETOF,
-        C_NAME_BUILTIN_LINE,
-        C_NAME_BUILTIN_COLUMN,
-        C_NAME_BUILTIN_FILE,
-        C_NAME_BUILTIN_FILE_NAME,
-        C_NAME_BUILTIN_FUNCTION,
-        C_NAME_BUILTIN_VECTORELEMENTS,
-        C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN,
         C_NAME_NORETURN,
         C_NAME_NONNULL,
         C_NAME_NULLABLE,
@@ -8008,14 +8021,18 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             {
                 matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)names[i]));
             }
+            // The span of the builtins of constants the walk works out (check_input_source_builtin_span), one comparison.
+            const __mmask16 source = _mm512_mask_cmplt_epu32_mask(present, _mm512_sub_epi32(name, _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_FIRST)),
+                                                                  _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_SPAN));
+            matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= source;
             for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
             {
                 result.groups[group] += (uint32_t)__builtin_popcount(matched[group]);
             }
-            __mmask16 syntax_matched[3] = { 0 };
+            __mmask16 syntax_matched[3] = { source, 0, 0 };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
             {
-                syntax_matched[i < 14 ? 0 : i < 19 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
+                syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
             }
             named |= (uint64_t)syntax_matched[0] << part;
             attributes |= (uint64_t)syntax_matched[1] << part;
@@ -8070,6 +8087,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         {
             matched[groups[i]] |= name == names[i];
         }
+        matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= name != 0 && check_input_source_builtin_span(name);
         for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
         {
             result.groups[group] += matched[group];
@@ -8180,25 +8198,18 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         "overloadable",
         "__overloadable__",
     };
-    // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them.
-    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR,
-                                                       C_NAME_BUILTIN_LINE, C_NAME_BUILTIN_COLUMN, C_NAME_BUILTIN_FILE, C_NAME_BUILTIN_FILE_NAME,
-                                                       C_NAME_BUILTIN_FUNCTION, C_NAME_BUILTIN_VECTORELEMENTS, C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN };
+    // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them: the
+    // type queries' names here, and the place's and the type queries' keywords by their span, which the count tests itself
+    // (check_input_source_builtin_span).
+    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR };
     uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES] =
     {
         CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
         CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
         CHECK_INPUT_COUNT_SELECTIONS,
         CHECK_INPUT_COUNT_SELECTIONS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
     };
-    uint32_t name_count = 11;
+    uint32_t name_count = 4;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(vararg_spellings); i += 1)
     {
         names[name_count] = intern_find(pp->table, (const uint8_t*)vararg_spellings[i], (uint32_t)strlen(vararg_spellings[i]));
