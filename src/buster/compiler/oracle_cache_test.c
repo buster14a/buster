@@ -8,7 +8,9 @@
 //     from 0 to 300 bytes hashed whole and in random pieces, which must agree;
 //   - roots: a directory's, an option's and a file's (its random characters before its suffix), names that aren't
 //     roots, two in order, more than BUSTER_ORACLE_ROOTS, a root followed by a name's character (not it), two roots
-//     replaced by each other in one pass, and keys that are alike only where the random characters differ;
+//     replaced by each other in one pass, keys that are alike only where the random characters differ, a root after a
+//     trailing slash's second slash or any number of them, and `$TMPDIR=/`'s roots (and paths that aren't), whose run
+//     in another directory of a trailing-slash `$TMPDIR` is taken;
 //   - runs: a run's status, output, errors and written file, taken by the same run again and by one in the other
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
@@ -211,6 +213,30 @@ static void oracle_test_roots(OracleTest* test)
     oracle_roots_find(&roots, "/b/x-Ab3d9Z/c.c");
     oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 11 && roots.roots[0].random == 5 && memcmp(roots.roots[0].name, "/b/x-Ab3d9Z", 11) == 0,
                        "roots: a directory's");
+    // A test that builds `$TMPDIR/NAME` from a trailing-slash `$TMPDIR` gives `/b//NAME`: the root still starts after
+    // the base, and its name may follow any number of slashes.
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, "/b//x-Ab3d9Z/c.c");
+    oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 12 && roots.roots[0].random == 6 && memcmp(roots.roots[0].name, "/b//x-Ab3d9Z", 12) == 0,
+                       "roots: a directory after a trailing slash's second slash");
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, "/b///x-Ab3d9Z/c.c");
+    oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 13 && roots.roots[0].random == 7 && memcmp(roots.roots[0].name, "/b///x-Ab3d9Z", 13) == 0,
+                       "roots: a directory after any number of slashes");
+    // `$TMPDIR=/` is a root's own first slash, at a name's boundary; it doesn't make every absolute path a root.
+    setenv("TMPDIR", "/", 1);
+    oracle_roots_begin(&roots);
+    oracle_test_expect(test, roots.base_length == 1 && strcmp(roots.base, "/") == 0, "roots: the temporary directory that is /");
+    oracle_roots_find(&roots, "/buster-root-Ab3d9Z/c.c");
+    oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 19 && roots.roots[0].random == 13 && memcmp(roots.roots[0].name, "/buster-root-Ab3d9Z", 19) == 0,
+                       "roots: a directory under /");
+    oracle_test_expect(test, oracle_test_root_count("/usr/bin/clang") == 0 && oracle_test_root_count("/b/x-Ab3d9Z") == 0,
+                       "roots: absolute paths under / that aren't roots");
+    setenv("TMPDIR", "//", 1);
+    oracle_roots_begin(&roots);
+    oracle_test_expect(test, roots.base_length == 1 && strcmp(roots.base, "/") == 0, "roots: // is /");
+    setenv("TMPDIR", "/b/", 1);
+    oracle_roots_begin(&roots);
     oracle_roots_find(&roots, "-I/b/x-Ab3d9Z/include");
     oracle_test_expect(test, roots.count == 1, "roots: the same root in an option");
     oracle_roots_find(&roots, "/b/case-Ab3d9Z.c");
@@ -608,6 +634,52 @@ static void oracle_test_remove(const char* base, const char* relative)
             rmdir(path);
         }
     }
+}
+
+// A `$TMPDIR` with a trailing slash, as a test that builds `$TMPDIR/NAME` sees it: its run in one directory is taken by
+// the same run in another, and the taken result names the other directory (#1104).
+static void oracle_test_trailing_root(OracleTest* test)
+{
+    const char* saved = getenv("TMPDIR");
+    char* kept = saved != 0 ? strdup(saved) : 0;
+    char trailing[BUSTER_ORACLE_PATH_BYTES + 4];
+    snprintf(trailing, sizeof(trailing), "%s//", test->base);
+    setenv("TMPDIR", trailing, 1);
+    char directories[2][BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(directories[0], sizeof(directories[0]), "%s/buster-trailing-XXXXXX", trailing);
+    snprintf(directories[1], sizeof(directories[1]), "%s/buster-trailing-XXXXXX", trailing);
+    bool made = mkdtemp(directories[0]) != 0;
+    made = made && mkdtemp(directories[1]) != 0;
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "trailing");
+    bool right = made;
+    for (uint32_t i = 0; made && i < 2; i += 1)
+    {
+        char* arguments[] = { "sh", "-c", "printf 'trailing %s\\n' \"$1\"; exit 3", "sh", directories[i], 0 };
+        OracleRun run = { .cache = &cache, .purpose = "oracle test: trailing", .arguments = arguments };
+        const bool ran = oracle_run(&run);
+        char expected[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(expected, sizeof(expected), "trailing %s\n", directories[i]);
+        right &= ran && run.taken == (i == 1) && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 3 && run.output != 0 && strcmp(run.output, expected) == 0;
+        oracle_run_release(&run);
+    }
+    oracle_test_expect(test, right, "roots: a trailing-slash $TMPDIR's run taken in another directory, naming that directory");
+    if (kept != 0)
+    {
+        setenv("TMPDIR", kept, 1);
+    }
+    else
+    {
+        unsetenv("TMPDIR");
+    }
+    free(kept);
+    oracle_cache_close(&cache);
+    if (made)
+    {
+        oracle_test_remove(directories[1], "");
+        oracle_test_remove(directories[0], "");
+    }
+    oracle_test_remove(test->base, "trailing");
 }
 
 static void oracle_test_dependencies(OracleTest* test)
@@ -2512,6 +2584,21 @@ static int run_oracle_cache_tests(int argc, char** argv)
     OracleTest test = { 0 };
     const char* temporary = getenv("TMPDIR");
     temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
+    // The test's own paths are built from a normalized temporary directory (#1104): a trailing slash would otherwise
+    // give the runs `/tmp//name`, which their dependency paths, which clang resolves, don't spell alike.
+    char normalized[BUSTER_ORACLE_PATH_BYTES];
+    const size_t temporary_length = strlen(temporary);
+    size_t normalized_length = temporary_length;
+    while (normalized_length > 1 && temporary[normalized_length - 1] == '/')
+    {
+        normalized_length -= 1;
+    }
+    if (normalized_length < sizeof(normalized))
+    {
+        memcpy(normalized, temporary, normalized_length);
+        normalized[normalized_length] = 0;
+        temporary = normalized;
+    }
     snprintf(test.base, sizeof(test.base), "%s/buster-oracle-test-XXXXXX", temporary);
     snprintf(test.runs[0], sizeof(test.runs[0]), "%s/buster-oracle-run-XXXXXX", temporary);
     snprintf(test.runs[1], sizeof(test.runs[1]), "%s/buster-oracle-run-XXXXXX", temporary);
@@ -2529,6 +2616,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
     {
         oracle_test_sha(&test);
         oracle_test_roots(&test);
+        oracle_test_trailing_root(&test);
         oracle_test_runs(&test);
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);

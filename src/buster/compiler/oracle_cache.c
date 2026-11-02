@@ -476,19 +476,28 @@ static void oracle_roots_begin(OracleRoots* roots)
     }
     roots->count = 0;
     roots->overflow = false;
-    roots->base_length = length < sizeof(roots->base) && !(length == 1 && base[0] == '/') ? (uint32_t)length : 0;
+    roots->base_length = length < sizeof(roots->base) ? (uint32_t)length : 0;
     memcpy(roots->base, base, roots->base_length);
     roots->base[roots->base_length] = 0;
 }
 
-// The root that starts at text[at], if one does: its length (0 if none) and where its random characters start.
+// The root that starts at text[at], if one does: its length (0 if none) and where its random characters start. A root
+// may follow its base with any number of slashes (a test's `$TMPDIR/` template gives `/tmp//name`), and a base of "/"
+// is a root's own first slash, at a name's boundary.
 static uint32_t oracle_root_at(const OracleRoots* roots, const char* text, size_t length, size_t at, uint32_t* random)
 {
     uint32_t result = 0;
     const size_t base = roots->base_length;
-    if (base != 0 && length - at > base + 1 && memcmp(text + at, roots->base, base) == 0 && text[at + base] == '/')
+    const bool root_directory = base == 1 && roots->base[0] == '/';
+    const bool follows = root_directory ? at == 0 || (!oracle_name_character((uint8_t)text[at - 1]) && text[at - 1] != '/')
+                                       : base != 0 && length - at > base && text[at + base] == '/';
+    if (base != 0 && length - at > base && memcmp(text + at, roots->base, base) == 0 && follows)
     {
-        const size_t start = at + base + 1;
+        size_t start = at + base + (root_directory ? 0 : 1);
+        while (start < length && text[start] == '/')
+        {
+            start += 1;
+        }
         size_t end = start;
         while (end < length && oracle_name_character((uint8_t)text[end]))
         {

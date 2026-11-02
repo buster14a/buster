@@ -176,10 +176,14 @@ The roots: a test makes its files in directories of `mkdtemp`'s under
 `$TMPDIR` (or `/tmp`), whose names differ from one run to the next. A root is
 such a name in a run's strings, `$TMPDIR/NAME`, NAME's last 6 characters (or
 the 6 before its last `.`) letters and digits, as `mkdtemp`'s random ones are.
-A key has a placeholder for each root's 6 characters, by the root's place
-among the run's; an entry holds the roots it was made with, which a run that
-takes it replaces with its own, as long, in the result (an object's bytes as
-much as a text's) and in the names of what it looked at.
+`$TMPDIR` may end in slashes, so `$TMPDIR/NAME` may spell `/tmp//name`: the
+base's trailing slashes are trimmed once per run, and a root may follow it
+with any number of slashes. `$TMPDIR=/` is the base `/` itself, at a path's
+name boundary, so `/name` under it is a root. A key has a placeholder for each
+root's 6 characters, by the root's place among the run's; an entry holds the
+roots it was made with, which a run that takes it replaces with its own, as
+long, in the result (an object's bytes as much as a text's) and in the names
+of what it looked at.
 
 A key keeps up to 32 entries (`BUSTER_ORACLE_VARIANTS`), one for each state
 of what its runs looked at, each named by its variant: SHA-256 of what its run
