@@ -123,7 +123,7 @@ static bool runtime_libraries_selected_libgcc(const Runtime* runtime, const char
 }
 
 static RuntimeError runtime_libraries_script(RuntimeLibraries* libraries, const Runtime* runtime, const char* path, String8 bytes,
-                                             const String8* directories, uint32_t directory_count, bool static_only, uint16_t* base)
+                                             const String8* directories, uint32_t directory_count, bool static_only, bool required, uint16_t* base)
 {
     ImportScript script = { 0 };
     libraries->import = import_script(&script, bytes, &libraries->arena);
@@ -156,7 +156,8 @@ static RuntimeError runtime_libraries_script(RuntimeLibraries* libraries, const 
                 result = RUNTIME_ERROR_IMPORT;
                 snprintf(libraries->failed, sizeof(libraries->failed), "%s, a script that %s names", input_path, path);
             }
-            result = result == RUNTIME_ERROR_NONE ? runtime_libraries_add(libraries, input_path, input.library || input.name.pointer[0] != '/', input_bytes, base) : result;
+            result = result == RUNTIME_ERROR_NONE ? runtime_libraries_add(libraries, input_path, input.library || input.name.pointer[0] != '/', input_bytes, base,
+                                                                            required && !input.as_needed) : result;
         }
     }
     return result;
