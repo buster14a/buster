@@ -3267,9 +3267,6 @@ struct ExecutableShared
     // Whether the executable relaxes its general- and local-dynamic TLS accesses (with the static runtime, and a dynamic
     // PIE), and its __tls_get_addr (ExecutableRuntime.tls_get_addr, ExecutableDynamic.tls_get_addr), or 0.
     bool relaxes_tls;
-    // Whether the counts may put the image past the 32-bit references' reach, so that a GOT kind's target may be far:
-    // then no candidate relaxes before the layout, and each has a slot the far check can fill.
-    bool far_possible;
     SymbolId relaxed;
     // ExecutableOptions.debug_sections, whose sections' bytes are the pieces of their sections, patched in place.
     const ExecutableDebugSections* debug_sections;
@@ -4489,11 +4486,13 @@ static uint64_t executable_slots_of_class(const Link* link, const ExecutableShar
 }
 
 // Of a word of the candidates for slots (ExecutableShared.relax_marks), those whose targets don't relax: from the bitset
-// of the relaxable symbols, or with `exact` by executable_relocation_class and executable_is_ifunc of each.
-static uint64_t executable_unrelaxed(const Link* link, const ExecutableShared* shared, uint64_t word, uint64_t candidates)
+// of the relaxable symbols, or with `exact` by executable_relocation_class and executable_is_ifunc of each. With
+// `far_possible` (the counts may put the image past the 32-bit references' reach, so that a GOT kind's target may be
+// far), none relaxes before the layout, and each has a slot the far check can fill.
+static uint64_t executable_unrelaxed(const Link* link, const ExecutableShared* shared, bool far_possible, uint64_t word, uint64_t candidates)
 {
     uint64_t result = 0;
-    if (shared->far_possible)
+    if (far_possible)
     {
         result = candidates;
     }
@@ -4531,7 +4530,9 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
             total += shared->counts[other].bytes[bucket];
         }
     }
-    shared->far_possible = total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE - BUSTER_EXECUTABLE_FAR_SLACK;
+    // Every lane computes the same answer from the counts, which no lane writes after the count phase's sync: each keeps
+    // its own, rather than all of them writing one shared flag at once.
+    const bool far_possible = total > BUSTER_EXECUTABLE_MAX_ADDRESS - BUSTER_EXECUTABLE_BASE - BUSTER_EXECUTABLE_FAR_SLACK;
     const bool dynamic = shared->dynamic_bits != 0;
     const bool stubbed = dynamic || shared->runtime;
     const bool relr_slots = dynamic && shared->relr;
@@ -4561,7 +4562,7 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
             canonical |= shared->ifuncs ? shared->canonical_marks[other * shared->words_per_lane + word] : 0;
             gd |= shared->tlsgd_marks != 0 ? shared->tlsgd_marks[other * shared->words_per_lane + word] : 0;
         }
-        marks |= candidates != 0 ? executable_unrelaxed(link, shared, word, candidates) : 0;
+        marks |= candidates != 0 ? executable_unrelaxed(link, shared, far_possible, word, candidates) : 0;
         // An IFUNC whose stub only calls reach reads the stub's slot through the GOT, as lld's reads its .got.plt entry:
         // nothing takes the stub for the IFUNC's address, so every load through the GOT may get the IFUNC's code, which
         // the stub's slot holds once its IRELATIVE relocation fills it. A dynamic PIE's imports' stubs read their own

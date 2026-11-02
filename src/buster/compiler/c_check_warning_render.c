@@ -22,6 +22,14 @@ static const char* check_warning_text(Arena* arena, const char* format, ...)
     return result;
 }
 
+// Clang names a promoted warning's flag as "[-Werror,-Wflag]" while the diagnostic is an ordinary error, and
+// "[-Wflag]" once it is fatal.
+static const char* check_driver_warning_error_prefix(bool promoted)
+{
+    const char* result = promoted ? "-Werror," : "";
+    return result;
+}
+
 static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
     const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
@@ -418,15 +426,16 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     }
                 }
                 const char* option = check_warning_descriptions[event->id].option;
-                const bool error = severity >= CHECK_WARNING_ERROR;
-                const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
+                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+                const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
                 if (valid)
                 {
                     const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
                     const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? pp->output.count + 1 :
                         check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
-                    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                     if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
