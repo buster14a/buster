@@ -54,6 +54,11 @@ struct CheckBuiltinMiscAction
     bool alignment_evaluated;
     bool alignment_side_effects;
     unsigned __int128 alignment_value;
+    // allow_runtime_check's and allow_sanitize_check's argument, and annotation's second, where the source writes a narrow
+    // string literal (the call's evidence: CheckBuiltinCall.nan_payload): its bytes, without the terminator.
+    bool string_known;
+    const uint8_t* string_bytes;
+    uint32_t string_length;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -750,6 +755,143 @@ static void check_builtin_misc_generic(TypeTable* table, const CheckBuiltinMiscA
     }
 }
 
+// The sanitizers __builtin_allow_sanitize_check names, as clang 23's Sema takes them.
+static bool check_builtin_misc_sanitizer(const uint8_t* bytes, uint32_t length)
+{
+    static const char* const names[] = { "address", "thread", "memory", "hwaddress", "kernel-address", "kernel-hwaddress", "kernel-memory" };
+    bool found = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names) && !found; i += 1)
+    {
+        found = strlen(names[i]) == length && memcmp(names[i], bytes, length) == 0;
+    }
+    return found;
+}
+
+// More of clang's generic builtins of #148 that its Sema checks itself:
+// - __builtin_alloca_uninitialized(n): __builtin_alloca's, whose bytes clang never initializes anyway;
+// - __builtin_alloca_with_align(n, a) and its _uninitialized form: n bytes at an alignment of a bits, which must be an
+//   integer constant expression, a power of 2, 8 or more and at most INT32_MAX (alignment, in bytes); a never runs;
+// - __builtin_allow_runtime_check(s): true, as clang -O0's code has it, of a string literal s, which never runs; no
+//   constant expression;
+// - __builtin_allow_sanitize_check(s): false, as no sanitizer is on, of a string literal naming a sanitizer clang takes;
+// - __builtin_annotation(x, s): x, of its integer type, s a narrow string literal; no constant expression;
+// - __builtin_addressof(e): &e, as the operator takes it, of an lvalue or a function designator (not a bit-field, a
+//   register variable or a vector's element): its address constant where e has one;
+// - __builtin_function_start(f): f's address, a void*, of a function designator that names a function.
+static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
+{
+    const CBuiltinId id = input->id;
+    if (id == CBUILTIN_ALLOCA_UNINITIALIZED || id == CBUILTIN_ALLOCA_WITH_ALIGN || id == CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED)
+    {
+        const TypeId pointer = check_builtin_misc_pointer(table, BUSTER_TYPE_VOID, 0);
+        output->action.value.type = pointer;
+        bool accepted = pointer != 0 && check_builtin_misc_convert(table, input, output, values, 0, BUSTER_TYPE_ULONG);
+        if (pointer == 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
+        }
+        if (accepted && id != CBUILTIN_ALLOCA_UNINITIALIZED)
+        {
+            accepted = check_builtin_misc_convert(table, input, output, values + 1, 1, BUSTER_TYPE_ULONG) && check_builtin_misc_constant(table, values + 1, 1, output);
+            const uint64_t bits = accepted ? (uint64_t)values[1].integer : 0;
+            if (accepted && ((bits & (bits - 1)) != 0 || bits < 8 || bits > INT32_MAX))
+            {
+                output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT;
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+            }
+            else if (accepted)
+            {
+                output->alignment = bits / 8;
+                output->evaluated_operands = 1;
+            }
+        }
+        check_action_inherit(&output->action.value, values);
+        output->allocates_stack = true;
+        output->action.value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+    }
+    else if (id == CBUILTIN_ALLOW_RUNTIME_CHECK || id == CBUILTIN_ALLOW_SANITIZE_CHECK)
+    {
+        if (!input->string_known)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (id == CBUILTIN_ALLOW_SANITIZE_CHECK && !check_builtin_misc_sanitizer(input->string_bytes, input->string_length))
+        {
+            output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else
+        {
+            output->action.value = (CheckValue){ .type = BUSTER_TYPE_BOOL, .category = CHECK_RVALUE };
+            output->evaluated_operands = 0;
+        }
+    }
+    else if (id == CBUILTIN_ANNOTATION)
+    {
+        if (!check_action_is_integer(table, values[0].type))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INTEGER_REQUIRED, 0);
+        }
+        else if (!input->string_known)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else
+        {
+            output->action.value = values[0];
+            output->action.value.category = CHECK_RVALUE;
+            output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+            output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL |
+                                            BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_LITERAL_ZERO);
+            output->evaluated_operands = 1;
+        }
+    }
+    else
+    {
+        // addressof and function_start take their operand as it is, before any conversion, as the & operator does.
+        const CheckValue operand = input->arguments[0];
+        const bool start = id == CBUILTIN_FUNCTION_START;
+        if (start && (operand.category != CHECK_FUNCTION || operand.constant_kind != CHECK_CONSTANT_ADDRESS || operand.object == 0))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if ((operand.flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_LVALUE_REQUIRED, 0);
+        }
+        else if ((operand.flags & BUSTER_CHECK_BIT_FIELD) != 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_BIT_FIELD, 0);
+        }
+        else if ((operand.flags & BUSTER_CHECK_REGISTER) != 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_REGISTER_ADDRESS, 0);
+        }
+        else if (operand.category != CHECK_LVALUE && operand.category != CHECK_FUNCTION)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_LVALUE_REQUIRED, 0);
+        }
+        else
+        {
+            output->action.value = operand;
+            output->action.value.type = start ? check_builtin_misc_pointer(table, BUSTER_TYPE_VOID, 0) : type_pointer(table, operand.type);
+            output->action.value.category = CHECK_RVALUE;
+            output->action.value.flags |= (operand.flags & BUSTER_CHECK_INACTIVE_UNION_READ) != 0 ? BUSTER_CHECK_INACTIVE_UNION_ADDRESS : 0;
+            output->action.value.flags &= ~(BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL |
+                                            BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
+            if (!input->constant_evaluated && (operand.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && output->action.value.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                output->action.value.object != 0 && operand.category != CHECK_FUNCTION)
+            {
+                output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+            }
+            if (output->action.value.type == 0)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
+            }
+        }
+    }
+}
+
 #include "c_check_builtin_bits.c"
 
 static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output)
@@ -779,7 +921,15 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_FROB_RETURN_ADDR:
         case CBUILTIN_CLASSIFY_TYPE:
         case CBUILTIN_EH_RETURN_DATA_REGNO:
-        case CBUILTIN_LAUNDER: minimum = maximum = 1; break;
+        case CBUILTIN_LAUNDER:
+        case CBUILTIN_ALLOCA_UNINITIALIZED:
+        case CBUILTIN_ALLOW_RUNTIME_CHECK:
+        case CBUILTIN_ALLOW_SANITIZE_CHECK:
+        case CBUILTIN_ADDRESSOF:
+        case CBUILTIN_FUNCTION_START: minimum = maximum = 1; break;
+        case CBUILTIN_ALLOCA_WITH_ALIGN:
+        case CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED:
+        case CBUILTIN_ANNOTATION: minimum = maximum = 2; break;
         case CBUILTIN_DWARF_CFA: minimum = maximum = 0; break;
         default:
             if (cbuiltin_bits(input->id))
@@ -809,13 +959,17 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         CheckValue values[4] = { 0 };
         output->runtime_builtin = input->id;
         output->evaluated_operands = (UINT32_C(1) << input->argument_count) - 1;
-        // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches.
-        const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE;
+        // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches, and
+        // addressof's and function_start's are their designators. allow_runtime_check's and allow_sanitize_check's string
+        // and annotation's second argument are their literals (CheckBuiltinMiscAction.string_known), never converted.
+        const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
+                              input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK;
         if (classify && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
         }
-        for (uint32_t i = 0; !classify && i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+        const uint32_t converted = input->id == CBUILTIN_ANNOTATION ? 1 : input->argument_count;
+        for (uint32_t i = 0; !classify && i < converted && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
         {
             values[i] = check_builtin_misc_argument(table, input, output, i);
             check_action_inherit(&output->action.value, values + i);
@@ -848,6 +1002,14 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
                 case CBUILTIN_EH_RETURN_DATA_REGNO:
                 case CBUILTIN_DWARF_CFA:
                 case CBUILTIN_LAUNDER: check_builtin_misc_generic(table, input, output, values); break;
+                case CBUILTIN_ALLOCA_UNINITIALIZED:
+                case CBUILTIN_ALLOCA_WITH_ALIGN:
+                case CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED:
+                case CBUILTIN_ALLOW_RUNTIME_CHECK:
+                case CBUILTIN_ALLOW_SANITIZE_CHECK:
+                case CBUILTIN_ANNOTATION:
+                case CBUILTIN_ADDRESSOF:
+                case CBUILTIN_FUNCTION_START: check_builtin_misc_more(table, input, output, values); break;
                 default:
                     if (cbuiltin_bits(input->id))
                     {

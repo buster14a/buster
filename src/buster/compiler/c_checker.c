@@ -838,7 +838,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_LAUNDER))
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_FUNCTION_START))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -1616,12 +1616,12 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     }
     const char* name = call->info->name;
     const uint32_t length = call->info->name_length;
-    // The library builtins (c_builtin_library.c) are calls of their prototypes too, those the lowering refuses by name
-    // among them, and a listed one folds where clang folds it.
+    // The library builtins (c_builtin_library.c) are calls of their prototypes too, and a listed one folds where clang
+    // folds it.
     const bool candidate = cbuiltin_library_candidate(name, length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
     const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
-                               (candidate && (cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC || cbuiltin_library_refusal(name, length) != NULL));
+                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC);
     if (library != CBUILTIN_LIBRARY_COUNT)
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
@@ -1877,6 +1877,9 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
             .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
+            .string_known = witness != NULL && witness->nan_payload_known,
+            .string_bytes = witness != NULL ? witness->nan_payload : NULL,
+            .string_length = witness != NULL ? witness->nan_payload_length : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);

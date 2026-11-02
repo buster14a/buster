@@ -114,6 +114,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_STATEMENT_ATTRIBUTE: result = "attribute cannot be applied to a statement"; break;
         case CHECK_INPUT_FALLTHROUGH_STATEMENT: result = "'fallthrough' attribute only applies to empty statements"; break;
         case CHECK_INPUT_FALLTHROUGH_SWITCH: result = "fallthrough annotation is outside switch statement"; break;
+        case CHECK_INPUT_VERBOSE_TRAP_STRING: result = "argument to __builtin_verbose_trap must be a pointer to a constant string"; break;
+        case CHECK_INPUT_VERBOSE_TRAP_DOLLAR: result = "argument to __builtin_verbose_trap must not contain $"; break;
     }
     return result;
 }

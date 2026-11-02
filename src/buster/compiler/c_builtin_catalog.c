@@ -59,7 +59,8 @@
 // stdc ones and the carry chains) 0x3a0 to 0x3c7, its floating builtins past the first ones (c_check_builtin_float.c:
 // isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9, and the alignment builtins and
 // __builtin_expect_with_probability 0x3e0 to 0x3e3, the signaling NaNs and the _Float16 and __float128 constants 0x3e4 to
-// 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa and launder (c_check_builtin_misc.c's) 0x3f0 to 0x3f3. Those
+// 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa, launder, the alloca variants, allow_runtime_check,
+// allow_sanitize_check, annotation, addressof and function_start (c_check_builtin_misc.c's) 0x3f0 to 0x3fb. Those
 // last families are the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
 // least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
@@ -427,7 +428,15 @@
     X(CLASSIFY_TYPE, 0x3f0u, "__builtin_classify_type", BUSTER_CBUILTIN_CONSTANT) \
     X(EH_RETURN_DATA_REGNO, 0x3f1u, "__builtin_eh_return_data_regno", BUSTER_CBUILTIN_CONSTANT) \
     X(DWARF_CFA, 0x3f2u, "__builtin_dwarf_cfa", BUSTER_CBUILTIN_SOURCE) \
-    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_CONSTANT)
+    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_CONSTANT) \
+    X(ALLOCA_UNINITIALIZED, 0x3f4u, "__builtin_alloca_uninitialized", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOCA_WITH_ALIGN, 0x3f5u, "__builtin_alloca_with_align", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOCA_WITH_ALIGN_UNINITIALIZED, 0x3f6u, "__builtin_alloca_with_align_uninitialized", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOW_RUNTIME_CHECK, 0x3f7u, "__builtin_allow_runtime_check", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOW_SANITIZE_CHECK, 0x3f8u, "__builtin_allow_sanitize_check", BUSTER_CBUILTIN_SOURCE) \
+    X(ANNOTATION, 0x3f9u, "__builtin_annotation", BUSTER_CBUILTIN_SOURCE) \
+    X(ADDRESSOF, 0x3fau, "__builtin_addressof", BUSTER_CBUILTIN_CONSTANT) \
+    X(FUNCTION_START, 0x3fbu, "__builtin_function_start", BUSTER_CBUILTIN_CONSTANT)
 
 typedef enum CBuiltinId
 {
@@ -501,6 +510,15 @@ static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_entry(const 
     return result;
 }
 
+// clang's other names of a catalog builtin (#148): __builtin_stdarg_start, its old name of __builtin_va_start, which its
+// Sema checks as that (SemaBuiltinVAStart). The entry the name stands for, or null.
+static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_alias_entry(const char* name, uint32_t length)
+{
+    static const char stdarg_start[] = "__builtin_stdarg_start";
+    const bool alias = length == sizeof(stdarg_start) - 1 && memcmp(name, stdarg_start, length) == 0;
+    return alias ? cbuiltin_entry("__builtin_va_start", sizeof("__builtin_va_start") - 1) : NULL;
+}
+
 // clang's sized legacy builtins, __sync_fetch_and_add_4 and the others of 1, 2, 4, 8 and 16 bytes (#148): Sema rewrites a
 // call of one by its object's size alone, whatever the suffix says (BuiltinAtomicOverloaded: __sync_fetch_and_add_1 of a
 // long is an 8-byte addition), so each is its family's builtin, which the name less its suffix spells. The family's
@@ -528,6 +546,7 @@ static __attribute__((unused)) CBuiltinId cbuiltin_resolve(const char* name, uin
     {
         const CBuiltinCatalogEntry* entry = cbuiltin_entry(name, length);
         entry = entry != NULL ? entry : cbuiltin_sized_entry(name, length);
+        entry = entry != NULL ? entry : cbuiltin_alias_entry(name, length);
         result = entry != NULL ? entry->id : CBUILTIN_NONE;
     }
     return result;
@@ -552,6 +571,7 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
         // A sized legacy name has its family's capabilities (cbuiltin_sized_entry).
         const CBuiltinCatalogEntry* entry = cbuiltin_entry((const char*)name, length);
         entry = entry != NULL ? entry : cbuiltin_sized_entry((const char*)name, length);
+        entry = entry != NULL ? entry : cbuiltin_alias_entry((const char*)name, length);
         result = entry != NULL && (entry->capabilities & required) == required;
     }
     return result;
@@ -648,7 +668,7 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 // fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
-    const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY;
+    const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION);
     return result;
 }
 

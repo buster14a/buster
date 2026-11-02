@@ -25,8 +25,8 @@ static void check_test_library_note(char* list, size_t capacity, uint32_t* count
 // where the list says, without custom checking; every fold's prototype its row's encoding, of a row with attribute E;
 // each list in its names' order, within its bound, and each lookup finding exactly the listed names, at an unreadable
 // page too. Then every row of C's languages: an F row of all languages without features is one __has_builtin advertises
-// (the catalog's, the fortified builtins', the list's, powi's), one the lowering refuses by name
-// (cbuiltin_library_refusal), or one whose prototype the checker doesn't decode (__fp16's, custom checking's, FILE's);
+// (the catalog's, the fortified builtins', the list's, powi's), or one whose prototype the checker doesn't decode
+// (__fp16's, custom checking's, FILE's);
 // and an f row is listed, or has no prototype to check (attribute T, or none), or needs FILE or va_list's reference.
 static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
 {
@@ -40,7 +40,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         rows &= info != NULL && memchr(info->attributes, 'F', info->attributes_length) != NULL && strcmp(info->language_token, "ALL_LANGUAGES") == 0 &&
                 info->features_length == 0 && !info->custom_typechecking && cbuiltin_library_lengths[l] == strlen(cbuiltin_library_names[l]);
         rows &= (uint32_t)length <= BUSTER_CBUILTIN_LIBRARY_MAX_NAME && cbuiltin_library_id(name, (uint32_t)length) == (CBuiltinLibraryId)l &&
-                cbuiltin_library_source((const uint8_t*)name, (uint32_t)length) && cbuiltin_library_refusal(name, (uint32_t)length) == NULL;
+                cbuiltin_library_source((const uint8_t*)name, (uint32_t)length);
         ordered &= l == 0 || strcmp(cbuiltin_library_names[l - 1], cbuiltin_library_names[l]) < 0;
     }
     check_test_expect(test, rows && ordered, "library builtins: each listed call is clang's F row of its name, in order and within the bound");
@@ -86,10 +86,8 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         },
     };
     uint32_t advertised = 0;
-    uint32_t refused = 0;
     uint32_t undecoded = 0;
     uint32_t unaccounted = 0;
-    uint32_t refused_advertised = 0;
     uint32_t unlisted = 0;
     uint32_t plain_unaccounted = 0;
     char missing[160] = { 0 };
@@ -102,14 +100,11 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         if (all && info->features_length == 0 && memchr(info->attributes, 'F', info->attributes_length) != NULL)
         {
             const bool query = pp_implemented_builtin_query(&gnu, (const uint8_t*)info->name, info->name_length) != 0;
-            const bool named = cbuiltin_library_refusal(info->name, info->name_length) != NULL;
             const bool half = memchr(info->encoding, 'h', info->encoding_length) != NULL;
             const bool file = memchr(info->encoding, 'P', info->encoding_length) != NULL;
             advertised += query;
-            refused += !query && named;
-            undecoded += !query && !named && (half || file || info->custom_typechecking);
-            refused_advertised += query && named;
-            if (!query && !named && !half && !file && !info->custom_typechecking)
+            undecoded += !query && (half || file || info->custom_typechecking);
+            if (!query && !half && !file && !info->custom_typechecking)
             {
                 check_test_library_note(missing, sizeof(missing), &unaccounted, info->name);
             }
@@ -127,17 +122,16 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
     }
     char description[384];
     snprintf(description, sizeof(description),
-             "library builtins: clang's F rows are %u advertised, %u refused by name and %u of prototypes that don't decode, with %u left (%s) and %u "
-             "refused but advertised",
-             advertised, refused, undecoded, unaccounted, missing, refused_advertised);
-    check_test_expect(test, unaccounted == 0 && refused_advertised == 0 && refused != 0 && undecoded != 0, description);
+             "library builtins: clang's F rows are %u advertised and %u of prototypes that don't decode, with %u left (%s)",
+             advertised, undecoded, unaccounted, missing);
+    check_test_expect(test, unaccounted == 0 && undecoded != 0, description);
     snprintf(description, sizeof(description), "library builtins: clang's f rows of C are %u listed and %u not, %u of them without a reason (%s)",
              BUSTER_CBUILTIN_LIBRARY_PLAIN_COUNT, unlisted, plain_unaccounted, missing_plain);
     check_test_expect(test, plain_unaccounted == 0, description);
     // Lookups of near misses and of bounded names at an unreadable page find nothing and read nothing past their slices.
     static const char* const misses[] = { "", "__builtin_", "__builtin_si", "__builtin_sinx", "__builtin_SIN", "_builtin_sin", "sin", "__builtin_powix", "__builtin_alloca" };
     bool missed = cbuiltin_library_id(NULL, 4) == CBUILTIN_LIBRARY_COUNT && !cbuiltin_library_source(NULL, 4) && cbuiltin_library_plain(NULL, 3) == NULL &&
-                  cbuiltin_library_plain_fold(NULL, 6) == BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && cbuiltin_library_refusal(NULL, 4) == NULL;
+                  cbuiltin_library_plain_fold(NULL, 6) == BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(misses); i += 1)
     {
         const uint32_t length = (uint32_t)strlen(misses[i]);

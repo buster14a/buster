@@ -39,7 +39,8 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
         effects |= op == CHECK_OP_STATEMENT_VALUE && (graph->members[node] & BUSTER_CHECK_SIDE_EFFECT) != 0;
         effects |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP ||
                    builtin == CBUILTIN_PREFETCH || builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET ||
-                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA || cbuiltin_carry(builtin));
+                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA || cbuiltin_carry(builtin) ||
+                   (builtin >= CBUILTIN_ALLOCA_UNINITIALIZED && builtin <= CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED));
         effects |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
                                                      builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
         const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
@@ -214,3 +215,21 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
         }
     }
 }
+
+static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
+
+// __builtin_annotation's string, its second argument from past `end` (its first's) to the call's closing parenthesis
+// `closing`, in place of the first's: the string witnesses (CheckBuiltinCall.nan_payload) of a narrow string literal.
+static __attribute__((noinline)) void check_input_annotation_evidence(CheckInputReader* reader, uint32_t end, uint32_t closing, CheckBuiltinCall* evidence)
+{
+    const uint32_t last = check_constant_punctuation(reader->parser, end + 1, closing, PARSE_KIND_COMMA);
+    CheckBuiltinCall second = { 0 };
+    if (last == closing && end + 1 < last)
+    {
+        check_input_builtin_evidence(reader, end + 1, last, &second);
+    }
+    evidence->nan_payload_known = second.nan_payload_known;
+    evidence->nan_payload = second.nan_payload;
+    evidence->nan_payload_length = second.nan_payload_length;
+}
+

@@ -44,6 +44,12 @@
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_ASSUME_DEREFERENCEABLE, BUSTER_CBUILTIN_X86_HELPER("__builtin_assume_dereferenceable", 2, false, cbuiltin_x86_helper_nothing, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MEMCPY_INLINE, BUSTER_CBUILTIN_X86_HELPER("__builtin_memcpy_inline", 3, false, cbuiltin_x86_helper_memcpy_inline, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MEMSET_INLINE, BUSTER_CBUILTIN_X86_HELPER("__builtin_memset_inline", 3, false, cbuiltin_x86_helper_memset_inline, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_UNWIND_INIT, BUSTER_CBUILTIN_X86_HELPER("__builtin_unwind_init", 0, false, cbuiltin_x86_helper_nothing, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_INIT_DWARF_REG_SIZE_TABLE,
+                             BUSTER_CBUILTIN_X86_HELPER("__builtin_init_dwarf_reg_size_table", 1, false, cbuiltin_x86_helper_init_dwarf_reg_size_table, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_SET_FLT_ROUNDS, BUSTER_CBUILTIN_X86_HELPER("__builtin_set_flt_rounds", 1, false, cbuiltin_x86_helper_set_flt_rounds, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_EXTEND_POINTER, BUSTER_CBUILTIN_X86_HELPER("__builtin_extend_pointer", 1, true, cbuiltin_x86_helper_extend_pointer, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_VERBOSE_TRAP, BUSTER_CBUILTIN_X86_HELPER("__builtin_verbose_trap", 2, false, cbuiltin_x86_helper_ud2, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_PAUSE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XGETBV, "__builtin_ia32_xgetbv", sizeof("__builtin_ia32_xgetbv") - 1, 1, true, cbuiltin_x86_helper_xgetbv,
                                      BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false, false)

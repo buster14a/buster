@@ -175,6 +175,10 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         evidence->alignment_low = (uint64_t)value.integer;
         evidence->alignment_high = (uint64_t)(value.integer >> 64);
     }
+    if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
+    {
+        check_input_annotation_evidence(reader, end, token, evidence);
+    }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)
     {

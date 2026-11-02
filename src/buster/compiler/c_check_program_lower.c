@@ -6722,10 +6722,27 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     const CBuiltinId runtime = selected != BUSTER_CHECK_NONE ? stream->misc[selected].runtime_builtin : CBUILTIN_NONE;
     const bool frame = runtime == CBUILTIN_FRAME_ADDRESS || runtime == CBUILTIN_RETURN_ADDRESS;
     const bool probability = runtime == CBUILTIN_EXPECT_WITH_PROBABILITY;
-    const uint32_t evaluated = frame ? 0 : probability ? 2 : count;
+    // alloca_with_align's alignment is a constant that never runs (CheckBuiltinMiscEffect.alignment, its bytes).
+    const bool aligned = runtime == CBUILTIN_ALLOCA_WITH_ALIGN || runtime == CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED;
+    const uint32_t evaluated = frame ? 0 : probability ? 2 : aligned ? 1 : count;
     if (selected == BUSTER_CHECK_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (runtime == CBUILTIN_ADDRESSOF || runtime == CBUILTIN_FUNCTION_START)
+    {
+        // Its operand's address, as the & operator's: a local's makes it addressed.
+        check_lower_operand(writer, node, 3, true, check_stream_type(stream, node));
+    }
+    else if (runtime == CBUILTIN_ANNOTATION)
+    {
+        // Its integer, which is its value; the string never runs.
+        check_lower_operand(writer, node, 3, false, check_stream_type(stream, node));
+    }
+    else if (runtime == CBUILTIN_ALLOW_RUNTIME_CHECK || runtime == CBUILTIN_ALLOW_SANITIZE_CHECK)
+    {
+        // clang -O0's true for a runtime check, and false for a sanitizer's, none being on; the string never runs.
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, check_lower_class(writer, check_stream_type(stream, node)), runtime == CBUILTIN_ALLOW_RUNTIME_CHECK);
     }
     else if (count > 4 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
     {
@@ -6741,7 +6758,14 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
-        *call = (CBuiltinMiscLowerCall){ .id = probability ? CBUILTIN_EXPECT : runtime, .argument_count = evaluated };
+        *call = (CBuiltinMiscLowerCall){ .id = probability ? CBUILTIN_EXPECT : aligned ? CBUILTIN_ALLOCA_WITH_ALIGN :
+                                               runtime == CBUILTIN_ALLOCA_UNINITIALIZED ? CBUILTIN_ALLOCA : runtime,
+                                         .argument_count = evaluated };
+        if (aligned)
+        {
+            call->constant_size_known = true;
+            call->constant_size = (uint32_t)stream->misc[selected].alignment;
+        }
         if (cbuiltin_align(call->id))
         {
             // An alignment builtin's recipe takes its source's, alignment's and result's descriptors, of up to 128 bits (the
@@ -7814,7 +7838,6 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const bool candidate = info != NULL && cbuiltin_library_candidate(info->name, info->name_length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
     const uint32_t libgcc = candidate ? cbuiltin_library_libgcc(info->name, info->name_length) : BUSTER_CBUILTIN_LIBRARY_LIBGCC;
-    const char* refusal = candidate ? cbuiltin_library_refusal(info->name, info->name_length) : NULL;
     if (fortify != CBUILTIN_FORTIFY_COUNT)
     {
         check_lower_fortify(writer, node, fortify);
@@ -7827,10 +7850,6 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     else if (libgcc != BUSTER_CBUILTIN_LIBRARY_LIBGCC)
     {
         check_lower_call_to(writer, node, (CheckLowerRuntime)(CHECK_LOWER_RUNTIME_POWIDF2 + libgcc), 0, 0);
-    }
-    else if (refusal != NULL)
-    {
-        check_lower_unsupported(writer, refusal);
     }
     else if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {

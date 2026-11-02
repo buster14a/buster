@@ -14,10 +14,10 @@
 // The table's F rows of custom checking that classify a value (__builtin_isnormal and its kin) and __builtin_signbitf and
 // signbitl, which clang tests inline, are the floating builtins' (c_check_builtin_float.c), not calls. Its other F rows
 // stay refused, and __has_builtin answers 0 for them: the __fp16 ones (their prototypes take and return __fp16, which no
-// C function can), the matrix builtins and C++'s __builtin_trivially_relocate, the alloca variants, the signaling NaNs'
+// C function can), the matrix builtins and C++'s __builtin_trivially_relocate, the signaling NaNs'
 // and the _Float128 and _Float16 NaNs' (which clang folds and libc has no function for), and the FILE builtins (fprintf
-// and its kin, whose prototypes need the unit's FILE). Those that the checker can type are refused by name where they
-// are lowered (cbuiltin_library_refusal); the others' prototypes don't decode (c_builtin_intrinsic_types.c).
+// and its kin, whose prototypes need the unit's FILE), whose prototypes don't decode (c_builtin_intrinsic_types.c). The
+// alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c), which take them first.
 //
 // The rows with attribute f are the C library's functions by their own names (sin, strlen, printf), which clang makes
 // builtins of the unit unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise, and ALL_GNU_LANGUAGES'
@@ -207,28 +207,6 @@ static __attribute__((unused)) uint32_t cbuiltin_library_libgcc(const char* name
     for (uint32_t i = 0; name != NULL && i < BUSTER_CBUILTIN_LIBRARY_LIBGCC && result == BUSTER_CBUILTIN_LIBRARY_LIBGCC; i += 1)
     {
         result = length == strlen(names[i]) && memcmp(name, names[i], length) == 0 ? i : result;
-    }
-    return result;
-}
-
-// The library builtins whose prototypes the checker gives but which the lowering refuses, each with the reason its
-// refusal names: NULL for any other name.
-static __attribute__((unused)) const char* cbuiltin_library_refusal(const char* name, uint32_t length)
-{
-    static const struct
-    {
-        const char* name;
-        const char* reason;
-    } refusals[] =
-    {
-        { "__builtin_alloca_uninitialized", "__builtin_alloca_uninitialized" },
-        { "__builtin_alloca_with_align", "__builtin_alloca_with_align, whose alignment Tier 0's allocation doesn't take" },
-        { "__builtin_alloca_with_align_uninitialized", "__builtin_alloca_with_align_uninitialized, whose alignment Tier 0's allocation doesn't take" },
-    };
-    const char* result = NULL;
-    for (uint32_t i = 0; name != NULL && result == NULL && i < sizeof(refusals) / sizeof(refusals[0]); i += 1)
-    {
-        result = length == strlen(refusals[i].name) && memcmp(name, refusals[i].name, length) == 0 ? refusals[i].reason : NULL;
     }
     return result;
 }

@@ -149,6 +149,11 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_ASSUME_DEREFERENCEABLE,
     CBUILTIN_X86_HELPER_MEMCPY_INLINE,
     CBUILTIN_X86_HELPER_MEMSET_INLINE,
+    CBUILTIN_X86_HELPER_UNWIND_INIT,
+    CBUILTIN_X86_HELPER_INIT_DWARF_REG_SIZE_TABLE,
+    CBUILTIN_X86_HELPER_SET_FLT_ROUNDS,
+    CBUILTIN_X86_HELPER_EXTEND_POINTER,
+    CBUILTIN_X86_HELPER_VERBOSE_TRAP,
     CBUILTIN_X86_HELPER_TILEZERO,
     CBUILTIN_X86_HELPER_TILELOADD,
     CBUILTIN_X86_HELPER_TILELOADDT1,
@@ -294,6 +299,66 @@ static const X86Instruction cbuiltin_x86_helper_memset_inline[] = {
     { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDX, .form = X86_FORM_MOV_R64_RM64 },
     { .form = X86_FORM_REP_STOS_B },
     { .form = X86_FORM_RET },
+};
+
+// More generic builtins of a few of clang -O0's instructions (#148), each a leaf: __builtin_unwind_init, whose code saves
+// the callee-saved registers in its caller's frame and computes nothing (a leaf preserves them anyway);
+// __builtin_init_dwarf_reg_size_table's 8 at each of the 17 bytes of the DWARF registers rax to rip, as clang's code
+// stores them; __builtin_set_flt_rounds's rounding mode in the x87's control word and in MXCSR, by LLVM's mapping of
+// FLT_ROUNDS's values (0xc9 << (2v + 4), its x87 bits 10 and 11; and those bits 3 places up for MXCSR's 13 and 14);
+// __builtin_extend_pointer's pointer as an unsigned long long; and __builtin_verbose_trap's ud2, as __builtin_trap's.
+static const X86Instruction cbuiltin_x86_helper_init_dwarf_reg_size_table[] = {
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 1, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 2, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 3, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 4, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 5, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 6, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 7, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 9, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 10, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 11, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 12, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 13, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 14, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 15, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOV_RM8_IMM8 },
+    { .form = X86_FORM_RET },
+};
+
+// The control word and MXCSR go through the red zone at rsp - 8, below the return address.
+static const X86Instruction cbuiltin_x86_helper_set_flt_rounds[] = {
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .index = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .displacement = 4,
+      .form = X86_FORM_LEA_R32_M },
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_RM32 },
+    { .immediate = 201, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
+    { .rm = X86_REGISTER_RAX, .form = X86_FORM_SHL_RM32_CL },
+    { .immediate = 0xc00, .rm = X86_REGISTER_RAX, .form = X86_FORM_AND_RM32_IMM32 },
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_FNSTCW_M16 },
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_MOVZX_R32_RM16 },
+    { .immediate = -3073, .rm = X86_REGISTER_RCX, .form = X86_FORM_AND_RM32_IMM32 },
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .form = X86_FORM_OR_R32_RM32 },
+    { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_MOV_RM16_R16 },
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_FLDCW_M16 },
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_STMXCSR_M32 },
+    { .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_MOV_R32_RM32 },
+    { .immediate = -24577, .rm = X86_REGISTER_RDX, .form = X86_FORM_AND_RM32_IMM32 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDX, .index = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3),
+      .form = X86_FORM_LEA_R32_M },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_MOV_RM32_R32 },
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8, .form = X86_FORM_LDMXCSR_M32 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_extend_pointer[] = {
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .form = X86_FORM_MOV_R64_RM64 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_ud2[] = {
+    { .form = X86_FORM_UD2 },
 };
 
 // xsetbv(a, v): XCR a (ecx) set to v's halves, edx:eax.

@@ -7564,6 +7564,14 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_EH_RETURN_DATA_REGNO, "__builtin_eh_return_data_regno", false, true, true },
         { CBUILTIN_DWARF_CFA, "__builtin_dwarf_cfa", false, true, false },
         { CBUILTIN_LAUNDER, "__builtin_launder", false, true, true },
+        { CBUILTIN_ALLOCA_UNINITIALIZED, "__builtin_alloca_uninitialized", false, true, false },
+        { CBUILTIN_ALLOCA_WITH_ALIGN, "__builtin_alloca_with_align", false, true, false },
+        { CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED, "__builtin_alloca_with_align_uninitialized", false, true, false },
+        { CBUILTIN_ALLOW_RUNTIME_CHECK, "__builtin_allow_runtime_check", false, true, false },
+        { CBUILTIN_ALLOW_SANITIZE_CHECK, "__builtin_allow_sanitize_check", false, true, false },
+        { CBUILTIN_ANNOTATION, "__builtin_annotation", false, true, false },
+        { CBUILTIN_ADDRESSOF, "__builtin_addressof", false, true, true },
+        { CBUILTIN_FUNCTION_START, "__builtin_function_start", false, true, true },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

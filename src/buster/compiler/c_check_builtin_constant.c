@@ -14,6 +14,10 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     const uint32_t first = keyword + 2;
     const uint32_t end = check_constant_punctuation(reader->parser, first, closing, PARSE_KIND_COMMA);
     check_input_builtin_evidence(reader, first, end, &evidence);
+    if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < closing)
+    {
+        check_input_annotation_evidence(reader, end, closing, &evidence);
+    }
     CheckActionResult result = { 0 };
     const CheckOp family = check_graph_builtin_op(builtin);
     if (builtin == CBUILTIN_BIT_CAST)
@@ -54,6 +58,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .source_position = closing + 1, .extensions = extensions,
             .const_values = &reader->output->const_values, .constant_evaluated = true,
             .pointer_object = evidence.base_object, .pointer_alignment = evidence.base_alignment,
+            .string_known = evidence.nan_payload_known, .string_bytes = evidence.nan_payload, .string_length = evidence.nan_payload_length,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

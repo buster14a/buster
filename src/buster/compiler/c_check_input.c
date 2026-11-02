@@ -105,6 +105,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_FALLTHROUGH_STATEMENT,
     // A fallthrough null statement outside a switch, at the attribute's name.
     CHECK_INPUT_FALLTHROUGH_SWITCH,
+    // __builtin_verbose_trap's arguments (#148), at the argument's first token: one that is no constant, and a string
+    // with a `$` (check_input_verbose_trap_arguments).
+    CHECK_INPUT_VERBOSE_TRAP_STRING,
+    CHECK_INPUT_VERBOSE_TRAP_DOLLAR,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -173,6 +177,8 @@ static const char* const check_input_messages[] =
     "attribute cannot be applied to a statement",
     "'fallthrough' attribute only applies to empty statements",
     "fallthrough annotation is outside switch statement",
+    "argument to __builtin_verbose_trap must be a pointer to a constant string",
+    "argument to __builtin_verbose_trap must not contain $",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -6402,11 +6408,79 @@ static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t
     return first;
 }
 
+// __builtin_verbose_trap's two arguments as clang's Sema takes them (#148): each a constant string whose bytes hold no
+// `$`, else an error at the argument's first token. A narrow string literal or __func__'s name, under parentheses and
+// casts, is read whole; an argument that is no address constant of an object (an automatic variable's value, an
+// integer, a null pointer) is no constant string. Another address constant (a const array's, a literal's past its start) clang
+// reads through its constant evaluator, whose reading of an object's bytes this reader doesn't model: it is refused.
+static void check_input_verbose_trap_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call)
+{
+    const Parser* parser = reader->parser;
+    for (uint32_t index = 0; index < call->argument_count; index += 1)
+    {
+        const CheckInputIntrinsicArgument span = call->arguments[index];
+        uint32_t first = span.first;
+        uint32_t end = span.end;
+        bool stripping = true;
+        while (stripping && first < end)
+        {
+            const uint8_t role = parser->tree.roles[first];
+            const uint32_t close = parser->tree.parents[first];
+            if (parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && close == end - 1 && role == PARSE_ROLE_OPEN_GROUP)
+            {
+                first += 1;
+                end -= 1;
+            }
+            else if (role == PARSE_ROLE_OPEN_CAST && close > first && close + 1 < end)
+            {
+                first = close + 1;
+            }
+            else
+            {
+                stripping = false;
+            }
+        }
+        const bool named = first < end && (parser->tokens.kinds[first] == PARSE_KIND_STRING || check_input_function_name_token(parser, first));
+        uint32_t after = first + (named && parser->tokens.kinds[first] != PARSE_KIND_STRING);
+        while (named && after < end && parser->tokens.kinds[after] == PARSE_KIND_STRING)
+        {
+            after += 1;
+        }
+        const CheckInitString* string = named && after == end ? check_input_string(reader, first) : NULL;
+        CheckValue value = { 0 };
+        if (string != NULL)
+        {
+            // A wide literal's conversion to const char* is the call's own error.
+            const TypeId element = type_element(reader->types, string->type);
+            if (type_size(reader->types, element) == 1 && memchr(string->bytes, '$', string->byte_count) != NULL)
+            {
+                check_input_report(reader, span.first, CHECK_INPUT_VERBOSE_TRAP_DOLLAR);
+            }
+        }
+        else if (!check_input_evaluate_cached(reader, span.first, span.end, &value) || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 ||
+                 (value.category == CHECK_LVALUE && (value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 &&
+                  !type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, value.type)))))
+        {
+            check_input_report(reader, span.first, CHECK_INPUT_VERBOSE_TRAP_STRING);
+        }
+        else
+        {
+            check_input_report(reader, span.first, CHECK_INPUT_UNSUPPORTED);
+        }
+    }
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
     CheckGraph* graph = &reader->output->graph;
     const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+    static const char verbose_trap[] = "__builtin_verbose_trap";
+    if (call->argument_count == 2 && declaration->info->name_length == sizeof(verbose_trap) - 1 &&
+        memcmp(declaration->info->name, verbose_trap, sizeof(verbose_trap) - 1) == 0)
+    {
+        check_input_verbose_trap_arguments(reader, call);
+    }
     const bool constant_context = reader->constant_contexts[call->closing] != 0;
     const uint64_t required = declaration->types.ice_parameters | check_graph_x86_ice_mask(declaration->info, constant_context);
     const uint32_t offset = graph->argument_count;
@@ -7996,6 +8070,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const char* const vararg_spellings[] =
     {
         "__builtin_va_start",
+        "__builtin_stdarg_start",
         "__builtin_c23_va_start",
         "__builtin_va_arg",
         "__builtin_va_copy",
