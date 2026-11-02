@@ -1624,17 +1624,18 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             default:
                 break;
         }
-        if (duplicate != BUSTER_CHECK_NONE)
+        if (earlier != BUSTER_CHECK_NONE && !incompatible[i])
+        {
+            // An earlier different-kind attribute is still present: clang reports the incompatibility, not the
+            // duplicate, for the repeated attribute (#839's re-review).
+            check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_INCOMPATIBLE, 0, attribute->name_token,
+                                            attributes->records[earlier].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
+            incompatible[i] = true;
+        }
+        else if (duplicate != BUSTER_CHECK_NONE)
         {
             check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_DUPLICATE, 0, attribute->name_token,
                                             attributes->records[duplicate].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
-            incompatible[i] = true;
-            continue;
-        }
-        if (earlier != BUSTER_CHECK_NONE && !incompatible[i])
-        {
-            check_input_report_multiversion(reader, attribute->name_token, CHECK_INPUT_MULTIVERSION_INCOMPATIBLE, 0, attribute->name_token,
-                                            attributes->records[earlier].name_token, CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE, 0);
             incompatible[i] = true;
         }
     }
