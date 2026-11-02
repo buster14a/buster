@@ -2285,7 +2285,6 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             {
                 const bool member = at > 0 && (parser->tokens.kinds[at - 1] == PARSE_KIND_PERIOD ||
                                                parser->tokens.kinds[at - 1] == PARSE_KIND_ARROW);
-                const uint32_t node = input->token_nodes != NULL && at < input->token_count ? input->token_nodes[at] : BUSTER_CHECK_NONE;
                 bool query = false;
                 for (uint32_t up = at, steps = 0; up < parser->tokens.count && steps < parser->tokens.count && !query; steps += 1)
                 {
@@ -2298,10 +2297,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     }
                     up = parent;
                 }
-                // A token the graph leaves out is the brace initializer's read; one it marks non-read (an address or
-                // void cast) is not, and a sizeof operand is not either.
-                const bool read = node >= graph->count || nonread[node] == 0;
-                if (read && !query && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name && !member)
+                if (!query && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name && !member)
                 {
                     read_token = at;
                 }
