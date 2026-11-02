@@ -1252,11 +1252,34 @@ static bool tier1_cfg_apply(const Tier1CfgInput* input, const Tier1CfgAllocation
     return valid;
 }
 
+// The allocation's columns, as the certificate's shape requires them (tier1_certificate_cfg.c), before anything reads
+// through them: each present where its count needs it, the interval and fragment maps' ends, the slots' count within
+// the values and each slot's value in range. What the columns' entries mean is left to the checks that read them.
+static bool tier1_cfg_verify_columns(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    const Tier1Allocation* allocation = &result->allocation;
+    const uint32_t values = input->value_count;
+    bool valid = result->value_interval_offsets != 0 && (intervals->count == 0 || (intervals->values != 0 && intervals->classes != 0 && intervals->starts != 0 && intervals->ends != 0));
+    valid = valid && allocation->interval_count == intervals->count && allocation->fragment_offsets != 0 && allocation->fragment_offsets[0] == 0 && allocation->fragment_offsets[intervals->count] == allocation->fragment_count;
+    valid = valid && (allocation->fragment_count == 0 || (allocation->starts != 0 && allocation->ends != 0 && allocation->kinds != 0 && allocation->registers != 0));
+    valid = valid && allocation->spill_count <= values && (allocation->spill_count == 0 || (allocation->spill_values != 0 && allocation->spill_ids != 0));
+    for (uint32_t s = 0; valid && s < allocation->spill_count; s += 1)
+    {
+        valid = allocation->spill_values[s] < values;
+    }
+    valid = valid && result->edge_move_offsets != 0 && result->split_move_offsets != 0 && result->edge_placements != 0;
+    valid = valid && (result->move_count == 0 || (result->move_sources != 0 && result->move_destinations != 0 && result->move_values != 0));
+    valid = valid && (result->split_count == 0 || result->split_positions != 0);
+    return valid;
+}
+
 static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* scratch, Tier1CfgCheck* check)
 {
     const uint64_t saved = scratch->length;
     *check = (Tier1CfgCheck){ 0 };
     bool valid = tier1_cfg_input_valid(input, scratch) || tier1_cfg_fail(check, "invalid input", 0, 0, 0);
+    valid = valid && (tier1_cfg_verify_columns(input, result) || tier1_cfg_fail(check, "the allocation's columns", 0, 0, 0));
     const uint32_t blocks = input->block_count;
     const uint32_t values = input->value_count;
     const Tier1Allocation* allocation = &result->allocation;
@@ -1265,20 +1288,24 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
     valid = valid && ((result->value_interval_offsets[0] == 0 && result->value_interval_offsets[values] == intervals->count && allocation->interval_count == intervals->count) || tier1_cfg_fail(check, "interval map", 0, 0, 0));
     for (uint32_t v = 0; valid && v < values; v += 1)
     {
+        // Each offset bounded before it bounds a read: a malformed allocation is refused, never read past its columns.
+        valid = (result->value_interval_offsets[v] <= result->value_interval_offsets[v + 1] && result->value_interval_offsets[v + 1] <= intervals->count) || tier1_cfg_fail(check, "interval map", 0, v, 0);
         for (uint32_t i = result->value_interval_offsets[v]; valid && i < result->value_interval_offsets[v + 1]; i += 1)
         {
             valid = (intervals->values[i] == v && intervals->classes[i] == input->classes[v] && intervals->starts[i] < intervals->ends[i] && intervals->ends[i] <= input->position_count && (i == result->value_interval_offsets[v] || intervals->ends[i - 1] <= intervals->starts[i])) || tier1_cfg_fail(check, "an interval out of its value's order", 0, v, intervals->starts[i]);
+            valid = valid && ((allocation->fragment_offsets[i] <= allocation->fragment_offsets[i + 1] && allocation->fragment_offsets[i + 1] <= allocation->fragment_count) || tier1_cfg_fail(check, "an interval's fragments past the allocation's", 0, v, intervals->starts[i]));
             uint32_t position = intervals->starts[i];
-            for (uint32_t f = allocation->fragment_offsets[i]; valid && f < allocation->fragment_offsets[i + 1]; f += 1)
+            for (uint32_t f = valid ? allocation->fragment_offsets[i] : 0; valid && f < allocation->fragment_offsets[i + 1]; f += 1)
             {
                 const bool reg = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
                 valid = (allocation->starts[f] == position && allocation->ends[f] > position && allocation->kinds[f] <= BUSTER_TIER1_ALLOCATE_REMATERIALIZE) || tier1_cfg_fail(check, "fragments don't tile their interval", 0, v, position);
                 valid = valid && ((!reg || (allocation->registers[f] < 32 && ((input->allowed_registers[v] >> allocation->registers[f]) & 1) != 0)) || tier1_cfg_fail(check, "a register outside the value's mask", 0, v, position));
+                valid = valid && (reg || allocation->registers[f] == UINT8_MAX || tier1_cfg_fail(check, "a register on a fragment without one", 0, v, position));
                 // The definition's fragment in one of its registers.
                 const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
                 const bool defines = allocation->starts[f] <= input->definitions[v] && input->definitions[v] < allocation->ends[f];
                 valid = valid && ((defined == 0 || !defines || (reg && ((defined >> allocation->registers[f]) & 1) != 0)) || tier1_cfg_fail(check, "a definition outside its registers", 0, v, position));
-                valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v)) || tier1_cfg_fail(check, "a spill without a slot", 0, v, position));
+                valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_count != 0 && allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v)) || tier1_cfg_fail(check, "a spill without a slot", 0, v, position));
                 valid = valid && ((allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_REMATERIALIZE || (input->rematerializable != 0 && input->rematerializable[v] != 0)) || tier1_cfg_fail(check, "a rematerialization of a value without a recipe", 0, v, position));
                 position = allocation->ends[f];
             }

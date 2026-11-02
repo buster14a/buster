@@ -21,9 +21,10 @@ static uint32_t check_input_overload_flags(const CheckInputAttributes* attribute
     return flags;
 }
 
-// The unit's tables of overloads, where `present`, a token named overloadable or __overloadable__, says it may have
-// some: room for `capacity` candidates, its operands, and `calls` calls, its calls' and function declarators' closing
-// parentheses. check_input_run counts them in its pass over the tokens (check_input_count_tokens).
+// The unit's tables of overloads, where `present`, a token named overloadable or __overloadable__ inside an attribute
+// list (check_input_count_tokens), says it may have some: room for `capacity` candidates, its operands, and `calls`
+// calls, its calls' and function declarators' closing parentheses. check_input_run counts them in its pass over the
+// tokens (check_input_count_tokens).
 static bool check_input_overload_initialize(CheckInputReader* reader, bool present, uint32_t capacity, uint32_t calls)
 {
     const Parser* parser = reader->parser;
@@ -80,11 +81,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .flags = check_input_overload_flags(input->attributes[token]) | (reader->defined[token] ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
         };
         const CheckOverloadContext context = {
-            .tag_completions = reader->tag_completions,
-            .transparent_unions = reader->transparent_unions,
-            .tag_completion_count = reader->types->tags.count,
-            .source_position = point,
-            .extensions = check_input_expression_extensions(reader->parser),
+            .semantic = check_input_context(reader, point, token, false),
         };
         CheckOverloadIndex* index = &reader->overload_index;
         uint64_t signature_hash = 0;

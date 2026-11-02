@@ -32,7 +32,8 @@ GNU ld gives `-R FILE` the `--just-symbols` meaning and only treats a directory
 as `--rpath`; lld treats `-R` as an alias for `--rpath`. Buster accepts `-R` for
 a path that is absent or a directory, and refuses an existing non-directory so
 that the GNU form is never silently reinterpreted. Use `-rpath` when the
-runtime search path contains a file-like name.
+runtime search path contains a file-like name. Static executables and static
+PIEs have no dynamic loader, so they refuse runtime paths.
 
 Entry selection does not omit the normal C runtime startup inputs or convert
 a C function into a process-entry ABI. A custom entry must implement that ABI.

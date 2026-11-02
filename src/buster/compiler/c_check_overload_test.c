@@ -69,7 +69,7 @@ static void check_test_overload_declarations(CheckTest* test, TypeTable* table)
         { .type = fi, .declaration = 10, .canonical = 10, .object = 100, .previous = UINT32_MAX, .scope = 1, .position = 11, .flags = BUSTER_CHECK_OVERLOADABLE },
         { .type = fd, .declaration = 20, .canonical = 20, .object = 200, .previous = 0, .scope = 1, .position = 21, .flags = BUSTER_CHECK_OVERLOADABLE },
     };
-    const CheckOverloadContext context = { .source_position = 100 };
+    const CheckOverloadContext context = { .semantic.source_position = 100 };
     CheckOverloadCandidate next = { .type = fi, .declaration = 30, .canonical = 30, .object = 300, .previous = 1, .scope = 1, .position = 31, .flags = BUSTER_CHECK_OVERLOADABLE };
     CheckOverloadResult result = check_overload_declare(table, candidates, 2, 1, &next, &context);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.canonical == 10 && result.object == 100 && result.candidate == 0,
@@ -210,8 +210,8 @@ static void check_test_overload_selection(CheckTest* test, TypeTable* table, con
                 .arguments = fixture->arguments,
                 .argument_count = fixture->argument_count,
                 .argument_conversions = conversions,
-                .extensions = BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT,
-                .source_position = 100,
+                .context.extensions = BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT,
+                .context.source_position = 100,
             };
             CheckActionResult checked;
             const CheckOverloadResult result = check_overload_call(table, &action, candidates, fixture->count, fixture->count - 1, &scratch, path != 0, &checked, 0, 0);
@@ -265,7 +265,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
         .head = 0,
         .arguments = &argument,
         .argument_count = 1,
-        .context = { .source_position = 15 },
+        .context = { .semantic.source_position = 15 },
     };
     Arena scratch = arena_reserve(1u << 20);
     CheckOverloadResult result = check_overload_select(table, &request, &scratch);
@@ -274,7 +274,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
     request.head = 1;
     result = check_overload_select(table, &request, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_INVALID, "future declaration cannot be smuggled into an earlier source snapshot");
-    request.context.source_position = 25;
+    request.context.semantic.source_position = 25;
     result = check_overload_select(table, &request, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.candidate == 1, "later call uses its own expanded overload set");
     candidates[2] = candidates[1];
@@ -283,7 +283,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
     candidates[2].position = 31;
     candidates[2].flags |= BUSTER_CHECK_OVERLOAD_UNAVAILABLE;
     request.count = 3;
-    request.context.source_position = 35;
+    request.context.semantic.source_position = 35;
     result = check_overload_select(table, &request, &scratch);
     check_test_expect(test, result.status == CHECK_OVERLOAD_OK && result.candidate == 1, "later unavailable redeclaration does not mutate an earlier captured head");
     request.head = 2;
@@ -319,7 +319,7 @@ static void check_test_overload_history(CheckTest* test, TypeTable* table)
         .head = 256,
         .arguments = arguments,
         .argument_count = 2,
-        .context = { .source_position = 2000 },
+        .context = { .semantic.source_position = 2000 },
     };
     for (uint32_t path = 0; path < 2; path += 1)
     {
@@ -409,7 +409,7 @@ static void check_test_overload_arguments(CheckTest* test, TypeTable* table)
         .arguments = &argument,
         .argument_count = 1,
         .argument_conversions = &conversion,
-        .source_position = 100,
+        .context.source_position = 100,
     };
     Arena scratch = arena_reserve(65536);
     for (uint32_t path = 0; path < 2; path += 1)
@@ -521,6 +521,16 @@ static __attribute__((noinline)) void check_test_overload_sources(CheckTest* tes
         { .name = "typeof cannot choose latest overload", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O;\n__typeof__(f) p;\n", .rejected = true },
         { .name = "typeof cast supplies exact overload context", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; __typeof__((int(*)(int))f) p; _Static_assert(__builtin_types_compatible_p(__typeof__(p),int(*)(int)),\"typed address\");\n" },
         { .name = "unavailable singleton in unchosen generic association", .source = "int f(int) __attribute__((overloadable,unavailable));\n_Static_assert(_Generic(0,int:1,default:f),\"type\");\n", .rejected = true },
+        // Which units get overload tables (#1038): a name of the attribute's inside an attribute list, in each spelling and
+        // place, but no other token of that name, which gave main.c tables and left its expressions' walk scalar.
+        { .name = "overload names outside attribute lists make no tables", .source = "struct s { int overloadable; };\nint __overloadable__;\nint get(struct s* p){int overloadable = p->overloadable; return overloadable + __overloadable__;}\nint run(void){struct s v = {3}; return get(&v);}\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_NONE },
+        { .name = "overload attribute after another in its list", .source = "int f(int) __attribute__((unused, overloadable)); double f(double) __attribute__((__overloadable__)); _Static_assert(_Generic(f(1.0),double:1,default:0),\"listed\"); int run(void){return f(2);}\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
+        { .name = "overload attribute with empty arguments", .source = "__attribute__((overloadable())) int f(int); __attribute__((overloadable)) double f(double); _Static_assert(_Generic(f(1.0),double:1,default:0),\"empty\");\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
+        { .name = "overload standard attribute in clang's namespace", .source = "[[clang::overloadable]] long q(long); [[clang::overloadable]] char* q(char*); _Static_assert(_Generic(q((char*)0),char*:1,default:0),\"standard\"); long run(void){long (*p)(long) = &q; return (__extension__ q)(4) + p(5) + (&q)(6);}\n",
+          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
         { .name = "unavailable selected address from a set remains usable", .source = "#define O __attribute__((overloadable))\nint f(int) O __attribute__((unavailable)); double f(double) O; int take(int(*)(int)) O; double take(char*) O; _Static_assert(_Generic(take(_Generic(0,int:f,default:0)),int:1,default:0),\"selected argument\"); int g(void){return ((int(*)(int))f)(1);}\n" },
     };
     char directory[] = "/tmp/buster-check-overload-source-XXXXXX";
@@ -549,6 +559,95 @@ static __attribute__((noinline)) void check_test_overload_sources(CheckTest* tes
     rmdir(directory);
 }
 
+// Which names of the overloadable attribute's count_tokens counts (#1038): those inside an attribute list, by both of its
+// paths, against the test's own reading of real C's tree, each name's ancestors walked up to the root for an attribute
+// list's closing. The first source's names are inside GNU's lists (alone, after another attribute, with empty
+// arguments), a standard one's, an attribute's argument, a list in a type in an argument, and a sibling list's (beside
+// one without); and outside: a member, a variable and their uses. The second's are all outside, so that a unit with
+// them alone has no tables.
+static __attribute__((noinline)) void check_test_overloadable_counts(CheckTest* test)
+{
+    static const char inside[] =
+        "struct s { int overloadable; };\n"
+        "int __overloadable__;\n"
+        "__attribute__((overloadable)) int f(int);\n"
+        "int g(int) __attribute__((unused, __overloadable__));\n"
+        "__attribute__((overloadable())) int f(double);\n"
+        "[[clang::overloadable]] long h(long);\n"
+        "__attribute__((aligned(sizeof(__overloadable__)))) int k;\n"
+        "__attribute__((aligned(sizeof(struct { int overloadable __attribute__((packed)); })))) int q;\n"
+        "__attribute__((unused)) int m; __attribute__((overloadable)) int n(int);\n"
+        "int use(struct s* p) { return p->overloadable + __overloadable__ + (((((overloadable))))); }\n";
+    static const char outside[] =
+        "struct s { int overloadable; };\n"
+        "int __overloadable__;\n"
+        "int use(struct s* p) { int overloadable = p->overloadable; return overloadable + __overloadable__; }\n";
+    const struct
+    {
+        const char* source;
+        uint32_t length;
+        uint32_t counted;
+    } sources[] = {
+        { inside, sizeof(inside) - 1, 7 },
+        { outside, sizeof(outside) - 1, 0 },
+    };
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        const PPOptions pp_options = {
+            .language = {
+                .standard = 2023,
+                .gnu = true,
+            },
+            .no_standard_includes = true,
+        };
+        const ParseOptions parser_options = { 0 };
+        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                     parse_initialize(&parser, &parser_options, pp_options.language) &&
+                     pp_run_source(&pp, "overloadable-counts.c", (const uint8_t*)sources[s].source, sources[s].length) && parse_translation_unit(&parser, &pp);
+        check_test_expect(test, ready && parser.tree.parents != NULL && parser.tree.roles != NULL, "overloadable counts' source parses");
+        if (ready && parser.tree.parents != NULL && parser.tree.roles != NULL)
+        {
+            const uint32_t names[] = {
+                intern_find(pp.table, (const uint8_t*)"overloadable", 12),
+                intern_find(pp.table, (const uint8_t*)"__overloadable__", 16),
+            };
+            const uint8_t groups[] = {
+                CHECK_INPUT_COUNT_OVERLOADABLE,
+                CHECK_INPUT_COUNT_OVERLOADABLE,
+            };
+            const uint32_t count = parser.tokens.count;
+            uint32_t expected = 0;
+            uint32_t spelled = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t name = parser.tokens.names[token];
+                bool listed = false;
+                for (uint32_t ancestor = parser.tree.parents[token]; ancestor < count; ancestor = parser.tree.parents[ancestor])
+                {
+                    listed |= parser.tree.roles[ancestor] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+                }
+                const bool named = name != 0 && (name == names[0] || name == names[1]);
+                spelled += named;
+                expected += named && listed;
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL, scalar != 0);
+                char description[200];
+                snprintf(description, sizeof(description), "source %u's names of overloadable by the %s path: %u of %u counted, the tree's %u, expected %u", s,
+                         scalar != 0 ? "scalar" : "vector", counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE], spelled, expected, sources[s].counted);
+                check_test_expect(test, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] == expected && expected == sources[s].counted && spelled > expected, description);
+            }
+        }
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+}
+
 #include "c_check_overload_index_test.c"
 
 static __attribute__((noinline)) void check_test_overloads(CheckTest* test, const char* clang)
@@ -566,6 +665,7 @@ static __attribute__((noinline)) void check_test_overloads(CheckTest* test, cons
         check_test_overload_ranks(test);
     }
     check_test_types_close(&types);
+    check_test_overloadable_counts(test);
 }
 
 #endif

@@ -56,12 +56,7 @@ struct CheckBuiltinMathAction
     const CheckValue* arguments;
     uint32_t argument_count;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
-    const CheckConstValues* const_values;
-    bool constant_evaluated;
+    CheckContext context;
     bool nondefault_fp_environment;
 };
 
@@ -204,12 +199,7 @@ static __attribute__((unused)) void check_builtin_math_one(TypeTable* table, con
             .arguments = input->arguments,
             .argument_count = input->argument_count,
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
-            .const_values = input->const_values,
-            .constant_evaluated = input->constant_evaluated,
+            .context = input->context,
         };
         CheckBuiltinFloatResult checked = { 0 };
         for (uint32_t i = 0; i < count; i += 1)

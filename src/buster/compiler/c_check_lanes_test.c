@@ -327,6 +327,8 @@ struct CheckLanesTestEmission
     uint32_t token;
     uint32_t backend_node;
     Tier0Error backend_error;
+    CheckTier1Outcome tier1_failure;
+    bool rolled_back;
     const char* reason;
     uint32_t active;
     uint32_t parts;
@@ -406,6 +408,9 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
     result.token = code.token;
     result.backend_node = code.backend_node;
     result.backend_error = code.backend_error;
+    result.tier1_failure = code.tier1_failure;
+    result.rolled_back = !emitted && output.length == 0 && bytes.length == 0 && scratch.length == 0 && code.link.atoms.count == 0 &&
+                         code.link.symbols.count == 0 && code.records == 0 && code.function_atoms == NULL;
     result.reason = code.reason;
     result.active = lanes != NULL ? lanes->active : 1;
     result.parts = lanes != NULL ? lanes->parts : 1;
@@ -2092,12 +2097,15 @@ static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const 
                             "commands in one process run on a lazy session's lanes, collectively", detail);
 }
 
+static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* directory, const char* executable);
+
 static int run_check_lanes_tests(int argc, char** argv)
 {
     CheckLanesTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
     const char* executable = "/proc/self/exe";
     bool keep = false;
     uint32_t programs = 6;
+    bool tier1_outcomes_only = false;
     uint64_t id_order = 153;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -2121,6 +2129,10 @@ static int run_check_lanes_tests(int argc, char** argv)
             id_order = strtoull(argv[++i], &end, 10);
             options = end != argv[i] && *end == 0;
         }
+        else if (strcmp(argv[i], "--tier1-outcomes") == 0)
+        {
+            tier1_outcomes_only = true;
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -2130,7 +2142,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             options = false;
         }
     }
-    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--keep]", 0);
+    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--tier1-outcomes] [--keep]", 0);
     char resolved[PATH_MAX];
     const ssize_t resolved_length = strcmp(executable, "/proc/self/exe") == 0 ? readlink(executable, resolved, sizeof(resolved) - 1) : -1;
     if (resolved_length > 0)
@@ -2145,24 +2157,28 @@ static int run_check_lanes_tests(int argc, char** argv)
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
     if (made)
     {
-        check_lanes_test_backend_startup(&tally, directory);
-        check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);
-        const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
-        check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
-        check_lanes_test_expect(&tally, check_lanes_test_order_setup(), "refuse an id-order priming setup that fails", NULL);
-        check_lanes_test_expect(&tally, check_lanes_test_order_cache(directory), "prime from a private cache while retaining source-error names", NULL);
-        check_lanes_test_programs(&tally, directory, programs, id_order);
-        check_lanes_test_failing(&tally, directory, id_order);
-        check_lanes_test_squeezes(&tally, directory);
-        check_lanes_test_unstarted(&tally, directory);
-        check_lanes_test_address_space(&tally, directory);
-        check_lanes_test_scratch(&tally, directory);
-        check_lanes_test_rule(&tally, directory);
-        check_lanes_test_driver(&tally, executable, directory, programs, id_order);
-        check_lanes_test_driver_failing(&tally, executable, directory, id_order);
-        check_lanes_test_session_threads(&tally, executable, directory);
-        check_lanes_test_session_commands(&tally, executable, directory);
-        check_lanes_test_benchmark_sections(&tally, executable, directory);
+        check_tier1_outcome_tests(&tally, directory, executable);
+        if (!tier1_outcomes_only)
+        {
+            check_lanes_test_backend_startup(&tally, directory);
+            check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);
+            const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
+            check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
+            check_lanes_test_expect(&tally, check_lanes_test_order_setup(), "refuse an id-order priming setup that fails", NULL);
+            check_lanes_test_expect(&tally, check_lanes_test_order_cache(directory), "prime from a private cache while retaining source-error names", NULL);
+            check_lanes_test_programs(&tally, directory, programs, id_order);
+            check_lanes_test_failing(&tally, directory, id_order);
+            check_lanes_test_squeezes(&tally, directory);
+            check_lanes_test_unstarted(&tally, directory);
+            check_lanes_test_address_space(&tally, directory);
+            check_lanes_test_scratch(&tally, directory);
+            check_lanes_test_rule(&tally, directory);
+            check_lanes_test_driver(&tally, executable, directory, programs, id_order);
+            check_lanes_test_driver_failing(&tally, executable, directory, id_order);
+            check_lanes_test_session_threads(&tally, executable, directory);
+            check_lanes_test_session_commands(&tally, executable, directory);
+            check_lanes_test_benchmark_sections(&tally, executable, directory);
+        }
         if (!keep && tally.failures == 0)
         {
             char* remove[] = { (char*)"rm", (char*)"-rf", directory, 0 };

@@ -153,6 +153,7 @@ static void check_test_driver_linker(CheckTest* test, const char* clang, const c
         { { "-Wl,-e" }, "missing argument to linker option '-e'" },
         { { "-Wl,-z" }, "missing argument to linker option '-z'" },
         { { "-Wl,-e,nosuch_entry" }, "linker entry 'nosuch_entry' is not a defined code symbol" },
+        { { "-static", "-Wl,-rpath,/x" }, "runtime search paths require dynamic output" },
     };
     for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refused); r += 1)
     {

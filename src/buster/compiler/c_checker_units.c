@@ -62,6 +62,7 @@ struct CheckUnitsUnit
     bool unbuffered;
     bool compiled;
     CheckUnitsKept kept;
+    DependencyOutput dependency;
 };
 
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
@@ -1496,15 +1497,16 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .board_lane = (uint32_t)(lane - run->lanes),
             .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
             .tier1 = command->tier1,
+            .tier1_strict = command->tier1_strict,
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
-            .tier1_refusals = command->tier1_refusals,
+            .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
         };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true);
+                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
         arena_small_floor = 0;
         // The unit's --tier1 outcomes into the command's report, which the other lanes' units add to too.
         for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_STAGE_COUNT; k += 1)
@@ -1521,6 +1523,13 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             CheckTier1Report* report = command->tier1_report;
             const CheckTier1Report* unit_report = &lane->functions.tier1_report;
             __atomic_fetch_add(&report->functions, unit_report->functions, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->requested, unit_report->requested, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->admitted, unit_report->admitted, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->fallbacks, unit_report->fallbacks, __ATOMIC_RELAXED);
+            for (uint32_t k = 1; k < CHECK_TIER1_CATEGORY_COUNT; k += 1)
+            {
+                __atomic_fetch_add(&report->categories[k], unit_report->categories[k], __ATOMIC_RELAXED);
+            }
             __atomic_fetch_add(&report->records, unit_report->records, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->spill_stores, unit_report->spill_stores, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->spill_loads, unit_report->spill_loads, __ATOMIC_RELAXED);
@@ -1853,8 +1862,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 CheckProgramLanes writers = { .lanes = active, .budget = lanes->budget, .units_flow = lanes->units_flow };
                 const bool linked = check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
                                                             command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
-                                                            stage_clock, units, count);
+                                                            stage_clock, units, count, command->runtime_kind);
                 result = linked ? 0 : 1;
+            }
+            for (uint32_t u = 0; result == 0 && u < count; u += 1)
+            {
+                result = dependency_publish(&units[u].dependency, stderr) ? 0 : 1;
             }
             for (uint32_t l = 0; l < active; l += 1)
             {

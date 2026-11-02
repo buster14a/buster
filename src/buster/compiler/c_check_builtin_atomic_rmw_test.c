@@ -151,7 +151,7 @@ static CheckBuiltinAtomicRmwAction check_builtin_atomic_rmw_test_input(TypeTable
             .arguments = arguments,
             .argument_count = fixture.fixed + (fixture.legacy ? 2 : 0),
             .node = 148,
-            .source_position = UINT32_MAX,
+            .context.source_position = UINT32_MAX,
             .minimum_alignment = 16,
             .alignment_known = true,
         },
@@ -301,14 +301,14 @@ static void check_builtin_atomic_rmw_test_constraints(CheckBuiltinAtomicRmwTest*
         completions[tag] = 20;
         input = check_builtin_atomic_rmw_test_input(table, 0, BUSTER_TYPE_INT, arguments);
         arguments[1] = check_test_integer(enumeration, UINT32_MAX);
-        input.source.tag_completions = completions;
-        input.source.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+        input.source.context.tag_completions = completions;
+        input.source.context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
         input.source.node = 999;
-        input.source.source_position = 19;
+        input.source.context.source_position = 19;
         check_builtin_atomic_rmw_one(table, &input, &result);
         check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_INCOMPLETE && result.atomic.action.diagnostic_operand == 1,
             "future enum definition is invisible at source position regardless of action node", 0);
-        input.source.source_position = 20;
+        input.source.context.source_position = 20;
         check_builtin_atomic_rmw_one(table, &input, &result);
         check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.store_value.type == BUSTER_TYPE_INT && result.atomic.store_value.integer == UINT32_MAX,
             "visible source enum follows ordinary value conversion", 0);
@@ -403,7 +403,7 @@ static CheckBuiltinAtomicRmwAction check_builtin_atomic_rmw_test_call(CBuiltinId
             .arguments = arguments,
             .argument_count = count,
             .node = 148,
-            .source_position = UINT32_MAX,
+            .context.source_position = UINT32_MAX,
             .minimum_alignment = 16,
             .alignment_known = true,
         },
@@ -646,8 +646,8 @@ static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test,
             const CheckBuiltinAtomicAction* x = &action_copy[i].source;
             const CheckBuiltinAtomicAction* y = &actions[i].source;
             unchanged &= x->id == y->id && x->arguments == y->arguments && x->argument_count == y->argument_count && x->node == y->node &&
-                x->tag_completions == y->tag_completions && x->tag_completion_count == y->tag_completion_count && x->source_position == y->source_position &&
-                x->extensions == y->extensions && x->minimum_alignment == y->minimum_alignment && x->alignment_known == y->alignment_known &&
+                x->context.tag_completions == y->context.tag_completions && x->context.tag_completion_count == y->context.tag_completion_count && x->context.source_position == y->context.source_position &&
+                x->context.extensions == y->context.extensions && x->minimum_alignment == y->minimum_alignment && x->alignment_known == y->alignment_known &&
                 action_copy[i].order_ice_arguments == actions[i].order_ice_arguments;
         }
         for (uint32_t i = 0; i < total; i += 1)
