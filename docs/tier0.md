@@ -160,6 +160,14 @@ table. The kinds are:
   - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it;
   - `FRAME_ADDRESS` pushes the frame's address, its frame pointer: where the prologue's push saved the caller's rbp,
     under the return address, as clang -O0's frame has it.
+- `FENCE` (#1059), a memory fence, which pops and pushes nothing (`class` VOID): `value` its order, C's `memory_order`
+  0 to 5, with bit 3 for a signal fence. No consumer moves an access across it, eliminates one past it or drops it.
+  Tier 0, which moves no access across an entry, defers it (`tier0_emit_deferred`) and emits `mfence` for a thread
+  fence of `seq_cst` and nothing for the others, as clang's code has them; it reads and writes no register, so a value
+  live across it stays where it is, where a helper's call saved it. The vector validator leaves a function with one to
+  the scalar validator, as it does a tail call's; the C producer gives a fence of a constant order one
+  (`check_program_direct_fence`, [the builtin integration guide](c-builtins-integration.md)'s "Helper contracts and
+  direct forms").
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs

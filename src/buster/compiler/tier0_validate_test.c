@@ -11,7 +11,8 @@
 //     bytes, address-taken ones and an address-only one), direct and indirect calls with arguments, a result object and a
 //     long double result, a long double constant, the access column and a label JUMP_INDIRECT may go to, with and without
 //     long double's and the 128-bit integers' values: the two verdicts the same on every one, but where the vector path
-//     leaves to the scalar validator an arrival it doesn't decide (a backward one with values on the stack);
+//     leaves to the scalar validator an arrival it doesn't decide (a backward one with values on the stack) or a fence
+//     (#1059), a kind past the vectors' that it leaves whole, as it leaves a tail call;
 //   - programs: tier0_test_build's checks that the vector path takes every function of every generated program
 //     (tier0_test_scan_program) and that the twins agree on each of them changed in one place (a kind, a class or a
 //     value replaced, two entries swapped, one removed or repeated);
@@ -232,6 +233,16 @@ static uint32_t tier0_test_scan_values(uint32_t kind, uint32_t entry, uint32_t c
         values[n++] = 1;
         values[n++] = 1ull << 40;
         break;
+    case BUSTER_TYPED_FENCE:
+        // Every order of either scope, an order past seq_cst and a bit past the scope's: 14 of the caller's 16.
+        for (uint64_t order = 0; order <= BUSTER_TYPED_FENCE_SEQ_CST; order += 1)
+        {
+            values[n++] = order;
+            values[n++] = order | BUSTER_TYPED_FENCE_SIGNAL;
+        }
+        values[n++] = BUSTER_TYPED_FENCE_SEQ_CST + 1;
+        values[n++] = BUSTER_TYPED_FENCE_SIGNAL << 1;
+        break;
     default:
         values[n++] = 0;
         values[n++] = 7;
@@ -316,7 +327,7 @@ static void tier0_test_scan_entries(Tier0TestTally* tally, bool memory, uint64_t
                         // to itself) is the scalar validator's to decide.
                         const bool backward = kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE && scan.values[entry] <= entry;
                         *checked += 1;
-                        if (!tier0_test_scan_agree(&scan.function, backward, taken))
+                        if (!tier0_test_scan_agree(&scan.function, backward || kind == BUSTER_TYPED_FENCE, taken))
                         {
                             tier0_test_expect(tally, false, "validation", "kind %u class %u after %u and %u, value %" PRIu64 ": the vector path %s, the scalar validator %s (%s)",
                                               kind, class, second, top, values[v], tier0_validate_accepts(&scan.function) ? "takes it" : "leaves it",

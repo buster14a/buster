@@ -1074,6 +1074,10 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_LIFETIME:
                     // A slot's lifetime marker reads and writes nothing: each slot has bytes of its own here.
                     break;
+                case IR_FENCE:
+                    // One thread's accesses in program order, as this interpreter runs them, are what any fence orders
+                    // them into (#1059): nothing to do. It is no model of other threads' views of memory.
+                    break;
                 case IR_ALLOCA:
                     result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
                     break;

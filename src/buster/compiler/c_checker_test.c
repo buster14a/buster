@@ -5369,6 +5369,175 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // GNU's function multiversioning (#839): target("default") makes a function multiversioned even alone, and
+        // clang refuses these declaration attributes beside it, at the function's name.
+        {
+            "multiversioning: always_inline beside target default",
+            "int g(int x) { return x; }\n__attribute__((always_inline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: noinline beside target default",
+            "int g(int x) { return x; }\n__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: flatten beside target default",
+            "int g(int x) { return x; }\n__attribute__((flatten, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cold beside target default",
+            "int g(int x) { return x; }\n__attribute__((cold, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: hot beside target default",
+            "int g(int x) { return x; }\n__attribute__((hot, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: weak beside target default",
+            "int g(int x) { return x; }\n__attribute__((weak, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: const beside target default",
+            "int g(int x) { return x; }\n__attribute__((const, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: pure beside target default",
+            "int g(int x) { return x; }\n__attribute__((pure, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: naked beside target default",
+            "int g(int x) { return x; }\n__attribute__((naked, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: alias beside target default",
+            "int g(int x) { return x; }\n__attribute__((alias(\"g\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: target_clones beside target",
+            "int g(int x) { return x; }\n__attribute__((target_clones(\"avx2\", \"default\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_specific beside target",
+            "int g(int x) { return x; }\n__attribute__((cpu_specific(generic), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: used beside target default",
+            "int g(int x) { return x; }\n__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: nothrow beside target default",
+            "int g(int x) { return x; }\n__attribute__((nothrow, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a second target version checks the first declaration",
+            "__attribute__((always_inline, target(\"avx2\"))) int h(int x);\n"
+            "__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_dispatch beside target",
+            "__attribute__((cpu_dispatch(generic), target(\"default\"))) int h(int x) { return x + 1; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: aligned beside target default",
+            "int h(void) __attribute__((aligned(16), target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: may_alias beside target default",
+            "int h(void) __attribute__((may_alias, target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: inline nonnull beside target default",
+            "inline int h(int *p) __attribute__((nonnull, nothrow, target(\"default\"))) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a block-scope declaration beside target default",
+            "int f(void) { int h(void) __attribute__((target(\"default\"), always_inline)); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: several declarators beside target default",
+            "__attribute__((target(\"default\"), always_inline)) int h(void), g(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific declaration alone is unsupported",
+            "__attribute__((cpu_specific(generic))) int h(void);\n",
+            true,
+            true
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu17",
+            "int h(void) __attribute__((nodiscard, target(\"default\")));\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu23",
+            "int h(void) __attribute__((nodiscard, maybe_unused, no_sanitize_undefined, target(\"default\")));\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "multiversioning: no_builtin on a declaration still reports the conflict",
+            "__attribute__((no_builtin(\"printf\"), always_inline, target(\"default\"))) int h(void);\n",
+            true,
+            false
+        },
     };
     enum
     {
