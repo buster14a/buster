@@ -181,6 +181,7 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
         "-fvisibility=bogus",
         "-fvisibility=default-extra",
         "-fvisibility=hidden-extra",
+        "-fvisibility=ms-compat",
     };
     for (uint32_t i = 0; written && i < BUSTER_ARRAY_LENGTH(malformed); i += 1)
     {
