@@ -315,6 +315,32 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         cc_compat_oracle(&test, "Make space/hash/dollar escaping", NULL, spaces, NULL);
         const char* const md[] = { "-MD", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MD with explicit object directory", NULL, md, "out/a.d");
+        const char* const static_pp[] = { "-E", "-P", "-static", "a.c", NULL };
+        cc_compat_oracle(&test, "-E and -M ignore the static link mode", NULL, static_pp, NULL);
+        // Clang's depfile is fopen's: a new file has 0666 less the umask, and replacing one keeps its mode. mkstemp's
+        // private 0600 must not leak out of the atomic temporary.
+        char mode_depfile[PATH_MAX];
+        snprintf(mode_depfile, sizeof(mode_depfile), "%s/out/mode.d", test.directory);
+        const mode_t previous_umask = umask(022);
+        const char* const mode_arguments[] = { "-MD", "-c", "a.c", "-o", "out/mode.o", NULL };
+        CCCompatibilityRun mode_run = cc_compat_run(&test, test.compiler, NULL, mode_arguments);
+        struct stat mode_status;
+        const bool mode_new = mode_run.status == 0 && stat(mode_depfile, &mode_status) == 0 && (mode_status.st_mode & 0777) == 0644;
+        cc_compat_expect(&test, mode_new, "a new depfile has fopen's permissions");
+        cc_compat_release(&mode_run);
+        unlink(mode_depfile);
+        const int mode_file = open(mode_depfile, O_WRONLY | O_CREAT | O_TRUNC, 0640);
+        const bool mode_written = mode_file >= 0 && fchmod(mode_file, 0640) == 0;
+        if (mode_file >= 0)
+        {
+            close(mode_file);
+        }
+        mode_run = cc_compat_run(&test, test.compiler, NULL, mode_arguments);
+        const bool mode_kept = mode_written && mode_run.status == 0 && stat(mode_depfile, &mode_status) == 0 && (mode_status.st_mode & 0777) == 0640;
+        cc_compat_expect(&test, mode_kept, "a replaced depfile keeps its permissions");
+        cc_compat_release(&mode_run);
+        umask(previous_umask);
+        unlink(mode_depfile);
         const char* const mmd[] = { "-MMD", "-MFjoined.d", "-c", "a.c", "-o", "out/a.o", NULL };
         cc_compat_oracle(&test, "-MMD with joined -MF", NULL, mmd, "joined.d");
         const char* const ep[] = { "-E", "-MD", "-P", "a.c", "-o", "out/a.i", NULL };

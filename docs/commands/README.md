@@ -93,6 +93,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 
 The original section titles are retained in their owning guides.
 
+- [C driver build-system integration](../cc-driver.md).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
 - [Call graph check](call-graph.md#call-graph-check).
 - [Lexer tests](lexer.md#lexer-tests).
