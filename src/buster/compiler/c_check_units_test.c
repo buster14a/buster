@@ -444,19 +444,28 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
     char* reference_symbols = NULL;
     const bool reference_listed = listed && cc_linked && check_units_test_symbols(directory, reference_path, 1, defined, &reference_symbols);
     check_units_test_expect(tally, reference_listed && strcmp(reference_symbols, defined) == 0, "cc's link defines its objects' symbols", detail);
-    // All units at once with -c: each unit's object as alone, and with the lanes' arenas poisoned between units.
-    for (uint32_t c = 0; c <= BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+    // All units at once with -c: each unit's object as alone, with the lanes' arenas poisoned between units, and with a
+    // byte of memory for the units' estimates (#1109), which no two lanes' units then hold at once.
+    for (uint32_t c = 0; c <= BUSTER_ARRAY_LENGTH(lane_counts) + 1; c += 1)
     {
         const bool poisoned = c == BUSTER_ARRAY_LENGTH(lane_counts);
-        const char* options[] = { "--lanes", poisoned ? "8" : lane_counts[c], "-c", NULL };
+        const bool limited = c == BUSTER_ARRAY_LENGTH(lane_counts) + 1;
+        const char* options[] = { "--lanes", poisoned || limited ? "8" : lane_counts[c], "-c", NULL };
         const char* poisoned_options[] = { "--poison-arenas", "--lanes", "8", "-c", NULL };
-        check_units_test_command(arguments, names, executable, poisoned ? poisoned_options : lane_counts[c] != NULL ? options : options + 2, count);
+        const char* limited_options[] = { "--units-memory=1", "--lanes", "8", "-c", NULL };
+        check_units_test_command(arguments, names, executable,
+                                 poisoned ? poisoned_options : limited ? limited_options : lane_counts[c] != NULL ? options : options + 2, count);
         const int status = check_units_test_run(directory, arguments, "/dev/null", errors_path, false);
         uint64_t error_bytes = 0;
         char* error_text = check_units_test_read(errors_path, &error_bytes);
-        snprintf(detail, sizeof(detail), "program %u, %u units, -c by --lanes %s%s", program, count, poisoned ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default",
-                 poisoned ? ", the lanes' arenas poisoned" : "");
-        check_units_test_expect(tally, status == 0 && error_bytes == 0, "the units at once write their objects, without a diagnostic", detail);
+        snprintf(detail, sizeof(detail), "program %u, %u units, -c by --lanes %s%s", program, count,
+                 poisoned || limited ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default",
+                 poisoned ? ", the lanes' arenas poisoned" : limited ? ", --units-memory=1" : "");
+        // The limited run's report, its only line: how many units waited, and that one lane at most held memory.
+        const char* report = limited && error_text != NULL ? strstr(error_text, "units memory: ") : NULL;
+        const char* most = report != NULL ? strstr(report, " units waited, at most 1 lane held memory at once\n") : NULL;
+        const bool reported = report == error_text && most != NULL && most[strlen(" units waited, at most 1 lane held memory at once\n")] == 0;
+        check_units_test_expect(tally, status == 0 && (limited ? reported : error_bytes == 0), "the units at once write their objects, without a diagnostic", detail);
         free(error_text);
         for (uint32_t u = 0; u < count; u += 1)
         {

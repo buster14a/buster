@@ -31,6 +31,12 @@
 // --shared-parts' pause after each part that a unit's emission takes itself on the board (#777), in microseconds: long
 // enough that the lanes without units, woken from their futex in 10 to 14 µs, take some of its parts.
 #define BUSTER_CHECK_UNITS_SHARED_PAUSE 1000
+// A unit's estimated peak (#1109, check_units_estimate): bytes per preprocessed token, and bytes for any unit; and the
+// part of what the process may take that the units' estimates may hold at once, in eighths, the rest left for what they
+// don't count (the links the lanes keep, the lanes that take only functions' parts, the link).
+#define BUSTER_CHECK_UNITS_TOKEN_BYTES 600
+#define BUSTER_CHECK_UNITS_UNIT_BYTES (48ull << 20)
+#define BUSTER_CHECK_UNITS_MEMORY_EIGHTHS 7
 
 // A unit's link kept for the units' link (check_units_keep): a copy of its records, with room for no more, and which of
 // its undefined global symbols a system header declared, for the link's error about them (check_driver_executable's,
@@ -64,9 +70,30 @@ struct CheckUnitsUnit
     CheckUnitsKept kept;
 };
 
+// The memory the units' lanes may hold at once (#1109), against which each unit, once preprocessed, takes an estimate of
+// its peak (check_units_admit): `limit`, what the process may still take when the run starts
+// (check_units_memory_available), or --units-memory's; `held`, what the lanes hold, each lane its largest unit's since it
+// last gave memory back, whose pages its three arenas keep for its next units. A unit that doesn't fit beside what the
+// other lanes hold waits on `released`, which every lane that gives memory back advances (lane_advance), until it fits
+// or no other lane holds any: a unit alone always runs. `waiting` counts the lanes waiting now, which makes a lane that
+// ends a unit give its memory back rather than keep it for its next; and for --units-memory's report, `waits` the units
+// that waited, and `holders` the lanes that hold memory now, which a lane adds itself to after it takes the memory and
+// takes itself out of before it gives it back, so that it never counts more than hold it, and `most` the most it counted.
+typedef struct CheckUnitsMemory CheckUnitsMemory;
+struct CheckUnitsMemory
+{
+    uint64_t limit;
+    uint64_t held;
+    uint32_t released;
+    uint32_t waiting;
+    uint32_t waits;
+    uint32_t holders;
+    uint32_t most;
+};
+
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
-// preprocessor, parser, memory and function lanes, the memory of the links it keeps, and the pool of the arenas its
-// units release (arena_pool).
+// preprocessor, parser, memory and function lanes, the memory of the links it keeps, the pool of the arenas its units
+// release (arena_pool), and the part of the run's memory it holds (CheckUnitsMemory).
 typedef struct CheckUnitsLane CheckUnitsLane;
 struct CheckUnitsLane
 {
@@ -83,6 +110,8 @@ struct CheckUnitsLane
     Arena kept_bytes;
     CheckProgramLanes functions;
     ArenaPool pool;
+    CheckUnitsMemory* memory;
+    uint64_t held;
 };
 
 // What every lane of the units' run reads, and each unit's result, which the lane that takes it fills.
@@ -98,6 +127,8 @@ struct CheckUnitsRun
     // The lanes' board (#777), on which a unit's emission shares its functions' parts with the lanes that have no unit
     // left to take; null on one lane.
     CheckEmitBoard* board;
+    // The memory the lanes' units take turns with (#1109).
+    CheckUnitsMemory* memory;
 };
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
@@ -1431,6 +1462,171 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     return result;
 }
 
+// Up to `size` - 1 bytes of the file at `path` into `buffer`, NUL-terminated: their count, 0 if it can't be read.
+static uint64_t check_units_read_text(const char* path, char* buffer, uint64_t size)
+{
+    uint64_t length = 0;
+    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t got = file >= 0 ? 1 : 0;
+    while (got > 0 && length + 1 < size)
+    {
+        got = read(file, buffer + length, size - 1 - length);
+        length += got > 0 ? (uint64_t)got : 0;
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    buffer[length] = 0;
+    return length;
+}
+
+// The number after `key` at the start of one of `text`'s lines (blanks skipped), times `unit`; `missing` if no line
+// starts with `key` and a number.
+static uint64_t check_units_text_value(const char* text, const char* key, uint64_t unit, uint64_t missing)
+{
+    const uint64_t key_length = strlen(key);
+    uint64_t result = missing;
+    bool found = false;
+    const char* line = text;
+    while (!found && line != NULL && *line != 0)
+    {
+        if (strncmp(line, key, key_length) == 0)
+        {
+            char* end = NULL;
+            const unsigned long long value = strtoull(line + key_length, &end, 10);
+            found = end != line + key_length;
+            result = found ? (value <= UINT64_MAX / unit ? (uint64_t)value * unit : UINT64_MAX) : result;
+        }
+        const char* next = strchr(line, '\n');
+        line = next != NULL ? next + 1 : NULL;
+    }
+    return result;
+}
+
+// What the process may still take of the machine's memory when the units' run starts (#1109): the least of
+// /proc/meminfo's MemAvailable and, for each cgroup v2 from the process's own (/proc/self/cgroup's "0::" line) up to its
+// hierarchy's root, its memory.max less its memory.current, the files' pages on its lists (memory.stat's active_file and
+// inactive_file) counted as free, since the kernel takes them back before it kills. UINT64_MAX if none can be read.
+static uint64_t check_units_memory_available(void)
+{
+    char text[8192];
+    uint64_t result = UINT64_MAX;
+    if (check_units_read_text("/proc/meminfo", text, sizeof(text)) != 0)
+    {
+        result = check_units_text_value(text, "MemAvailable:", 1024, UINT64_MAX);
+    }
+    static const char root[] = "/sys/fs/cgroup";
+    char directory[PATH_MAX];
+    const uint64_t prefix = sizeof(root) - 1;
+    const uint64_t length = check_units_read_text("/proc/self/cgroup", text, sizeof(text));
+    const char* line = length != 0 && strncmp(text, "0::/", 4) == 0 ? text : length != 0 ? strstr(text, "\n0::/") : NULL;
+    const char* path = line != NULL ? line + (line == text ? 3 : 4) : NULL;
+    const uint64_t path_length = path != NULL ? strcspn(path, "\n") : 0;
+    uint64_t end = path != NULL && prefix + path_length < sizeof(directory) ? prefix + path_length : 0;
+    if (end != 0)
+    {
+        memcpy(directory, root, prefix);
+        memcpy(directory + prefix, path, path_length);
+        // The hierarchy's root itself, "0::/", is root alone.
+        end = directory[end - 1] == '/' ? end - 1 : end;
+    }
+    while (end >= prefix)
+    {
+        char file[PATH_MAX + 32];
+        snprintf(file, sizeof(file), "%.*s/memory.max", (int)end, directory);
+        const uint64_t limit = check_units_read_text(file, text, sizeof(text)) != 0 ? check_units_text_value(text, "", 1, UINT64_MAX) : UINT64_MAX;
+        if (limit != UINT64_MAX)
+        {
+            snprintf(file, sizeof(file), "%.*s/memory.current", (int)end, directory);
+            const uint64_t current = check_units_read_text(file, text, sizeof(text)) != 0 ? check_units_text_value(text, "", 1, 0) : 0;
+            snprintf(file, sizeof(file), "%.*s/memory.stat", (int)end, directory);
+            const bool stat = check_units_read_text(file, text, sizeof(text)) != 0;
+            const uint64_t files = stat ? check_units_text_value(text, "active_file ", 1, 0) + check_units_text_value(text, "inactive_file ", 1, 0) : 0;
+            const uint64_t used = current > files ? current - files : 0;
+            const uint64_t headroom = limit > used ? limit - used : 0;
+            result = headroom < result ? headroom : result;
+        }
+        // Up a level: to the last '/' past root, or past root's own level, out of the loop.
+        uint64_t parent = end;
+        while (parent > prefix && directory[parent - 1] != '/')
+        {
+            parent -= 1;
+        }
+        end = end > prefix ? parent - 1 : 0;
+    }
+    return result;
+}
+
+// The peak a unit of `tokens` preprocessed tokens adds to the process's resident memory, by estimate (#1109): what its
+// parse, checking and emission take per token, and what any unit takes, measured on units from a few tokens to
+// main.c's (docs/translation-units.md, "Memory").
+static uint64_t check_units_estimate(uint32_t tokens)
+{
+    return (uint64_t)tokens * BUSTER_CHECK_UNITS_TOKEN_BYTES + BUSTER_CHECK_UNITS_UNIT_BYTES;
+}
+
+// Takes `need` bytes of the run's memory for a lane that holds `held` of it, in place of those: true if they fit beside
+// what the other lanes hold, or no other lane holds any.
+static bool check_units_memory_take(CheckUnitsMemory* memory, uint64_t held, uint64_t need)
+{
+    uint64_t total = __atomic_load_n(&memory->held, __ATOMIC_ACQUIRE);
+    bool fits = total - held + need <= memory->limit || total == held;
+    while (fits && !__atomic_compare_exchange_n(&memory->held, &total, total - held + need, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        fits = total - held + need <= memory->limit || total == held;
+    }
+    if (fits && held == 0)
+    {
+        const uint32_t holders = __atomic_add_fetch(&memory->holders, 1, __ATOMIC_ACQ_REL);
+        uint32_t most = __atomic_load_n(&memory->most, __ATOMIC_RELAXED);
+        while (holders > most && !__atomic_compare_exchange_n(&memory->most, &most, holders, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        {
+        }
+    }
+    return fits;
+}
+
+// What `lane` held of the run's memory, given back (#1109): its three arenas' pages from the first huge page boundary past
+// their lengths (arena_discard; none after its release), and its part of the run's memory, which wakes the lanes waiting
+// for it.
+static void check_units_memory_give(CheckUnitsLane* lane)
+{
+    if (lane->held != 0)
+    {
+        arena_discard(&lane->arena);
+        arena_discard(&lane->scratch);
+        arena_discard(&lane->output);
+        __atomic_sub_fetch(&lane->memory->holders, 1, __ATOMIC_ACQ_REL);
+        __atomic_sub_fetch(&lane->memory->held, lane->held, __ATOMIC_RELEASE);
+        lane->held = 0;
+        lane_advance(&lane->memory->released);
+    }
+}
+
+// A unit of `tokens` preprocessed tokens on `lane`, before its parse (#1109, check_driver_unit): it takes its estimated
+// peak from the run's memory, in place of what the lane holds, where that is less. If that doesn't fit beside what the
+// other lanes hold, the lane gives back what it holds and waits until it fits or no other lane holds any.
+static void check_units_admit(CheckUnitsLane* lane, uint32_t tokens)
+{
+    CheckUnitsMemory* memory = lane->memory;
+    const uint64_t need = check_units_estimate(tokens);
+    if (memory != NULL && need > lane->held && !check_units_memory_take(memory, lane->held, need))
+    {
+        check_units_memory_give(lane);
+        __atomic_add_fetch(&memory->waiting, 1, __ATOMIC_ACQ_REL);
+        __atomic_add_fetch(&memory->waits, 1, __ATOMIC_RELAXED);
+        // The word is read before each try, so that a lane that gives memory back after a failed try wakes this one.
+        uint32_t released = __atomic_load_n(&memory->released, __ATOMIC_ACQUIRE) & ~1u;
+        while (!check_units_memory_take(memory, 0, need))
+        {
+            released = lane_sleep(&memory->released, released);
+        }
+        __atomic_sub_fetch(&memory->waiting, 1, __ATOMIC_ACQ_REL);
+    }
+    lane->held = memory != NULL && need > lane->held ? need : lane->held;
+}
+
 // The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
 // memory of the links it keeps (once: the links it kept stay there), the first time the lane takes a unit. False, with
 // the lane failed, if it can't be reserved: what was stays the lane's, for its release.
@@ -1456,6 +1652,7 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
 // where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
 // A lane whose setup failed releases what it reserved before the failure, which its table and cache keep as their
 // initializers left them (a lane that took no unit, or released them already, has them zero, which their releases take).
+// Then it gives back what it held of the run's memory (check_units_memory_give).
 static void check_units_lane_release(CheckUnitsLane* lane)
 {
     file_cache_release(&lane->cache);
@@ -1464,6 +1661,7 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
+    check_units_memory_give(lane);
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
@@ -1501,7 +1699,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+            .units_lane = lane,
         };
+        lane->memory = run->memory;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
@@ -1555,6 +1755,11 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             {
                 arena_pop_to(arenas[a], 0);
             }
+        }
+        // A lane that waits for memory (#1109) takes what this one gave back, rather than wait for its later units too.
+        if (lane->memory != NULL && __atomic_load_n(&lane->memory->waiting, __ATOMIC_ACQUIRE) != 0)
+        {
+            check_units_memory_give(lane);
         }
     }
     if (errors != NULL && fclose(errors) != 0)
@@ -1791,6 +1996,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 board->lanes = active;
                 board->taking = active;
             }
+            // The memory the units take turns with (#1109): part of what the process may take, or --units-memory's.
+            const uint64_t available = command->units_memory != 0 ? 0 : check_units_memory_available();
+            CheckUnitsMemory memory = {
+                .limit = command->units_memory != 0 ? command->units_memory : available / 8 * BUSTER_CHECK_UNITS_MEMORY_EIGHTHS,
+            };
             CheckUnitsRun run = {
                 .command = command,
                 .units = units,
@@ -1798,6 +2008,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .order = order,
                 .lanes = states,
                 .board = board,
+                .memory = &memory,
             };
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
@@ -1846,6 +2057,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             if (command->shared_parts)
             {
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
+            }
+            if (command->units_memory != 0)
+            {
+                fprintf(stderr, "units memory: %u units waited, at most %u lane%s held memory at once\n", memory.waits, memory.most, memory.most != 1 ? "s" : "");
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release): the kept links are
             // all the link reads.

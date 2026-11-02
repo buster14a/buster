@@ -2539,6 +2539,10 @@ struct CheckDriverCommand
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
+    // --units-memory=BYTES, #1109's test option: the memory the units' lanes may hold at once, by their estimates, in
+    // place of what the process may take, and the command reports how many units waited for it, after the units'
+    // diagnostics (c_checker_units.c). 0 without it.
+    uint64_t units_memory;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2564,6 +2568,7 @@ struct CheckDriverCommand
 
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock);
+static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
@@ -2632,6 +2637,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
+        // One of several units (#1109): the unit's estimated peak, from its tokens, out of the memory the units' lanes
+        // share, before the parse and the checker take it; it may wait for another lane's units to give theirs back.
+        if (lanes != NULL && lanes->units_lane != NULL)
+        {
+            check_units_admit(lanes->units_lane, pp->output.count);
+        }
         if (ready)
         {
             ready = parse_translation_unit(parser, pp);
@@ -3291,9 +3302,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
-    // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
+    // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
+    // (CheckDriverCommand's).
     bool poison_arenas = false;
     bool shared_parts = false;
+    uint64_t units_memory = 0;
+    bool invalid_units_memory = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -3499,6 +3513,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             shared_parts = true;
         }
+        else if (strncmp(arguments[i], "--units-memory=", 15) == 0)
+        {
+            char* end = NULL;
+            units_memory = strtoull(arguments[i] + 15, &end, 10);
+            invalid_units_memory |= end == arguments[i] + 15 || *end != 0 || units_memory == 0 || arguments[i][15] == '-';
+        }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
@@ -3555,7 +3575,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* output = 0;
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
-    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && !invalid_units_memory &&
                         pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
     // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
@@ -3592,6 +3612,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_order = id_order,
         .poison_arenas = poison_arenas,
         .shared_parts = shared_parts,
+        .units_memory = units_memory,
         .emit_object = emit_object,
         .link = link,
         .source_rows = source_rows,
@@ -3624,7 +3645,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)

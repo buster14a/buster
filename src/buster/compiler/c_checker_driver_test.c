@@ -2924,7 +2924,7 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tstage-system-validation\tdocs-compile-time-clock-accounting-control\n",
                                            "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t",
-                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
+                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t", "\ntime-process\thuge-pages\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
     double walk = -1;
@@ -3153,6 +3153,23 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                       "--time-stages -fsyntax-only reports the stages it ran, on one lane");
     free(text);
     text = NULL;
+    // BUSTER_HUGE_PAGES (#1109, arena_page_policy): "0" turns transparent huge pages off for the process, and "1" leaves
+    // them as the system has them, even where the process that started it (this one, on a virtual machine) had them off.
+    const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
+    char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
+    bool paged = made && (pages_saved == NULL || pages_copy != NULL);
+    for (uint32_t setting = 0; setting < 2; setting += 1)
+    {
+        paged = paged && setenv("BUSTER_HUGE_PAGES", setting == 0 ? "0" : "1", 1) == 0;
+        const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
+        const char* expected = setting == 0 ? "\ntime-process\thuge-pages\toff\n" : "\ntime-process\thuge-pages\tsystem\n";
+        paged = pages_status == 0 && text != NULL && strstr(text, expected) != NULL;
+        free(text);
+        text = NULL;
+    }
+    paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
+    free(pages_copy);
+    check_test_expect(test, paged, "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, and 1 leaves them as the system has them");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
