@@ -44,11 +44,14 @@ static bool check_input_fp_name(const CheckInputReader* reader, uint32_t source,
 // Only complete supported extension forms acquire a handled mark. In particular, a recognized prefix must not
 // swallow another clang fp clause, a float_control stack operation, a macro argument or malformed punctuation.
 // Unsupported forms remain with the semantic-pragma diagnostic, which retains their original spelling.
-static bool check_input_fp_extension(const CheckInputReader* reader, uint32_t source, uint32_t* end, uint8_t* kind, uint8_t* state)
+static bool check_input_fp_extension(CheckInputReader* reader, uint64_t** macros, uint32_t source, uint32_t* end, uint8_t* kind, uint8_t* state)
 {
     const PPTokens* output = &reader->pp->output;
     uint32_t last = source;
-    const bool directive = parse_pragma_at(output, source, &last);
+    const bool candidate = source < output->count && output->count - source >= 6 &&
+                           (check_input_fp_name(reader, source + 2, "fenv_access") || check_input_fp_name(reader, source + 2, "float_control") ||
+                            (check_input_fp_name(reader, source + 2, "clang") && check_input_fp_name(reader, source + 3, "fp")));
+    const bool directive = candidate && parse_pragma_at(output, source, &last);
     const uint32_t length = directive ? last - source : 0;
     bool supported = false;
     uint8_t selected = CHECK_FP_PRAGMA_FENV_ACCESS;
@@ -83,6 +86,15 @@ static bool check_input_fp_extension(const CheckInputReader* reader, uint32_t so
         selected = CHECK_FP_PRAGMA_PRECISE;
         value = 1;
     }
+    // These handlers read macro-expanded arguments, but the retained stream is unexpanded. Even a literal-looking
+    // word such as 'on' can have been a macro. Use the existing conservative unit-history guard; pragma namespace
+    // and handler names themselves are not expanded. The count pass prepares this scratch before publishing state.
+    const uint32_t first = source + (selected == CHECK_FP_PRAGMA_FP_CONTRACT ? 4 : 3);
+    for (uint32_t token = first; supported && token < last; token += 1)
+    {
+        const IdentId name = check_input_pragma_name(reader, token);
+        supported = name == 0 || !check_input_pragma_macro(reader, macros, name);
+    }
     *end = last;
     *kind = selected;
     *state = value;
@@ -93,6 +105,9 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
 {
     const Parser* parser = reader->parser;
     CheckInput* input = reader->output;
+    const uint64_t mark = reader->scratch->length;
+    const uint64_t retained = reader->arena->length;
+    uint64_t* macros = 0;
     uint32_t count = 0;
     for (uint32_t pragma = 0; pragma < parser->tokens.pragma_count; pragma += 1)
     {
@@ -103,7 +118,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
         const bool standard = check_input_fp_name(reader, source + 2, "STDC") &&
                               (check_input_fp_name(reader, source + 3, "FENV_ACCESS") || check_input_fp_name(reader, source + 3, "CX_LIMITED_RANGE") ||
                                check_input_fp_name(reader, source + 3, "FP_CONTRACT"));
-        count += standard || check_input_fp_extension(reader, source, &end, &kind, &state);
+        count += standard || check_input_fp_extension(reader, &macros, source, &end, &kind, &state);
     }
     typedef struct CheckFpScope CheckFpScope;
     struct CheckFpScope
@@ -114,14 +129,12 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
         uint8_t complex_range;
         bool compound;
     };
-    const uint64_t mark = reader->scratch->length;
-    const uint64_t retained = reader->arena->length;
     CheckFpScope* scopes = count != 0 ? arena_push_array(reader->scratch, (uint64_t)parser->tokens.count + 1, sizeof(CheckFpScope), _Alignof(CheckFpScope)) : 0;
     CheckInputFpPragma* records = count != 0 ? arena_push_array(reader->arena, count, sizeof(CheckInputFpPragma), _Alignof(CheckInputFpPragma)) : 0;
     uint8_t* environments = count != 0 ? arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint8_t), 1) : 0;
     uint8_t* complex_ranges = count != 0 ? arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint8_t), 1) : 0;
     uint8_t* nodes = count != 0 ? arena_push_array(reader->arena, input->graph.capacity, sizeof(uint8_t), 1) : 0;
-    const bool valid = count == 0 || (scopes != 0 && records != 0 && environments != 0 && complex_ranges != 0 && nodes != 0);
+    const bool valid = !input->resource && (count == 0 || (scopes != 0 && records != 0 && environments != 0 && complex_ranges != 0 && nodes != 0));
     reader->output->resource |= !valid;
     if (valid && count != 0)
     {
@@ -180,7 +193,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     uint32_t end = source;
                     uint8_t kind = 0;
                     uint8_t state = 0;
-                    if (placement && check_input_fp_extension(reader, source, &end, &kind, &state))
+                    if (placement && check_input_fp_extension(reader, &macros, source, &end, &kind, &state))
                     {
                         if (kind == CHECK_FP_PRAGMA_FENV_ACCESS)
                         {
