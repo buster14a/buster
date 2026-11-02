@@ -5,27 +5,41 @@ on:
     branches: [agent/1105-bootstrap]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inventory:
+  split:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/agent/1105-bootstrap'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          persist-credentials: false
-      - name: Inventory the documentation to split
+          fetch-depth: 4
+      - name: Split the reviewed documentation without changing compiler code
         shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
         run: |
           set -euo pipefail
-          wc -lc AGENTS.md CLAUDE.md
-          awk '/^## / { if (title != "") print start, NR - start, title; title=$0; start=NR } END { print start, NR + 1 - start, title }' AGENTS.md
-          printf '\nMODULE BULLETS\n'
-          awk '/^## Current repository and exact smoke commands/ { active=1; next } active && /^## / { active=0 } active && /^- / { print NR, $0 }' AGENTS.md
-          printf '\nROOT INSTRUCTION FILES\n'
-          git ls-files '*AGENTS.md' '*CLAUDE.md'
-          printf '\nMARKDOWN REFERENCES TO AGENTS\n'
-          git grep -n 'AGENTS.md#' -- '*.md' || true
-          printf '\nCOMMAND DISPATCH\n'
-          grep -n -E 'test-|benchmark-|measure-|cores|usage' src/buster/compiler/main.c | head -220 || true
+          test "$(git hash-object AGENTS.md)" = 4275633ecec326fd87ea551dfc3751491a4b0a11
+          cc -std=c17 -Wall -Wextra -Werror -g -fsanitize=address,undefined .github/issue1105-split.c -o "$RUNNER_TEMP/split-guide"
+          "$RUNNER_TEMP/split-guide"
+          base=06bcc8980b3ab331a545a860f556b3bf1527d48f
+          git cat-file -e "$base^{commit}"
+          git read-tree "$base"
+          git add AGENTS.md CLAUDE.md docs/commands
+          git diff --cached --check
+          while IFS= read -r path; do
+              case "$path" in
+                  AGENTS.md|CLAUDE.md|docs/commands/*.md) ;;
+                  *) echo "Unexpected output path: $path"; exit 1 ;;
+              esac
+          done < <(git diff --cached --name-only "$base")
+          git diff --cached --stat "$base"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'docs: split agent guidance into command-specific guides (#1105)' '' 'Preserve the shared rules and smoke commands; move detailed module, test' 'and benchmark guidance into docs/commands with corrected relative links.' '' 'Generated from AGENTS.md blob 4275633ecec326fd87ea551dfc3751491a4b0a11.' 'No compiler source or behavior changes. Maintainer DCO certification pending.' 'Agent: OpenAI / GPT-6 Astra Pro (session URL/ID unavailable).' | git commit-tree "$tree" -p "$base")
+          git push origin "$commit:refs/heads/agent/1105-guide-split"
+          printf 'OUTPUT_COMMIT=%s\n' "$commit"
