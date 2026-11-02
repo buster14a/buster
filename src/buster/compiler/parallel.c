@@ -3,7 +3,7 @@
 //
 // The runner the 9700X job runs its tests through, for the parallel command:
 //
-//   build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]
+//   build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]
 //
 // LIST (standard input without one) is a list of commands. Each starts at a heading, a line `== TITLE`, and its script
 // is the lines after it, up to the next heading; before the first heading there may be blank lines and comments (`#`).
@@ -22,6 +22,12 @@
 // skip code) is reported as skipped, counted apart, and doesn't fail the run; a test that leaves a check to another
 // stage says so in its output and exits 77. The exit status is 0 when every command passed or was skipped, and 1
 // otherwise.
+//
+// --shard K/N runs the K-th of N shards of the list, for N machines that each run one (a CI job's matrix): the runner
+// deals the commands to the shards, the costliest first, each to the shard whose commands cost the least so far
+// (parallel_shards), and runs its shard's in the list's order. FILE's lines (--costs) are `SECONDS TITLE`, a command's
+// time times the CPUs it held, as a runner's report gives them; a command without a line costs its CPUs times 10 s. The
+// deal depends on the list and the costs alone, never on the machine, so that the N shards run every command once.
 //
 // The report never holds up the run. A command's output is read into memory when it ends and its capture closed, so
 // that only running commands hold one, however many have ended before the report reaches them; and the report goes out
@@ -43,7 +49,8 @@
 // goes into them.
 //
 // main.c includes this file after lane.c, for its arenas, and parallel_test.c after it. Layout, in this order: the list
-// (ParallelList, parallel_title_cpus, parallel_list_parse), the run (ParallelOptions, ParallelResult, ParallelSummary,
+// (ParallelList, parallel_title_cpus, parallel_list_parse), the shards (ParallelCosts, parallel_costs_parse,
+// parallel_shards, parallel_list_shard), the run (ParallelOptions, ParallelResult, ParallelSummary,
 // ParallelEnvironment, parallel_start, the report's parts: parallel_render, parallel_render_summary and parallel_part,
 // ParallelOutput and parallel_output_write, parallel_reap, parallel_stop, parallel_run), and the command
 // (run_parallel_command).
@@ -311,6 +318,193 @@ static ParallelList parallel_list_parse(Arena* arena, String8 text)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Shards
+
+// What a command costs, in milliseconds of the CPUs it holds, when the costs have no line for it: its CPUs times this.
+#define BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS 10000ull
+// The most milliseconds a cost may give: a day of 1,024 CPUs, far past any command, so that sums of costs can't overflow.
+#define BUSTER_PARALLEL_MAX_COST_MILLISECONDS (86400000ull * 1024)
+
+typedef struct ParallelCosts ParallelCosts;
+struct ParallelCosts
+{
+    // Each command's cost in milliseconds, by its place in the list.
+    uint64_t* milliseconds;
+    // The first problem: what it is, or null, and its line (from 1).
+    const char* error;
+    uint64_t error_line;
+};
+
+// A cost line's seconds, digits with at most three after a '.', into milliseconds: the length it read, or 0 for none.
+static uint64_t parallel_cost_seconds(String8 line, uint64_t* milliseconds)
+{
+    uint64_t i = 0;
+    uint64_t value = 0;
+    bool valid = true;
+    while (valid && i < line.length && line.pointer[i] >= '0' && line.pointer[i] <= '9')
+    {
+        value = value * 10 + (uint64_t)(line.pointer[i] - '0');
+        valid = value <= BUSTER_PARALLEL_MAX_COST_MILLISECONDS / 1000;
+        i += 1;
+    }
+    const uint64_t whole = i;
+    value *= 1000;
+    uint64_t fraction = 0;
+    if (valid && whole != 0 && i < line.length && line.pointer[i] == '.')
+    {
+        i += 1;
+        uint64_t scale = 100;
+        const uint64_t digits = i;
+        while (i < line.length && line.pointer[i] >= '0' && line.pointer[i] <= '9' && i - digits < 3)
+        {
+            fraction += (uint64_t)(line.pointer[i] - '0') * scale;
+            scale /= 10;
+            i += 1;
+        }
+        valid = i != digits && !(i < line.length && line.pointer[i] >= '0' && line.pointer[i] <= '9');
+    }
+    *milliseconds = valid ? value + fraction : 0;
+    return valid && whole != 0 ? i : 0;
+}
+
+// Reads `text`'s costs for the list's commands: each line not blank nor a comment is `SECONDS TITLE`, a command's cost in
+// seconds of the CPUs it holds (its time, times its CPUs), then blanks, then its title as its heading has it. A title the
+// list doesn't have is left out (a command since removed); a command without a line costs its CPUs times 10 s.
+static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list, String8 text)
+{
+    ParallelCosts result = { .milliseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1) };
+    bool* given = BUSTER_ARENA_PUSH_ARRAY(arena, bool, list->count + 1);
+    if (result.milliseconds == 0 || given == 0)
+    {
+        result.error = "out of memory for the costs";
+    }
+    for (uint64_t i = 0; result.error == 0 && i < list->count; i += 1)
+    {
+        result.milliseconds[i] = list->commands[i].cpus * BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS;
+        given[i] = false;
+    }
+    uint64_t position = 0;
+    uint64_t line_number = 0;
+    while (result.error == 0 && position < text.length)
+    {
+        const uint64_t line_start = position;
+        while (position < text.length && text.pointer[position] != '\n')
+        {
+            position += 1;
+        }
+        String8 line = { .pointer = text.pointer + line_start, .length = position - line_start };
+        position += position < text.length;
+        line_number += 1;
+        // The seconds, after the blanks before them.
+        while (line.length != 0 && parallel_is_blank(line.pointer[0]))
+        {
+            line.pointer += 1;
+            line.length -= 1;
+        }
+        uint64_t milliseconds = 0;
+        const uint64_t length = parallel_cost_seconds(line, &milliseconds);
+        if (memchr(line.pointer, 0, line.length) != 0)
+        {
+            result.error = "a NUL byte";
+            result.error_line = line_number;
+        }
+        else if (!parallel_blank_line(line) && !parallel_comment_line(line))
+        {
+            // The title: what follows the blanks after the seconds, without the blanks after it.
+            uint64_t start = length;
+            uint64_t end = line.length;
+            while (start < end && parallel_is_blank(line.pointer[start]))
+            {
+                start += 1;
+            }
+            while (end > start && parallel_is_blank(line.pointer[end - 1]))
+            {
+                end -= 1;
+            }
+            const String8 title = { .pointer = line.pointer + start, .length = end - start };
+            uint64_t found = list->count;
+            for (uint64_t i = 0; i < list->count; i += 1)
+            {
+                found = found == list->count && parallel_equal(list->commands[i].title, title) ? i : found;
+            }
+            if (length == 0 || start == length || title.length == 0)
+            {
+                result.error = "a cost that isn't SECONDS TITLE";
+                result.error_line = line_number;
+            }
+            else if (found != list->count && given[found])
+            {
+                result.error = "a title that an earlier cost has";
+                result.error_line = line_number;
+            }
+            else if (found != list->count)
+            {
+                result.milliseconds[found] = milliseconds;
+                given[found] = true;
+            }
+        }
+    }
+    return result;
+}
+
+// Deals the list's commands to `shards` shards: the costliest first (the earlier in the list of two that cost the same),
+// each to the shard whose commands cost the least so far (the first of those). A command's shard, from 0, goes in
+// assigned[i]. The deal depends on the list and the costs alone, so that every shard's runner, on any machine, deals the
+// same.
+static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shards, uint64_t* assigned)
+{
+    uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1);
+    uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, shards);
+    const bool valid = order != 0 && loads != 0;
+    for (uint64_t i = 0; valid && i < list->count; i += 1)
+    {
+        // Insertion by cost, descending; equal costs keep the list's order.
+        uint64_t at = i;
+        while (at > 0 && costs[order[at - 1]] < costs[i])
+        {
+            order[at] = order[at - 1];
+            at -= 1;
+        }
+        order[at] = i;
+    }
+    for (uint64_t s = 0; valid && s < shards; s += 1)
+    {
+        loads[s] = 0;
+    }
+    for (uint64_t k = 0; valid && k < list->count; k += 1)
+    {
+        uint64_t lightest = 0;
+        for (uint64_t s = 1; s < shards; s += 1)
+        {
+            lightest = loads[s] < loads[lightest] ? s : lightest;
+        }
+        assigned[order[k]] = lightest;
+        loads[lightest] += costs[order[k]];
+    }
+    return valid;
+}
+
+// The list's commands that the deal gives shard `shard` (from 0), in the list's order, as a list of their own.
+static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shard, uint64_t shards)
+{
+    ParallelList result = { .commands = BUSTER_ARENA_PUSH_ARRAY(arena, ParallelCommand, list->count + 1) };
+    uint64_t* assigned = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1);
+    if (result.commands == 0 || assigned == 0 || !parallel_shards(arena, list, costs, shards, assigned))
+    {
+        result.error = "out of memory for the shard";
+    }
+    for (uint64_t i = 0; result.error == 0 && i < list->count; i += 1)
+    {
+        if (assigned[i] == shard)
+        {
+            result.commands[result.count] = list->commands[i];
+            result.count += 1;
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The run
 
 typedef struct ParallelOptions ParallelOptions;
@@ -326,6 +520,11 @@ struct ParallelOptions
     const char* shell;
     // Where the report goes.
     int output;
+    // With --shard K/N, K (from 1) and N, and the commands of the whole list, which the opening line names; N is 0
+    // without it.
+    uint64_t shard;
+    uint64_t shards;
+    uint64_t listed;
 };
 
 typedef enum ParallelState
@@ -908,7 +1107,11 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     parallel_environment(arena, &environment);
     const uint64_t origin = parallel_clock();
     char line[BUSTER_PARALLEL_OUTCOME_BYTES];
-    const int line_length = snprintf(line, sizeof(line), "parallel: %llu commands, at most %llu CPUs at once\n", (unsigned long long)list->count, (unsigned long long)jobs);
+    const int line_length = options->shards != 0
+                                ? snprintf(line, sizeof(line), "parallel: shard %llu of %llu, %llu of %llu commands, at most %llu CPUs at once\n",
+                                           (unsigned long long)options->shard, (unsigned long long)options->shards, (unsigned long long)list->count,
+                                           (unsigned long long)options->listed, (unsigned long long)jobs)
+                                : snprintf(line, sizeof(line), "parallel: %llu commands, at most %llu CPUs at once\n", (unsigned long long)list->count, (unsigned long long)jobs);
     const uint64_t opening_mark = arena->length;
     const bool opened = line_length > 0 && parallel_append(arena, line, (uint64_t)line_length);
     const String8 opening = opened ? (String8){ .pointer = (char*)arena->base + opening_mark, .length = (uint64_t)line_length }
@@ -1094,12 +1297,41 @@ static String8 parallel_read(Arena* arena, int fd)
     return failed ? (String8){ 0 } : (String8){ .pointer = (char*)arena->base + mark, .length = length };
 }
 
+// A --shard option's value, K/N: decimal K from 1 to N, a '/', and decimal N from 1.
+static bool parallel_shard_option(const char* text, uint64_t* shard, uint64_t* shards)
+{
+    const char* slash = strchr(text, '/');
+    char first[24];
+    const uint64_t length = slash != 0 ? (uint64_t)(slash - text) : 0;
+    bool valid = slash != 0 && length < sizeof(first);
+    if (valid)
+    {
+        memcpy(first, text, length);
+        first[length] = 0;
+    }
+    valid = valid && parallel_count(first, UINT32_MAX, shard) && parallel_count(slash + 1, UINT32_MAX, shards) && *shard <= *shards;
+    return valid;
+}
+
+// Reads the file at `path` into the arena, or a null pointer if it can't.
+static String8 parallel_read_path(Arena* arena, const char* path)
+{
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    const String8 text = fd >= 0 ? parallel_read(arena, fd) : (String8){ 0 };
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    return text;
+}
+
 // argv[0] is the command's name, parallel.
 static int run_parallel_command(int argc, char** argv)
 {
     int result = 1;
     ParallelOptions options = { .shell = "bash", .output = STDOUT_FILENO };
     const char* path = 0;
+    const char* costs_path = 0;
     bool valid = true;
     int i = 1;
     while (valid && i < argc)
@@ -1120,6 +1352,15 @@ static int run_parallel_command(int argc, char** argv)
             options.github = true;
             i += 1;
         }
+        else if (strcmp(argv[i], "--shard") == 0 && options.shards == 0 && i + 1 < argc && parallel_shard_option(argv[i + 1], &options.shard, &options.shards))
+        {
+            i += 2;
+        }
+        else if (strcmp(argv[i], "--costs") == 0 && costs_path == 0 && i + 1 < argc)
+        {
+            costs_path = argv[i + 1];
+            i += 2;
+        }
         else if (path == 0 && argv[i][0] != '-')
         {
             path = argv[i];
@@ -1130,9 +1371,11 @@ static int run_parallel_command(int argc, char** argv)
             valid = false;
         }
     }
+    // Costs only deal commands to shards.
+    valid = valid && (costs_path == 0 || options.shards != 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]\n");
+        fprintf(stderr, "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]\n");
     }
     else
     {
@@ -1144,23 +1387,48 @@ static int run_parallel_command(int argc, char** argv)
             close(fd);
         }
         const char* name = path != 0 ? path : "standard input";
+        // Without a file of costs, an empty one: each command costs its CPUs times 10 s.
+        static char no_costs[1];
+        const String8 costs_text = costs_path != 0 ? parallel_read_path(&arena, costs_path) : (String8){ .pointer = no_costs, .length = 0 };
         if (text.pointer == 0)
         {
             fprintf(stderr, "parallel: can't read %s\n", name);
         }
+        else if (costs_text.pointer == 0)
+        {
+            fprintf(stderr, "parallel: can't read %s\n", costs_path);
+        }
         else
         {
-            const ParallelList list = parallel_list_parse(&arena, text);
-            ParallelResult* results = list.error == 0 ? BUSTER_ARENA_PUSH_ARRAY(&arena, ParallelResult, list.count) : 0;
+            ParallelList list = parallel_list_parse(&arena, text);
+            ParallelCosts costs = { 0 };
             if (list.error != 0)
             {
                 fprintf(stderr, "parallel: %s:%llu: %s\n", name, (unsigned long long)list.error_line, list.error);
             }
-            else if (results == 0)
+            else if (options.shards != 0)
+            {
+                // The shard's commands, dealt by the costs (each command's CPUs times 10 s without a file of them).
+                costs = parallel_costs_parse(&arena, &list, costs_text);
+                options.listed = list.count;
+                list = costs.error == 0 ? parallel_list_shard(&arena, &list, costs.milliseconds, options.shard - 1, options.shards) : list;
+                if (costs.error != 0)
+                {
+                    fprintf(stderr, "parallel: %s:%llu: %s\n", costs_path, (unsigned long long)costs.error_line, costs.error);
+                }
+                else if (list.error != 0)
+                {
+                    fprintf(stderr, "parallel: %s\n", list.error);
+                }
+            }
+            // A shard may have no commands; its results still take an element.
+            const bool listed = list.error == 0 && costs.error == 0;
+            ParallelResult* results = listed ? BUSTER_ARENA_PUSH_ARRAY(&arena, ParallelResult, list.count + 1) : 0;
+            if (listed && results == 0)
             {
                 fprintf(stderr, "parallel: out of memory for the results\n");
             }
-            else
+            else if (listed)
             {
                 // By default a command per core of the CPUs this process may use (lane_core_count). Two commands on a core's
                 // two SMT siblings slow each other down, and so do the lanes' waits, which spin while their group's other

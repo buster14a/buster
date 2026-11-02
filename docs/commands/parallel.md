@@ -13,7 +13,7 @@ requirements. [Command index](README.md).
   below describes both.
 ## The parallel runner
 
-`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]`
+`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]`
 runs a list of commands at once. LIST (standard input without one) holds them:
 each starts at a heading, a line `== TITLE`, and its script is the lines after
 it, up to the next heading; before the first heading there may be blank lines
@@ -60,6 +60,24 @@ drops the rest of the report rather than wait for its reader. A report that
 can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
 
+`--shard K/N` runs the K-th of N shards of the list, for N machines that each
+run one: the hosted test job runs each row's inventory as 4 shards, a runner
+each (`--shard K/4`), since its 2,437 s of CPU took 14.6 minutes on one 4-CPU
+runner. The runner deals the list's commands to the shards, the costliest first
+(of two that cost the same, the earlier in the list), each to the shard whose
+commands cost the least so far (of those, the first), and runs its shard's in
+the list's order (`parallel_shards`). The deal depends on the list and the costs
+alone, never on the machine or `--jobs`, so the N shards run every command once.
+`--costs FILE` gives the costs, a line `SECONDS TITLE` for each command (blank
+lines and `#` comments aside): its time times the CPUs it held, as a runner's
+report gives both, then its title as its heading has it. A command without a
+line costs its CPUs times 10 s, and a line whose title the list doesn't have is
+left out, so a stale file only unbalances the shards. `tools/ci/correctness.costs`
+holds the hosted plain rows' costs; refresh it from a hosted run's report when
+the shards' times drift apart. The report's first line names the shard: `parallel:
+shard K of N, M of T commands, at most J CPUs at once`. A shard may have no
+commands (N past the list's), which passes.
+
 The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
 test through it, with `--timeout 600`, before the benchmarks, which run one at
 a time and pinned. Its commands share CPUs 0 to 7 (`taskset`), one per core,
@@ -89,19 +107,23 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
   cases, its repository's units and the SSA promotion of c-testsuite's programs
   declared 4, 4 and 3 and kept about 2 busy on every machine (hosted, baseline,
   TSan and the 9700X): they declare 2, which frees the rest for the commands of
-  one CPU;
+  one CPU. test-preprocessor's cases then became the list's longest command
+  (295 s on a hosted runner and 44 s on the 9700X), so they run as 4 parts of
+  one CPU each among the commands of one CPU (`--part`, below);
 - the commands of one CPU follow, the longest first by their times on the hosted
   runners and the 9700X. A long command that checks independent things runs as
   parts, each a command of its own that the runner packs beside the others
   (`--part K/N`): test-checker-driver as 4 (the list's longest, 197 s on a hosted
-  runner and 48 s on the 9700X, whose start late in the list ended the step) and
+  runner and 48 s on the 9700X, whose start late in the list ended the step),
   test-checker as 4 (141 s on a hosted runner, holding 2 CPUs while it kept 1.03
-  busy). The parts together run each check once, with the whole command's
-  random samples: test-checker starts each unit's numbers afresh from the seed
-  and the unit's place (`check_test_part_random`), and no check of
-  test-checker-driver's draws from the shared stream. c-testsuite's self-test,
-  about 7 s of waiting out its timeouts, is a command of its own on one CPU,
-  apart from the subset's four.
+  busy) and test-preprocessor's checks without files as 4, dealt by their
+  weights (`pp_test_sections`). The parts together run each check once, with
+  the whole command's random samples: test-checker starts each unit's numbers
+  afresh from the seed and the unit's place (`check_test_part_random`), no check
+  of test-checker-driver's draws from the shared stream, and test-preprocessor's
+  random checks take their seed alone. c-testsuite's self-test, about 2 s of
+  waiting out its timeouts (its scenarios at once), is a command of its own on
+  one CPU, apart from the subset's four.
 
 A heading declares the CPUs its command keeps busy for much of its run, which
 its CPU time over its time shows (the report gives both). Brief phases on more
@@ -176,6 +198,15 @@ as expected with its times and CPU times written as `*`:
   SIGHUP while ignored (as under nohup) doesn't stop the run, and SIGCHLD
   ignored doesn't keep the runner from its commands; each run leaves the signal
   mask and the dispositions as they were;
+- shards: a list of six commands dealt to 2, 3 and 1 shards by costs, two of
+  them without a line (each its CPUs times 10 s) and a line for a command the
+  list doesn't have, each shard's commands in the list's order and every command
+  in exactly one; 2 shards without costs; a shard without commands, which
+  passes; then each error of the options (`--shard` 0/2, 3/2, 1/0, 2, a/b, /2,
+  twice and without a value, and `--costs` without `--shard`, each with the
+  usage) and of the costs, at its line (letters for seconds, a title without its
+  blank, none, a '.' without digits, four digits after it, a sign, too many
+  seconds, a title twice and a NUL byte), and costs that can't be read;
 - the command: its report and exit status for lists on standard input and in a
   file that pass and fail, a report with no reader (the run stops, and the
   runner ends at once with its command killed), with SIGPIPE at its default and
