@@ -743,7 +743,37 @@ static bool lane_test_arenas(void)
         const bool wide_tail = arena_push(&wide, 1, 1) != 0 && lane_test_vm_flag((uintptr_t)wide.base + wide_small, "hg", &found) && found;
         lane_test_expect(&tally, wide_tail && wide.huge, "an arena with 8 MB of base pages doesn't ask for huge pages past them");
     }
+    // Through a pool, which frees its pages with MADV_DONTNEED and hands it out again: the advice of both parts stays
+    // with the mapping, and Arena.huge with the arena, so that its next commit past the base pages advises nothing again.
+    ArenaPool* const saved_pool = arena_pool;
+    ArenaPool pool = { 0 };
+    arena_pool = &pool;
+    const uint8_t* const wide_base = wide.base;
     arena_release(&wide);
+    lane_test_expect(&tally, wide_base == 0 || pool.count == 1, "a released arena didn't go to the pool");
+    wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, wide_small);
+    lane_test_expect(&tally, wide.base == wide_base && pool.count == 0 && wide.length == 0, "a reservation didn't take the pool's arena");
+    if (wide.base != 0 && wide.base == wide_base)
+    {
+        const bool pooled_huge = wide.huge;
+        const bool pushed = arena_push(&wide, wide_small + 1, 1) == wide.base;
+        const bool pooled_head = lane_test_vm_flag((uintptr_t)wide.base, "nh", &found) && found;
+        const bool pooled_tail = lane_test_vm_flag((uintptr_t)wide.base + wide_small, "hg", &found) && found;
+        const bool pooled_capable = lane_test_huge_capable((uintptr_t)wide.base + wide_small / 2, &found) || !found;
+        lane_test_expect(&tally, pooled_huge && pushed && pooled_head && pooled_tail && !pooled_capable,
+                         "a pooled arena lost Arena.huge or its pages' advice");
+    }
+    arena_pool = saved_pool;
+    arena_release(&wide);
+    arena_pool_release(&pool);
+
+    // The executable's .bss in base pages (arena_static_base_pages): a static of this file's there, and its last page.
+    static uint8_t bss_probe[64];
+    extern char _end[];
+    arena_static_base_pages();
+    const bool probe_advised = lane_test_vm_flag((uintptr_t)bss_probe, "nh", &found) && found;
+    const bool end_advised = lane_test_vm_flag((uintptr_t)_end - 1, "nh", &found) && found;
+    lane_test_expect(&tally, probe_advised && end_advised && bss_probe[0] == 0, "the executable's .bss may take huge pages");
 
     printf("arenas: %lu checks, %lu failed\n", (unsigned long)tally.checks, (unsigned long)tally.failures);
     return tally.failures == 0;

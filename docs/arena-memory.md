@@ -15,6 +15,38 @@ A reservation and a successful push are therefore distinct operations that can
 both fail. The driver reports the failed operation and requested byte count.
 The early C-driver checks from #852 remain in place.
 
+## Page sizes
+
+An arena's first `small` bytes (`BUSTER_ARENA_SMALL_BYTES`, 64 KB, or
+`arena_reserve_small`'s, or a thread's `arena_small_floor`) are base pages and
+the rest huge pages. `base + small` falls on a 2 MB boundary, and `base` a page
+or more past the mapping's start. Since the kernel takes a transparent huge page
+only where one writable mapping covers its whole 2 MB from such a boundary, the
+layout itself keeps the base pages base pages (#652): below `base + small` the
+writable bytes start past inaccessible ones and end at the boundary, so fewer
+than 2 MB of them hold no huge page, with any setting of transparent huge pages.
+So the advice is only where the layout doesn't decide:
+
+- `MADV_NOHUGEPAGE` at the reservation for base pages of 2 MB or more (a units
+  lane's 16 MB floor, the tables reserved in base pages throughout, the
+  deferred checker's slices);
+- `MADV_HUGEPAGE` from `base + small` to the mapping's end at the first commit
+  that reaches past `base + small` (`Arena.huge`, which the pool keeps), which a
+  host whose transparent huge pages are `madvise` needs, and which makes the
+  kernel compact for them where they are `always`.
+
+An arena that stays in its base pages, as most of a small unit's do, takes one
+`mmap` and one `mprotect` and no advice. An empty file's `-fsyntax-only` made
+146 `madvise` calls before, 48 since.
+
+The compile commands (the C driver and `-E`, `check`, `parse`) also advise the
+executable's `.bss` `MADV_NOHUGEPAGE` first (`arena_static_base_pages`). It is
+220 MB of statics, mostly the tests' and benchmarks', of which any compile, an
+empty file's or sqlite3.c's, writes 11 pages in three 2 MB stretches; with
+transparent huge pages `always`, as on the 9700X, two of them took a huge page
+each, 4 MB cleared for 44 KB of statics. Tests and benchmarks keep their
+`.bss` as the kernel gives it.
+
 ## Finite address spaces
 
 `PROT_NONE` still counts toward `RLIMIT_AS`. With a finite limit, each ordinary

@@ -302,6 +302,8 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
     const uint64_t requested = capacity;
     const uint64_t limit = bounded ? arena_reservation_limit() : BUSTER_ARENA_MAX_CAPACITY;
     capacity = capacity < limit ? capacity : limit;
+    // At least BUSTER_ARENA_SMALL_BYTES, past which arena_mapping_bytes leaves room to align the huge pages.
+    small = small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES;
     small = arena_small_floor > small ? arena_small_floor : small;
     ArenaPool* pool = arena_pool;
     const uint32_t count = pool != 0 ? pool->count : 0;
