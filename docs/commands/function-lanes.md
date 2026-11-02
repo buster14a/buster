@@ -84,11 +84,12 @@ lazy session. Then a growing team: the first program of 600 functions by
 2, 3 or 5 more after its first part (`BUSTER_TEST_WORKER_SUPPLY`): its
 `--time-stages` grant, team and growth, no more lanes taking parts than it
 admitted, its object `--lanes 1`'s, and every token back in the pipe once;
-the growth gate alone around its threshold and bounds, and the driver by the
-default policy on programs of 4,000 functions (which grow, to `--worker-budget
-3` where given) and of 100 (which don't); and in this process, on a session of
-4 lanes, a growth to 4 lanes and with `--worker-budget 2` to 2, every supplied
-token back as the command returns.
+the growth gate alone around its threshold and bounds, and its release of a
+guardian that took no token; the driver by the default policy on programs of
+4,000 functions (which grow, to `--worker-budget 3` where given) and of 200
+(which ask for more than one lane but don't); and in this process, on a session
+of 4 lanes, a growth to 4 lanes and with `--worker-budget 2` to 2, every
+supplied token back as the command returns.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the

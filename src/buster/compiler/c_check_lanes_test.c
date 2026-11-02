@@ -62,15 +62,17 @@
 // - A growing team (#673's tail). The growth gate alone (check_program_emit_grow), under a jobserver pipe of 7 tokens:
 //   parts left of one token fewer than pay for a guardian don't grow a team of 1 of 8 lanes, and the least that pays
 //   grows it by 7; --lanes N grows it whatever they pay; the parts left, the lanes left and the spare tokens each bound
-//   the growth; no part left, none; a guardian only for a growth, and the tokens back after each. Then the driver: the
-//   first program of 600 functions by --lanes 4, and programs of 4,000 and 100 functions by the default policy (with
-//   --worker-budget 3 and without), under a jobserver pipe of no token or one, its lane 0 writing none, 2, 3 or 5 more
-//   after its first part (BUSTER_TEST_WORKER_SUPPLY), as another recipe returning them would: --time-stages reports the
-//   lanes the lane rule asked for, those the jobserver granted as it started, the lanes it ran on at its end and those
-//   it grew by, up to its lanes and the cap, none for the 100 functions, whose parts don't pay for a guardian, and no
-//   more lanes that took a part than it had admitted (with one token and none supplied, 2 of a round of 4); its object
-//   is --lanes 1's; and afterwards the pipe holds each token once, the supplied ones among them, those it had no lane
-//   for never taken.
+//   the growth; no part left, none; a guardian only for a growth, and the tokens back after each; and a guardian that
+//   took no token, from a reader whose bytes FIONREAD counts but no guardian takes (a file's), released at once rather
+//   than left holding one of the team's leases. Then the driver: the first program of 600 functions by --lanes 4, and
+//   programs of 4,000 and 200 functions by the default policy (with --worker-budget 3 and without), under a jobserver
+//   pipe of no token or one, its lane 0 writing none, 2, 3 or 5 more after its first part (BUSTER_TEST_WORKER_SUPPLY),
+//   as another recipe returning them would: --time-stages reports the lanes the lane rule asked for, those the
+//   jobserver granted as it started, the lanes it ran on at its end and those it grew by, up to its lanes and the cap,
+//   none for the 200 functions, which ask for more than one lane but whose parts don't pay for a guardian, and no more
+//   lanes that took a part than it had admitted (with one token and none supplied, 2 of a round of 4); its object is
+//   --lanes 1's; and afterwards the pipe holds each token once, the supplied ones among them, those it had no lane for
+//   never taken.
 // - Commands in one process (#905): a session of 4 lanes whose flow runs, three times, a command that fails, one that
 //   writes an object on 4 lanes, one on 2 by --worker-budget 2, a -fsyntax-only, and -fsyntax-only of two sources by 3
 //   lanes and by 1, every lane calling each (run_check_command's collective call): each lane the same thread
@@ -1695,6 +1697,36 @@ static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
                                            worker_budget_test_available(fds[0]) == 7,
                                 gate->what, detail);
     }
+    // A guardian that took no token, as when another recipe takes the spare tokens between FIONREAD and its read, goes
+    // at once rather than hold one of the team's leases. A budget whose reader is a file of 7 bytes makes that state:
+    // FIONREAD counts them, and a guardian, which takes a pipe's alone (F_GETPIPE_SZ), takes none.
+    WorkerBudget unread;
+    worker_budget_initialize(&unread, flags, 64);
+    // MFD_CLOEXEC, which <sys/mman.h> declares only with _GNU_SOURCE.
+    const long file = ready && unread.mode == WORKER_BUDGET_JOBSERVER ? syscall(SYS_memfd_create, "buster-grow-gate", 1u) : -1;
+    const bool filled = file >= 0 && write((int)file, tokens, sizeof(tokens)) == (ssize_t)sizeof(tokens) && lseek((int)file, 0, SEEK_SET) == 0;
+    if (file >= 0)
+    {
+        close(unread.read_fd);
+        unread.read_fd = (int)file;
+    }
+    WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+    const uint32_t taken = filled ? worker_budget_grow(&unread, 7, &lease) : 1;
+    const bool guarded = lease.child > 0;
+    const bool released = worker_budget_release(&lease);
+    check_lanes_test_expect(tally, filled && taken == 0 && guarded && released && unread.mode == WORKER_BUDGET_JOBSERVER,
+                            "a guardian that finds none of the tokens FIONREAD counted takes none and holds its lease", NULL);
+    CheckProgramLanes lanes = { 0 };
+    CheckEmitRun run = { .lanes = &lanes };
+    CheckEmitGrowth growth = { .parts = 100, .rest = rest };
+    rest[0] = least;
+    const uint32_t more = filled ? check_program_emit_grow(&run, &growth, 1, 8, &unread, &lease) : 1;
+    char detail[96];
+    snprintf(detail, sizeof(detail), "admitted %u more; lease of guardian %d", more, (int)lease.child);
+    check_lanes_test_expect(tally, filled && more == 0 && lease.child < 0 && lease.control < 0 && lease.reply < 0 && !unread.return_failed,
+                            "a guardian that took no token is released at once, not left holding one of the team's leases", detail);
+    worker_budget_release(&lease);
+    worker_budget_close(&unread);
     worker_budget_close(&budget);
     check_lanes_test_expect(tally, !ready || worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)), "the growth gate's tokens all come back once", NULL);
     if (fds[0] >= 0)
@@ -1708,15 +1740,16 @@ static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
 }
 
 // A growing team in the driver (#673's tail; see the file's comment): the first generated program of 600 functions,
-// `program_N.c` for N `programs`, by --lanes 4, and programs of 4,000 and of 100 functions of the test's own by the
+// `program_N.c` for N `programs`, by --lanes 4, and programs of 4,000 and of 200 functions of the test's own by the
 // default policy, under a jobserver pipe of a case's tokens, lane 0 writing a case's more after its first part
 // (BUSTER_TEST_WORKER_SUPPLY).
 static void check_lanes_test_driver_growth(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs)
 {
-    // A case's program (0 the 600 functions', 1 the 4,000's, 2 the 100's), the tokens in the pipe as the driver starts,
+    // A case's program (0 the 600 functions', 1 the 4,000's, 2 the 200's), the tokens in the pipe as the driver starts,
     // those its lane 0 supplies, and its options: --lanes 4 (every lane, whatever its parts pay), or the default policy,
-    // with --worker-budget 3 or without. The 4,000 functions' parts pay for every growth here; the 100's tokens, fewer
-    // than BUSTER_CHECK_EMIT_GROW_TOKENS, for none.
+    // with --worker-budget 3 or without. The 4,000 functions' parts pay for every growth here. The 200's ask for more
+    // than one lane, so that their team reaches the gate (100 functions sit at the lane rule's first step), and their
+    // parts left pay for none (a team first grew at about 400).
     typedef struct CheckLanesGrowthCase CheckLanesGrowthCase;
     struct CheckLanesGrowthCase
     {
@@ -1736,7 +1769,7 @@ static void check_lanes_test_driver_growth(CheckLanesTestTally* tally, const cha
         { 1, 1, 0, { "--worker-budget", "3" } },
         { 2, 0, 5, { NULL, NULL } },
     };
-    static const uint32_t sizes[] = { 0, 4000, 100 };
+    static const uint32_t sizes[] = { 0, 4000, 200 };
     const uint32_t cpus = check_driver_cpus();
     // The cores of those CPUs, whose lanes the default policy asks for (lane_test_process_cores, as the session's test
     // counts them).
@@ -1817,7 +1850,7 @@ static void check_lanes_test_driver_growth(CheckLanesTestTally* tally, const cha
                  growth->initial, growth->supply, status, reported[1], reported[2], reported[3], reported[4], reported[5]);
         check_lanes_test_expect(tally, status == 0 && check_test_driver_same_files(object, references[growth->program]), "a growing team's object is --lanes 1's",
                                 detail);
-        check_lanes_test_expect(tally, found && (!every_lane || reported[1] == (cpus < 4 ? cpus : 4)) && (growth->program != 1 || cores < 2 || reported[1] > 1),
+        check_lanes_test_expect(tally, found && (!every_lane || reported[1] == (cpus < 4 ? cpus : 4)) && (growth->program == 0 || cores < 2 || reported[1] > 1),
                                 "the growing team's request is the lane rule's", detail);
         check_lanes_test_expect(tally, found && reported[2] == granted && reported[3] == active && reported[4] == active - granted,
                                 pays ? "a team short of its lanes grows by the tokens that come back, up to its lanes and the cap" :

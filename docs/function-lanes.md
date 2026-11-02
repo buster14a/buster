@@ -181,15 +181,20 @@ The [growing teams' record](https://github.com/buster14a/buster-performance/tree
 reruns the same harness on the 9700X, main `3ce71ec3` against `e7416f30` (#1161), in two rounds of
 12 cohorts per policy. Medians of whole-cohort wall time:
 
-| Eight-file workload | Main's jobserver (ms) | Jobserver (ms) | Cap one (ms) | Unrestricted (ms) |
-| --- | ---: | ---: | ---: | ---: |
-| Two SQLite and six tiny | 147.099, 146.914 | 137.855, 137.309 | 144.940, 144.687 | 140.783, 140.460 |
-| Eight SQLite units | 301.304, 301.201 | 299.902, 300.995 | 302.465, 302.687 | 319.443, 320.413 |
-| Eight tiny units | 7.225 | 7.175 | 7.156 | 7.192 |
+| Eight-file workload | Build | Jobserver (ms) | Cap one (ms) | Unrestricted (ms) |
+| --- | --- | ---: | ---: | ---: |
+| Two SQLite and six tiny | main | 147.099, 146.914 | 145.331, 144.990 | 139.306, 139.926 |
+| | `e7416f30` | 137.855, 137.309 | 144.940, 144.687 | 140.783, 140.460 |
+| Eight SQLite units | main | 301.304, 301.201 | 302.414, 303.212 | 321.145, 320.512 |
+| | `e7416f30` | 299.902, 300.995 | 302.465, 302.687 | 319.443, 320.413 |
+| Eight tiny units | main | 7.225 | 7.287 | 7.223 |
+| | `e7416f30` | 7.175 | 7.156 | 7.192 |
 
 - **Uneven.** The jobserver's cohort takes 6.3–6.5% less wall time than main's and is the fastest of the
   three. In every cohort, the SQLite file it started on one lane grew to seven.
 - **Eight SQLite.** It moves −0.5% and −0.1%, with a few files growing at the tail.
+- **The other policies.** Cap one and unrestricted, whose paths the change leaves alone, move −0.5%
+  to +1.1% on the two SQLite workloads.
 - **Objects.** They are one lane's in every cohort.
 - **Controls.** `time-runs` on `sqlite3.c`'s `-c`, against main: wall time +0.17% for a team that
   never grows, −0.08% for one granted 4 of 8 lanes, +0.20% with every lane granted and −0.38%
