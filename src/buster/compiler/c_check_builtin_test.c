@@ -188,9 +188,9 @@ static void check_builtin_test_fixtures(CheckBuiltinTest* test, TypeTable* table
     if (tag < BUSTER_ARRAY_LENGTH(completions))
     {
         completions[tag] = 100;
-        action.tag_completions = completions;
-        action.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
-        action.source_position = 99;
+        action.context.tag_completions = completions;
+        action.context.tag_completion_count = BUSTER_ARRAY_LENGTH(completions);
+        action.context.source_position = 99;
         result = check_builtin_test_action(test, table, action);
         check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE && !result.store,
                                   "later enum completion cannot validate an earlier overflow operand");
@@ -198,20 +198,20 @@ static void check_builtin_test_fixtures(CheckBuiltinTest* test, TypeTable* table
         result = check_builtin_test_action(test, table, action);
         check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE && result.action.diagnostic_operand == 2 && !result.store,
                                   "later enum completion cannot validate an earlier overflow destination");
-        action.source_position = 100;
+        action.context.source_position = 100;
         result = check_builtin_test_action(test, table, action);
         check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.store,
                                   "enum is usable at the retained completion cutoff");
         action.id = CBUILTIN_POPCOUNT;
         action.argument_count = 1;
         action.operands[0] = check_test_integer(enumeration, 3);
-        action.source_position = 99;
+        action.context.source_position = 99;
         result = check_builtin_test_action(test, table, action);
         check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPLETE,
                                   "later enum completion cannot validate an earlier unary conversion");
         action.id = CBUILTIN_ADD_OVERFLOW;
         action.argument_count = 3;
-        action.tag_completions = NULL;
+        action.context.tag_completions = NULL;
     }
     else
     {

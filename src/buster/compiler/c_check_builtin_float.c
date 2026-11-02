@@ -60,12 +60,7 @@ struct CheckBuiltinFloatAction
     const CheckValue* arguments;
     uint32_t argument_count;
     uint32_t node;
-    const uint32_t* tag_completions;
-    uint32_t tag_completion_count;
-    uint32_t source_position;
-    uint32_t extensions;
-    const CheckConstValues* const_values;
-    bool constant_evaluated;
+    CheckContext context;
     const uint8_t* nan_payload;
     uint32_t nan_payload_length;
     bool nan_payload_known;
@@ -110,15 +105,7 @@ static uint32_t check_builtin_float_fixed_mask(CBuiltinId id)
 
 static bool check_builtin_float_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinFloatAction* input)
 {
-    const TypeId base = type_strip_aligned(table, type);
-    bool complete = type_is_complete(table, base);
-    const uint8_t kind = type_kind(table, base);
-    if (complete && input->tag_completions != NULL &&
-        (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM))
-    {
-        const uint32_t tag = table->types.index[type_index(base)];
-        complete = tag < input->tag_completion_count && input->tag_completions[tag] <= input->source_position;
-    }
+    const bool complete = type_is_complete(table, type) && check_context_tag_visible(table, type, &input->context);
     return complete;
 }
 
@@ -145,12 +132,7 @@ static CheckValue check_builtin_float_argument(TypeTable* table, const CheckBuil
             const CheckAction action = {
                 .operands = { value },
                 .node = input->node,
-                .tag_completions = input->tag_completions,
-                .tag_completion_count = input->tag_completion_count,
-                .source_position = input->source_position,
-                .extensions = input->extensions,
-                .const_values = input->const_values,
-                .constant_evaluated = input->constant_evaluated,
+                .context = input->context,
             };
             value = check_action_operand(table, &action, &converted, 0);
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -432,10 +414,7 @@ static void check_builtin_float_nan_argument(TypeTable* table, const CheckBuilti
     {
         const CheckAction context = {
             .node = input->node,
-            .tag_completions = input->tag_completions,
-            .tag_completion_count = input->tag_completion_count,
-            .source_position = input->source_position,
-            .extensions = input->extensions,
+            .context = input->context,
         };
         bool compatible = check_action_assignable(table, parameter, value, &context, &output->action);
         if ((output->action.warnings & CHECK_WARNING_DISCARDED_QUALIFIERS) != 0)

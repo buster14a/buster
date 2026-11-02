@@ -2437,7 +2437,11 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             }
             const char* name = NULL;
             uint32_t length = 0;
-            lines[p] = first < pp.output.count ? pp_presumed(&pp, pp.output.locations[first], &name, &length) : 0;
+            // Compare the primary diagnostic, not a macro-definition spelling. The driver's output diagnostics
+            // materialize history and follow this same invocation/argument/generated-token provenance.
+            const bool history = first >= pp.output.count || pp_history_ensure(&pp);
+            check_test_expect(test, history, "source diagnostic expansion history is available");
+            lines[p] = first < pp.output.count && history ? pp_presumed(&pp, parse_primary_location(&pp, first), &name, &length) : 0;
         }
         char description[320];
         snprintf(description, sizeof(description), "%s: %s expected, %s from %s path, first line %u (clang %u)", fixture->name,
@@ -5761,6 +5765,8 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_diagnostic_test.c"
 #include "c_check_warning_events_test.c"
 #include "c_check_const_values_test.c"
+#include "c_check_context_test.c"
+#include "c_check_context_source_test.c"
 #include "c_check_warning_deferred_test.c"
 #include "c_check_warning_policy_test.c"
 #include "c_check_warning_render_test.c"
@@ -5980,6 +5986,8 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && const_values)
         {
             check_test_const_values(&test);
+            check_test_semantic_context(&test);
+            check_test_semantic_context_sources(&test, clang);
             check_test_const_sources(&test, clang);
             check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
@@ -6068,6 +6076,14 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_const_values(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_semantic_context(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_semantic_context_sources(&test, clang);
             }
             if (check_test_takes())
             {

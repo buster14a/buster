@@ -26,7 +26,7 @@ static __attribute__((noinline)) void check_test_transparent_calls(CheckTest* te
         .arguments = &argument,
         .argument_count = 1,
         .argument_conversions = &conversion,
-        .extensions = BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT,
+        .context.extensions = BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT,
     };
     CheckActionResult result = check_test_action(test, table, action);
     check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && conversion.type == generic &&
@@ -57,14 +57,14 @@ static __attribute__((noinline)) void check_test_transparent_calls(CheckTest* te
         const uint32_t tag = table->types.index[type_index(record)];
         completions[tag] = 10;
         activations[tag] = 20;
-        action.tag_completions = completions;
-        action.transparent_unions = activations;
-        action.tag_completion_count = table->tags.count;
-        action.source_position = 19;
+        action.context.tag_completions = completions;
+        action.context.transparent_unions = activations;
+        action.context.tag_completion_count = table->tags.count;
+        action.context.source_position = 19;
         argument.type = pointer;
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a later transparent attribute cannot authorize an earlier call");
-        action.source_position = 20;
+        action.context.source_position = 20;
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && conversion.type == generic,
                           "transparent member conversion begins at the exact activation cutoff");
