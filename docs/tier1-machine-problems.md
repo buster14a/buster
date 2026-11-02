@@ -189,10 +189,14 @@ two independent functions. Decode failure is itself a reported function outcome.
 
 `accepted` means accepted by the stage being tallied, never certified allocation.
 `certificate-unavailable` is a distinct reason for a campaign whose prerequisite
-checker is absent. No checker callback or success stub is supplied here. A
-future quality publisher must invoke the real checker against original and
-rewritten programs and refuse publication on absence or failure. Import and
-occupancy checks cannot stand in for that gate.
+checker is absent. #939's gate is `tier1_problem_certify`
+(`tier1_problem_intervals.c`). It checks an allocation of an adapted problem by
+the fragment certificate checker. A refusal is `certificate-rejected`, and its
+capacity is `capacity`. No success stub is supplied. A future quality publisher
+must invoke this gate, or the CFG checker once problems carry edges, against
+original and rewritten programs, and refuse publication on absence or failure.
+No publisher calls it yet. Import and occupancy checks cannot stand in for that
+gate.
 
 ## Tests and reproduction
 

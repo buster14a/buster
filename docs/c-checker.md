@@ -19,6 +19,19 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
+Sanitizer instrumentation and OpenMP code generation are not implemented
+([#1112](https://github.com/buster14a/buster/issues/1112)). Object emission
+(including `check -c`) and direct linking reject an enabled `-fsanitize=...`,
+instrumenting `-fsanitize-coverage=...`, or `-fopenmp[=runtime]` by name before
+reading source files or creating/replacing output. This applies to both tiers
+and to `--scalar`. The final resolved option state decides: disabling all
+requested sanitizers or OpenMP with later negative options permits ordinary,
+uninstrumented compilation; disabling only part of a sanitizer group does not.
+Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeling.
+`-fsyntax-only` suppresses `-c` in either order. A sanitizer or `_OPENMP` macro
+observed in a non-emitting action is not a promise that Buster can generate the
+corresponding instrumentation or parallel runtime calls.
+
 The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
 `-Werror` does not guarantee the warnings or build failures Clang gives for the
 same source: some warnings are not produced, and some produced warnings are not
@@ -308,12 +321,14 @@ does, each rule checked against clang's answers on probes of it:
   the place's only when it is (#480's fourth review): such a count leaves the
   loop's pragmas unsupported, including when a state or count of its category
   shares its pragma. At file scope, where clang reads no count, the pragma is
-  an error. Placement, duplicate and incompatible hints wait for the whole
-  annotated statement (#503): its exclusive end is the reader's barrier and
-  the ordering position of its report, so the diagnostic graph includes the
-  statement's type errors too. The printed source is separate: conflicts at
-  the later pragma's `loop` or hint name, placement at the statement's first
-  token, with clang's directive names and messages. Nested statements finishing
+  an error, reported at the directive with the source spelling (`invalid
+  '#pragma GCC unroll' directive`). Placement, duplicate and incompatible
+  hints wait for the whole annotated statement (#503): its exclusive end is
+  the reader's barrier and the ordering position of its report, so the
+  diagnostic graph includes the statement's type errors too. The printed
+  source is separate: conflicts at the later pragma's `loop` or hint name,
+  placement at the statement's first token, with clang's directive names and
+  messages (where `GCC unroll` is `unroll`). Nested statements finishing
   together report the inner hints first. The existing postorder subtree ends
   supply the boundary; the pragma reader follows parent links to the statement
   root without scanning its body. Only a rejected unit retains one cold
@@ -334,6 +349,20 @@ does, each rule checked against clang's answers on probes of it:
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
+- **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
+  `#pragma fenv_access(on|off)` at file scope or a compound's start updates
+  the same runtime `FENV_ACCESS` column as the STDC form, with the same
+  nested-scope restoration; `#pragma clang fp contract(on|off|fast)` retains
+  its state (`fast` distinct) without contracting anything; and
+  `#pragma float_control(precise, on)` records the precise policy already used.
+  The handler names are not macro-expanded, but their argument words are, so a
+  spelling that was a macro anywhere in the unit is refused conservatively
+  rather than read unexpanded. Other arguments, stack operations, additional
+  clauses, malformed forms and invalid placements are hard semantic-pragma
+  errors. Clang enables `fenv_access` only with `-fms-extensions` (or a strict
+  floating model) and silently ignores a mid-block spelling; buster refuses
+  that option, recognizes these spellings unconditionally as #1135 asks, and
+  refuses the placements it cannot apply.
 - **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
   `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
   number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
@@ -3882,10 +3911,24 @@ the oracle.
   of the walk's tests its role, its kind and the columns the walk doesn't write
   lead to. Each block of 64 tokens looks its roles up in a table of their
   classes (`check_input_role_codes`, with `vpermi2b`). An operand's class is its
-  kind's (identifier, literal or the walk's own). A role no test takes is a
+  kind's (identifier, literal, string or the walk's own), and a `return`
+  keyword's is RETURN (`goto`, `break` and `continue`, of its role, are the
+  walk's). A role no test takes is a
   DROP, but for the kinds the walk refuses. An ignored token is a LIST of a list
   role and a DROP otherwise. A sparse entry or a type query finishing at the
   token (`specifier_finishes`, 8 pointers at a time) makes it the walk's.
+  The columns the reader writes before the walk refine the class
+  (`check_input_expression_fold`, #1144), read 64 tokens at a time:
+  - a separator that `expression_commas` marks is a comma operator's BINARY,
+    and the other separators are lists;
+  - an initializer's assignment (`initializers`) is the walk's;
+  - so is a builtin's token (`builtins`) of a class whose action left builtins
+    to the walk (`check_input_builtin_codes`);
+  - so is an intrinsic's call (`intrinsic_ids`).
+
+  The actions test none of these as the walk reaches each token. An intrinsic's
+  id was the walk's hottest load: a column no other pass reads, so a miss at
+  nearly every call.
   `check_input_expression_code` is the scalar twin, by the walk's tests in their
   order. The scalar classes' pass computes the codes only for the coded walk:
   `--scalar`'s walk reads a token's `ACTS` and `SPARSE` bits alone, so it gets
@@ -3902,31 +3945,56 @@ the oracle.
 - **Actions.** Each class has its own action, which writes what the walk's does
   (the node's columns, its leaf, the token's node and values):
   - an identifier's leaf, as twelve words (no x87 store of its zero floating
-    parts);
-  - a literal's leaf;
+    parts), made before the chunk's actions (below);
+  - a literal's leaf, and a string's;
   - prefix, binary, cast, member, subscript, postfix and conditional operators;
   - lists and groups;
-  - terminators' discards and conditions;
+  - terminators' discards, a statement expression's last statement's result
+    among them, and conditions;
+  - a return's conversion to the function's type, or its missing value's
+    report;
   - plain calls, with their arguments' slice and the library builtins' marks.
+
+  In a unit with overload tables, the actions carry the heads as the walk's
+  action does. An identifier's leaf holds its use's head. `ADDRESS` and
+  `SELECT` take their operand's head, and every other operator clears its
+  token's. A call whose callee names a set is recorded in `overload_calls`, in
+  node order.
+
+  An identifier's leaf is a function of columns the reader writes before the
+  walk: at its token (declared type, declaration, overload head), at its
+  declaration (kind, storage, flags, object, enumerator's value), and its
+  type's kind. So each chunk's identifiers get their leaves' varying words
+  before its actions run (`check_input_expression_identifiers`):
+  - the vector path compresses the chunk's identifiers;
+  - it then gathers 16 identifiers' columns at once, a byte column as the
+    aligned dword that holds the byte, which never crosses a page the column
+    isn't on;
+  - the identifier's action only adds the node and writes the words.
+
+  `check_input_identifier_entry` is the scalar twin. Unlike the batch measured
+  below, this needs no flush: the node ids still come from the walk, and only
+  the leaves' contents are made ahead.
 
   The node is `check_input_add_node`'s: `check_graph_add`'s, with its checks
   and columns, and the columns the reader gives every node. `check_input_add`
   records the nodes before it first. The coded walk doesn't: the next
   `check_input_add` or `check_graph_record_finish` records them, in node order,
   from their final columns. An action tests what its class can't say: the
-  values the children have, the columns the walk writes as it goes, a builtin or
-  an intrinsic at the token. Where they don't hold, the token goes to the walk's
+  values the children have, and the columns the walk writes as it goes. Where
+  they don't hold, the token goes to the walk's
   own visit (`check_input_expression_visit`, the action factored out as
   `check_input_expression_act`). An action that leaves a token has written only
   its first value and its children's chains, which the visit writes again as
-  they were. A unit with expressions past its limit or deferred, or with
-  overload tables (any unit that spells `overloadable` or `__overloadable__`,
-  `main.c` among them: below), is the walk's throughout. So are a K&R unit's
-  identifiers and calls and a constexpr object's uses.
+  they were. A unit with expressions past its limit or deferred is the walk's
+  throughout. So are a K&R unit's identifiers and calls and a constexpr
+  object's uses.
 - **The twins.** The scan test checks the classes by both paths against its own
   reading of the walk's tests. It checks the compaction by both paths, with and
   without the DROPs, against a random postorder, every column ending at a
-  `PROT_NONE` page. The coded walk counts, by class, the tokens it acted at by
+  `PROT_NONE` page. It checks the identifiers' leaves by both paths on random
+  chunks over random columns, each ending at a `PROT_NONE` page, the byte
+  columns at every alignment. The coded walk counts, by class, the tokens it acted at by
   the class's action and those it left to the walk's visit
   (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
   it to act by class at tokens of every fixture whose features it takes, and
@@ -3935,13 +4003,18 @@ the oracle.
   `benchmark-checker-bindings` prints a file's tokens acted at by class
   (`expression_classed`), declined by their classes' actions
   (`expression_declined`) and of the walk's own class (`expression_scalar`). Every comparison of the two paths compares the
-  graphs, leaves, argument slices and `token_nodes` (`test-checker`,
-  `test-checker-corpus`, c-testsuite's objects).
+  graphs, leaves, argument slices, overload calls and `token_nodes`:
+  - `test-checker`, for every source fixture
+    (`check_test_source_graphs_equal`), with the overload heads;
+  - `test-checker-corpus`;
+  - c-testsuite's objects.
 - **What the walk is made of.** The counts per class that #1038 asked for, as
   shares of each corpus's tokens: every token is in one row. A class's tokens
   that its action left to the walk's visit are in parentheses. They were
   counted from the classes' bytes and `CheckInput.expression_acted` and
-  `expression_left` (#1038's review):
+  `expression_left` (#1038's review). This first table is the coded walk as
+  #1061 merged it, before the folds, the string and return classes and the
+  overload tables' new trigger (the second table, below):
 
   | class | `sqlite3.c` | `main.c` | musl's 8 directories |
   | --- | --- | --- | --- |
@@ -3980,26 +4053,71 @@ the oracle.
   - **Declines.** The actions that decline valid code do so by design: a binary
     operator in an initializer's designation or a builtin's, a call of a
     builtin or an intrinsic, a prefix `sizeof`, `alignof` or a label's address.
-  - **`main.c`.** The coded walk takes none of its tokens, so its column is the
-    classes the coded walk would take. The unit spells `overloadable` (a
-    member's name in `c_check_input.c`), so the reader makes it overload tables
-    (`CheckInput.overload_heads`). In them, every function declaration is a
-    candidate, 18,413 of them, whose head the walk's action carries through its
-    nodes to its calls. The class actions don't carry heads yet, so such a unit
-    is the walk's throughout.
-  - **The trigger is the name.** Any token spelled `overloadable` or
-    `__overloadable__` gives a unit the tables (the reader's count of the
-    unit's names, `CHECK_INPUT_COUNT_OVERLOADABLE`). A member or a variable of
-    that name counts as much as the attribute does, whether or not the unit
-    declares an overloadable function. So one stray identifier turns the coded
-    walk off for the whole unit. `main.c`'s column is hypothetical, and the
-    compiler's own compile gets none of the coded walk. Either way out is
-    #1038's remaining work, beside the numbering below:
-    - tables only for a unit that names the attribute where an attribute goes,
-      rather than for any token's spelling;
-    - class actions that carry the heads.
+  - **`main.c`.** As #1061 merged it, the coded walk took none of its tokens.
+    `main.c` spells `overloadable` (a member's name in `c_check_input.c`), and
+    any token so spelled gave a unit overload tables (`CheckInput.
+    overload_heads`), which the class actions didn't carry yet. So this
+    column was the classes the coded walk would take.
+  - **The trigger, narrowed (#1144).** A name of the attribute's now counts
+    only inside an attribute list (`check_input_count_tokens`). That is: more
+    of the lists' openings up to it than closings before it, which, a subtree
+    being a run of tokens, puts it in a list's closing's subtree, where every
+    GNU and standard attribute's name is. An attribute's argument counts too,
+    a superset that costs at most the tables. Each path keeps the lists'
+    depth as it goes: the vector path a 64-token block at a time, from the
+    block's openings' and closings' counts. So a name's test costs the same
+    however deep the tree. A first version walked each name's ancestors,
+    which made the count quadratic in names times depth: 100,000 names
+    100,000 levels deep took 20 s (#1144's review).
+    The class actions carry the heads (above), so a unit that does declare
+    overloadable functions is coded as well.
+    - Tables nobody used were dear. In a 4-CPU VM, appending
+      `int overloadable;` to `sqlite3.c` cost about 50 ms of a 296 ms `-c`,
+      only ~10 ms of it in the walk.
+    - In such a unit, overload resolution also dropped the library builtins'
+      folds: `main.c` called `strlen` of a constant string 71 more times than
+      clang's code does. Its object now folds them, and nothing else in it
+      changes.
+    - A unit with real overloadable functions still misses those folds. That
+      is the overload path's bug, not changed here.
   - **The sparse tail.** It has to stay ordered, and is small in all three:
     0.03%, 0.08% and 0.86%.
+
+  The second table: with the folds, the string and return classes, the
+  statement expressions' terminators and the narrowed trigger (#1144), for
+  `sqlite3.c` and `main.c` (both coded). musl's corpus wasn't at hand. Every
+  token is in one row, and declined tokens are in parentheses:
+
+  | class | `sqlite3.c` | `main.c` |
+  | --- | --- | --- |
+  | tokens | 710,061 | 6,848,922 |
+  | not acted at | 27.89% | 21.30% |
+  | identifier | 13.72% | 14.10% |
+  | list | 10.68% | 8.16% |
+  | terminator | 7.82% | 4.38% |
+  | drop | 6.72% | 4.09% |
+  | literal | 6.38% | 10.39% (0.001%) |
+  | binary | 6.17% | 8.31% |
+  | member | 4.59% | 2.82% |
+  | separator | 3.60% | 10.54% |
+  | group | 3.12% | 3.07% |
+  | call | 1.93% | 1.84% |
+  | condition | 1.63% | 0.49% |
+  | cast | 1.28% | 0.96% |
+  | prefix | 1.22% (0.13%) | 1.88% (0.77%) |
+  | subscript | 1.00% | 1.19% |
+  | the walk's own (scalar) | 0.97% | 3.36% |
+  | return | 0.61% | 0.19% |
+  | postfix | 0.30% | 0.03% |
+  | string | 0.27% | 2.46% |
+  | ternary | 0.09% | 0.43% |
+
+  The walk's own visits, the scalar class and the declined tokens, fall from
+  14,073 of `sqlite3.c`'s tokens (1.98%) to 7,800 (1.10%). For `main.c` they
+  fall from all of its 5.39 million visited tokens to 283,522 (4.14%). Its
+  remaining scalar class holds the builtins' and intrinsics' tokens the folds
+  give the walk, its `sizeof`s and the walk's other roles; its declined
+  prefixes are `sizeof`'s and `alignof`'s keywords.
 - **Measured.** In a 4-CPU Sapphire Rapids VM without performance counters, `-c`
   of the frozen `sqlite3.c` (`--lanes 1`, CPU 2) was timed 31 times with
   rotating builds, by `--time-stages`' new `time-check expressions` row (the
@@ -4021,15 +4139,41 @@ the oracle.
   action's call at every token is the same code with `noinline` or without it,
   since clang doesn't inline its 28 KB at two places. No benchmark times that
   path; it is the oracle.
+- **Measured on the 9700X (#1144).** The 9700X job's `measure-compile` of
+  `sqlite3.c` (11 runs, medians), against a run on `main`'s neighbour
+  `06bcc898`:
+  - the walk's interval (`check-input.expressions`) went from 17.27 ms to
+    15.36 ms;
+  - `check-input` went from 49.22 ms to 47.47 ms;
+  - the whole compile went from 117.80 ms to 116.02 ms.
+
+  That measures the narrowed trigger, the heads, the gathered identifier
+  leaves and the folds; `sqlite3.c` has no overload tables or statement
+  expressions. In the VM, the gathered leaves alone were within its noise:
+  user-mode samples in the walk over five compiles were 3,010 and 2,987
+  without them and 2,603 and 3,039 with them. The folds' build had the VM's
+  best walk interval: minimum 33.7 against 35.9 ms, median 37.8 against
+  40.6 ms, for the build with only the trigger and the heads (21 rotated runs
+  each).
 - **Tried, and slower.** Identifier leaves built 16 at a time from gathered
   declaration columns, written before anything could read a leaf. That is
   before every token left to the walk's visit, whose node records the nodes
   before it. Those flushes averaged about 3 leaves on `sqlite3.c`, and the
   walk's minimum rose from 32.1 to 34.2 ms, so the leaves are written by their
-  action. Building the graph data-parallel needs node ids before any node is
+  action. #1144 makes the leaves' contents ahead instead, without placing them
+  (above). Building the graph data-parallel needs node ids before any node is
   written, which is #1038's remaining work. That means every value's consumer
   found (its nearest ancestor that isn't a list, by pointer jumping), the
-  consumers' operand counts as a histogram, and a prefix sum.
+  consumers' operand counts as a histogram, and a prefix sum. What still makes
+  it hard is the walk's own visits:
+  - each makes as many nodes as it decides, and reads its operands' columns,
+    so the ids after it are known only once it has run;
+  - the classes must then leave them few and far apart. They are 1.10% of
+    `sqlite3.c`'s tokens, one in about 59 acted at by class, and 4.14% of
+    `main.c`'s.
+  - The nodes' recording isn't such a barrier: nothing reads it before
+    `check_graph_record_finish`, which can record every node from its final
+    columns.
 
 What is left of the reader's per-token work is the walks' work where they
 act, the expression-comma propagation, graph construction and the remaining
@@ -4464,10 +4608,12 @@ GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
 
 OpenMP directives are ignored when OpenMP was not requested, with the separately
 enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
-not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
-active `-fopenmp` request, including alternate runtime selections, is refused
-until execution semantics are implemented; it must not silently produce serial
-code. A subsequent `-fno-openmp` restores the ignore behavior.
+not a definition of `_OPENMP`, determines whether OpenMP was requested. An active
+`-fopenmp` request, including alternate runtime selections, must not silently
+produce serial code: a code-generating action refuses the option itself before
+reading source (the instrumentation boundary in the introduction), while a
+non-emitting action refuses each `#pragma omp` directive through the checker. A
+subsequent `-fno-openmp` restores the ignore behavior for both.
 
 Known unsupported semantic effects remain hard, named errors, including
 `redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
