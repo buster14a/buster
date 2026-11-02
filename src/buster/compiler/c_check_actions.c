@@ -129,6 +129,17 @@ struct CheckValue
     uint32_t object_bit_offset;
 };
 
+// A value's two x87 payloads as their ten meaningful bytes, the significand and the sign and exponent, copied as
+// integer storage: an x87 load and store of one is microcoded, and the six pad bytes needn't be read (#879). The
+// helper zeroes the destination's pad bytes itself, so its padding is deterministic whatever its caller left there.
+static void check_value_copy_floating(CheckValue* destination, const CheckValue* source)
+{
+    destination->floating_storage[0] = source->floating_storage[0];
+    destination->floating_storage[1] = source->floating_storage[1] & UINT64_C(0xffff);
+    destination->imaginary_storage[0] = source->imaginary_storage[0];
+    destination->imaginary_storage[1] = source->imaginary_storage[1] & UINT64_C(0xffff);
+}
+
 typedef enum CheckOp
 {
     CHECK_OP_VALUE,

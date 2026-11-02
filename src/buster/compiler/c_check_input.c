@@ -6896,28 +6896,32 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
                 const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
                     check_input_constexpr_find(reader, declaration) : 0;
-                *check_graph_leaf_of(graph, node) = constant != 0 ? constant->value : (CheckValue)
-                {
-                    .type = type,
-                    .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) | (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
-                    .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
-                    .integer = enumeration ? reader->enum_values[declaration] : 0,
-                    .object = reader->objects[declaration],
-                    .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
-                };
+                CheckValue* const leaf = check_graph_leaf_of(graph, node);
                 if (constant != 0)
                 {
-                    *check_graph_leaf_of(graph, node) = (CheckValue)
+                    CheckValue value =
                     {
                         .type = type,
                         .category = CHECK_LVALUE,
                         .flags = constant->value.flags | BUSTER_CHECK_ICE,
                         .constant_kind = constant->value.constant_kind,
                         .integer = constant->value.integer,
-                        .floating = constant->value.floating,
-                        .imaginary = constant->value.imaginary,
                         .object = reader->objects[declaration],
+                    };
+                    check_value_copy_floating(&value, &constant->value);
+                    *leaf = value;
+                }
+                else
+                {
+                    *leaf = (CheckValue)
+                    {
+                        .type = type,
+                        .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
+                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) | (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                        .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
+                        .integer = enumeration ? reader->enum_values[declaration] : 0,
+                        .object = reader->objects[declaration],
+                        .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                     };
                 }
             }
