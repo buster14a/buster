@@ -66,7 +66,11 @@ whose IR the executor runs as its ABI records say. Targeted fixtures exercise
 conditional joins, entry-zero backedges, narrow shifts, wide pointer scales,
 objects' slots, `COPY` of every size from 1 to 256, labels and computed gotos
 (one, and two through the dispatch block), a variadic definition's frame, a struct by value's records, guarded source tails
-and transactional failures. Every lowered function is also promoted by both SSA
+and transactional failures. A loop whose `?:` joins carry a U64 and an I32 at
+one depth (#1189), and the same loop in a statement expression under a pending
+U64, whose slot then crosses the backedge, must lower to a depth slot per depth
+and type, each reached by one type alone, compute what C does, and promote to no
+slot, load or store. Every lowered function is also promoted by both SSA
 paths, verified, and must keep its objects' slots. Tier 0's random long double
 and `__int128` programs (four times the count) run through the shared IR's
 interpreter (#176) against their stack machines. The default count is 32

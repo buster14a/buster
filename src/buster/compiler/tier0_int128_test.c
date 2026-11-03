@@ -17,13 +17,16 @@
 //   - functions of 128-bit parameters and results, which the convention passes as two INTEGER eightbytes in registers or
 //     on the stack (Tier 0 takes them as 16-byte objects, as a front end hands them), and functions calling C functions
 //     of them, called from C on boundary values;
-//   - the memory classes' slots: a stack of their values up to the last slot, which runs, and one past it, which both
-//     paths refuse, for the 128-bit integers and for long double;
+//   - the memory classes' slots: native sums through the old depth bound and byte wraps, up to 1000 values, for
+//     the 128-bit integers and for long double;
 //   - the stream's rules for the classes, each break refused at its entry.
 // tier0_test.c includes this file after tier0_x87_test.c, whose helpers it uses.
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The values
+
+// Room for the 1000-deep native slot regressions, including the encoder's worst-case capacity.
+#define BUSTER_TIER0_TEST_INT128_IMAGE_BYTES (64 * BUSTER_TIER0_TEST_PAGE)
 
 #define BUSTER_TIER0_TEST_INT128_PROGRAMS 300
 #define BUSTER_TIER0_TEST_INT128_STATEMENTS 8
@@ -713,13 +716,13 @@ static bool tier0_test_int128_native(const uint8_t* code, uint32_t length, Tier0
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
-        uint8_t* page = mmap(0, 4 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        uint8_t* page = mmap(0, BUSTER_TIER0_TEST_INT128_IMAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (page == MAP_FAILED)
         {
             _exit(3);
         }
         memcpy(page, code, length);
-        if (mprotect(page, 4 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) != 0)
+        if (mprotect(page, BUSTER_TIER0_TEST_INT128_IMAGE_BYTES, PROT_READ | PROT_EXEC) != 0)
         {
             _exit(4);
         }
@@ -900,8 +903,8 @@ static uint32_t tier0_test_int128_encode(Tier0TestTally* tally, const char* name
     const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "int128", "%s: the branches can't be sized", name);
     const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
-    const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
-    const int64_t scalar_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, scratch, room, 0, 0) : -1;
+    const int64_t vector_length = ready && room <= BUSTER_TIER0_TEST_INT128_IMAGE_BYTES ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
+    const int64_t scalar_length = ready && room <= BUSTER_TIER0_TEST_INT128_IMAGE_BYTES ? x86_encode_scalar(scalar.records, scalar.count, scratch, room, 0, 0) : -1;
     ready = ready && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length && memcmp(image, scratch, (size_t)vector_length) == 0, "int128",
                                        "%s: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, vector_length, scalar_length);
     return ready ? (uint32_t)vector_length : 0;
@@ -957,7 +960,7 @@ static void tier0_test_int128_boundaries(Tier0TestTally* tally, const Tier0TestI
         ~(Tier0TestWide)0 << 63,
     };
     Tier0TestInt128Program* program = calloc(1, sizeof(Tier0TestInt128Program));
-    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    uint8_t* image = calloc(2, BUSTER_TIER0_TEST_INT128_IMAGE_BYTES);
     Arena arena = arena_reserve(1ull << 24);
     const bool ready = tier0_test_expect(tally, program != 0 && image != 0 && arena.base != 0, "int128", "no memory");
     for (uint32_t index = 0; index < 2 && ready; index += 1)
@@ -1005,7 +1008,7 @@ static void tier0_test_int128_boundaries(Tier0TestTally* tally, const Tier0TestI
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_int128_function(program, abi);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
+        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + BUSTER_TIER0_TEST_INT128_IMAGE_BYTES, false, &error);
         for (uint32_t pair = 0; pair < BUSTER_TIER0_TEST_INT128_BOUNDARIES * BUSTER_TIER0_TEST_INT128_BOUNDARIES && length != 0; pair += 1)
         {
             const Tier0TestWide a = values[pair / BUSTER_TIER0_TEST_INT128_BOUNDARIES];
@@ -1052,7 +1055,7 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
 {
     Tier0TestInt128Reach reached = { 0 };
     Tier0TestInt128Program* program = calloc(1, sizeof(Tier0TestInt128Program));
-    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    uint8_t* image = calloc(2, BUSTER_TIER0_TEST_INT128_IMAGE_BYTES);
     Arena arena = arena_reserve(1ull << 26);
     bool ready = tier0_test_expect(tally, program != 0 && image != 0 && arena.base != 0, "int128", "no memory");
     for (uint32_t p = 0; p < count && ready; p += 1)
@@ -1068,7 +1071,7 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
         }
         const Tier0Function function = tier0_test_int128_function(program, abi);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, true, &error);
+        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + BUSTER_TIER0_TEST_INT128_IMAGE_BYTES, true, &error);
         *too_deep += error == TIER0_ERROR_DEPTH ? 1 : 0;
         *entries += program->count;
         if (length == 0)
@@ -1298,7 +1301,7 @@ static Tier0TestWide tier0_test_int128_expected(uint32_t which, uint32_t k)
 //     and on the stack, and results in rax and rdx into objects, the first sum kept in its slot across the second call.
 static void tier0_test_int128_functions(Tier0TestTally* tally, const Tier0TestInt128Abi* abi, Tier0TestInt128Shared* shared)
 {
-    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    uint8_t* image = calloc(2, BUSTER_TIER0_TEST_INT128_IMAGE_BYTES);
     Arena arena = arena_reserve(1ull << 24);
     const bool ready = tier0_test_expect(tally, image != 0 && arena.base != 0, "int128", "no memory");
     for (uint32_t which = 0; which < 3 && ready; which += 1)
@@ -1412,7 +1415,7 @@ static void tier0_test_int128_functions(Tier0TestTally* tally, const Tier0TestIn
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_int128_written_function(&written, abi, signatures[which], 16);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_int128_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
+        const uint32_t length = tier0_test_int128_encode(tally, names[which], &function, &arena, image, image + BUSTER_TIER0_TEST_INT128_IMAGE_BYTES, false, &error);
         const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_int128_native(image, length, runs[which], shared), "int128", "%s: the native run failed", names[which]);
         for (uint32_t k = 0; k < 16 && ran; k += 1)
         {
@@ -1440,28 +1443,25 @@ static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_slots
 // A stack of `values` constants of `class` (I128, or F80 with its constant 1.0) above the output's address, summed and
 // stored: their slots run to depth `values`, past the integer table from 15 (BUSTER_TIER0_INTEGER_DEPTHS) on, where the
 // values below take the deep slots and theirs stay in the memory classes' slots at their true depths (#780). Both paths
-// compile it to the same code, which stores the sum, at the table's last slot, one and two past it and 40; and refuse it
-// (TIER0_ERROR_DEPTH) past BUSTER_TIER0_MAX_DEPTH alone: 239 constants and the address make a stack of 240 at the first
-// addition, where 238 compile.
+// compile it to the same code and execute the sum, past the register table, the old 240 limit and byte wraps (#1106).
 static void tier0_test_int128_slots(Tier0TestTally* tally, const Tier0TestInt128Abi* abi, Tier0TestInt128Shared* shared)
 {
-    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    uint8_t* image = calloc(2, BUSTER_TIER0_TEST_INT128_IMAGE_BYTES);
     Arena arena = arena_reserve(1ull << 24);
     const bool ready = tier0_test_expect(tally, image != 0 && arena.base != 0, "int128", "no memory");
     static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
     static const uint8_t local_flags[1] = { 0 };
     const uint64_t one[2] = { 1ull << 63, 0x3fff };
-    static const uint32_t stacks[] = { BUSTER_TIER0_INTEGER_DEPTHS - 1, BUSTER_TIER0_INTEGER_DEPTHS, BUSTER_TIER0_INTEGER_DEPTHS + 1, 40, BUSTER_TIER0_MAX_DEPTH - 2,
-                                       BUSTER_TIER0_MAX_DEPTH - 1 };
+    static const uint32_t stacks[] = { BUSTER_TIER0_INTEGER_DEPTHS - 1, BUSTER_TIER0_INTEGER_DEPTHS, BUSTER_TIER0_INTEGER_DEPTHS + 1, 40, 238, 239, 240, 254, 255, 256, 257, 511, 512, 1000 };
     for (uint32_t c = 0; c < 2 && ready; c += 1)
     {
         const uint32_t class = c == 0 ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_F80;
         for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(stacks); s += 1)
         {
             const uint32_t values = stacks[s];
-            uint8_t kinds[2 * BUSTER_TIER0_MAX_DEPTH + 4];
-            uint8_t classes[2 * BUSTER_TIER0_MAX_DEPTH + 4];
-            uint64_t constants[2 * BUSTER_TIER0_MAX_DEPTH + 4];
+            uint8_t kinds[2 * 1000 + 4];
+            uint8_t classes[2 * 1000 + 4];
+            uint64_t constants[2 * 1000 + 4];
             uint32_t count = 0;
             kinds[count] = BUSTER_TYPED_LOCAL;
             classes[count] = BUSTER_TYPED_CLASS_U64;
@@ -1505,14 +1505,11 @@ static void tier0_test_int128_slots(Tier0TestTally* tally, const Tier0TestInt128
             arena_pop_to(&arena, 0);
             const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            const bool fits = values + 1 < BUSTER_TIER0_MAX_DEPTH;
-            tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector) && (fits ? scalar.error == TIER0_OK : scalar.error == TIER0_ERROR_DEPTH), "int128",
+            tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector) && scalar.error == TIER0_OK, "int128",
                               "%s: the paths give %d and %d", name, scalar.error, vector.error);
-            tier0_test_expect(tally, !fits || values <= BUSTER_TIER0_INTEGER_DEPTHS - 1 || scalar.deep != 0, "int128", "%s: no deep entries", name);
-            // The deepest stacks' code is past the image's pages: they are compiled alone.
-            const bool run = values <= 40;
+            tier0_test_expect(tally, values <= BUSTER_TIER0_INTEGER_DEPTHS - 1 || scalar.deep != 0, "int128", "%s: no deep entries", name);
             Tier0Error error = TIER0_OK;
-            const uint32_t length = run ? tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error) : 0;
+            const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + BUSTER_TIER0_TEST_INT128_IMAGE_BYTES, false, &error);
             memset(shared->out, 0xa5, sizeof(shared->out));
             const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_int128_native(image, length, tier0_test_int128_run_slots, shared), "int128",
                                                               "%s: the native run failed", name);

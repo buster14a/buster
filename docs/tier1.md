@@ -374,8 +374,8 @@ of C's truth values, addresses and divisions by powers of two (#141's items in
 compiles take 26% fewer as its code than as Tier 0's (41% fewer than before the
 walks). What still costs: a narrow value's zero extension is a `movzx`, though
 its register is zero-extended already; `&&`, `||` and `?:` results whose depth
-slot carries values of several types stay in memory (single-type ones promote
-since #983); a frame
+slot carried values of several types stayed in memory (single-type ones promoted
+since #983, and each depth and type has a slot of its own since #1189); a frame
 object's address is a `lea` rather than part of its users' memory operands; the
 pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
 function, was Tier 0's then (its switch). 80 of #142's programs, 40 per generator, gave
@@ -385,6 +385,53 @@ time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
 the walks, which leave 40% fewer records to emit); the checker's unit, which
 compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 36.9 s without them.
+
+## Where the gap to clang -O2 is (#1189)
+
+#1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
+[the record](https://github.com/buster14a/buster-performance/tree/caa665509d9c68ce3e0091a360f47400170f71f2/docs/measurements/tier1-gap-1189-2026-11-03)
+has the tool, the experiment patches and the counts)
+counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
+scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
+instruction and agrees with the 9700X's `perf stat` on c-testsuite 00040 to the
+instruction. An experiment build, not on main, tags each Tier 1 record with its
+origin: spill, edge spill, call save, edge move, call sequence, frame,
+recomputed value, CFG branch or node. Its executables are main's byte for byte.
+
+At main `96b6cbcd`, the program's own code runs:
+
+| | `--tier1` | clang -O2 | Gap |
+| --- | ---: | ---: | ---: |
+| speedtest1 | 3,744 M | 1,888 M | 1,856 M |
+| Lua 5.4.8, five scripts | 7,228 M | 3,768 M | 3,460 M |
+
+The gap by cause, as shares of each program's gap:
+
+| Cause | speedtest1 | Lua | Issue |
+| --- | ---: | ---: | --- |
+| stack loads and stores | 22.5% | 25.8% | #1216 (edge spills and reloads), #1116 (call saves) |
+| register moves | 18.8% | 12.9% | #1216 (edge moves), #1116 (call sequences' 32-bit self-moves) |
+| address arithmetic | 14.8% | 18.2% | #1217 |
+| compares and branches | 14.8% | 17.8% | #1218 |
+| other loads and stores | 12.1% | 9.3% | #139 (memory value numbering), #1218 (load folding) |
+| zero and sign extensions | 9.0% | 12.5% | #1219 |
+| calls, returns and frames | 7.4% | 1.5% | #139 (inlining), #177 (frames) |
+
+The interpreters' loops hold most of it: `sqlite3VdbeExec` 21% of speedtest1's
+gap, and `luaV_execute` 64% of Lua's.
+
+None of the existing passes that `--tier1` doesn't run measures as a gain:
+- GVN: the measurement above (`--tier1-gvn`).
+- LICM: [the loop-motion guide](ir-loop-motion.md)'s "In `--tier1`".
+- SROA: [the scalar-replacement guide](ir-scalar-replacement.md)'s "In `--tier1`".
+- The inliner: [the inlining guide](ir-inlining.md)'s "Reach in `--tier1`".
+
+What did pay is a slot per depth and type for the typed stream's values that
+cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
+instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
+-O0 on both programs: 3,870 M against 3,908 M, and 7,610 M against 8,253 M.
+
+Cycles and run time remain to be measured on the 9700X.
 
 ## Current integration boundary
 

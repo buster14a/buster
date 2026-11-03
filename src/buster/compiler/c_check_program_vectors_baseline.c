@@ -214,11 +214,12 @@ static void check_vector_baseline_compare(CheckVectorBaseline* context, CheckVec
     }
 }
 
-static const char* check_vector_lower_baseline_row(const TypeTable* types, const X86Target* target, uint32_t op, TypeId vector, uint8_t scalar_class,
-                                                  Tier0Operation* row)
+// An operator's row on `bytes` bytes of `vector`'s elements: the vector's own, or a piece of a wider one's that the target's
+// registers hold (check_lower_vector_split, #1193). Every row here is elementwise, a piece's elements its own.
+static const char* check_vector_lower_baseline_piece(const TypeTable* types, const X86Target* target, uint32_t op, TypeId vector, uint32_t bytes,
+                                                    uint8_t scalar_class, Tier0Operation* row)
 {
     const CheckVectorElement element = check_vector_lower_element(types, vector);
-    const uint32_t bytes = (uint32_t)type_size(types, type_unqualified(type_strip_aligned(types, vector)));
     const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
     const bool compare = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
@@ -316,6 +317,13 @@ static const char* check_vector_lower_baseline_row(const TypeTable* types, const
                  compare ? "vector comparison unavailable at this target" : "vector operator unavailable at this target";
     }
     return reason;
+}
+
+static const char* check_vector_lower_baseline_row(const TypeTable* types, const X86Target* target, uint32_t op, TypeId vector, uint8_t scalar_class,
+                                                  Tier0Operation* row)
+{
+    const uint32_t bytes = (uint32_t)type_size(types, type_unqualified(type_strip_aligned(types, vector)));
+    return check_vector_lower_baseline_piece(types, target, op, vector, bytes, scalar_class, row);
 }
 
 #undef BUSTER_CHECK_BASE_PACKED
