@@ -338,8 +338,31 @@ printf 'model name\t: AMD Ryzen 7 9700X\nmicrocode\t: 0xb404023\n' > "$work/cpui
 mkdir -p "$work/identity-bin"
 printf '#!/bin/sh\necho 6.17.1-arch1\n' > "$work/identity-bin/uname"
 printf '#!/bin/sh\necho glibc 2.42\n' > "$work/identity-bin/getconf"
-printf '#!/bin/sh\necho "gcc 15.2.1-1"\necho "binutils 2.45-1"\n' > "$work/identity-bin/pacman"
-printf '#!/bin/sh\ncase "$1" in -dumpfullversion) echo 15.2.1 ;; *) echo "$1" | sed "s/^-print-prog-name=//" ;; esac\n' > "$work/identity-bin/gcc"
+# A stand-in package database: -Q lists the packages (FAKE_VERSIONS), -Qo owns the runtime fixtures, -Ql lists the
+# packages' files (a header and the static runtime).
+mkdir -p "$work/runtime/include"
+printf 'static runtime\n' > "$work/runtime/libc.a"
+printf 'startup object\n' > "$work/runtime/crt1.o"
+printf '#define VERSION 1\n' > "$work/runtime/include/stdio.h"
+cat > "$work/identity-bin/pacman" <<SH
+#!/bin/sh
+case "\$1" in
+    -Q) printf '%s\\n' "\${FAKE_VERSIONS:-gcc 15.2.1-1}" "binutils 2.45-1" ;;
+    -Qoq) echo glibc ;;
+    -Qlq) printf '%s\\n' "$work/runtime/" "$work/runtime/libc.a" "$work/runtime/crt1.o" "$work/runtime/include/stdio.h" ;;
+    *) exit 1 ;;
+esac
+SH
+cat > "$work/identity-bin/gcc" <<SH
+#!/bin/sh
+case "\$1" in
+    -dumpfullversion) echo 15.2.1 ;;
+    -print-file-name=libc.a) echo "$work/runtime/libc.a" ;;
+    -print-file-name=crt1.o) echo "$work/runtime/crt1.o" ;;
+    -print-file-name=*) echo "\$1" | sed 's/^-print-file-name=//' ;;
+    *) echo "\$1" | sed "s/^-print-prog-name=//" ;;
+esac
+SH
 printf '#!/bin/sh\necho "GNU objdump 2.45"\n' > "$work/identity-bin/objdump"
 chmod +x "$work/identity-bin"/*
 identity()
@@ -355,10 +378,23 @@ test "$(identity)" = "$first" || fail 'the host identity is deterministic'
 printf '#!/bin/sh\necho "GNU objdump 2.45"\n# rebuilt\n' > "$work/identity-bin/objdump"
 second=$(identity)
 [[ "$second" == 9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-* ]] && [ "$second" != "$first" ] || fail 'a replaced objdump of the same version changes the identity'
-# A package updated, every tool the same: another identity.
-printf '#!/bin/sh\necho "gcc 15.2.1-2"\necho "binutils 2.45-1"\n' > "$work/identity-bin/pacman"
-third=$(identity)
-[ "$third" != "$second" ] && [ "$third" != "$first" ] || fail 'a package rebuilt under the same GCC version changes the identity'
+# The static runtime (test-static's cc -static) changed in place, its package's version the same: another identity.
+printf 'static runtime, rebuilt\n' > "$work/runtime/libc.a"
+runtime=$(identity)
+[[ "$runtime" == 9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-* ]] && [ "$runtime" != "$second" ] || fail 'a changed libc.a changes the identity'
+# A header of the toolchain's packages changed: another identity.
+printf '#define VERSION 2\n' > "$work/runtime/include/stdio.h"
+header=$(identity)
+[ "$header" != "$runtime" ] || fail 'a changed header changes the identity'
+# A package updated, every file the same: another identity.
+third=$(FAKE_VERSIONS='gcc 15.2.1-2' identity)
+[ "$third" != "$header" ] && [ "$third" != "$first" ] || fail 'a package rebuilt under the same GCC version changes the identity'
+# A package's file that can't be read leaves no identity.
+chmod 000 "$work/runtime/crt1.o"
+if [ "$(id -u)" != 0 ]; then
+    test -z "$(identity)" || fail 'an unreadable runtime file leaves no identity'
+fi
+chmod 644 "$work/runtime/crt1.o"
 # No package database: no identity at all.
 printf '#!/bin/sh\nexit 1\n' > "$work/identity-bin/pacman"
 test -z "$(identity)" || fail 'without a package database no identity is recorded'

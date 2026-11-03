@@ -680,13 +680,17 @@ jobs:
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses. That
-          # is the kernel, the microcode, glibc, and the software the inventory runs: the package database's every
-          # package and version, and the contents of each external tool the inventory calls (GCC and its cc1, cc1plus
-          # and collect2; binutils; gdb, perf, valgrind, mold, wild, make, file, the shell) and of every shared library
-          # they load. A tool absent is recorded as absent. A component that can't be read (no package database,
-          # say) leaves no identity at all, never a placeholder that another unread one would match: no reuse holds.
-          # tests/ci/nightly.sh runs the lines from here to the identity's end against stand-in tools.
+          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses: the
+          # kernel, the microcode, glibc, and a digest of the software. The digest covers the package database's every
+          # package and version; each external tool the inventory calls (GCC and its cc1, cc1plus and collect2,
+          # binutils, gdb, perf, valgrind, mold, wild, make, file, the shell) and every shared library it loads; the
+          # runtime GCC links a static program with (test-static's cc -static); and every file of the packages that
+          # own any of those, or of the C toolchain's (gcc, gcc-libs, glibc, binutils, linux-api-headers). Those files
+          # are the headers, static libraries, startup objects, linker scripts and configuration, by content. A tool
+          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a file
+          # that can't be hashed) leaves no identity at all, never a placeholder that another unread one would
+          # match: no reuse holds. tests/ci/nightly.sh runs the lines from here to the identity's end against
+          # stand-in tools.
           kernel=$(uname -r 2> /dev/null || true)
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
@@ -704,17 +708,35 @@ jobs:
                   path=$(command -v "$tool" 2> /dev/null || true)
                   if [ -n "$path" ] && [ -f "$path" ]; then
                       real=$(readlink -f "$path")
-                      listing+="$tool $real"$'\n'
+                      listing+="tool $tool $real"$'\n'
                       files+=("$real")
                       while IFS= read -r library; do
                           files+=("$library")
                       done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
                   else
-                      listing+="$tool absent"$'\n'
+                      listing+="tool $tool absent"$'\n'
                   fi
               done
-              hashes=$(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r file; do sha256sum "$file" 2> /dev/null || printf 'unreadable %s\n' "$file"; done)
-              if [[ "$hashes" != *unreadable* ]]; then
+              for runtime in libc.a libm.a libpthread.a crt1.o crti.o crtn.o crtbeginT.o crtend.o libgcc.a libgcc_eh.a; do
+                  path=$(gcc -print-file-name="$runtime" 2> /dev/null || true)
+                  if [ -n "$path" ] && [ -f "$path" ]; then
+                      real=$(readlink -f "$path")
+                      listing+="runtime $runtime $real"$'\n'
+                      files+=("$real")
+                  else
+                      listing+="runtime $runtime absent"$'\n'
+                  fi
+              done
+              owners=$({ printf '%s\n' gcc gcc-libs glibc binutils linux-api-headers; pacman -Qoq "${files[@]}" 2> /dev/null || true; } | LC_ALL=C sort -u)
+              listing+="packages $(printf '%s ' $owners)"$'\n'
+              while IFS= read -r owned; do
+                  if [ -L "$owned" ]; then
+                      listing+="link $owned $(readlink "$owned")"$'\n'
+                  elif [ -f "$owned" ]; then
+                      files+=("$owned")
+                  fi
+              done < <(pacman -Qlq $owners 2> /dev/null || true)
+              if hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | xargs -0 -r -n 256 -P 8 sha256sum | LC_ALL=C sort -k 2); then
                   software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
               fi
           fi
@@ -770,13 +792,17 @@ jobs:
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses. That
-          # is the kernel, the microcode, glibc, and the software the inventory runs: the package database's every
-          # package and version, and the contents of each external tool the inventory calls (GCC and its cc1, cc1plus
-          # and collect2; binutils; gdb, perf, valgrind, mold, wild, make, file, the shell) and of every shared library
-          # they load. A tool absent is recorded as absent. A component that can't be read (no package database,
-          # say) leaves no identity at all, never a placeholder that another unread one would match: no reuse holds.
-          # tests/ci/nightly.sh runs the lines from here to the identity's end against stand-in tools.
+          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses: the
+          # kernel, the microcode, glibc, and a digest of the software. The digest covers the package database's every
+          # package and version; each external tool the inventory calls (GCC and its cc1, cc1plus and collect2,
+          # binutils, gdb, perf, valgrind, mold, wild, make, file, the shell) and every shared library it loads; the
+          # runtime GCC links a static program with (test-static's cc -static); and every file of the packages that
+          # own any of those, or of the C toolchain's (gcc, gcc-libs, glibc, binutils, linux-api-headers). Those files
+          # are the headers, static libraries, startup objects, linker scripts and configuration, by content. A tool
+          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a file
+          # that can't be hashed) leaves no identity at all, never a placeholder that another unread one would
+          # match: no reuse holds. tests/ci/nightly.sh runs the lines from here to the identity's end against
+          # stand-in tools.
           kernel=$(uname -r 2> /dev/null || true)
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
@@ -794,17 +820,35 @@ jobs:
                   path=$(command -v "$tool" 2> /dev/null || true)
                   if [ -n "$path" ] && [ -f "$path" ]; then
                       real=$(readlink -f "$path")
-                      listing+="$tool $real"$'\n'
+                      listing+="tool $tool $real"$'\n'
                       files+=("$real")
                       while IFS= read -r library; do
                           files+=("$library")
                       done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
                   else
-                      listing+="$tool absent"$'\n'
+                      listing+="tool $tool absent"$'\n'
                   fi
               done
-              hashes=$(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r file; do sha256sum "$file" 2> /dev/null || printf 'unreadable %s\n' "$file"; done)
-              if [[ "$hashes" != *unreadable* ]]; then
+              for runtime in libc.a libm.a libpthread.a crt1.o crti.o crtn.o crtbeginT.o crtend.o libgcc.a libgcc_eh.a; do
+                  path=$(gcc -print-file-name="$runtime" 2> /dev/null || true)
+                  if [ -n "$path" ] && [ -f "$path" ]; then
+                      real=$(readlink -f "$path")
+                      listing+="runtime $runtime $real"$'\n'
+                      files+=("$real")
+                  else
+                      listing+="runtime $runtime absent"$'\n'
+                  fi
+              done
+              owners=$({ printf '%s\n' gcc gcc-libs glibc binutils linux-api-headers; pacman -Qoq "${files[@]}" 2> /dev/null || true; } | LC_ALL=C sort -u)
+              listing+="packages $(printf '%s ' $owners)"$'\n'
+              while IFS= read -r owned; do
+                  if [ -L "$owned" ]; then
+                      listing+="link $owned $(readlink "$owned")"$'\n'
+                  elif [ -f "$owned" ]; then
+                      files+=("$owned")
+                  fi
+              done < <(pacman -Qlq $owners 2> /dev/null || true)
+              if hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | xargs -0 -r -n 256 -P 8 sha256sum | LC_ALL=C sort -k 2); then
                   software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
               fi
           fi

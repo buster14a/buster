@@ -267,13 +267,21 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   its host identity, made of:
 
   - the kernel, the microcode, GCC's version and glibc;
-  - a digest of the software the native inventory runs: the package
-    database's every package and version, and the contents of each external
-    tool the inventory calls and of every shared library those load. The tools
-    are GCC with its `cc1`, `cc1plus` and `collect2`, binutils, `gdb`, `perf`,
-    `valgrind`, `mold`, `wild`, `make`, `file` and the shell.
+  - a digest of the software the native inventory runs, which covers:
+    - the package database's every package and version;
+    - the contents of each external tool the inventory calls, and of every
+      shared library those load. The tools are GCC with its `cc1`, `cc1plus`
+      and `collect2`, binutils, `gdb`, `perf`, `valgrind`, `mold`, `wild`,
+      `make`, `file` and the shell;
+    - the runtime GCC links a static program with (`libc.a`, `crt1.o` and the
+      rest, as `test-static`'s `cc -static` resolves them);
+    - every file of the packages that own any of those, and of the C
+      toolchain's packages (`gcc`, `gcc-libs`, `glibc`, `binutils`,
+      `linux-api-headers`): their headers, static libraries, startup
+      objects, linker scripts and configuration, by content.
 
-  So an oracle replaced under the same version changes the identity. In the nightly mode, such a push runs a
+  So an oracle, runtime or header replaced under the same version changes the
+  identity. In the nightly mode, such a push runs a
   `host-identity` job on the 9700X. It takes the lock for seconds and reads
   the identity with the same step as the 9700X job; the self-test keeps the
   two steps identical. The 9700X job is skipped only when that identity
