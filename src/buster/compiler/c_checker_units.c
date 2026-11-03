@@ -103,6 +103,11 @@ struct CheckUnitsRun
     // before a link, whose peak then stays the units'; otherwise the process's exit, which follows the lanes, frees the
     // memory of the lane that stops taking units last.
     bool release;
+    // The lanes that still take units, which the run counts itself, with or without a board (whose own count gates the
+    // help): the board's allocation may fail on several lanes, and only the lane that stops last may leave its memory to
+    // the exit (check_units_lane). `kept` counts the lanes that did, for --shared-parts' report.
+    uint32_t taking;
+    uint32_t kept;
 };
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
@@ -1594,7 +1599,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 // Before a link it releases it, as every lane does, so that the link's peak stays the units'.
 static void check_units_lane(void* argument)
 {
-    const CheckUnitsRun* run = argument;
+    CheckUnitsRun* run = argument;
     const uint32_t index = lane_index();
     CheckUnitsLane* lane = run->lanes + index;
     arena_pool = &lane->pool;
@@ -1604,12 +1609,22 @@ static void check_units_lane(void* argument)
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
-    // The lanes that still take units after this one, which help the units' emissions (#777) from now on.
-    const uint32_t taking = run->board != NULL ? __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE) : 0;
+    // The lanes that still take units after this one: the board's, which help the units' emissions (#777) from now on,
+    // and the run's, which counts them without a board too. Every lane counts itself out of the board's first, so the
+    // one that leaves the run's at 0 finds no unit's emission left to help.
+    if (run->board != NULL)
+    {
+        __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE);
+    }
+    const uint32_t taking = __atomic_sub_fetch(&run->taking, 1, __ATOMIC_RELEASE);
     if (run->release || taking != 0)
     {
         check_units_lane_release(lane);
         arena_pool_release(&lane->pool);
+    }
+    else
+    {
+        __atomic_add_fetch(&run->kept, 1, __ATOMIC_RELAXED);
     }
     arena_pool = 0;
     // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
@@ -1812,8 +1827,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             memset(states, 0, (uint64_t)active * sizeof(*states));
             // The lanes' board (#777): every lane takes units at first. Without its memory, each unit's functions compile
-            // on its lane alone.
-            CheckEmitBoard* board = active > 1 ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
+            // on its lane alone; BUSTER_TEST_NO_UNITS_BOARD, a test hook (test-check-units), stands for its allocation
+            // failing.
+            const bool boarded = active > 1 && getenv("BUSTER_TEST_NO_UNITS_BOARD") == NULL;
+            CheckEmitBoard* board = boarded ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
             if (board != NULL)
             {
                 memset(board, 0, sizeof(*board));
@@ -1828,6 +1845,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .lanes = states,
                 .board = board,
                 .release = release || command->link,
+                .taking = active,
             };
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
@@ -1874,6 +1892,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             if (command->shared_parts)
             {
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
+                fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release), but the last one's in a
             // command without a link that doesn't release its memory: the kept links are all the link reads.
