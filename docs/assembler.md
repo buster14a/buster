@@ -436,7 +436,7 @@ The writer checks table counts, section types and merge entry sizes before
 emitting bytes, then compacts temporary locals only after seeing every fixup.
 
 `assembler_cfi.c` retains ordered directives as events attached to fragment IDs.
-`asm_cfi_emit` consumes final fragment positions after monotone branch relaxation,
+`asm_cfi_emit` consumes final fragment positions after branch relaxation,
 deduplicates identical initial CIE programs and emits FDEs in procedure order.
 Layout and emission share stable per-section fragment ranges. The single
 post-layout CFI fragment is inserted into their reserved extra slot, preserving
@@ -509,12 +509,39 @@ latencies of three cycles from operand 2 and two from operand 3 to the result.
 These guide the algorithm; the complete
 assembler measurements decide whether its extra token pass and temporaries pay.
 
-Relaxation starts short and only promotes a branch once. It recomputes all
-alignment padding each round, stopping within `branch_count + 1` rounds.
-Alignment can absorb growth, so this scheme guarantees a correct stable layout,
-not the globally shortest encoding for every alignment arrangement. Rel8-only
-branches are range-checked against the final layout. There is no implicit
-expansion that changes flags or registers.
+Relaxation starts short and only promotes a branch once. Assembly of only
+labels and instructions in one section takes the branch sizer's columnar
+layout, whose least fixed point is GNU as's there. Otherwise layout is GNU as's
+`relax_segment` (#1115), because compilers' output is compared with GNU as's
+objects byte for byte. A pass visits a section in order, and growth moves the
+rest at once. A branch measures backward targets where this pass put them. A
+forward target is where the last pass put it, moved by the stretch so far when
+the stretch is negative or no alignment lies between them. Otherwise the
+alignment may absorb it, and a branch whose target then lies behind it waits for
+the next pass. Alignment pads to where it now starts, and `.uleb128` and
+`.sleb128` take their value's size. Passes repeat until one grows nothing.
+Max-skip alignment (`.p2align 4,,10`) lets a distance shrink as earlier code
+grows. Which branches grow therefore depends on this order, not only on the
+final layout, and the order matters to the bytes. GCC 16's `-O2` floating
+program had a backward `jmp` that an earlier round-based layout grew and GNU as
+keeps short. On GCC 13's `-O2` output of 1,500 generated branchy functions
+(11 MB), that layout grew branches worth 80 bytes that GNU as keeps short.
+
+The passes are as many as GNU as's (179 on those functions, as growth reaches
+each later function a pass later), so a pass reads little. Only alignments,
+LEB128s and short branches that may grow change size. A pass reads those
+events' 32-byte records alone, as GNU as's frags hold the bytes between two
+variable parts. A label is its anchor event's end plus a fixed distance.
+Fragment offsets are written once, after the passes, by a prefix sum (sixteen
+at a time on the vector path). On a cloud host, not the 9700X, layout of those
+functions took 0.29 s against the round-based layout's 0.13 s; GNU as took
+1.1 s for the whole file. The `mixed` workload of `benchmark-assembler`, where
+no branch grows, lays out in the same time as before. A version that skipped
+events whose distances a pass doesn't change visited 15 times fewer events but
+took as long there, so it isn't kept. A LEB128 that bounces across an alignment,
+which GNU as pads to break, is refused once the passes exceed one per branch and
+nine per LEB128. Rel8-only branches are range-checked against the final layout.
+There is no implicit expansion that changes flags or registers.
 
 ## Tests and measurements
 
@@ -944,7 +971,7 @@ must remain in the shared-interface inventory.
 | Counted assembly bytes → `asm_lex` → statements/operands | `AsmToken` is four u32 fields: start/end/kind/reserved. Vector register classification caches its bounded result in reserved; source spans remain for diagnostics. |
 | `.S` preprocessing → printed assembly bytes → assembly lexer | Uses the PP assembly mode and spacing rules. This materialized text handoff is real; it is not C parser token conversion. |
 | Statements/expressions → shared `x86_match` → fragments/records | Symbols and relative expressions retain identity/addends. Public input rejects unsupported forms and validates records before trusted encoding. |
-| Fragments/labels/alignment → monotone layout → encoding/Link | Variable fragment counts and final offsets; branches promote, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
+| Fragments/labels/alignment → GNU-order layout → encoding/Link | Variable fragment counts and final offsets; branches promote in GNU as's pass order, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
 
 The public source is bounded (64 MiB limit); the driver can read streams and
 keeps its own terminator, while reusable `asm_assemble` takes a counted slice.
@@ -956,7 +983,8 @@ rather than sending an invalid record to the unchecked encoder.
 
 A logical assembly unit/section contains ordered directives, labels and
 alignment, so sorting instructions or independently sizing arbitrary fragments
-is invalid. Layout terminates by monotone promotion and checks rel8-only
+is invalid. Layout terminates because branches only grow (LEB128s are bounded)
+and checks rel8-only
 instructions after final placement. This differs from C `size_branches`, whose
 record order is fixed and has no assembly alignment fragments; replacing one
 with the other would lose a real dependency.

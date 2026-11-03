@@ -3528,6 +3528,14 @@ static const char* asm_unmatched(const AsmParser* parser, const AsmInstruction* 
                                           : "no form of the instruction takes these operands";
 }
 
+// Whether a branch form is a rel8 that GNU as relaxes to the rel32 form of its mnemonic, the next row: jmp and jcc,
+// not jrcxz or loop.
+static bool asm_branch_grows(uint32_t row)
+{
+    const X86FormDescription* form = &x86_form_descriptions[row];
+    return form->relative_bytes == 1 && row + 1 < X86_FORM_COUNT && form[1].relative_bytes == 4 && (form->mnemonic == form[1].mnemonic || strcmp(form->mnemonic, form[1].mnemonic) == 0);
+}
+
 static void asm_match_instructions(AsmParser* parser)
 {
     for (uint32_t i = 0; i < parser->instruction_count && parser->result.error == 0; i += 1)
@@ -3594,8 +3602,7 @@ static void asm_match_instructions(AsmParser* parser)
             if (instruction->branch && !instruction->local_branch && form->relative_bytes == 1)
             {
                 const uint32_t row = instruction->record.form;
-                const bool grows = row + 1 < X86_FORM_COUNT && x86_form_descriptions[row + 1].relative_bytes == 4 && strcmp(form->mnemonic, x86_form_descriptions[row + 1].mnemonic) == 0;
-                if (!grows)
+                if (!asm_branch_grows(row))
                 {
                     asm_fail(parser, instruction->location, "rel8-only branch requires a defined local target in its section");
                 }
@@ -3704,73 +3711,6 @@ static __m512i asm_prefix16(__m512i values)
     return values;
 }
 
-// Alignment is an ordered location-counter operation. Between those operations, the vector path computes sixteen
-// fragment offsets by a prefix network; the exact path is a plain sum. Partition by section once, so neither path
-// scans unrelated sections in each relaxation round. Scalar column loads/stores avoid Zen 5's costly gather/scatter.
-static void asm_fragment_offsets(AsmParser* parser, const uint32_t* order, const uint32_t* begin)
-{
-    for (uint32_t section = 1; section < parser->section_count; section += 1)
-    {
-        uint32_t offset = 0;
-        uint32_t at = begin[section];
-        while (at < begin[section + 1] && parser->result.error == 0)
-        {
-            AsmFragment* fragment = &parser->fragments[order[at]];
-            if (fragment->kind == ASM_ALIGN)
-            {
-                const uint32_t padding = -offset & (fragment->alignment - 1);
-                fragment->size = padding <= fragment->maximum ? padding : 0;
-                fragment->offset = offset;
-                offset += fragment->size;
-                at += 1;
-            }
-            else if (BUSTER_VECTOR_PATH(parser->options.vectorized))
-            {
-                uint32_t sizes[16] = {0};
-                uint32_t offsets[16];
-                uint32_t count = 0;
-                uint64_t total = offset;
-                while (count < 16 && at + count < begin[section + 1] && parser->fragments[order[at + count]].kind != ASM_ALIGN)
-                {
-                    sizes[count] = parser->fragments[order[at + count]].size;
-                    total += sizes[count++];
-                }
-                const __m512i values = _mm512_loadu_si512(sizes);
-                const __m512i prefix = asm_prefix16(values);
-                _mm512_storeu_si512(offsets, _mm512_add_epi32(_mm512_sub_epi32(prefix, values), _mm512_set1_epi32(offset)));
-                for (uint32_t i = 0; i < count; i += 1)
-                {
-                    parser->fragments[order[at + i]].offset = offsets[i];
-                }
-                if (total > BUSTER_ASM_MAX_SECTION)
-                {
-                    // Name the fragment that crosses the limit, as the exact path does, not the group's first.
-                    uint64_t crossed = offset;
-                    uint32_t i = 0;
-                    while ((crossed += sizes[i]) <= BUSTER_ASM_MAX_SECTION)
-                    {
-                        i += 1;
-                    }
-                    asm_fail(parser, parser->fragments[order[at + i]].location, "section exceeds the 256 MiB layout limit");
-                }
-                offset = total;
-                at += count;
-            }
-            else
-            {
-                fragment->offset = offset;
-                offset += fragment->size;
-                at += 1;
-            }
-            if (offset > BUSTER_ASM_MAX_SECTION)
-            {
-                asm_fail(parser, fragment->location, "section exceeds the 256 MiB layout limit");
-            }
-        }
-        parser->sections[section].size = offset;
-    }
-}
-
 // DWARF's variable-length integers, as GNU as's .uleb128 and .sleb128 write them. Compiler debug sections use them for
 // constant offsets, label differences and label offsets, which asm_leb_value reduces to one value.
 static uint32_t asm_leb_size(__int128 value, bool is_signed)
@@ -3856,66 +3796,431 @@ static bool asm_leb_value(const AsmParser* parser, AsmExpr expression, __int128*
     return valid;
 }
 
-// The sizes of .uleb128 and .sleb128 fragments depend on the values they encode, which label differences change as
-// layout moves. One pass after each offset pass updates them; a changed size lays the section out again.
-static bool asm_leb_sizes(AsmParser* parser)
+// A .uleb128 or .sleb128's size, from the value it encodes where layout now has its labels.
+static uint32_t asm_leb_fragment_size(AsmParser* parser, const AsmFragment* fragment)
 {
-    bool changed = false;
-    for (uint32_t i = 0; i < parser->fragment_count && parser->result.error == 0; i += 1)
+    const bool is_signed = fragment->kind == ASM_SLEB;
+    const AsmExpr expression = asm_resolve(parser, fragment->expression, fragment->location);
+    __int128 value = 0;
+    uint32_t size = 0;
+    if (!asm_leb_value(parser, expression, &value) || (!is_signed && value < 0) || value < INT64_MIN || (is_signed ? value > INT64_MAX : value > UINT64_MAX))
     {
-        AsmFragment* fragment = &parser->fragments[i];
-        if (fragment->kind == ASM_ULEB || fragment->kind == ASM_SLEB)
+        asm_fail(parser, fragment->location, "LEB128 value must be an absolute value, a label difference or a label offset");
+    }
+    else
+    {
+        size = asm_leb_size(value, is_signed);
+    }
+    return size;
+}
+
+// Layout is GNU as's relax_segment (#1115), so that each branch takes the size GNU as gives it: compilers' output is
+// compared byte for byte with GNU as's objects, and a different size moves the code and CFI after it. A pass visits a
+// section in order, and a fragment that grows moves the rest at once (the pass's stretch), so a branch after it
+// measures the distances this pass makes. A target the pass hasn't reached yet is where the last pass put it, moved by
+// the stretch when the stretch is negative or no alignment lies between them; otherwise the alignment may absorb the
+// stretch, so a branch whose target then appears behind it waits for the next pass. Alignments pad to where they now
+// start, and LEB128s take the size of their value. Passes repeat until one grows nothing. A branch never shrinks, but
+// with alignment a distance can shrink as code before it grows (max-skip padding), so the order decides which branches
+// grow, as it does in GNU as. A previous round-based layout measured every branch against the last round's offsets
+// and grew one GNU as kept short (GCC 16's -O2 floating program, where a backward jmp crossed `.p2align 4,,10`), and on
+// GCC 13 -O2 output of 1,500 branchy functions it grew branches worth 80 bytes that GNU as keeps short.
+//
+// The order is the result, so a pass is sequential, and the passes are as many as GNU as's: 179 for those functions,
+// where growth reaches each later function a pass later. What a pass reads is small instead. Only alignments, LEB128s
+// and short branches that may grow (its events) change size, so the fragments between two events move together, and
+// a pass reads each event's 32 bytes alone, as GNU as's frags hold the bytes between two of its variable parts. A
+// label is its anchor (the event before it, or the section's start) plus a distance that no pass changes. Fragment
+// offsets are written once, after the passes, by a prefix sum. Skipping the events whose distances a pass doesn't
+// change (marking those over each change of the stretch, and deferring forward branches across alignments until the
+// stretch at them allows growth) visited 15 times fewer events on those functions but took as long on a cloud host,
+// so it isn't done; the 9700X's benchmark-assembler measures this layout.
+#define ASM_RELAX_PLAIN 0
+#define ASM_RELAX_ALIGN 1
+#define ASM_RELAX_LEB 2
+#define ASM_RELAX_BRANCH 3
+
+typedef struct AsmRelaxEvent AsmRelaxEvent;
+struct AsmRelaxEvent
+{
+    // A branch: its target's distance past its anchor's end, with the addend. An alignment: its alignment.
+    int64_t local;
+    uint32_t offset;
+    uint32_t size;
+    // The bytes between the previous event's end (or the section's start) and this event.
+    uint32_t gap;
+    uint32_t fragment;
+    // A branch: its target's anchor, an event's index plus one, or 0 for the section's start. An alignment: its most
+    // padding.
+    uint32_t anchor;
+    // The alignments before the event in its section, above its role's two bits; a branch that grew is plain.
+    uint32_t region;
+};
+
+typedef struct AsmRelax AsmRelax;
+struct AsmRelax
+{
+    // The short branches that may grow, a bit by fragment id, which asm_layout marks from the instruction records.
+    uint64_t* branches;
+    AsmRelaxEvent* events;
+    // Each section's first event, and its bytes after its last.
+    uint32_t* event_begin;
+    uint32_t* tails;
+    uint32_t event_count;
+    uint64_t limit;
+    bool lebs;
+};
+
+static void asm_relax_add(AsmRelax* relax, const AsmFragment* fragment, uint32_t id, uint32_t region, uint32_t* end)
+{
+    const bool align = (region & 3) == ASM_RELAX_ALIGN;
+    relax->events[relax->event_count++] = (AsmRelaxEvent){
+        .local = align ? fragment->alignment : 0,
+        .offset = fragment->offset,
+        .size = fragment->size,
+        .gap = fragment->offset - *end,
+        .fragment = id,
+        .anchor = align ? fragment->maximum : 0,
+        .region = region,
+    };
+    *end = fragment->offset + fragment->size;
+}
+
+static uint32_t asm_relax_role(const AsmRelax* relax, const AsmFragment* fragment, uint32_t id)
+{
+    const bool leb = fragment->kind == ASM_ULEB || fragment->kind == ASM_SLEB;
+    const bool branch = (relax->branches[id / 64] >> (id % 64) & 1) != 0;
+    return leb ? ASM_RELAX_LEB : branch ? ASM_RELAX_BRANCH : ASM_RELAX_PLAIN;
+}
+
+// GNU as's first addresses, every branch short and every LEB128 one byte, recording the section's events. Between
+// alignments, the vector path computes sixteen offsets by a prefix network; the exact path is a plain sum. Scalar
+// column loads/stores avoid Zen 5's costly gather/scatter.
+static void asm_relax_first(AsmParser* parser, AsmRelax* relax, uint32_t section)
+{
+    const uint32_t* order = parser->fragment_order;
+    const uint32_t end = parser->fragment_begin[section + 1];
+    uint32_t at = parser->fragment_begin[section];
+    uint32_t offset = 0;
+    uint32_t region = 0;
+    uint32_t event_end = 0;
+    relax->event_begin[section] = relax->event_count;
+    while (at < end && parser->result.error == 0)
+    {
+        const uint32_t id = order[at];
+        AsmFragment* fragment = &parser->fragments[id];
+        if (fragment->kind == ASM_ALIGN)
         {
-            const bool is_signed = fragment->kind == ASM_SLEB;
-            const AsmExpr expression = asm_resolve(parser, fragment->expression, fragment->location);
-            __int128 value = 0;
-            uint32_t size = 0;
-            if (!asm_leb_value(parser, expression, &value) || (!is_signed && value < 0) || value < INT64_MIN || (is_signed ? value > INT64_MAX : value > UINT64_MAX))
+            const uint32_t padding = -offset & (fragment->alignment - 1);
+            fragment->size = padding <= fragment->maximum ? padding : 0;
+            fragment->offset = offset;
+            asm_relax_add(relax, fragment, id, region << 2 | ASM_RELAX_ALIGN, &event_end);
+            region += 1;
+            offset += fragment->size;
+            at += 1;
+        }
+        else if (BUSTER_VECTOR_PATH(parser->options.vectorized))
+        {
+            uint32_t sizes[16] = {0};
+            uint32_t offsets[16];
+            uint32_t count = 0;
+            uint64_t total = offset;
+            while (count < 16 && at + count < end && parser->fragments[order[at + count]].kind != ASM_ALIGN)
             {
-                asm_fail(parser, fragment->location, "LEB128 value must be an absolute value, a label difference or a label offset");
+                sizes[count] = parser->fragments[order[at + count]].size;
+                total += sizes[count++];
             }
-            else
+            const __m512i values = _mm512_loadu_si512(sizes);
+            const __m512i prefix = asm_prefix16(values);
+            _mm512_storeu_si512(offsets, _mm512_add_epi32(_mm512_sub_epi32(prefix, values), _mm512_set1_epi32(offset)));
+            for (uint32_t i = 0; i < count; i += 1)
             {
-                size = asm_leb_size(value, is_signed);
+                const uint32_t member = order[at + i];
+                AsmFragment* placed = &parser->fragments[member];
+                placed->offset = offsets[i];
+                const uint32_t role = asm_relax_role(relax, placed, member);
+                if (role != ASM_RELAX_PLAIN)
+                {
+                    asm_relax_add(relax, placed, member, region << 2 | role, &event_end);
+                }
             }
-            changed |= size != fragment->size;
-            fragment->size = size;
+            if (total > BUSTER_ASM_MAX_SECTION)
+            {
+                // Name the fragment that crosses the limit, as the exact path does, not the group's first.
+                uint64_t crossed = offset;
+                uint32_t i = 0;
+                while ((crossed += sizes[i]) <= BUSTER_ASM_MAX_SECTION)
+                {
+                    i += 1;
+                }
+                asm_fail(parser, parser->fragments[order[at + i]].location, "section exceeds the 256 MiB layout limit");
+            }
+            offset = (uint32_t)total;
+            at += count;
+        }
+        else
+        {
+            fragment->offset = offset;
+            const uint32_t role = asm_relax_role(relax, fragment, id);
+            if (role != ASM_RELAX_PLAIN)
+            {
+                asm_relax_add(relax, fragment, id, region << 2 | role, &event_end);
+            }
+            offset += fragment->size;
+            at += 1;
+        }
+        if (offset > BUSTER_ASM_MAX_SECTION)
+        {
+            asm_fail(parser, fragment->location, "section exceeds the 256 MiB layout limit");
         }
     }
-    return changed;
+    relax->tails[section] = offset - event_end;
+    parser->sections[section].size = offset;
+}
+
+// Each short branch's target as its anchor and distance, from the first addresses: the events before the target
+// label are those of lower fragment id in its section (asm_partition_fragments is a stable partition, so a section's
+// fragments are in id order). Targets are near, so the count gallops from the branch to a bracket, then a binary
+// search finds it.
+static void asm_relax_targets(AsmParser* parser, AsmRelax* relax)
+{
+    for (uint32_t section = 1; section < parser->section_count; section += 1)
+    {
+        const uint32_t first = relax->event_begin[section];
+        const uint32_t last = relax->event_begin[section + 1];
+        for (uint32_t e = first; e < last; e += 1)
+        {
+            AsmRelaxEvent* event = &relax->events[e];
+            if ((event->region & 3) == ASM_RELAX_BRANCH)
+            {
+                const AsmInstruction* instruction = &parser->instructions[parser->fragments[event->fragment].instruction];
+                const AsmSymbol* symbol = &parser->symbols[instruction->expressions[0].plus];
+                const bool ahead = event->fragment < symbol->fragment;
+                uint32_t low = ahead ? e + 1 : first;
+                uint32_t high = ahead ? last : e;
+                uint32_t step = 1;
+                bool bracketed = false;
+                while (!bracketed)
+                {
+                    const uint32_t probe = ahead ? (high - low > step ? low + step : high) : (high - low > step ? high - step : low);
+                    const bool before = probe < last && relax->events[probe].fragment < symbol->fragment;
+                    bracketed = ahead ? (probe == high || !before) : (probe == low || before);
+                    low = ahead ? (bracketed ? low : probe + 1) : (bracketed && before ? probe + 1 : low);
+                    high = ahead ? (bracketed && probe < high ? probe : high) : (bracketed ? high : probe);
+                    step *= 2;
+                }
+                while (low < high)
+                {
+                    const uint32_t middle = low + (high - low) / 2;
+                    const bool before = relax->events[middle].fragment < symbol->fragment;
+                    low = before ? middle + 1 : low;
+                    high = before ? high : middle;
+                }
+                const AsmRelaxEvent* anchor = low == first ? 0 : &relax->events[low - 1];
+                const __int128 base = anchor == 0 ? 0 : (__int128)anchor->offset + anchor->size;
+                const __int128 local = asm_symbol_position(parser, symbol) + instruction->expressions[0].value - base;
+                // A distance past a signed 64-bit one is out of range either way, and the final check names it.
+                event->local = local > INT64_MAX ? INT64_MAX : local < INT64_MIN ? INT64_MIN : (int64_t)local;
+                event->anchor = low == first ? 0 : low;
+            }
+        }
+    }
+}
+
+// relax_frag's choice for the short branch event `e`, now at `offset`, `stretch` bytes from where the last pass put
+// it. The event still has the last pass's offset, which a target just after it is anchored to. A branch that grows
+// takes its rel32 form.
+static void asm_relax_branch(AsmParser* parser, AsmRelax* relax, uint32_t e, uint32_t offset, int64_t stretch)
+{
+    AsmRelaxEvent* event = &relax->events[e];
+    const AsmRelaxEvent* anchor = event->anchor == 0 ? 0 : &relax->events[event->anchor - 1];
+    __int128 target = (anchor == 0 ? 0 : (__int128)anchor->offset + anchor->size) + event->local;
+    bool hold = false;
+    // An anchor this pass hasn't reached, or this branch itself, holds a target the pass hasn't reached.
+    if (stretch != 0 && event->anchor > e)
+    {
+        const uint32_t region = (anchor->region >> 2) + ((anchor->region & 3) == ASM_RELAX_ALIGN);
+        if (stretch < 0 || region == event->region >> 2)
+        {
+            target += stretch;
+        }
+        else
+        {
+            // GNU as's address is the rel8's, the branch's last byte.
+            hold = target < (__int128)offset + event->size - 1;
+        }
+    }
+    const __int128 distance = target - offset - event->size;
+    if (!hold && (distance < -128 || distance > 127))
+    {
+        AsmFragment* fragment = &parser->fragments[event->fragment];
+        AsmInstruction* instruction = &parser->instructions[fragment->instruction];
+        const uint32_t growth = branch_sizing_growth(instruction->record.form);
+        instruction->record.form += 1;
+        fragment->size += growth;
+        event->size += growth;
+        event->region &= ~(uint32_t)3;
+    }
+}
+
+// One pass over a section's events in order; returns whether a size changed.
+static bool asm_relax_pass(AsmParser* parser, AsmRelax* relax, uint32_t section)
+{
+    uint64_t running = 0;
+    bool stretched = false;
+    for (uint32_t e = relax->event_begin[section]; e < relax->event_begin[section + 1] && parser->result.error == 0; e += 1)
+    {
+        AsmRelaxEvent* event = &relax->events[e];
+        const uint64_t offset = running + event->gap;
+        const uint32_t size = event->size;
+        const uint32_t role = event->region & 3;
+        if (offset + size > BUSTER_ASM_MAX_SECTION)
+        {
+            asm_fail(parser, parser->fragments[event->fragment].location, "section exceeds the 256 MiB layout limit");
+        }
+        else if (role == ASM_RELAX_ALIGN)
+        {
+            const uint32_t padding = -(uint32_t)offset & ((uint32_t)event->local - 1);
+            event->size = padding <= event->anchor ? padding : 0;
+        }
+        else if (role == ASM_RELAX_LEB)
+        {
+            // Its labels are where the last pass put them.
+            AsmFragment* fragment = &parser->fragments[event->fragment];
+            fragment->size = asm_leb_fragment_size(parser, fragment);
+            event->size = fragment->size;
+        }
+        else if (role == ASM_RELAX_BRANCH)
+        {
+            asm_relax_branch(parser, relax, e, (uint32_t)offset, (int64_t)offset - event->offset);
+        }
+        event->offset = (uint32_t)offset;
+        stretched |= event->size != size;
+        running = offset + event->size;
+    }
+    running += relax->tails[section];
+    if (running > BUSTER_ASM_MAX_SECTION && parser->result.error == 0)
+    {
+        asm_fail(parser, 0, "section exceeds the 256 MiB layout limit");
+    }
+    parser->sections[section].size = (uint32_t)running;
+    return stretched;
+}
+
+// Every fragment's offset from the passes' sizes: one prefix sum per section, sixteen at a time on the vector path,
+// with no alignment to stop at, as the events' sizes are final.
+static void asm_relax_place(AsmParser* parser, const AsmRelax* relax, uint32_t section)
+{
+    for (uint32_t e = relax->event_begin[section]; e < relax->event_begin[section + 1]; e += 1)
+    {
+        parser->fragments[relax->events[e].fragment].size = relax->events[e].size;
+    }
+    const uint32_t* order = parser->fragment_order;
+    const uint32_t end = parser->fragment_begin[section + 1];
+    uint32_t at = parser->fragment_begin[section];
+    uint32_t offset = 0;
+    while (at < end)
+    {
+        if (BUSTER_VECTOR_PATH(parser->options.vectorized))
+        {
+            uint32_t sizes[16] = {0};
+            uint32_t offsets[16];
+            const uint32_t count = end - at < 16 ? end - at : 16;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                sizes[i] = parser->fragments[order[at + i]].size;
+            }
+            const __m512i values = _mm512_loadu_si512(sizes);
+            const __m512i prefix = asm_prefix16(values);
+            _mm512_storeu_si512(offsets, _mm512_add_epi32(_mm512_sub_epi32(prefix, values), _mm512_set1_epi32(offset)));
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                parser->fragments[order[at + i]].offset = offsets[i];
+            }
+            offset = offsets[count - 1] + sizes[count - 1];
+            at += count;
+        }
+        else
+        {
+            AsmFragment* fragment = &parser->fragments[order[at]];
+            fragment->offset = offset;
+            offset += fragment->size;
+            at += 1;
+        }
+    }
 }
 
 static void asm_layout(AsmParser* parser)
 {
     asm_partition_fragments(parser);
-    bool changed = parser->result.error == 0 && !asm_layout_records(parser);
-    const uint32_t* order = parser->fragment_order;
-    const uint32_t* begin = parser->fragment_begin;
-    while (changed && parser->result.error == 0)
+    if (parser->result.error == 0 && !asm_layout_records(parser))
     {
-        changed = false;
-        parser->result.rounds += 1;
-        asm_fragment_offsets(parser, order, begin);
-        changed |= asm_leb_sizes(parser);
-        for (uint32_t i = 0; i < parser->instruction_count; i += 1)
+        Scratch scratch = scratch_begin(parser->arena);
+        // A pass that changes nothing ends layout, and a branch grows once; a LEB128 grows at most nine times unless an
+        // alignment after it makes it bounce, which GNU as breaks by padding and this refuses.
+        const uint64_t count = (uint64_t)parser->fragment_count + 1;
+        AsmRelax relax = {
+            .branches = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count / 64 + 1),
+            .events = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AsmRelaxEvent, count),
+            .event_begin = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, parser->section_count + 1),
+            .tails = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, parser->section_count + 1),
+            .limit = 2,
+        };
+        if (relax.branches == 0 || relax.events == 0 || relax.event_begin == 0 || relax.tails == 0)
         {
-            AsmInstruction* instruction = &parser->instructions[i];
-            if (instruction->local_branch)
+            asm_fail(parser, 0, "arena exhausted laying out fragments");
+        }
+        else
+        {
+            memset(relax.branches, 0, (count / 64 + 1) * sizeof(uint64_t));
+            for (uint32_t i = 0; i < parser->instruction_count; i += 1)
             {
-                AsmFragment* fragment = &parser->fragments[instruction->fragment];
-                const AsmExpr expression = instruction->expressions[0];
-                const __int128 target = asm_symbol_position(parser, &parser->symbols[expression.plus]);
-                const __int128 distance = target + expression.value - fragment->offset - fragment->size;
-                const uint32_t row = instruction->record.form;
-                const X86FormDescription* form = x86_form_description(row);
-                if (form->relative_bytes == 1 && (distance < -128 || distance > 127) && row + 1 < X86_FORM_COUNT && x86_form_descriptions[row + 1].relative_bytes == 4 && strcmp(form->mnemonic, x86_form_descriptions[row + 1].mnemonic) == 0)
+                const AsmInstruction* instruction = &parser->instructions[i];
+                if (instruction->local_branch && asm_branch_grows(instruction->record.form))
                 {
-                    instruction->record.form += 1;
-                    fragment->size += branch_sizing_growth(row);
-                    changed = true;
+                    relax.branches[instruction->fragment / 64] |= (uint64_t)1 << (instruction->fragment % 64);
+                    relax.limit += 1;
                 }
             }
+            for (uint32_t section = 1; section < parser->section_count; section += 1)
+            {
+                asm_relax_first(parser, &relax, section);
+            }
+            relax.event_begin[parser->section_count] = relax.event_count;
+            for (uint32_t e = 0; e < relax.event_count; e += 1)
+            {
+                const bool leb = (relax.events[e].region & 3) == ASM_RELAX_LEB;
+                relax.lebs |= leb;
+                relax.limit += leb ? 9 : 0;
+            }
+            asm_relax_targets(parser, &relax);
+            bool stretched = true;
+            bool moved = false;
+            while (stretched && parser->result.error == 0)
+            {
+                stretched = false;
+                parser->result.rounds += 1;
+                for (uint32_t section = 1; section < parser->section_count; section += 1)
+                {
+                    stretched |= asm_relax_pass(parser, &relax, section);
+                }
+                moved |= stretched;
+                // A LEB128 reads labels' fragment offsets, so a round that moved them places them for the next.
+                for (uint32_t section = 1; relax.lebs && stretched && section < parser->section_count; section += 1)
+                {
+                    asm_relax_place(parser, &relax, section);
+                }
+                if (stretched && parser->result.rounds >= relax.limit)
+                {
+                    asm_fail(parser, 0, "layout doesn't converge: a .uleb128 or .sleb128 bounces between sizes across an alignment");
+                }
+            }
+            for (uint32_t section = 1; moved && !relax.lebs && parser->result.error == 0 && section < parser->section_count; section += 1)
+            {
+                asm_relax_place(parser, &relax, section);
+            }
         }
+        scratch_end(scratch);
     }
     for (uint32_t i = 0; i < parser->instruction_count && parser->result.error == 0; i += 1)
     {

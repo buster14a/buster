@@ -64,6 +64,80 @@ static const char asm_test_predicate_fixture[] =
     "vpcmpltd %zmm1, %zmm2, %k1\nvpcmpnleuq %zmm1, %zmm2, %k3{%k4}\nvpcmpequb %xmm1, %xmm2, %k1\nvpcmpneqw %ymm1, %ymm2, %k2\nvpcmpeqd %zmm1, %zmm2, %k1\n"
     ".intel_syntax noprefix\ncmpltsd xmm1, xmm2\ncmpnless xmm1, dword ptr [rax]\nvcmpltsd xmm0, xmm1, xmm2\nvpcmpltd k1, zmm2, zmm1\nvcmpgtps k1{k2}, zmm1, zmm2\n";
 
+// Branch relaxation in GNU as's order (relax_segment): a backward jmp whose distance shrinks as an earlier jmp grows
+// and a max-skip alignment pads less, the GCC 16 -O2 pattern that a round-based layout grew; a forward jmp across an
+// alignment that absorbs an earlier jmp's growth; and a forward jmp that 45 grown jmps before it would see behind it,
+// which waits for the next pass. Alignments fill with int3, as GNU as's code padding differs between binutils versions.
+#define BUSTER_ASM_TEST_FAR5 "jmp .Lh_far\njmp .Lh_far\njmp .Lh_far\njmp .Lh_far\njmp .Lh_far\n"
+static const char asm_test_relax_fixture[] =
+    ".section .text.backward,\"ax\",@progbits\nbackward: jmp .Lb_far\n.skip 13, 0x90\n.Lb_target: .skip 7, 0x90\n.p2align 4, 0xcc, 10\n"
+    ".skip 110, 0x90\njmp .Lb_target\n.skip 200, 0x90\n.Lb_far: ret\n"
+    ".section .text.forward,\"ax\",@progbits\nforward: jmp .Lf_far\n.skip 12, 0x90\njmp .Lf_target\n.skip 120, 0x90\n.p2align 4, 0xcc\n"
+    ".Lf_target: .skip 200, 0x90\n.Lf_far: ret\n"
+    ".section .text.hold,\"ax\",@progbits\nhold:\n" BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5
+    BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5 BUSTER_ASM_TEST_FAR5
+    "jmp .Lh_target\n.p2align 4, 0xcc\n.Lh_target: .skip 200, 0x90\n.Lh_far: ret\n";
+#undef BUSTER_ASM_TEST_FAR5
+
+// Random relaxation programs (#1115): labels, jmp and jcc to any of them, filler, and alignments with and without a
+// most padding, filled with int3, so that each branch's size is GNU as's pass order's. --cross-check compares each
+// with GNU as; otherwise both paths assemble each into the same object.
+static void asm_test_relax_programs(AsmTest* test, const char* directory, bool cross_check)
+{
+    static const char* const branches[] = { "jmp", "je", "jne", "jl", "jg", "jb", "ja" };
+    char source[16384];
+    uint64_t state = 1115;
+    for (uint32_t program = 0; program < 300; program += 1)
+    {
+        const uint32_t labels = 4 + (uint32_t)(asm_test_random(&state) % 37);
+        int length = snprintf(source, sizeof(source), ".text\nrelax:\n");
+        for (uint32_t label = 0; label < labels; label += 1)
+        {
+            length += snprintf(source + length, sizeof(source) - length, ".Lr%u:\n", label);
+            const uint32_t statements = (uint32_t)(asm_test_random(&state) % 4);
+            for (uint32_t i = 0; i < statements; i += 1)
+            {
+                const uint32_t kind = (uint32_t)(asm_test_random(&state) % 20);
+                const uint32_t power = 2 + (uint32_t)(asm_test_random(&state) % 4);
+                const uint32_t most = (uint32_t)(asm_test_random(&state) % (1u << power));
+                const bool limited = asm_test_random(&state) % 10 < 7;
+                if (kind < 9)
+                {
+                    length += snprintf(source + length, sizeof(source) - length, "%s .Lr%u\n", branches[asm_test_random(&state) % BUSTER_ARRAY_LENGTH(branches)], (uint32_t)(asm_test_random(&state) % labels));
+                }
+                else if (kind < 14)
+                {
+                    length += snprintf(source + length, sizeof(source) - length, ".skip %u, 0x90\n", 1 + (uint32_t)(asm_test_random(&state) % 90));
+                }
+                else if (kind < 17 && limited)
+                {
+                    length += snprintf(source + length, sizeof(source) - length, ".p2align %u, 0xcc, %u\n", power, most);
+                }
+                else if (kind < 17)
+                {
+                    length += snprintf(source + length, sizeof(source) - length, ".p2align %u, 0xcc\n", power);
+                }
+                else
+                {
+                    length += snprintf(source + length, sizeof(source) - length, "addl $1, %%eax\n");
+                }
+            }
+        }
+        snprintf(source + length, sizeof(source) - length, "ret\n");
+        if (cross_check)
+        {
+            if (!asm_test_oracle(test, source, directory, X86_ARCH_BASELINE))
+            {
+                fprintf(stderr, "assembler relaxation program %u:\n%s", program, source);
+            }
+        }
+        else
+        {
+            asm_test_pair(test, (String8){ .pointer = source, .length = strlen(source) }, 1, X86_ARCH_BASELINE);
+        }
+    }
+}
+
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
     static const struct
@@ -76,7 +150,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_wide_fixture, X86_ARCH_BASELINE },
         { asm_test_x87_fixture, X86_ARCH_BASELINE },
         { asm_test_predicate_fixture, X86_ARCH_V4 },
+        { asm_test_relax_fixture, X86_ARCH_BASELINE },
     };
+    asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
     {
         if (cross_check)
