@@ -142,18 +142,20 @@ depths (the 15th value in its deep slot), and a function that allocates 64 KB an
 scope of its own, around calls with stack arguments, run natively; the frame's
 address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
 allocation, run natively; and the
-aggregates at locations written by hand, 14 fixtures (each kind of general and
+aggregates at locations written by hand, 16 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
 the low eightbyte alone of a larger one on the stack, SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
 misaligned, and results in each kind and order of register, short ones, a
-vector and through a hidden pointer), run natively both ways: as calls, whose
+vector, through a hidden pointer and a vector split across xmm0 and xmm1 and
+across xmm0 to xmm3, #1193's), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
-copy their parameters out; and `tier0_validate` refusing 61 breaks of their
+copy their parameters out; and `tier0_validate` refusing 67 breaks of their
 rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
-nothing, two parts or two parameters in one register, and registers outside
-the convention's, among them), and a function of value parameters in one
+nothing, two parts or two parameters in one register, registers outside
+the convention's, and a split vector's registers out of order or of the wrong
+parts, among them), and a function of value parameters in one
 register or outside the convention's; then tail calls (#147, `tier0_tail_test.c`):
 a function per aggregate fixture that passes its parameters on to the probe by a
 `TAIL_CALL`, in five frames (plain, an `ALLOCA`'s frame pointer, saved registers

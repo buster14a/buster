@@ -18,8 +18,10 @@ requirements. [Command index](README.md).
   jump through the function's one dispatch block, as clang's indirect gotos go,
   which keeps an interpreter's CFG linear), aggregates by value, variadic frames,
   long double and `__int128`; it refuses vectors, `X86` rows, the frame
-  address (`FRAME_ADDRESS`) and tail calls (`TAIL_CALL`), which no corpus
-  function has. `test-ir` checks
+  address (`FRAME_ADDRESS`) and tail calls (`TAIL_CALL`). These capability
+  refusals use `IR_ERROR_UNSUPPORTED`: ordinary `--tier1` may fall back to
+  Tier 0, while `--tier1-strict` rejects them without an internal error.
+  `test-ir` checks
   independent fixtures, guarded columns, malformed inputs and allocation
   rollback; `test-ir-lowering` also executes generated IR (values, objects,
   indirect calls, records by value, the dynamic stack) against the typed-stream

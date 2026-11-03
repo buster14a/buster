@@ -2182,8 +2182,6 @@ struct CheckSourceFixture
     bool undecided;
     // The type table's room, for a fixture larger than check_test_types_open's; null for that.
     const TypeCapacity* capacity;
-    // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
-    double* check_seconds;
     // Whether the reader must make the unit overload tables (CHECK_TEST_OVERLOAD_TABLES) or none (CHECK_TEST_OVERLOAD_NONE),
     // on both paths: a name of the overloadable attribute's counts only inside an attribute list (#1038). 0 checks neither.
     uint8_t overload_tables;
@@ -2362,18 +2360,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         lines[p] = outcome.line;
         if (!rejected[p])
         {
-            struct timespec reader_start;
-            struct timespec reader_stop;
-            if (fixture->check_seconds != NULL)
-            {
-                clock_gettime(CLOCK_MONOTONIC, &reader_start);
-            }
             const bool adapted = check_input(&input[p], &parsers[p], &pp, &types[p].table, &input_storage[p], &scratch[p]);
-            if (fixture->check_seconds != NULL)
-            {
-                clock_gettime(CLOCK_MONOTONIC, &reader_stop);
-                *fixture->check_seconds += (double)(reader_stop.tv_sec - reader_start.tv_sec) + (double)(reader_stop.tv_nsec - reader_start.tv_nsec) * 1e-9;
-            }
             if (adapted || input[p].diagnostic_graph)
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
@@ -2427,18 +2414,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     .scalar = p == 0,
                     .verify = true,
                 };
-                struct timespec start;
-                struct timespec stop;
-                if (fixture->check_seconds != NULL)
-                {
-                    clock_gettime(CLOCK_MONOTONIC, &start);
-                }
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
-                if (fixture->check_seconds != NULL)
-                {
-                    clock_gettime(CLOCK_MONOTONIC, &stop);
-                    *fixture->check_seconds += (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9;
-                }
                 check_test_expect(test, checked[p], "source adapter emitted an invalid graph");
                 rejected[p] = !checked[p] || streams[p].report_count != 0;
                 if (checked[p] && streams[p].report_count != 0)
@@ -5607,11 +5583,48 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
     }
 }
 
+// #1130: a scaling fixture's check time for its growth guard: the least thread CPU time of `runs` checks, with that run's
+// wall time. Thread CPU time leaves out the time the process is descheduled, which was the flake, and the least of a few
+// runs leaves out a page fault or another one-off in the test process; each run does the same work.
+#define BUSTER_CHECK_SCALING_RUNS 3u
+#define BUSTER_CHECK_SCALING_RATIO 20.0
+#define BUSTER_CHECK_SCALING_SLACK 0.2
+
+static double check_test_scaling_seconds(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* outcome,
+                                         uint32_t runs, double* wall)
+{
+    double best = 0;
+    double best_wall = 0;
+    for (uint32_t run = 0; run < runs; run += 1)
+    {
+        struct timespec cpu_start;
+        struct timespec wall_start;
+        struct timespec cpu_stop;
+        struct timespec wall_stop;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
+        clock_gettime(CLOCK_MONOTONIC, &wall_start);
+        check_test_source(test, fixture, path, outcome);
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_stop);
+        clock_gettime(CLOCK_MONOTONIC, &wall_stop);
+        const double cpu = (double)(cpu_stop.tv_sec - cpu_start.tv_sec) + (double)(cpu_stop.tv_nsec - cpu_start.tv_nsec) * 1e-9;
+        const double elapsed = (double)(wall_stop.tv_sec - wall_start.tv_sec) + (double)(wall_stop.tv_nsec - wall_start.tv_nsec) * 1e-9;
+        if (run == 0 || cpu < best)
+        {
+            best = cpu;
+            best_wall = elapsed;
+        }
+    }
+    *wall = best_wall;
+    return best;
+}
+
 // #480's fifth review: an inferred array's struct element in d parentheses, or after d ?:'s, has its type read from the
 // tree's links in one pass, not from a scan of what's left at each level. Against clang at depths it parses (its
-// brackets stop at 256), then alone, timed: 60,000 parentheses and 40,000 ?:'s must check within 20 times what a tenth
-// of them takes, plus 0.2 s, as linear work does. The scans took 0.62 s for 30,000 parentheses on the laptop and 1.16 s
-// for 30,000 ?:'s, 9 times as long as for 10,000, which a tenth's 20 times doesn't allow.
+// brackets stop at 256), then alone: 60,000 parentheses and 40,000 ?:'s must check within 20 times the thread CPU time a
+// tenth takes, plus 0.2 s, as linear work does (#1130). Thread CPU time excludes descheduling, which was the flake, and
+// the least of three checks drops a page fault or another one-off; the times are printed. The scans took 0.62 s for
+// 30,000 parentheses on the laptop and 1.16 s for 30,000 ?:'s, 9 times as long as for 10,000, which a tenth's 20 times
+// didn't allow.
 static bool check_test_nesting_source(Arena* text, uint32_t form, uint32_t depth, const char* path)
 {
     const char literal[] = "(struct S){ .x = 1 }";
@@ -5657,6 +5670,8 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
         const char* levels = form == 0 ? "parentheses" : "?:'s";
         // Depths clang parses, against its answer, and then a tenth of the timed depth and the timed depth itself.
         double seconds[2] = { 0 };
+        double wall[2] = { 0 };
+        char description[256];
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compared) + 2; c += 1)
         {
             const bool timing = c >= BUSTER_ARRAY_LENGTH(compared);
@@ -5673,7 +5688,6 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
             ParseTestClang outcome = { 0 };
             bool ready = check_test_nesting_source(&text, form, depth, path);
             ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
-            char description[200];
             snprintf(description, sizeof(description), "%u %s around an inferred array's struct element: %s", depth, levels,
                      timing ? "the fixture is written" : "clang accepts it");
             check_test_expect(test, ready && !outcome.rejected, description);
@@ -5683,20 +5697,25 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
                     .name = name,
                     .source = (const char*)text.base,
                 };
-                struct timespec start;
-                struct timespec stop;
-                clock_gettime(CLOCK_MONOTONIC, &start);
-                check_test_source(test, &fixture, path, &outcome);
-                clock_gettime(CLOCK_MONOTONIC, &stop);
-                seconds[timing ? c - BUSTER_ARRAY_LENGTH(compared) : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : 0;
+                if (timing)
+                {
+                    const uint32_t index = c - BUSTER_ARRAY_LENGTH(compared);
+                    seconds[index] = check_test_scaling_seconds(test, &fixture, path, &outcome, BUSTER_CHECK_SCALING_RUNS, &wall[index]);
+                }
+                else
+                {
+                    check_test_source(test, &fixture, path, &outcome);
+                }
             }
             unlink(path);
             arena_release(&text);
         }
-        char description[200];
-        snprintf(description, sizeof(description), "%u %s checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", timed[form], levels, seconds[1],
-                 timed[form] / 10, seconds[0]);
-        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+        snprintf(description, sizeof(description),
+                 "%u %s around an inferred array's struct element: %.3f s of thread CPU (%.3f s wall) in the best of %u checks, within "
+                 "20 times %u's %.3f s (%.3f s wall) plus %.1f s",
+                 timed[form], levels, seconds[1], wall[1], BUSTER_CHECK_SCALING_RUNS, timed[form] / 10, seconds[0], wall[0], BUSTER_CHECK_SCALING_SLACK);
+        check_test_expect(test, seconds[1] <= BUSTER_CHECK_SCALING_RATIO * seconds[0] + BUSTER_CHECK_SCALING_SLACK, description);
+        printf("test-checker: %s\n", description);
     }
     if (created)
     {
@@ -5706,9 +5725,10 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
 
 // #591: member accesses checked in time linear in the unit, whatever the type table's size and the records'. The lookup
 // cleared a byte per type at every access, and compared the record's names one at a time. Two units, each against clang
-// at a small size, then timed at a tenth of a size and at the size, both paths (check_test_source, whose typed streams,
-// the members' offsets among them, must agree): the larger must check within 20 times what the tenth takes, plus 0.2 s,
-// as linear work does.
+// at a small size, then measured at a tenth of a size and at the size, both paths (check_test_source, whose typed
+// streams, the members' offsets among them, must agree): the larger must check within 20 times the thread CPU time a
+// tenth takes, plus 0.2 s, as linear work does (#1130). Thread CPU time excludes descheduling, which was the flake, and
+// the least of three checks drops a page fault or another one-off; the times are printed.
 //   - `size` structs of 3 to 26 members, every 7th with an anonymous union too, each with a pointer to it of 50 levels,
 //     whose types fill the table, and a function that reads 16 of its members;
 //   - one struct of `size` members, an anonymous struct of two every 50th, and a function that reads every name.
@@ -5791,6 +5811,7 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
         const char* name = form == 0 ? "many records' members after a large type table" : "a record of many members";
         // 100 against clang, then a tenth of the timed size and the timed size itself.
         double seconds[2] = { 0 };
+        double wall[2] = { 0 };
         for (uint32_t c = 0; c < 3; c += 1)
         {
             const bool timing = c != 0;
@@ -5807,7 +5828,7 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
             ParseTestClang outcome = { 0 };
             bool ready = check_test_member_source(&text, form, size, path);
             ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
-            char description[200];
+            char description[240];
             snprintf(description, sizeof(description), "%s, %u of them: %s", name, size, timing ? "the fixture is written" : "clang accepts it");
             check_test_expect(test, ready && !outcome.rejected, description);
             if (ready)
@@ -5823,17 +5844,26 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
                     .name = name,
                     .source = (const char*)text.base,
                     .capacity = &capacity,
-                    .check_seconds = timing ? &seconds[c - 1] : NULL,
                 };
-                check_test_source(test, &fixture, path, &outcome);
+                if (timing)
+                {
+                    const uint32_t index = c - 1;
+                    seconds[index] = check_test_scaling_seconds(test, &fixture, path, &outcome, BUSTER_CHECK_SCALING_RUNS, &wall[index]);
+                }
+                else
+                {
+                    check_test_source(test, &fixture, path, &outcome);
+                }
             }
             unlink(path);
             arena_release(&text);
         }
-        char description[200];
-        snprintf(description, sizeof(description), "%s: %u read and checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
-                 timed[form] / 10, seconds[0]);
-        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+        char description[320];
+        snprintf(description, sizeof(description),
+                 "%s: %u read and checked in %.3f s of thread CPU (%.3f s wall) in the best of %u checks, within 20 times %u's %.3f s (%.3f s "
+                 "wall) plus %.1f s",
+                 name, timed[form], seconds[1], wall[1], BUSTER_CHECK_SCALING_RUNS, timed[form] / 10, seconds[0], wall[0], BUSTER_CHECK_SCALING_SLACK);
+        check_test_expect(test, seconds[1] <= BUSTER_CHECK_SCALING_RATIO * seconds[0] + BUSTER_CHECK_SCALING_SLACK, description);
         printf("test-checker: %s\n", description);
     }
     if (created)
