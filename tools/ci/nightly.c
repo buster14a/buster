@@ -1724,11 +1724,14 @@ struct NightlyState
     bool full_this_cycle;
     uint64_t complete_run;
     uint64_t source;
+    // The latest verdicts by run and then attempt: a rerun keeps its run's ID and takes the next attempt.
     NightlyPlain plain;
     uint64_t plain_run;
+    uint32_t plain_attempt;
     bool blocked_native;
     uint64_t blocked_run;
     uint64_t admitted_run;
+    uint32_t admitted_attempt;
     uint32_t failures;
     bool admit_in_flight;
     bool defer_in_flight;
@@ -1895,7 +1898,27 @@ static bool nightly_request_this_cycle(const char* request, const char* date, bo
     return nightly_request(request, cycle, admit) && strcmp(cycle, date) == 0;
 }
 
+// Whether run `run`'s attempt `attempt` is later than `than_run`'s attempt `than_attempt` (a rerun keeps its run's ID).
+static bool nightly_later(uint64_t run, uint32_t attempt, uint64_t than_run, uint32_t than_attempt)
+{
+    return run > than_run || (run == than_run && attempt > than_attempt);
+}
+
+// Whether the ledger's row `index` is its run's latest attempt in the ledger.
+static bool nightly_latest_attempt(const NightlyLedger* ledger, uint32_t index)
+{
+    bool latest = true;
+    for (uint32_t i = 0; i < ledger->row_count && latest; i += 1)
+    {
+        latest = ledger->rows[i].run != ledger->rows[index].run || ledger->rows[i].attempt <= ledger->rows[index].attempt;
+    }
+    return latest;
+}
+
 // Folds the rows, the runs in flight and the pending dispatches into each state, and into the cycle's bookkeeping.
+// A state's verdicts are its latest run's latest attempt's, whatever order the ledger holds them in. Each failed or
+// interrupted attempt counts toward the state's failures, as each one occupied the 9700X; the cycle counts each run
+// once, by its latest attempt.
 static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle)
 {
     NightlyStates* states = (NightlyStates*)input->states;
@@ -1915,15 +1938,17 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
             state->full_this_cycle |= complete && row->coverage == NIGHTLY_COVERAGE_FULL && this_cycle && admit && row->purpose == NIGHTLY_PURPOSE_SNAPSHOT;
             state->source = complete && row->source != 0 ? row->source : state->source;
             state->complete_run = complete && row->run > state->complete_run ? row->run : state->complete_run;
-            if (row->plain != NIGHTLY_PLAIN_NONE && row->run > state->plain_run)
+            if (row->plain != NIGHTLY_PLAIN_NONE && nightly_later(row->run, row->attempt, state->plain_run, state->plain_attempt))
             {
                 state->plain = row->plain;
                 state->plain_run = row->run;
+                state->plain_attempt = row->attempt;
             }
             const bool admitted = row->hardware == NIGHTLY_HARDWARE_ADMIT;
-            if (admitted && row->run > state->admitted_run)
+            if (admitted && nightly_later(row->run, row->attempt, state->admitted_run, state->admitted_attempt))
             {
                 state->admitted_run = row->run;
+                state->admitted_attempt = row->attempt;
                 state->blocked_native = row->outcome == NIGHTLY_OUTCOME_BLOCKED_NATIVE;
                 state->blocked_run = state->blocked_native ? row->run : state->blocked_run;
             }
@@ -1936,11 +1961,13 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
             cycle->snapshot_attempted |= admit && row->outcome != NIGHTLY_OUTCOME_DEFERRED;
             cycle->measured = admit && row->outcome != NIGHTLY_OUTCOME_DEFERRED ? index : cycle->measured;
         }
-        if (this_cycle && row->purpose == NIGHTLY_PURPOSE_BACKLOG && !admit)
+        // The cycle's counts: each run once, by its latest attempt (a rerun is no second dispatch).
+        const bool counted = this_cycle && nightly_latest_attempt(ledger, i);
+        if (counted && row->purpose == NIGHTLY_PURPOSE_BACKLOG && !admit)
         {
             cycle->preparations_this_cycle += 1;
         }
-        if (this_cycle && admit)
+        if (counted && admit)
         {
             cycle->selected += 1;
             cycle->completed += row->outcome == NIGHTLY_OUTCOME_COMPLETE;
@@ -3461,6 +3488,57 @@ static void nightly_test_plan(NightlyTest* test)
     snprintf(pruned, sizeof(pruned), "prune\t%s\n", scenario->states.items[0].sha);
     nightly_expect(test, nightly_has(scenario, pruned) && nightly_count(scenario, "prune\t") == 1, "and a finished state's ref is still pruned");
     nightly_scenario_free(scenario);
+
+    // A rerun keeps its run's ID and takes the next attempt: a state's verdicts are its run's latest attempt's, in
+    // whichever order the ledger holds the attempts, hosted and native alike, and the cycle counts the run once.
+    for (uint32_t order = 0; order < 2; order += 1)
+    {
+        for (uint32_t later_fails = 0; later_fails < 2; later_fails += 1)
+        {
+            const NightlyPlain verdicts[2] = { later_fails ? NIGHTLY_PLAIN_OK : NIGHTLY_PLAIN_FAILED, later_fails ? NIGHTLY_PLAIN_FAILED : NIGHTLY_PLAIN_OK };
+            scenario = nightly_scenario(2, committed);
+            nightly_scenario_cycle(scenario, "2026-11-04", 1);
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t attempt = order == 0 ? k + 1 : 2 - k;
+                nightly_scenario_row(scenario, 200, 0, NIGHTLY_PURPOSE_BACKLOG, "20261103.900.1.defer", verdicts[attempt - 1], NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_TARGETED, verdicts[attempt - 1] == NIGHTLY_PLAIN_OK ? NIGHTLY_OUTCOME_DEFERRED : NIGHTLY_OUTCOME_BLOCKED_HOSTED);
+                scenario->ledger.rows[scenario->ledger.row_count - 1].attempt = attempt;
+            }
+            nightly_scenario_plan(scenario, opening);
+            const bool blocked = strstr(scenario->report, "| blocked-hosted | 1 |") != NULL;
+            nightly_expect(test, later_fails ? blocked : !blocked && strstr(scenario->report, "| ready | 1 |") != NULL, later_fails ? "a rerun's failed plain rows block the state, whatever the ledger's order" : "a rerun's passing plain rows unblock the state, whatever the ledger's order");
+            nightly_scenario_free(scenario);
+
+            const NightlyOutcome outcomes[2] = { later_fails ? NIGHTLY_OUTCOME_FAILED : NIGHTLY_OUTCOME_BLOCKED_NATIVE, later_fails ? NIGHTLY_OUTCOME_BLOCKED_NATIVE : NIGHTLY_OUTCOME_FAILED };
+            scenario = nightly_scenario(2, committed);
+            nightly_scenario_pushes(scenario);
+            nightly_scenario_cycle(scenario, "2026-11-04", 1);
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t attempt = order == 0 ? k + 1 : 2 - k;
+                nightly_scenario_row(scenario, 210, 0, NIGHTLY_PURPOSE_BACKLOG, "20261103.900.10001.admit", NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_TARGETED, outcomes[attempt - 1]);
+                scenario->ledger.rows[scenario->ledger.row_count - 1].attempt = attempt;
+            }
+            nightly_scenario_plan(scenario, opening);
+            const bool native = strstr(scenario->report, "| blocked-native | 1 |") != NULL;
+            nightly_expect(test, later_fails ? native : !native, later_fails ? "a rerun's failed native correctness blocks the state, whatever the ledger's order" : "a rerun past its native failure unblocks the state, whatever the ledger's order");
+            nightly_scenario_free(scenario);
+        }
+        // This cycle's admitted run, failed and then rerun to completion: one run selected, completed, none failed.
+        scenario = nightly_scenario(2, committed);
+        nightly_scenario_pushes(scenario);
+        nightly_scenario_cycle(scenario, "2026-11-04", 1);
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const uint32_t attempt = order == 0 ? k + 1 : 2 - k;
+            nightly_scenario_row(scenario, 220, 0, NIGHTLY_PURPOSE_BACKLOG, "20261104.900.10001.admit", NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_TARGETED, attempt == 1 ? NIGHTLY_OUTCOME_FAILED : NIGHTLY_OUTCOME_COMPLETE);
+            scenario->ledger.rows[scenario->ledger.row_count - 1].attempt = attempt;
+        }
+        scenario->prepare_only = true;
+        nightly_scenario_plan(scenario, opening);
+        nightly_expect(test, strstr(scenario->report, "This cycle: 1 hardware runs selected, 1 completed, 0 failed or blocked, 0 deferred") != NULL, "the cycle counts a rerun run once, by its latest attempt");
+        nightly_scenario_free(scenario);
+    }
 
     // Documentation-only states are not required; the snapshot's hosted run in flight keeps its room.
     scenario = nightly_scenario(4, committed);

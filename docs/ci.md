@@ -126,10 +126,6 @@ checks the tree against it (about 0.15 s for 600 MB, in 8 processes) and
 stages it afresh from the verified archive when anything differs. A tree
 staged before the manifest is staged afresh once.
 
-The oracle's cache checks the manifest again and keys on its digest. So a
-compiler, header or library changed in place can't reuse an oracle another one
-built: the check refuses the tree, and a fresh staging is another key.
-
 On 2026-11-03 PR jobs, the setup before native tests took about 45 s, nearly
 all of it the 40 s build. The corpus and c-testsuite fetches took 0 to 1 s, and
 the oracle's 2.3 s ran beside the build (#1183). So these caches remove the
@@ -378,7 +374,11 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
 States move between `not-required`, `complete`, `in-flight`, `ready`,
 `preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and
 `failed` (three failed or interrupted measurements) are reported and skipped,
-and never block later states. Nothing depends on dates but the cycle, so
+and never block later states. A rerun keeps its run's ID and takes the next
+attempt. So a state's hosted and native verdicts are its latest run's latest
+attempt's, whatever order the ledger holds them in. Each failed attempt counts
+toward the three, since each one occupied the 9700X. The cycle's report counts
+each run once, by its latest attempt. Nothing depends on dates but the cycle, so
 unfinished states carry over, and a completion never moves a cursor past an
 earlier gap. Pending dispatches that aren't yet visible as runs prevent
 duplicates. A step whose run listing fails, even partly, plans nothing until a
