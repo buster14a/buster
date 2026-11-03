@@ -311,6 +311,46 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
     return body;
 }
 
+// Whether `token` is in one of the ranges the program's writer left out (CheckProgram.dropped_ranges, in token order and
+// apart): the last to start at or before it, if it ends at or after it.
+static bool check_program_token_dropped(const CheckProgram* program, uint32_t token)
+{
+    uint32_t low = 0;
+    uint32_t high = program->dropped_range_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if ((uint32_t)(program->dropped_ranges[middle] >> 32) <= token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low != 0 && token <= (uint32_t)program->dropped_ranges[low - 1];
+}
+
+// Whether code that clang emits holds `token`, as far as the selection needs it for a block-scope static's declaration
+// (#1108): not in a range the writer left out (check_program_token_dropped), nor in a statement expression that its
+// body's references never reach (CheckProgram.region_reached: in an operand a constant condition never evaluates, or
+// sizeof's), whichever of its enclosing ones, found through the parse tree's parents.
+static bool check_program_token_emitted(const CheckProgram* program, uint32_t token)
+{
+    const CheckInput* input = program->input;
+    const uint32_t* parents = program->parser->tree.parents;
+    bool emitted = !check_program_token_dropped(program, token);
+    uint32_t steps = 0;
+    for (uint32_t at = token; emitted && program->region_reached != NULL && at < input->token_count && steps < input->token_count; at = parents[at])
+    {
+        const uint32_t region = input->expression_regions[at];
+        emitted = region == 0 || region > program->region_count || program->region_reached[region - 1] != 0;
+        steps += 1;
+    }
+    return emitted;
+}
+
 // Whether the program's bodies are in token order and apart, as check_program_token_body needs them.
 static bool check_program_bodies_ordered(const CheckProgram* program)
 {
@@ -400,7 +440,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
             const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
             bool gnu_inline = false;
-            roots[group] |= check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
+            // A block-scope static that no emitted code declares is no root, `used` as it may be: clang emits it only
+            // where it emits its declaration's statement (#1108).
+            const bool dropped = !function && input->linkage[token] == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
+                                 !check_program_token_emitted(full, token);
+            const uint32_t attribute_roots = check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
+            roots[group] |= dropped ? 0 : attribute_roots;
             inline_rules[group] |= gnu_inline ? 2 : 0;
             const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
             // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself
@@ -535,11 +580,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     kinds[edges++] = target != 0 ? C_LOWERING_REFERENCE_EVALUATED : C_LOWERING_REFERENCE_EXTERNAL;
                 }
             }
-            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body.
+            // A block-scope static (declared in a body, without linkage, not a compound literal), from its body, unless
+            // no emitted code declares it: clang emits it where it emits its declaration's statement (#1108).
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
             const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
-                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] ? check_program_token_body(full, declaration) : 0;
+                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] && check_program_token_emitted(full, declaration) ?
+                                  check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {
                 const uint32_t source = object_definitions[full->bodies[body - 1].object];

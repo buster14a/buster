@@ -8,8 +8,9 @@
 // are resources that run out (#514's review): the arena the corpus's records are compiled into, the timed runs'
 // scratch, and the corpus's room for functions, full at the second of a file's two and not at its last; and a file
 // whose one function lowers to no typed entry. Then the options' target (#1041): a unit of <immintrin.h>'s 512-bit
-// intrinsics, which -march=znver5 compiles (its masks Tier 0's opmask class, #179) and the baseline profile refuses by
-// name, leaving it out; and, without -march, a function whose target("bmi2") attribute its BMI2 builtin needs, measured
+// intrinsics, which -march=znver5 compiles (its masks Tier 0's opmask class, #179) and the baseline profile refuses,
+// leaving it out: -c's target-feature check reports its builtins (#1057), before its emission would refuse its vectors
+// by name; and, without -march, a function whose target("bmi2") attribute its BMI2 builtin needs, measured
 // as -c compiles it for its attribute's target (#1041's review), where the unit's would refuse the builtin by name.
 // Each case's corpus, counts, exit status and report lines are checked, the totals last with the measurement's
 // outcome. Then the command's repeated --only, and tier0_benchmark_add at its corpus's capacity, which must write
@@ -302,13 +303,14 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
                         " totals files=1 left_out=0 failures=0 measurement=reported\n" },
         },
         {
-            .label = "a unit of 512-bit intrinsics is left out for the baseline profile, without -march",
+            // -c reports its builtins' target features before its emission would refuse its vectors by name (#1057).
+            .label = "a unit of 512-bit intrinsics is left out for the baseline profile, without -march, as -c refuses it",
             .files = { 5, 0, -1 },
             .includes = true,
             .functions = 2,
             .measured = 1,
             .left_out = 1,
-            .report = { "/5.c unsupported=\"vector results wider than the target's registers\"\n", "/0.c functions=2 entries=",
+            .report = { "/5.c rejected=\"code generation's target-feature check: ", "/0.c functions=2 entries=",
                         " totals files=1 left_out=1 failures=0 measurement=reported\n" },
         },
         {

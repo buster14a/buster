@@ -157,10 +157,61 @@ definition. Its flags and edges:
 - **Edges:** each body's evaluated references (calls, addresses and reads of
   static objects, from the checked expression walk: not `sizeof`, `alignof` or a
   `_Generic` association it doesn't select, and not the operands of `&&`, `||`
-  and `?:` that a constant condition never evaluates), and each initializer's
-  (its address constants, strings and compound literals). A body also selects
-  its own block-scope statics, referenced or not, as clang emits every static
-  local of a function it emits.
+  and `?:` that a constant condition never evaluates, nor what a constant
+  `if`'s dead arm holds, below), and each initializer's (its address
+  constants, strings and compound literals). A body also selects its own
+  block-scope statics, referenced or not, as clang emits every static local of
+  a function it emits, but those that a dead arm declares.
+- **Constant `if`s (#1108):** `check_program` writes only the arm that an `if`
+  whose condition is an integer constant without side effects runs, without the
+  condition, as clang -O0's code has it (`CodeGenFunction::EmitIfStmt`): unless
+  a label, or a `case` of a `switch` outside it, can enter the other arm, or the
+  condition holds a label itself (`ContainsLabel`, which sees one in `sizeof`'s
+  operand too). A condition whose `&&` or `||` leaves an operand unevaluated is
+  a constant, a call in that operand among them: `main.c`'s
+  `BUSTER_IN_UNIT(X) && argc >= 2 && strcmp(...) == 0` branches. The
+  condition is its source value, where clang's constant evaluation would fold
+  it outside a constant context too (`check_control_foldable`): not where it
+  evaluates `__builtin_constant_p` of a variable (`__builtin_constant_p(5)`
+  folds), nor a comma whose left operand is no constant (`(n, 0)` keeps both
+  arms; `(1, 0)` and `(sizeof(n), 0)` fold), nor a statement expression with a
+  statement before its value that the evaluator (`EvaluateStmt`) refuses. Such
+  a statement expression keeps both arms; one folds whose statements declare
+  automatic objects initialized with constants, address constants among them
+  (`&n`, an array's or a string literal's decay), or not at all (a
+  variable-length array among them),
+  declare extern objects, or are constant expressions, blocks of such
+  statements, an `if` of a constant condition by its taken arm, a `while`, a
+  `for` (its first clause such a statement) or a `do` whose constant condition
+  is false, or a `switch` of a constant condition without a `case`. A read of
+  an object (`n;`), a static declaration, a `return` or `goto` the evaluation
+  reaches, and a loop that runs keep both arms. Some shapes that clang folds
+  keep both arms here, which runs alike: a statement expression with a jump in
+  code its evaluation skips (`if (0) return 0;`, a `return` or `goto` in a
+  loop whose condition is false or in a constant `switch`'s body before any
+  label) or that initializes a `volatile` object, which the checker counts as
+  side effects of the statement expression; a loop that a `break` leaves
+  (`while (1) { break; }`, `do { break; } while (0)`) and a constant `switch`
+  with a `case` or `default` label, which the walk doesn't model; a `const`
+  local's read as its value, which the checker gives no constant; and an
+  address the walk doesn't take (an element's, a variable-length array's
+  decay). The
+  condition and the dead arm are left out with their
+  references, their block-scope statics (a `used` one is no root either) and
+  their statement expressions, whose regions are written empty
+  (`CheckProgram.dropped_ranges`, their token ranges), and the lowering gives
+  their locals no place, so a variable-length array declared there needs no
+  allocation. A block-scope static declared in a statement expression that its
+  body's references never reach, in an operand a constant condition never
+  evaluates or in `sizeof`'s, isn't selected either
+  (`CheckProgram.region_reached`). So a function that only a dead arm calls is neither selected nor
+  lowered, nor checked by code generation's target features (#775):
+  `if (BUSTER_VECTOR_PATH(vector))` in a baseline build no longer emits the
+  AVX-512 kernel it calls. A variable-length array's address is read only after
+  its allocation, which the lowering checks at each read: one in an operand that
+  a constant condition never evaluates is never allocated, nor read. A constant
+  `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
+  `FindCaseStatementsForValue`) are still written and selected.
 
 The selected bodies, data and the symbols they need become the emission's view,
 in source order whatever order the traversal found them in. `--lower-all`
@@ -454,6 +505,65 @@ facts. The closure can run over prefix sums of the slots' counts. The vector
 pass's results are to be checked against these scalar ones, and the lowering
 against the tasks, by the same command.
 
+## The preparation's node counts and the branches' targets (#1048)
+
+Before the bodies, `check_lower_prepare` bounds the writers' room by counts
+over every node of the unit's graph: its builtins (the integer ones too, which
+share a recipe pool), the nodes that may lower an atomic access (an atomic
+builtin, or a node whose type or whose update's destination is `_Atomic`), and
+the C library's calls of a vector's libm builtins and strict rounds
+(`__builtin_elementwise_round` under `FENV_ACCESS`), one a lane. Its loop read
+both types' kinds through `type_strip_aligned` for every node. callgrind on
+`sqlite3.c` (#136's options, a baseline build of main at `171d6301`) counts
+49.1 M instructions in `check_lower_prepare`, 19.6 M of them that loop's,
+about 30 for each of the graph's 647,114 nodes.
+
+`check_lower_node_counts` takes the counts from the ops alone, 16 at a time:
+the masks of their compares, which population counts add up. A node's type,
+or its update's destination, is `_Atomic` only where the type table has an
+`_Atomic` kind (an aligned typedef's base is a type of the table too), so a
+unit without one reads no node's type, and a unit with one takes the rules
+for every node. A vector builtin's node takes the rules for its lane calls.
+The loop is the scalar twin (`check_lower_node_counts_scalar`, which
+`--scalar` takes), and `test-checker` compares the two on every boundary
+fixture of its program tests, among them a vector's libm builtins, an
+`_Atomic` global (the rules) and the atomic builtins on plain objects (the
+masks, whose fixture's table the test requires to have no `_Atomic` kind).
+
+After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
+take their targets: their labels' entries. The loop compared every entry's
+kind and branched on it, a branch whose outcome follows the branches' places
+among the entries: 4.7 M instructions over `sqlite3.c`'s 407,396 entries.
+`check_lower_resolve_labels` compares the kinds 64 at a time, and only the
+branches among them take their targets, in entry order, up to the first label
+without an entry, as its scalar twin (`check_lower_resolve_labels_scalar`)
+does. `test-checker` compares the two on random kinds at a page's end,
+across the masks' tails, with labels that all have entries and with some that
+don't.
+
+On the 9700X (`measure-compile`'s medians of 11 runs on `sqlite3.c`), the
+`lower` stage went from 13.541 ms (13.472 to 13.603, #1143's last run at
+`425f57c7`) to 12.485 ms (12.399 to 12.708) with both, and perf's share of
+`check_lower_prepare`'s own samples from 1.46% to 0.75% of the compile's.
+`--time-stages`' rows (#1048) then split the stage, on one lane (the step pins
+the compile to one CPU; on several lanes the parts' time is the `lanes`
+stage's), each row its own median, so that they add up to 12.508 ms, 0.023 ms
+more than the stage's median. That run's `--time-stages` costs 0.588 ms
+(0.51%) of the default compile's median wall time, against 0.196 ms (0.10%)
+in the compile-time guide's older figure, which later splits compare with:
+
+| row | ms | of `lower` |
+| --- | ---: | ---: |
+| `lower.prepare` | 1.356 | 10.9% |
+| `lower.statements` | 8.339 | 66.8% |
+| `lower.bodies` | 1.573 | 12.6% |
+| `lower.validate` | 1.194 | 9.6% |
+| `lower.rest` | 0.046 | 0.4% |
+
+The statements, the controls and the tasks' loops, are two thirds of the
+stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
+templates' target.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
@@ -494,14 +604,18 @@ none of its subset's programs makes a name twice in clang's objects.
   `tested.x.2` in both) and differ from it once a name in its string table is
   replaced: `tag.2` for the label, `tested.x` for the made `tested.x.2` (the
   suffix lost) and `tested.x.3` for the label `tested.x.1`. Constant `if`s'
-  fixtures select their dead arms' callees, as Tier 0 lowers them, and their
-  objects are compared under clang's model (`folded_ifs`, below) instead, and
+  fixtures leave their dead arms out (#1108), in `-c`'s selection and in
+  clang's model alike, and their objects are compared with clang's too, and
   run: a chain of `sizeof` conditions, dead arms with a label, with an outer
   `case` and with their own `switch`, a true condition with an `else`,
-  floating, pointer and side-effecting conditions, and an `else if` chain. And
+  floating, pointer and side-effecting conditions, an `else if` chain, dead
+  arms' block-scope statics, a condition whose `&&` leaves a call unevaluated,
+  dead arms' statement expressions with a `break` and a `continue` (in the body
+  and inside a live statement expression) and a dead arm's `asm goto`. And
   the reasons below on one fixture of each (`c_check_corpus_symbols_test.c`),
   through `check_corpus_measure` as `--symbols` runs it, must all be
-  explained, and a function clang alone sees renamed must not be.
+  explained, what only constant `if`s' dead arms reach must make no difference
+  at all, and a function clang alone sees renamed must not be.
 - **c-testsuite** (`test-c-testsuite --cross-check`): each program's `-c`
   object against `clang -O0 -c`'s, functions and objects. All 220 programs
   agree; the backend compiles every one since it lowers `long double`.
@@ -526,9 +640,11 @@ none of its subset's programs makes a name twice in clang's objects.
   checking comparison, whose 6,323,682-token unit exceeds their hosted
   runner's memory (docs/ci.md).
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
-  dropped and 164 inlined.
+  dropped and 164 inlined. The dropped ones were the other units' commands,
+  each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which
+  `-c` now leaves out as clang does (#1108).
 
-On corpora, clang -O0 decides four things in its code otherwise than the
+On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
 checked program, never from a name, and fails on any other:
 
@@ -536,12 +652,18 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
-| dropped | ours only: a definition that the selection of clang's model doesn't reach, the program with unselected operands counted and a constant `if`'s dead arm left out (`CheckProgramOptions.folded_ifs`) | Doesn't emit the arm that an integer constant condition without side effects never runs, unless a label or a `case` of a `switch` outside it enters it (`CodeGenFunction::EmitIfStmt` and `ContainsLabel`), and so not what only that arm calls. musl's `FORCE_EVAL` calls `fp_force_evalf` and `fp_force_evall` in the arms a `double` never runs. Tier 0 lowers both arms, and the selection counts them. |
 | inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 doesn't inline: it calls the function, so the object defines it. |
 
-The model doesn't name string literals, which have no symbols, and a constant
-`if`'s dead arm drops the ones only it refers to too (c-testsuite's 00212, 00214
-and 00215): the corpora compare no strings.
+Until #1108 there was a fourth, dropped: a definition only ours had, which
+clang's model left out because only a constant `if`'s dead arm reached it
+(musl's `FORCE_EVAL` calls `fp_force_evalf` and `fp_force_evall` in the arms a
+`double` never runs). `-c` leaves such an arm out now as clang does (the source
+path's "Constant `if`s"), so the selection's model is the program with the
+unselected operands counted alone, and what a dead arm reaches makes no
+difference. The counts below that name dropped differences are from before it.
+
+The model doesn't name string literals, which have no symbols: the corpora
+compare no strings.
 
 The harness finds the definitions that may explain a difference by binary
 searches (`check_corpus_symbol_index`): once per file it sorts the selections'
@@ -558,7 +680,7 @@ c-testsuite too.
 Results on the Zen 4 laptop, with clang 23.1.3 (`--target`'s configuration of
 each corpus as `test-checker-corpus` runs it):
 
-| Corpus | Accepted | Compared | Explained differences (folded, unselected, dropped) | Unexplained | Refused by the backend |
+| Corpus | Accepted | Compared | Explained differences (folded, unselected, dropped before #1108) | Unexplained | Refused by the backend |
 | --- | --- | --- | --- | --- | --- |
 | c-testsuite (220) | 220 | 220 | 0 | 0 | 0 |
 | musl 1.2.5 `src` (Zig 0.14.1's copy), 1,524 files, `-std=c99 -ffreestanding` | 1,484 | 546 | 383 (210, 59, 114) | 0 | 937, and 1 the backend fails on |
@@ -589,8 +711,11 @@ compare 348 files.
 ./build/compiler benchmark-lowering-source [--passes N] [preprocessor options] file...
 ```
 
-checks each file as the driver does, outside the time, then times in turns the
-two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
+prepares each file as `-c` does (the shared preparation, [the request
+guide](compilation-requests.md): its options refused as the driver refuses
+them, its program for their target and predefines, `-c`'s target-feature check
+of its selection), outside the time, prints its configuration's receipt, then
+times in turns the two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
 the static data's publication, section/symbol preparation and building the
 object in memory. Unwind generation and verification are disabled in this
 benchmark; preprocessing, checking, program/static-data preparation, the outer
