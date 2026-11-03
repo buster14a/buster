@@ -402,17 +402,19 @@ descriptor directly before: work per function proportional to its frame's
 transitions, plus the protocol's layout check over its records (16 at a time on
 AVX-512 hosts). The events live on the lane's scratch until the emission ends.
 
-On the locked 9700X ([the record](https://github.com/buster14a/buster-performance/tree/e44b9d01cf1475bc604af3001dd23654219c3d03/docs/measurements/emission-cost-1056-2026-11-02),
+On the locked 9700X ([the record](https://github.com/buster14a/buster-performance/tree/3064ca7f/docs/measurements/emission-cost-1056-2026-11-02),
 main `c10aa68e` against #1145's `5052211a`, znver5 without debug information, six
 placements of the checker's unit, three copies each, three rounds), the objects
 are the same bytes, and:
 
-- `-c sqlite3.c` executes 9,276,365 more instructions (+0.73%, the same in
-  every process): +0.65% user cycles and +0.47% wall time, 0.5 ms of 116 ms,
-  outside main's floor against itself in every round. `--time-stages` puts it
-  all in `tier0` (+0.24 ms, the adapter's frame events) and `unwind`
-  (+0.26 ms, their resolution and check, where the fixed descriptor was written
-  at once).
+- `-c sqlite3.c` executes 9,276,367 more instructions at the medians (+0.73%;
+  they vary by at most 307 within a build, and every head process executes more
+  than every base one): +0.65% user cycles and +0.47% wall time, 0.5 ms of
+  116 ms, outside main's floor against itself in every round. `--time-stages`
+  shows the change in `tier0` (+0.24 ms, the stage that builds the adapter's
+  frame events) and `unwind` (+0.26 ms, the stage that resolves and checks them,
+  where the fixed descriptor was written at once), whose differences add up to
+  the wall time's; it says where the time changed, not each function's share.
 - `-c` of musl's 72 `src/string` units: +0.07% instructions, its cycles and wall
   time within the floor.
 - Peak resident memory is unchanged on `sqlite3.c` and 36 KiB higher on musl's
