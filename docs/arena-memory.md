@@ -31,8 +31,8 @@ base pages alone, has an inaccessible page on each side for the same reason. So
 the advice is only where the layout doesn't decide:
 
 - `MADV_NOHUGEPAGE` at the reservation for base pages of 2 MB or more (a units
-  lane's 16 MB floor, the tables reserved in base pages throughout, the
-  deferred checker's slices);
+  lane's 16 MB floor, the tables reserved in base pages throughout, such as
+  the preprocessor's tables of a fixed size, the deferred checker's slices);
 - `MADV_HUGEPAGE` from `base + small` to the mapping's end at the first commit
   that reaches past `base + small` (`Arena.huge`, which the pool keeps), which a
   host whose transparent huge pages are `madvise` needs, and which makes the
@@ -40,7 +40,16 @@ the advice is only where the layout doesn't decide:
 
 An arena that stays in its base pages, as most of a small unit's do, takes one
 `mmap` and one `mprotect` and no advice. An empty file's `-fsyntax-only` made
-146 `madvise` calls before, 48 since.
+146 `madvise` calls before, 48 since, and 11 once the preprocessor's tables
+shared a reservation (below).
+
+Fewer arenas save more than less advice: on the 9700X an arena costs 2 to 3.4
+µs with its teardown, by its size, though it holds a page or none, in its
+mapping, its protection change and, once touched, its own page tables (the
+measurements in `docs/c-preprocessor.md`'s "Tables of a fixed size"). A small
+unit's tables that are pushed whole as it starts and stay small on every unit
+therefore share one reservation in base pages: the preprocessor's
+(`pp_tables_lay_out`), which were 39 of an empty file's 81 arenas.
 
 The compile commands (the C driver and `-E`, `check`, `parse`) also advise the
 executable's `.bss` `MADV_NOHUGEPAGE` first (`arena_static_base_pages`). It is

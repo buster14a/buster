@@ -476,6 +476,33 @@ makes its own; with one, the units and lanes that share it read each file once
   token per byte, then trimmed to the tokens it has. Before this, the columns
   of every file shared one arena, and the unused room between them was cleared
   too wherever a huge page held a used byte: 9 bytes per input byte.
+- **Tables of a fixed size** (#652). The records' tables (ranges, files,
+  macros, items and the rest), the three stacks' token columns and a unit's
+  own file cache are pushed whole as the unit starts, into one reservation of
+  base pages: `pp_tables_lay_out` lays them out on `arena_measure`'s arena for
+  its size, then on the reservation, which is made writable at once. Each had
+  an arena of its own, whose mapping, protection change and, once touched, page
+  tables cost 2 to 3.4 µs on the 9700X with their teardown (a benchmark of 90
+  reservations in a forked process, each committing 64 KB and touching a page:
+  3.35 µs each at 64 GB, 2.11 at 2 MB, 1.36 as ranges of one mapping, 0.49 for
+  the page's fault alone), though most touch a page or none on a small unit:
+  an empty file's unit reserved 39 of its 81 arenas for them, and touched 19.
+  It now reserves 43 and has 125 VMAs at exit rather than 260, and its
+  `-fsyntax-only` makes 214 system calls rather than 363 on the 9700X. None of
+  the tables grows large enough for base pages to cost the large units much:
+  on `sqlite3.c` the macros touch the most, 368 KB, and on this compiler's
+  `main.c` the items 1.9 MB and the macros 1.1 MB. The
+  output's columns keep their arenas, whose huge pages pay on large units, and
+  a history table that outgrows its slice still moves to an arena of its own.
+  On the 9700X ([the
+  record](https://github.com/buster14a/buster-performance/tree/b8048387bc7a16d89329acb9ae8df96d8f8acdf2/docs/measurements/fewer-arenas-652-2026-11-03)),
+  `time-runs --copies 3` against main in three rounds, with main again as the
+  floor (within 0.5%): an empty file's `-fsyntax-only` took 13.2% to 13.4% less
+  wall time, its `-E -P` 16.0% to 16.5% less and a one-line `-c` 9.1% to 10.4%
+  less, all of it the kernel's (the empty file's kernel instructions went from
+  3.65 to 2.92 M, while its user cycles read 1% to 2% over their floor).
+  `sqlite3.c`'s `-E -P` took 1.7% to 2.4% less, and its `-fsyntax-only` and
+  `-c` 0.0% to 0.6% less, where the floor moved up to 0.3%.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
