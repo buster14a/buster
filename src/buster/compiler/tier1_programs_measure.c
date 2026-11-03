@@ -10,10 +10,11 @@
 //
 // The programs and their inputs are #1189's (buster-performance's tier1-gap-1189-2026-11-03, after the cc3387f record's):
 // - speedtest1: DIR/sqlite3.c (--sqlite: the frozen corpus's SQLite 3.53.2 amalgamation) and DIR/speedtest1.c
-//   (--speedtest: SQLite 3.53.2's test/speedtest1.c), with #136's flags; this compiler's builds take both as one
-//   translation unit (the direct path's one file, which renames speedtest1.c's static randomFunc), the others compile
-//   each to an object and link them. Each run uses #136's options, its database a file in the run's directory, which
-//   speedtest1 deletes before it starts.
+//   (--speedtest: SQLite 3.53.2's test/speedtest1.c), with #136's flags; this compiler's builds and tcc's take both as
+//   one translation unit (the direct path's one file, which renames speedtest1.c's static randomFunc), clang's compile
+//   each to an object and link them, as the record's corpora.sh does. Each run uses #136's options from a fresh
+//   database: before it, outside its time, its database's files and SQLite's temporary directory (SQLITE_TMPDIR) are
+//   removed, as the record's run() removes and makes its directories again.
 // - Lua 5.4.8's interpreter: lua.c and the library's 32 sources in --lua's DIR, as its Makefile's linux target builds
 //   them (-std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX, linked with -lm -ldl; tcc without -std=gnu99), running each of the
 //   five scripts in --scripts' DIR (calls, tables, strings, arithmetic and closures).lua.
@@ -25,10 +26,15 @@
 // (build, program) pair once, in an order that rotates by round (profile_ab_tree's), pinned where the caller pins this
 // process (taskset), every run's wall time from its exec's release to wait4's return and its user cycles and
 // instructions (profile_time_one: perf_event_open from its exec, all its threads). Every run must exit with status 0
-// and be counted (but with --uncounted, for a host without the counters). It prints every pair's medians with the wall time's range, then a table of speedtest1's medians and
+// and be counted (but with --uncounted, for a host without the counters). It prints a line per run, warm-ups among
+// them, `tier1-programs-run` and its phase, round, position, program, build, wall time in ns, user cycles,
+// instructions, exit status and whether it was counted, tab-separated (the record's raw data); then every pair's
+// medians with the wall time's range, then a table of speedtest1's medians and
 // the sum of Lua's five scripts' medians by build, and each against clang -O2's and -O0's. DIR is a new directory under
 // --directory ($TMPDIR, or /tmp: a tmpfs on the 9700X, which takes speedtest1's database and SQLite's temporary
 // files), removed at the end unless --keep. docs/tier1.md has the 9700X's numbers.
+
+#include <dirent.h>
 
 #define BUSTER_TIER1_PROGRAMS_BUILDS 5
 #define BUSTER_TIER1_PROGRAMS_SCRIPTS 5
@@ -84,7 +90,9 @@ struct Tier1Programs
     char speedtests[BUSTER_TIER1_PROGRAMS_BUILDS][PATH_MAX];
     char luas[BUSTER_TIER1_PROGRAMS_BUILDS][PATH_MAX];
     char errors[PATH_MAX];
+    // speedtest1's database, and SQLITE_TMPDIR's directory, made fresh before each of its runs.
     char database[PATH_MAX];
+    char temporary[PATH_MAX];
     char script_paths[BUSTER_TIER1_PROGRAMS_SCRIPTS][PATH_MAX];
 };
 
@@ -165,7 +173,9 @@ static void tier1_programs_compiler(const Tier1Programs* p, uint32_t b, Tier1Pro
 // Build `b`'s speedtest1 and Lua, each command's errors appended to p->errors. Returns whether every command succeeded.
 static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
 {
-    const bool ours = b == TIER1_PROGRAMS_TIER0 || b == TIER1_PROGRAMS_TIER1;
+    // speedtest1 as one translation unit (this compiler's direct path takes one file, and tcc's build as the record's),
+    // or clang's object of each and a link.
+    const bool ours = b != TIER1_PROGRAMS_CLANG_O0 && b != TIER1_PROGRAMS_CLANG_O2;
     const char* file = tier1_programs_build_files[b];
     char unity[PATH_MAX];
     char objects[2][PATH_MAX];
@@ -177,7 +187,6 @@ static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
     Tier1ProgramsCommand c = { 0 };
     ok = ok && snprintf(c.includes[0], sizeof(c.includes[0]), "-I%s", p->sqlite) < (int)sizeof(c.includes[0]) &&
          snprintf(c.includes[1], sizeof(c.includes[1]), "-I%s", p->speedtest) < (int)sizeof(c.includes[1]);
-    // speedtest1: this compiler's direct path takes one file, the unity's; the others an object of each and a link.
     for (uint32_t step = 0; ok && step < (ours ? 1u : 3u); step += 1)
     {
         tier1_programs_compiler(p, b, &c);
@@ -238,6 +247,37 @@ static bool tier1_programs_build(Tier1Programs* p, uint32_t b)
     return ok;
 }
 
+// speedtest1's database's files and SQLite's temporary directory removed, and the directory made again: a fresh database
+// for the next run, outside its time. Returns whether the directory is there.
+static bool tier1_programs_fresh(const Tier1Programs* p)
+{
+    static const char* const suffixes[] = { "", "-wal", "-shm", "-journal" };
+    char path[PATH_MAX];
+    for (uint32_t k = 0; k < sizeof(suffixes) / sizeof(suffixes[0]); k += 1)
+    {
+        if (tier1_programs_path(path, "%s%s", p->database, suffixes[k]))
+        {
+            unlink(path);
+        }
+    }
+    DIR* directory = opendir(p->temporary);
+    struct dirent* entry = directory != NULL ? readdir(directory) : NULL;
+    while (entry != NULL)
+    {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0 && tier1_programs_path(path, "%s/%s", p->temporary, entry->d_name))
+        {
+            unlink(path);
+        }
+        entry = readdir(directory);
+    }
+    if (directory != NULL)
+    {
+        closedir(directory);
+    }
+    rmdir(p->temporary);
+    return mkdir(p->temporary, 0755) == 0;
+}
+
 // The arguments of list `l` (speedtest1, or a script) of build `b`, into argv (room for its executable, the options, a
 // database or script, and the null), with --verify before speedtest1's database when `verify`.
 static void tier1_programs_list(const Tier1Programs* p, uint32_t b, uint32_t l, bool verify, char** argv)
@@ -267,7 +307,8 @@ static bool tier1_programs_check(Arena* arena, Tier1Programs* p)
     for (uint32_t b = 0; ok && b < p->build_count; b += 1)
     {
         tier1_programs_list(p, b, 0, true, argv);
-        ok = tier1_programs_path(outputs[b], "%s/verify-%s.txt", p->directory, tier1_programs_build_files[b]) && tier1_programs_spawn(argv, outputs[b], p->errors);
+        ok = tier1_programs_path(outputs[b], "%s/verify-%s.txt", p->directory, tier1_programs_build_files[b]) && tier1_programs_fresh(p) &&
+             tier1_programs_spawn(argv, outputs[b], p->errors);
         const uint64_t mark = arena->length;
         const char* text = ok ? measure_compile_read(arena, outputs[b]) : NULL;
         const char* line = text != NULL ? strstr(text, "Verification Hash:") : NULL;
@@ -319,6 +360,7 @@ static uint64_t tier1_programs_time(Arena* arena, Tier1Programs* p, Tier1Program
     uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)p->runs + 1);
     char* argv[BUSTER_TIER1_PROGRAMS_SPEEDTEST_OPTIONS + 4];
     uint64_t failures = timed == NULL || values == NULL;
+    printf("tier1-programs-run\tphase\tround\tposition\tprogram\tbuild\twall_ns\tuser_cycles\tinstructions\tstatus\tcounted\n");
     for (uint64_t run = 0; failures == 0 && run < (uint64_t)p->warmups + p->runs; run += 1)
     {
         const bool warmup = run < p->warmups;
@@ -328,13 +370,18 @@ static uint64_t tier1_programs_time(Arena* arena, Tier1Programs* p, Tier1Program
             const uint32_t b = (uint32_t)(s % p->build_count);
             const uint32_t l = (uint32_t)(s / p->build_count);
             tier1_programs_list(p, b, l, false, argv);
-            const ProfileTimed one = profile_time_one(argv[0], argv);
-            const bool passed = one.status != -1 && WIFEXITED(one.status) && WEXITSTATUS(one.status) == 0 && (one.counted || p->uncounted);
+            const bool fresh = l != 0 || tier1_programs_fresh(p);
+            const ProfileTimed one = fresh ? profile_time_one(argv[0], argv) : (ProfileTimed){ .status = -1 };
+            const int status = one.status != -1 && WIFEXITED(one.status) ? WEXITSTATUS(one.status) : -1;
+            const bool passed = status == 0 && (one.counted || p->uncounted);
             failures += !passed;
+            printf("tier1-programs-run\t%s\t%llu\t%llu\t%s\t%s\t%llu\t%llu\t%llu\t%d\t%d\n", warmup ? "warm-up" : "measured",
+                   (unsigned long long)(warmup ? run : run - p->warmups) + 1, (unsigned long long)position + 1, l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1],
+                   tier1_programs_build_files[b], (unsigned long long)one.wall_ns, (unsigned long long)one.cycles, (unsigned long long)one.instructions, status, one.counted);
             if (!passed)
             {
-                printf("measure-tier1-programs: %s's %s: FAILED (status %d, counted %d)\n", tier1_programs_build_names[b], l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1],
-                       one.status != -1 && WIFEXITED(one.status) ? WEXITSTATUS(one.status) : -1, one.counted);
+                printf("measure-tier1-programs: %s's %s: FAILED (status %d, counted %d)\n", tier1_programs_build_names[b], l == 0 ? "speedtest1" : tier1_programs_scripts[l - 1], status,
+                       one.counted);
             }
             if (!warmup)
             {
@@ -512,7 +559,7 @@ static int run_tier1_programs_measure(int argc, char** argv)
     {
         char unity[PATH_MAX];
         bool ok = tier1_programs_path(p.errors, "%s/%s", p.directory, "errors.txt") && tier1_programs_path(p.database, "%s/%s", p.directory, "speedtest1.db") &&
-                  tier1_programs_path(unity, "%s/%s", p.directory, "speedtest1-unity.c");
+                  tier1_programs_path(p.temporary, "%s/%s", p.directory, "tmp") && tier1_programs_path(unity, "%s/%s", p.directory, "speedtest1-unity.c");
         for (uint32_t s = 0; ok && s < BUSTER_TIER1_PROGRAMS_SCRIPTS; s += 1)
         {
             ok = snprintf(p.script_paths[s], PATH_MAX, "%s/%s.lua", p.scripts, tier1_programs_scripts[s]) < PATH_MAX;
@@ -526,8 +573,8 @@ static int run_tier1_programs_measure(int argc, char** argv)
         {
             close(unity_file);
         }
-        // SQLite's temporary files with the database, in the run's directory.
-        ok = ok && setenv("SQLITE_TMPDIR", p.directory, 1) == 0;
+        // SQLite's temporary files in a directory of their own, made fresh with the database before each run.
+        ok = ok && setenv("SQLITE_TMPDIR", p.temporary, 1) == 0;
         printf("measure-tier1-programs: %u warm-ups, %u runs, %u builds, in %s\n", p.warmups, p.runs, p.build_count, p.directory);
         for (uint32_t b = 0; ok && b < p.build_count; b += 1)
         {
