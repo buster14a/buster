@@ -287,10 +287,24 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   two steps identical. The 9700X job is skipped only when that identity
   equals the one the pull request's run recorded. A component that can't be
   read leaves no identity at all, never a placeholder that another unread
-  one would match. A host without a package database is one such case. The
-  reuse accepts only an identity with every component present. A different identity, an incomplete one, a record
-  without one, or a failed `host-identity` job runs native correctness after
-  all, and the record then says `host-unconfirmed`.
+  one would match. The cases are:
+
+  - a host without a package database;
+  - a file that can't be hashed;
+  - a package query that fails or prints anything on stderr;
+  - an ownership query that doesn't account for every file. Each file needs
+    an owner, at the version the package list gives, or pacman's "No package
+    owns" and no other message;
+  - an owners' file listing that lacks a file the ownership query attributed
+    to them.
+
+  A file no package owns is hashed like any other, but a failed query is
+  never taken for one. The warning names the check that failed.
+
+  The reuse accepts only an identity with every component present. A
+  different identity, an incomplete one, a record without one, or a failed
+  `host-identity` job runs native correctness after all. The record then says
+  `host-unconfirmed`.
 
   Measurements are reused too only when the first-parent tree is also
   identical; otherwise they are the backlog's. Missing, ambiguous, stale or

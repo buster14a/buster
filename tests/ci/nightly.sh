@@ -338,18 +338,57 @@ printf 'model name\t: AMD Ryzen 7 9700X\nmicrocode\t: 0xb404023\n' > "$work/cpui
 mkdir -p "$work/identity-bin"
 printf '#!/bin/sh\necho 6.17.1-arch1\n' > "$work/identity-bin/uname"
 printf '#!/bin/sh\necho glibc 2.42\n' > "$work/identity-bin/getconf"
-# A stand-in package database: -Q lists the packages (FAKE_VERSIONS), -Qo owns the runtime fixtures, -Ql lists the
-# packages' files (a header and the static runtime).
+# A stand-in package database that answers as pacman does: -Q lists the packages (FAKE_VERSIONS); -Qo names glibc as the
+# runtime fixtures' owner, and for any other file says on stderr that no package owns it; -Ql lists the owners' files
+# as "PACKAGE PATH" (glibc: the runtime and a header; the other packages none). FAKE_PACMAN selects a failure: an
+# ownership query that fails, that leaves a file unanswered or that names an owner at another version than -Q's; a
+# file listing that fails after a partial list, that warns on stderr, or that omits a file -Qo attributed.
 mkdir -p "$work/runtime/include"
 printf 'static runtime\n' > "$work/runtime/libc.a"
 printf 'startup object\n' > "$work/runtime/crt1.o"
 printf '#define VERSION 1\n' > "$work/runtime/include/stdio.h"
-cat > "$work/identity-bin/pacman" <<SH
+export FAKE_RUNTIME
+FAKE_RUNTIME=$(readlink -f "$work/runtime")
+cat > "$work/identity-bin/pacman" <<'SH'
 #!/bin/sh
-case "\$1" in
-    -Q) printf '%s\\n' "\${FAKE_VERSIONS:-gcc 15.2.1-1}" "binutils 2.45-1" ;;
-    -Qoq) echo glibc ;;
-    -Qlq) printf '%s\\n' "$work/runtime/" "$work/runtime/libc.a" "$work/runtime/crt1.o" "$work/runtime/include/stdio.h" ;;
+operation=$1
+shift
+if [ "${1:-}" = --color ]; then shift 2; fi
+case "$operation" in
+    -Q) printf '%s\n' "${FAKE_VERSIONS:-gcc 15.2.1-1}" "binutils 2.45-1" "glibc 2.42-1" ;;
+    -Qo)
+        if [ "${FAKE_PACMAN:-}" = ownership-fails ]; then
+            echo 'error: could not open database' >&2
+            exit 1
+        fi
+        status=0
+        for file in "$@"; do
+            case "$file" in
+                "$FAKE_RUNTIME"/*)
+                    if [ "${FAKE_PACMAN:-}" = ownership-unanswered ] && [ "$file" = "$FAKE_RUNTIME/crt1.o" ]; then continue; fi
+                    if [ "${FAKE_PACMAN:-}" = ownership-other-version ]; then
+                        echo "$file is owned by glibc 2.42-2"
+                    else
+                        echo "$file is owned by glibc 2.42-1"
+                    fi ;;
+                *) echo "error: No package owns $file" >&2; status=1 ;;
+            esac
+        done
+        exit "$status" ;;
+    -Ql)
+        for package in "$@"; do
+            if [ "$package" = glibc ]; then
+                printf 'glibc %s\n' "$FAKE_RUNTIME/"
+                if [ "${FAKE_PACMAN:-}" != listing-omits ]; then printf 'glibc %s\n' "$FAKE_RUNTIME/libc.a"; fi
+                printf 'glibc %s\n' "$FAKE_RUNTIME/crt1.o" "$FAKE_RUNTIME/include/"
+                if [ "${FAKE_PACMAN:-}" = listing-fails ]; then
+                    echo 'error: could not read the files of glibc' >&2
+                    exit 1
+                fi
+                printf 'glibc %s\n' "$FAKE_RUNTIME/include/stdio.h"
+            fi
+        done
+        if [ "${FAKE_PACMAN:-}" = listing-warns ]; then echo 'warning: glibc: the files list is damaged' >&2; fi ;;
     *) exit 1 ;;
 esac
 SH
@@ -369,7 +408,7 @@ identity()
 {
     : > "$GITHUB_OUTPUT"
     # As the workflow's shell runs a step: errexit and pipefail.
-    PATH="$work/identity-bin:$PATH" bash -eo pipefail "$identity_step" > /dev/null 2>&1 || true
+    PATH="$work/identity-bin:$PATH" bash -eo pipefail "$identity_step" > "$work/identity.log" 2>&1 || true
     sed -n 's/^host=//p' "$GITHUB_OUTPUT"
 }
 first=$(identity)
@@ -390,15 +429,33 @@ header=$(identity)
 # A package updated, every file the same: another identity.
 third=$(FAKE_VERSIONS='gcc 15.2.1-2' identity)
 [ "$third" != "$header" ] && [ "$third" != "$first" ] || fail 'a package rebuilt under the same GCC version changes the identity'
+# A package database that doesn't answer completely leaves no identity, so the header changed meanwhile can't go
+# unnoticed: the files' listing failing after a partial list (the header among the files it omits), the listing
+# warning, the listing omitting a file -Qo attributed to its package, the ownership query failing, leaving a file
+# unanswered or naming another version than -Q's. A file no package owns (the real tools here) is not a failure.
+test "$(identity)" = "$header" || fail 'the database answering completely again gives the identity back'
+printf '#define VERSION 3\n' > "$work/runtime/include/stdio.h"
+for failure in 'listing-fails:the owners file listing failed' 'listing-warns:the owners file listing failed' \
+    'listing-omits:the owners file listing omits files attributed to them' \
+    'ownership-fails:the ownership query did not account for every file' \
+    'ownership-unanswered:the ownership query did not account for every file' \
+    'ownership-other-version:an owner at another version than -Q lists'; do
+    test -z "$(FAKE_PACMAN=${failure%%:*} identity)" || fail "an incomplete package database (${failure%%:*}) leaves no identity"
+    grep -Fq "(software: ${failure#*:})" "$work/identity.log" || fail "and the warning says why: ${failure#*:}"
+done
+changed=$(identity)
+[ -n "$changed" ] && [ "$changed" != "$header" ] || fail 'the header changed while the database failed changes the identity'
 # A package's file that can't be read leaves no identity.
 chmod 000 "$work/runtime/crt1.o"
 if [ "$(id -u)" != 0 ]; then
     test -z "$(identity)" || fail 'an unreadable runtime file leaves no identity'
+    grep -Fq "(software: a file that can't be hashed)" "$work/identity.log" || fail 'and the warning says why'
 fi
 chmod 644 "$work/runtime/crt1.o"
 # No package database: no identity at all.
 printf '#!/bin/sh\nexit 1\n' > "$work/identity-bin/pacman"
 test -z "$(identity)" || fail 'without a package database no identity is recorded'
+grep -Fq '(software: no package database)' "$work/identity.log" || fail 'and the warning says why'
 
 # --- The record job, in this repository's checkout ---
 

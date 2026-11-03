@@ -687,17 +687,25 @@ jobs:
           # runtime GCC links a static program with (test-static's cc -static); and every file of the packages that
           # own any of those, or of the C toolchain's (gcc, gcc-libs, glibc, binutils, linux-api-headers). Those files
           # are the headers, static libraries, startup objects, linker scripts and configuration, by content. A tool
-          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a file
-          # that can't be hashed) leaves no identity at all, never a placeholder that another unread one would
-          # match: no reuse holds. tests/ci/nightly.sh runs the lines from here to the identity's end against
-          # stand-in tools.
+          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a
+          # package query that fails or doesn't answer completely, a file that can't be hashed) leaves no identity at
+          # all, never a placeholder that another unread one would match: no reuse holds. tests/ci/nightly.sh runs the
+          # lines from here to the identity's end against stand-in tools.
           kernel=$(uname -r 2> /dev/null || true)
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
           glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || true)
-          packages=$(pacman -Q 2> /dev/null || true)
+          # Each package query must succeed and print nothing on stderr. The ownership query must account for every
+          # file: an owner at the version -Q lists, or pacman's "No package owns" and no other message. The owners'
+          # listing must then contain every file the ownership query attributed to them. Otherwise the database didn't
+          # answer completely, which is not the same as an unowned file: there is no identity.
+          errors=$(mktemp)
           software=''
-          if [ -n "$packages" ]; then
+          incomplete=''
+          packages=$(LC_ALL=C pacman -Q 2> "$errors") && [ ! -s "$errors" ] || packages=''
+          if [ -z "$packages" ]; then
+              incomplete='no package database'
+          else
               tools=(cc gcc g++ as ld ld.bfd readelf objdump objcopy nm ar gdb perf valgrind mold wild make file sh bash env)
               for program in cc1 cc1plus collect2; do
                   tools+=("$(gcc -print-prog-name="$program" 2> /dev/null || printf '%s' "$program")")
@@ -711,7 +719,7 @@ jobs:
                       listing+="tool $tool $real"$'\n'
                       files+=("$real")
                       while IFS= read -r library; do
-                          files+=("$library")
+                          files+=("$(readlink -f "$library" 2> /dev/null || printf '%s' "$library")")
                       done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
                   else
                       listing+="tool $tool absent"$'\n'
@@ -727,27 +735,54 @@ jobs:
                       listing+="runtime $runtime absent"$'\n'
                   fi
               done
-              owners=$({ printf '%s\n' gcc gcc-libs glibc binutils linux-api-headers; pacman -Qoq "${files[@]}" 2> /dev/null || true; } | LC_ALL=C sort -u)
+              ownership=$(LC_ALL=C pacman -Qo --color never "${files[@]}" 2> "$errors") && status=0 || status=$?
+              claims=$(sed -n 's/^\(\/.*\) is owned by \([^ ]*\) [^ ]*$/\2 \1/p' <<< "$ownership" | LC_ALL=C sort -u)
+              versions=$(sed -n 's/^\/.* is owned by \([^ ]*\) \([^ ]*\)$/\1 \2/p' <<< "$ownership" | LC_ALL=C sort -u)
+              answered=$(grep -c . <<< "$ownership" || true)
+              attributed=$(grep -c '^/.* is owned by [^ ]* [^ ]*$' <<< "$ownership" || true)
+              unowned=$(grep -c '^error: No package owns /' "$errors" || true)
+              if grep -qv '^error: No package owns /' "$errors" || [ "$attributed" -ne "$answered" ] || [ $((attributed + unowned)) -ne "${#files[@]}" ] || [ $((status == 0)) -ne $((unowned == 0)) ]; then
+                  incomplete+='the ownership query did not account for every file; '
+              fi
+              if [ -n "$(LC_ALL=C comm -23 <(sed '/^$/d' <<< "$versions") <(LC_ALL=C sort -u <<< "$packages"))" ]; then
+                  incomplete+='an owner at another version than -Q lists; '
+              fi
+              installed=$(cut -d ' ' -f 1 <<< "$packages")
+              owners=$({ for package in gcc gcc-libs glibc binutils linux-api-headers; do
+                      if grep -Fxq -- "$package" <<< "$installed"; then printf '%s\n' "$package"; fi
+                  done
+                  cut -d ' ' -f 1 <<< "$claims"; } | sed '/^$/d' | LC_ALL=C sort -u)
               listing+="packages $(printf '%s ' $owners)"$'\n'
+              listed=''
+              if [ -n "$owners" ]; then
+                  listed=$(LC_ALL=C pacman -Ql --color never $owners 2> "$errors") && [ ! -s "$errors" ] || incomplete+='the owners file listing failed; '
+              fi
+              if [ -n "$(LC_ALL=C comm -23 <(sed '/^$/d' <<< "$claims") <(LC_ALL=C sort -u <<< "$listed"))" ]; then
+                  incomplete+='the owners file listing omits files attributed to them; '
+              fi
               while IFS= read -r owned; do
                   if [ -L "$owned" ]; then
                       listing+="link $owned $(readlink "$owned")"$'\n'
                   elif [ -f "$owned" ]; then
                       files+=("$owned")
                   fi
-              done < <(pacman -Qlq $owners 2> /dev/null || true)
+              done < <(sed -n 's/^[^ ]* //p' <<< "$listed")
               # A file that can't be hashed marks the hashes, whatever the shell's pipefail: then there is no identity.
               hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | { xargs -0 -r -n 256 -P 8 sha256sum 2> /dev/null || printf 'unhashable\n'; } | LC_ALL=C sort -k 2)
-              if [[ "$hashes" != *unhashable* ]]; then
+              if [[ "$hashes" == *unhashable* ]]; then
+                  incomplete+="a file that can't be hashed; "
+              fi
+              if [ -z "$incomplete" ]; then
                   software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
               fi
           fi
+          rm -f "$errors"
           if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ] && [ -n "$software" ]; then
               host=$(printf '9700X/%s/%s/gcc-%s/%s/sw-%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" "$software" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
               printf 'Host identity: %s\n' "$host"
               printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
           else
-              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}"
+              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it%s\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}" "${incomplete:+ (software: ${incomplete%; })}"
           fi
           # The identity's end.
 
@@ -801,17 +836,25 @@ jobs:
           # runtime GCC links a static program with (test-static's cc -static); and every file of the packages that
           # own any of those, or of the C toolchain's (gcc, gcc-libs, glibc, binutils, linux-api-headers). Those files
           # are the headers, static libraries, startup objects, linker scripts and configuration, by content. A tool
-          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a file
-          # that can't be hashed) leaves no identity at all, never a placeholder that another unread one would
-          # match: no reuse holds. tests/ci/nightly.sh runs the lines from here to the identity's end against
-          # stand-in tools.
+          # or runtime file absent is recorded as absent. A component that can't be read (no package database, a
+          # package query that fails or doesn't answer completely, a file that can't be hashed) leaves no identity at
+          # all, never a placeholder that another unread one would match: no reuse holds. tests/ci/nightly.sh runs the
+          # lines from here to the identity's end against stand-in tools.
           kernel=$(uname -r 2> /dev/null || true)
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
           glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || true)
-          packages=$(pacman -Q 2> /dev/null || true)
+          # Each package query must succeed and print nothing on stderr. The ownership query must account for every
+          # file: an owner at the version -Q lists, or pacman's "No package owns" and no other message. The owners'
+          # listing must then contain every file the ownership query attributed to them. Otherwise the database didn't
+          # answer completely, which is not the same as an unowned file: there is no identity.
+          errors=$(mktemp)
           software=''
-          if [ -n "$packages" ]; then
+          incomplete=''
+          packages=$(LC_ALL=C pacman -Q 2> "$errors") && [ ! -s "$errors" ] || packages=''
+          if [ -z "$packages" ]; then
+              incomplete='no package database'
+          else
               tools=(cc gcc g++ as ld ld.bfd readelf objdump objcopy nm ar gdb perf valgrind mold wild make file sh bash env)
               for program in cc1 cc1plus collect2; do
                   tools+=("$(gcc -print-prog-name="$program" 2> /dev/null || printf '%s' "$program")")
@@ -825,7 +868,7 @@ jobs:
                       listing+="tool $tool $real"$'\n'
                       files+=("$real")
                       while IFS= read -r library; do
-                          files+=("$library")
+                          files+=("$(readlink -f "$library" 2> /dev/null || printf '%s' "$library")")
                       done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
                   else
                       listing+="tool $tool absent"$'\n'
@@ -841,27 +884,54 @@ jobs:
                       listing+="runtime $runtime absent"$'\n'
                   fi
               done
-              owners=$({ printf '%s\n' gcc gcc-libs glibc binutils linux-api-headers; pacman -Qoq "${files[@]}" 2> /dev/null || true; } | LC_ALL=C sort -u)
+              ownership=$(LC_ALL=C pacman -Qo --color never "${files[@]}" 2> "$errors") && status=0 || status=$?
+              claims=$(sed -n 's/^\(\/.*\) is owned by \([^ ]*\) [^ ]*$/\2 \1/p' <<< "$ownership" | LC_ALL=C sort -u)
+              versions=$(sed -n 's/^\/.* is owned by \([^ ]*\) \([^ ]*\)$/\1 \2/p' <<< "$ownership" | LC_ALL=C sort -u)
+              answered=$(grep -c . <<< "$ownership" || true)
+              attributed=$(grep -c '^/.* is owned by [^ ]* [^ ]*$' <<< "$ownership" || true)
+              unowned=$(grep -c '^error: No package owns /' "$errors" || true)
+              if grep -qv '^error: No package owns /' "$errors" || [ "$attributed" -ne "$answered" ] || [ $((attributed + unowned)) -ne "${#files[@]}" ] || [ $((status == 0)) -ne $((unowned == 0)) ]; then
+                  incomplete+='the ownership query did not account for every file; '
+              fi
+              if [ -n "$(LC_ALL=C comm -23 <(sed '/^$/d' <<< "$versions") <(LC_ALL=C sort -u <<< "$packages"))" ]; then
+                  incomplete+='an owner at another version than -Q lists; '
+              fi
+              installed=$(cut -d ' ' -f 1 <<< "$packages")
+              owners=$({ for package in gcc gcc-libs glibc binutils linux-api-headers; do
+                      if grep -Fxq -- "$package" <<< "$installed"; then printf '%s\n' "$package"; fi
+                  done
+                  cut -d ' ' -f 1 <<< "$claims"; } | sed '/^$/d' | LC_ALL=C sort -u)
               listing+="packages $(printf '%s ' $owners)"$'\n'
+              listed=''
+              if [ -n "$owners" ]; then
+                  listed=$(LC_ALL=C pacman -Ql --color never $owners 2> "$errors") && [ ! -s "$errors" ] || incomplete+='the owners file listing failed; '
+              fi
+              if [ -n "$(LC_ALL=C comm -23 <(sed '/^$/d' <<< "$claims") <(LC_ALL=C sort -u <<< "$listed"))" ]; then
+                  incomplete+='the owners file listing omits files attributed to them; '
+              fi
               while IFS= read -r owned; do
                   if [ -L "$owned" ]; then
                       listing+="link $owned $(readlink "$owned")"$'\n'
                   elif [ -f "$owned" ]; then
                       files+=("$owned")
                   fi
-              done < <(pacman -Qlq $owners 2> /dev/null || true)
+              done < <(sed -n 's/^[^ ]* //p' <<< "$listed")
               # A file that can't be hashed marks the hashes, whatever the shell's pipefail: then there is no identity.
               hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | { xargs -0 -r -n 256 -P 8 sha256sum 2> /dev/null || printf 'unhashable\n'; } | LC_ALL=C sort -k 2)
-              if [[ "$hashes" != *unhashable* ]]; then
+              if [[ "$hashes" == *unhashable* ]]; then
+                  incomplete+="a file that can't be hashed; "
+              fi
+              if [ -z "$incomplete" ]; then
                   software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
               fi
           fi
+          rm -f "$errors"
           if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ] && [ -n "$software" ]; then
               host=$(printf '9700X/%s/%s/gcc-%s/%s/sw-%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" "$software" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
               printf 'Host identity: %s\n' "$host"
               printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
           else
-              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}"
+              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it%s\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}" "${incomplete:+ (software: ${incomplete%; })}"
           fi
           # The identity's end.
 
