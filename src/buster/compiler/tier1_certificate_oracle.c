@@ -207,9 +207,10 @@ static bool tier1_cert_oracle_move(Tier1CertOracle* oracle, uint64_t* state, Tie
     // The move reads its two locations' rows alone: save those before either is written.
     memcpy(oracle->saved + (size_t)b.unit * values, state + (size_t)b.unit * values, (size_t)b.width * values * sizeof(uint64_t));
     memcpy(oracle->saved + (size_t)a.unit * values, state + (size_t)a.unit * values, (size_t)a.width * values * sizeof(uint64_t));
+    // A move needs its source's first byte known, an exchange every byte of both sides (tier1_cert_copy's contract).
     for (uint32_t lane = 0; valid && oracle->checking && lane < a.width; lane += 1)
     {
-        valid = tier1_cert_oracle_known(oracle, oracle->saved + (size_t)(b.unit + lane) * values);
+        valid = (in.op == TIER1_CERT_MOVE && lane != 0) || tier1_cert_oracle_known(oracle, oracle->saved + (size_t)(b.unit + lane) * values);
         if (valid && in.op == TIER1_CERT_XCHG)
         {
             valid = tier1_cert_oracle_known(oracle, oracle->saved + (size_t)(a.unit + lane) * values);

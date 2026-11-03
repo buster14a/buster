@@ -617,6 +617,19 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "bind|import|runtime",
     },
     {
+        // #939's certificates of the CFG consumer's code of real C's functions, decoded from its records: the corpus's
+        // preparation, as benchmark-tier1-select-source's (benchmark-backend-source's, then the IR's lowering, promotion
+        // and optimization), selection, the emission it certifies, its decoding and the checker.
+        .name = "tier1-code-certificate",
+        .sources = "tier1_certificate[a-z0-9_]*|tier1_code_certificate_benchmark|tier1_emit[a-z0-9_]*|tier1_select[a-z0-9_]*|tier1_frame[a-z0-9_]*|"
+                   "tier1_rematerialize|tier1_liveness|tier1_cfg[a-z0-9_]*|tier1_allocate|ir_optimize[a-z0-9_]*|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|"
+                   "ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|"
+                   "c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
+                   "bind|import|runtime",
+    },
+    {
         .name = "types",
         .unit = "c_types_benchmark.c",
     },

@@ -79,7 +79,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-tier0, benchmark-backend, benchmark-backend-source` | `tier0.c` | [tier0](tier0.md) |
 | `test-tier1-select, test-tier1-pipeline, test-tier1-masks` | `tier1_select.c` | [tier1](tier1.md) |
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
-| `benchmark-tier1-certificate`, allocation certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
+| `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
 | `test-tier1-cfg, test-tier1-cfg-source` | `tier1_cfg.c` | [tier1-cfg](tier1-cfg.md) |
 | `test-tier1-frame, test-tier1-frame-execution` | `tier1_frame.c` | [tier1-frame](tier1-frame.md) |
 | `test-tier1-schedule, benchmark-tier1-schedule` | `tier1_schedule.c` | [tier1-schedule](tier1-schedule.md) |

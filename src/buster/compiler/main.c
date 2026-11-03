@@ -613,6 +613,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/mask_spill_measure_test.c"
 #include "buster/compiler/tier1_pipeline_benchmark.c"
 #include "buster/compiler/tier1_select_source_benchmark.c"
+// #939: the certificate of the CFG consumer's code on real C, decoded from its records, beside the emission it certifies.
+#include "buster/compiler/tier1_code_certificate_benchmark.c"
 // The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_tier1.c"
@@ -1289,6 +1291,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select-source") == 0)
     {
         result = run_tier1_select_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-code-certificate") == 0)
+    {
+        result = run_tier1_code_certificate_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-source") == 0)
     {

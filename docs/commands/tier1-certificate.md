@@ -20,8 +20,17 @@ requirements. [Command index](README.md).
   `--oracle-every N`), and its mutants, malformed shapes among them, which
   `tier1_cfg_verify` refuses alike;
   `test-tier1-cfg-source` proves every one of real C.
-- The emitter checks its allocations under `Tier1EmitOptions.certify`, which its
-  tests and the driver's `--verify` set. A failure is the emission stage's
+- `tier1_certificate_emitted.c` certifies the CFG consumer's code: its stream
+  decoded from the emitted records (each record's origin, `Tier1Origin`, says
+  which decoding applies), each node's records regenerated and compared, the
+  control flow walked. Shapes it doesn't decode yet (aggregates, dynamic
+  frames, variadic definitions, indirect jumps to several labels) leave the
+  code uncertified, by reason; `--tier1-report` counts `code_certified` and
+  `code_uncertified`. `test-tier1-pipeline` corrupts certified functions'
+  records: a refused mutant counts, an accepted one runs natively and must
+  agree with the interpreter.
+- The emitter checks its allocations, and the CFG consumer's code, under
+  `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and
   the checker's capacity (`TIER1_EMIT_MEMORY`) a resource failure. Either fails
   `--tier1 --verify`'s compile ([the outcomes
@@ -36,7 +45,7 @@ requirements. [Command index](README.md).
   The `Tier 1 machine-problem interchange` workflow runs all three.
 - [The certificate guide](../../docs/tier1-certificate.md) records the trust
   boundary, supported forms, the CFG producer, why the checker is scalar and the
-  native-emitter bridge still pending for #939.
+  emitted code's certificate, with what it doesn't decode yet.
 
 ## Benchmark
 
@@ -45,3 +54,10 @@ allocation, publication, check, both, and `tier1_cfg_verify` per IR instruction
 on real C's functions, with the certificates' sizes. Run it under the 9700X's
 lock on CPU 2. The 9700X job runs it on the frozen `sqlite3.c` where `changes`'
 `tier1-certificate` entry says.
+
+`benchmark-tier1-code-certificate [--only emit|decode|check|certify] [-E's
+options] file...` times the emitted code's certificate, its decoding, its check
+and both, per IR instruction and per record, beside the emission it certifies,
+on every function whose code it certifies, with the certificates' sizes and the
+uncertified functions by reason. A refusal fails it. The 9700X job runs it on
+the frozen `sqlite3.c` where `changes`' `tier1-code-certificate` entry says.
