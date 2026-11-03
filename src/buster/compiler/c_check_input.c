@@ -6,6 +6,8 @@
 // bracket depths and are never used as semantic dependency levels. Unsupported declarators and statements fail
 // explicitly; no unresolved name or unrecognized syntax acquires an invented int type.
 
+#include <sys/resource.h>
+
 // Parser token indices are below 1 << 30. The high bit distinguishes a source-only selection retained by a
 // declaration/type-query proof from an evaluated selection that may supply an expression graph operand.
 #define CHECK_INPUT_SOURCE_SELECTION 0x80000000u
@@ -261,6 +263,17 @@ struct CheckInputKrDiagnostic
 
 // The class codes the visits byte's bits 2 to 6 hold (CheckInputExpressionCode, BUSTER_CHECK_EXPRESSION_CODE_MASK).
 #define BUSTER_CHECK_EXPRESSION_CODES 32u
+// The expressions' walk's parts, whose TSC ticks --time-stages reports within its row (#1038): the classes' pass
+// (check_input_expression_classes), the coded walk's chunks' preparation (the compaction and the identifiers' leaves),
+// its classes' own actions, and the walk's visits (check_input_expression_visit: in a coded unit those of the tokens
+// the classes' actions leave, two TSC reads each; in a unit the coded walk leaves to the visit throughout, and on the
+// scalar path, the whole of its actions). Preparation and the classes' actions are the coded walk's, 0 on the scalar
+// path.
+#define BUSTER_CHECK_EXPRESSION_PART_CLASSES 0u
+#define BUSTER_CHECK_EXPRESSION_PART_PREPARE 1u
+#define BUSTER_CHECK_EXPRESSION_PART_ACTIONS 2u
+#define BUSTER_CHECK_EXPRESSION_PART_VISITS 3u
+#define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
@@ -538,8 +551,29 @@ struct CheckInput
     uint32_t expression_acted[BUSTER_CHECK_EXPRESSION_CODES];
     uint32_t expression_left[BUSTER_CHECK_EXPRESSION_CODES];
     // The TSC's ticks the expressions' walk took (check_input_expressions), which --time-stages reports apart within the
-    // reader's stage (#1038).
+    // reader's stage (#1038), and its parts' (BUSTER_CHECK_EXPRESSION_PART_*); and the process's minor faults and system
+    // microseconds across it, from getrusage(RUSAGE_SELF) as the stages' clock reads them: every thread's, which in a
+    // one-lane compile are the reader's own. The faults are mostly the first touches of the graph's node columns, which
+    // check_graph_initialize leaves unwritten and the walk writes a node at a time; the reader's per-token columns and
+    // the output columns check_input_output_none clears are written before it. Where a read failed,
+    // expression_usage_failed is set and the two are 0, which the report gives as unavailable (-1), not as a reading.
     uint64_t expression_ticks;
+    uint64_t expression_part_ticks[BUSTER_CHECK_EXPRESSION_PARTS];
+    uint64_t expression_faults;
+    uint64_t expression_system_us;
+    bool expression_usage_failed;
+    // Under PPOptions.expression_timing alone, the TSC's ticks of the coded walk's actions by class (the walk's visits of
+    // the tokens a class's action leaves among them), and the ticks of a TSC read's pair after each token, which the
+    // report takes off every token's as the timing's own cost (benchmark-checker-bindings).
+    uint64_t expression_class_ticks[BUSTER_CHECK_EXPRESSION_CODES];
+    uint64_t expression_class_overhead;
+    // Under PPOptions.expression_numbering alone, the graph by passes' numbering of the coded walk's tokens
+    // (check_input_expression_numbering): its ticks, the nodes it numbered, those it checked against the walk's graph,
+    // and those whose token or first operand differ from the walk's.
+    uint64_t expression_numbering_ticks;
+    uint32_t expression_numbering_nodes;
+    uint32_t expression_numbering_checked;
+    uint32_t expression_numbering_mismatches;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -657,6 +691,29 @@ typedef enum CheckInputExpressionCode
     // In check_input_role_codes alone: an operand's role, whose class its kind gives.
     CHECK_INPUT_CODE_OPERAND,
 } CheckInputExpressionCode;
+
+// The classes' names, as test-checker's coverage and benchmark-checker-bindings' report give them.
+static const char* const check_input_expression_code_names[BUSTER_CHECK_EXPRESSION_CODES] __attribute__((unused)) = {
+    [CHECK_INPUT_CODE_SCALAR] = "scalar",
+    [CHECK_INPUT_CODE_LIST] = "list",
+    [CHECK_INPUT_CODE_DROP] = "drop",
+    [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
+    [CHECK_INPUT_CODE_LITERAL] = "literal",
+    [CHECK_INPUT_CODE_PREFIX] = "prefix",
+    [CHECK_INPUT_CODE_BINARY] = "binary",
+    [CHECK_INPUT_CODE_SEPARATOR] = "separator",
+    [CHECK_INPUT_CODE_GROUP] = "group",
+    [CHECK_INPUT_CODE_CAST] = "cast",
+    [CHECK_INPUT_CODE_TERNARY] = "ternary",
+    [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
+    [CHECK_INPUT_CODE_MEMBER] = "member",
+    [CHECK_INPUT_CODE_POSTFIX] = "postfix",
+    [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
+    [CHECK_INPUT_CODE_CONDITION] = "condition",
+    [CHECK_INPUT_CODE_CALL] = "call",
+    [CHECK_INPUT_CODE_STRING] = "string",
+    [CHECK_INPUT_CODE_RETURN] = "return",
+};
 
 _Static_assert(CHECK_INPUT_CODE_OPERAND << BUSTER_CHECK_EXPRESSION_CODE_SHIFT <= BUSTER_CHECK_EXPRESSION_CODE_MASK, "the classes fit their bits");
 _Static_assert(BUSTER_CHECK_EXPRESSION_CODE_MASK >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == BUSTER_CHECK_EXPRESSION_CODES - 1, "a counter per code the bits hold");
@@ -1128,6 +1185,9 @@ struct CheckInputReader
     // quadratic in its elements. The scalar reader walks the chains, as the twin of these counts.
     uint32_t* value_counts;
     uint32_t* value_next;
+    // Under PPOptions.expression_numbering alone, a byte a token: 1 where the coded walk's class action left it to the
+    // walk's visit (check_input_expression_numbering's barriers); null otherwise.
+    uint8_t* expression_declined;
     uint32_t* scope_marks;
     uint32_t* scope_ends;
     uint32_t* scope_openings;
@@ -6564,10 +6624,12 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
 // floating-point environment. A full graph is a resource failure. It doesn't record the nodes before it, which
 // check_input_add does first; the coded walk leaves that to the next check_input_add or check_graph_record_finish, which
 // record them in node order from their final columns.
-// Always inlined (#880), as profile-guided builds do; hot caller: check_input_run, once per node.
-static inline __attribute__((always_inline)) uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+// Always inlined (#880), as profile-guided builds do; hot callers: the coded walk's actions and check_input_add_node,
+// once per node.
+static inline __attribute__((always_inline)) uint32_t check_input_add_columns(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c,
+                                                                              bool clear)
 {
-    const uint32_t node = check_graph_add(&reader->output->graph, op, token, a, b, c);
+    const uint32_t node = check_graph_add_node(&reader->output->graph, op, token, a, b, c, clear);
     if (node == BUSTER_CHECK_NONE)
     {
         reader->output->resource = true;
@@ -6586,6 +6648,19 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_node(Check
         }
     }
     return node;
+}
+
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_run, once per node.
+static inline __attribute__((always_inline)) uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+{
+    return check_input_add_columns(reader, op, token, a, b, c, true);
+}
+
+// A VALUE node at `token` whose leaf its maker writes whole (check_graph_add_node without `clear`): the coded walk's
+// identifiers', literals' and strings' (#1038), inlined as check_input_add_node is.
+static inline __attribute__((always_inline)) uint32_t check_input_add_leaf(CheckInputReader* reader, uint32_t token)
+{
+    return check_input_add_columns(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
 }
 
 static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
@@ -7822,7 +7897,10 @@ static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
+    const uint64_t start = __rdtsc();
     const uint32_t acts = check_input_expression_classes(reader);
+    const uint64_t classed = __rdtsc();
+    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_CLASSES] = classed - start;
     reader->output->expression_visits = parser->options.scalar ? parser->tokens.count : acts;
     if (parser->options.scalar)
     {
@@ -7831,6 +7909,7 @@ static void check_input_expressions(CheckInputReader* reader)
             const uint32_t token = reader->postorder[order];
             check_input_expression_visit(reader, token, reader->visits[token]);
         }
+        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS] = __rdtsc() - classed;
     }
     else
     {
@@ -8992,9 +9071,20 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         check_input_sizeof_prepare(&reader);
                     }
+                    struct rusage before;
+                    const bool used = getrusage(RUSAGE_SELF, &before) == 0;
                     const uint64_t expressions_start = __rdtsc();
                     check_input_expressions(&reader);
                     input->expression_ticks = __rdtsc() - expressions_start;
+                    struct rusage after;
+                    const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
+                    if (read)
+                    {
+                        input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
+                        input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
+                                                                 (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
+                    }
+                    input->expression_usage_failed = !read;
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {

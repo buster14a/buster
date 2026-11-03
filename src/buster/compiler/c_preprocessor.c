@@ -322,6 +322,14 @@ struct PPOptions
     const char* predefines_path;
     // Measure the phases (PPPhase) in Preprocessor.ticks and lookup intervals/counters in Preprocessor.statistics.
     bool timing;
+    // Time the checker's expressions' walk by class (CheckInput.expression_class_ticks, #1038): three TSC reads a token
+    // the coded walk's classes reach. Off in every compile; benchmark-checker-bindings sets it for runs of its own,
+    // apart from its samples.
+    bool expression_timing;
+    // After the coded walk, number its tokens again as the graph by passes would (CheckInput.expression_numbering_*,
+    // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
+    // expression_timing.
+    bool expression_numbering;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
