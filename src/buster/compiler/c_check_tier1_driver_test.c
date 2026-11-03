@@ -773,6 +773,58 @@ static const char check_test_tier1_records_source[] =
     "    return 0;\n"
     "}\n";
 
+// The wide values' fixture (#141): long double values, parameters and results, in a loop's phis and through a variadic
+// definition's va_arg; aggregates returned in the x87's registers (a struct of a long double in st0, a _Complex long
+// double in st0 and st1) and passed on the stack, and one of the memory class through the hidden pointer; and 128-bit
+// integers within the bodies (a high product and a loop's shifts, products and xors). Each crosses between this unit
+// (Tier 1's) and the other (clang -O2's) both ways, as arguments and results, and printf takes the long doubles.
+static const char check_test_tier1_wide_header[] =
+    "#include <stdio.h>\n"
+    "#include <complex.h>\n"
+    "typedef struct { long double x; } L1;\n"
+    "typedef struct { long double x; long n; } LN;\n"
+    "L1 b_make_L1(int seed);\n"
+    "_Complex long double b_make_C(int seed);\n"
+    "long b_check_L1(L1 s);\n"
+    "long b_check_C(_Complex long double c);\n"
+    "long double b_mix(long double a, int k, long double b);\n"
+    "long b_back(int seed);\n"
+    "L1 a_twist_L1(L1 s, int k);\n"
+    "_Complex long double a_twist_C(_Complex long double c, int k);\n"
+    "LN a_pair(long double x, long n);\n"
+    "long double a_poly(long double x, int n);\n"
+    "long double a_sum(int n, ...);\n"
+    "long a_mulhi(long a, long b);\n"
+    "long a_wide_loop(int n);\n";
+
+static const char check_test_tier1_wide_other_source[] =
+    "#include \"tier1-wide.h\"\n"
+    "L1 b_make_L1(int seed) { L1 r = { seed * 1.5L + 0.125L }; return r; }\n"
+    "_Complex long double b_make_C(int seed) { return (seed + 0.5L) + (seed * 2 - 1.25L) * I; }\n"
+    "long b_check_L1(L1 s) { return (long)(s.x * 1024); }\n"
+    "long b_check_C(_Complex long double c) { return (long)(__real__ c * 1024) * 31 + (long)(__imag__ c * 1024); }\n"
+    "long double b_mix(long double a, int k, long double b) { return a / (k + 1) + b; }\n"
+    "long b_back(int seed) { L1 s = a_twist_L1(b_make_L1(seed), seed); _Complex long double c = a_twist_C(b_make_C(seed), seed); LN p = a_pair(s.x, seed);\n"
+    "    return b_check_L1(s) * 7 + b_check_C(c) + (long)(p.x * 64) + p.n + (long)(a_poly(1.5L, seed + 2) * 16) + (long)(a_sum(3, 1.25L, 2.5L, (long double)seed) * 8); }\n";
+
+static const char check_test_tier1_wide_source[] =
+    "#include \"tier1-wide.h\"\n"
+    "#include <stdarg.h>\n"
+    "L1 a_twist_L1(L1 s, int k) { L1 r = { s.x * k + b_mix(s.x, k, 0.25L) }; return r; }\n"
+    "_Complex long double a_twist_C(_Complex long double c, int k) { return c * (long double)k + (__real__ c - __imag__ c) * I; }\n"
+    "LN a_pair(long double x, long n) { LN r = { x / 3, n * 5 }; return r; }\n"
+    "long double a_poly(long double x, int n) { long double s = 0; for (int i = 0; i < n; i += 1) { s = s * x + (long double)i; if (s > 1e30L) s = s / 1e20L; } return s; }\n"
+    "long double a_sum(int n, ...) { va_list ap; va_start(ap, n); long double s = 0; for (int i = 0; i < n; i += 1) s += va_arg(ap, long double) * (i + 1); va_end(ap); return s; }\n"
+    "long a_mulhi(long a, long b) { return (long)(((__int128)a * b) >> 64); }\n"
+    "long a_wide_loop(int n) { unsigned __int128 acc = 1; for (int i = 1; i <= n; i += 1) { acc = acc * (unsigned)(i + 3) + ((unsigned __int128)i << 70); acc ^= acc >> 33; } return (long)(acc ^ (acc >> 64)); }\n"
+    "int main(void) {\n"
+    "    for (int seed = 0; seed < 6; seed += 1) printf(\"%ld %ld\\n\", b_back(seed), a_mulhi(seed * 0x123456789abcdefL, -0x7edcba9876543210L - seed));\n"
+    "    L1 s = a_twist_L1(b_make_L1(3), 4); _Complex long double c = a_twist_C(b_make_C(2), 5);\n"
+    "    printf(\"%.10Lg %.10Lg %.10Lg %ld\\n\", s.x, __real__ c, __imag__ c, a_wide_loop(40));\n"
+    "    printf(\"%.10Lg\\n\", a_sum(4, 1.0L, 2.0L, 3.0L, 0.5L));\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -2280,6 +2332,74 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang, 
     char actual[4096] = { 0 };
     check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                       "both units of the by-value aggregates' fixture by --tier1, every function Tier 1's, print clang's build's output");
+    unlink(header);
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
+    unlink(reference);
+    unlink(both);
+}
+
+// The wide values' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every function
+// Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both prints; and both units
+// by --tier1, every function of both Tier 1's, print it too.
+static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char header[512];
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    char reference[512];
+    char both[512];
+    snprintf(header, sizeof(header), "%s/tier1-wide.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-wide.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-wide-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-wide-other.o", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-wide-clang", directory);
+    snprintf(both, sizeof(both), "%s/tier1-wide-both", directory);
+    const bool written = parse_test_write(header, check_test_tier1_wide_header, sizeof(check_test_tier1_wide_header) - 1) &&
+                         parse_test_write(unit, check_test_tier1_wide_source, sizeof(check_test_tier1_wide_source) - 1) &&
+                         parse_test_write(other, check_test_tier1_wide_other_source, sizeof(check_test_tier1_wide_other_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's builds of the wide values' fixture run");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            snprintf(object, sizeof(object), "%s/tier1-wide-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-wide-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            check_test_expect(test, compiled, "the wide values' unit compiles by --tier1, every function Tier 1's");
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            char* link_text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+            free(link_text);
+            char actual[4096] = { 0 };
+            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's long doubles, x87 aggregates and 128-bit integers pass to and from clang -O2's code");
+            unlink(object);
+            unlink(program);
+        }
+    }
+    char* both_arguments[] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", "-o", both, unit, other, NULL };
+    text = NULL;
+    const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+    free(text);
+    char actual[4096] = { 0 };
+    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                      "both units of the wide values' fixture by --tier1, every function Tier 1's, print clang's build's output");
     unlink(header);
     unlink(unit);
     unlink(other);

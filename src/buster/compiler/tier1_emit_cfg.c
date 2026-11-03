@@ -1726,10 +1726,17 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
     const AbiReturn result = function->result_abi;
     Tier1SelectPart parts[2];
     const uint32_t part_count = result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier1_select_parts(result.registers, function->result_size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
+    // In the x87's registers (#141): each part's 10 bytes loaded from its 16, the last first, so that st0 holds the first.
+    const uint32_t x87_parts = tier1_select_x87_parts(result, function->result_size);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
     int32_t hidden_offset = 0;
     const bool found = hidden && tier1_emit_cfg_object(function, emitted, function->slot_count + function->parameter_count, &hidden_offset);
-    Tier1EmitError error = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && (part_count != 0 || found) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    Tier1EmitError error = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && (part_count != 0 || x87_parts != 0 || found) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    for (uint32_t k = x87_parts; error == TIER1_EMIT_OK && k-- > 0;)
+    {
+        const X86Instruction load = { .form = X86_FORM_FLD_M80, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(16 * k) };
+        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+    }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         error = tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, tier1_emit_staging(k), source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;

@@ -1942,7 +1942,9 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
     {
         const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
                                 (floating ? vector && (reg & 0x1fu) < BUSTER_ABI_VECTOR_ARGUMENTS : reg < 16 && ((BUSTER_TIER1_SELECT_ARGUMENT_GENERAL >> reg) & 1) != 0);
-        supported = (floating || type == IR_I32 || type == IR_I64 || type == IR_PTR) && (location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0 && (registered || stacked);
+        // A long double (#141) on the stack alone, its object's bytes copied into its 16 (tier1_emit_cfg_stack_argument).
+        supported = (((floating || type == IR_I32 || type == IR_I64 || type == IR_PTR) && (registered || stacked)) || (type == IR_F80 && stacked)) &&
+                    (location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
     }
     else
     {
@@ -1952,17 +1954,28 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
     return supported;
 }
 
+// An aggregate result of `size` bytes in the x87's registers (#141): st0, a struct of a long double's, and st1 too, a
+// _Complex long double's, each part 16 bytes of the aggregate (part_bytes 16: a vector of long doubles, whose parts LLVM
+// packs into 10 bytes, isn't one). How many parts, or 0.
+static uint32_t tier1_select_x87_parts(AbiReturn result, uint32_t size)
+{
+    const bool first = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[0] == BUSTER_ABI_REGISTER_X87 && result.part_bytes == 16 && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
+                       result.registers[3] == BUSTER_ABI_REGISTER_NONE;
+    const uint32_t count = !first ? 0 : result.registers[1] == (BUSTER_ABI_REGISTER_X87 | 1) ? 2 : result.registers[1] == BUSTER_ABI_REGISTER_NONE ? 1 : 0;
+    return count != 0 && size > 16 * (count - 1) && size <= 16 * count ? count : 0;
+}
+
 // Whether Tier 1 takes a result as the convention returns it (#789): a scalar's (`size` 0) as the IR's result type says,
-// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts (tier1_select_parts), or through the
-// hidden pointer (MEMORY). Not an x87 register's, a high eightbyte's alone, or one LLVM returns through a hidden pointer
-// that clang doesn't count (DEMOTED).
+// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts (tier1_select_parts), in st0 and st1
+// (tier1_select_x87_parts, #141), or through the hidden pointer (MEMORY). Not a high eightbyte's alone, or one LLVM
+// returns through a hidden pointer that clang doesn't count (DEMOTED).
 static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
 {
     Tier1SelectPart parts[2];
     const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
     const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
                            tier1_select_parts(result.registers, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) != 0;
-    return flags && (size == 0 || registers || result.kind == BUSTER_ABI_RESULT_MEMORY);
+    return flags && (size == 0 || registers || tier1_select_x87_parts(result, size) != 0 || result.kind == BUSTER_ABI_RESULT_MEMORY);
 }
 
 static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot);

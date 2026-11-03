@@ -198,7 +198,13 @@ patterns are:
   bytes copied there by `fld` and `fstp` (`tier1_select_next_place`), and its
   long double result comes in st0, which the call stores into its own object; a
   return loads its operand's object into st0 before the epilogue. A function's
-  long double parameters are by-value aggregates, as before.
+  long double parameters are by-value aggregates, as before, and so is an
+  aggregate returned in the x87's registers (`tier1_select_x87_parts`): a
+  struct of a long double in st0, a `_Complex long double` in st0 and st1, each
+  part 16 bytes of the aggregate. The call stores st0 into the first part and
+  then st1 into the second (`fstp`); the return loads them the last first, so
+  that st0 holds the first (`fld`). A long double argument whose call has ABI
+  records takes its stack slots the same way.
 - Call arguments and parameters take their places by the System V classes
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,
@@ -244,8 +250,8 @@ patterns are:
   object past the IR's slots that the entry fills from its registers, or its
   stack slots in the incoming area, selected as a frame object's address
   (`TIER1_RULE_STACK_ADDRESS`). Refused: a part LLVM puts in a stack slot
-  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part, the x87's
-  registers and a result LLVM demotes to a hidden pointer. Every function and
+  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part and a result
+  LLVM demotes to a hidden pointer. Every function and
   call with records goes to the CFG consumer. Before a call's moves, it copies
   the call's aggregates from their addresses into their stack slots, or into the
   red zone's staging slots, whose registers it loads after the moves. An address

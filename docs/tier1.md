@@ -262,9 +262,11 @@ places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
 from rsp around it (the selection guide's "The dynamic stack"). So do the
 128-bit integers (#141), as pairs of 64-bit halves ("The 128-bit integers",
 below), and long double (#141), in frame objects of their own, computed on the
-x87 stack (the selection guide's "Long double"). Still refused: vectors, and the
-convention's rarer aggregate shapes (a part in a stack slot, a high or low
-eightbyte alone, a vector's or the x87's register). The IR's switches and selects of floating
+x87 stack (the selection guide's "Long double"), with aggregates returned in
+the x87's registers. Still refused: vectors, the convention's rarer aggregate
+shapes (a part in a stack slot, a high or low eightbyte alone, a vector's
+register), and naked functions, whose bodies are assembly Tier 0 copies as
+written. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 
@@ -344,7 +346,12 @@ unsplit function and the programs' stack machine; the split's refusals and its
 scan's twins; and 300 of Tier 0's random long double programs (calls of C
 functions of long doubles, every conversion, NaNs, frame objects, `?:`'s blocks)
 through the optimizer and both of Tier 1's paths natively against their stack
-machine (#141).
+machine (#141). `test-checker-driver`'s wide values' fixture
+(`c_check_tier1_driver_test.c`) passes long doubles, aggregates returned in the
+x87's registers (a struct of a long double, a `_Complex long double`) and the
+memory class's, to and from clang -O2's code and through a variadic
+definition, beside 128-bit integers within its bodies, every function Tier 1's
+by both paths, against clang -O0's build.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

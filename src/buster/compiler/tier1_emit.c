@@ -944,7 +944,14 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     // or through the scratch register for any other size.
     Tier1SelectPart returned[2];
     const uint32_t returned_count = parts_returned ? tier1_select_parts(abi->call.result.registers, abi->result_size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, returned) : 0;
-    error = error == TIER1_EMIT_OK && parts_returned && returned_count == 0 ? TIER1_EMIT_ALLOCATION : error;
+    // In the x87's registers (#141): st0's 10 bytes into the first part's 16, then st1's into the second's.
+    const uint32_t x87_parts = parts_returned ? tier1_select_x87_parts(abi->call.result, abi->result_size) : 0;
+    error = error == TIER1_EMIT_OK && parts_returned && returned_count == 0 && x87_parts == 0 ? TIER1_EMIT_ALLOCATION : error;
+    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < x87_parts; k += 1)
+    {
+        const X86Instruction store = { .form = X86_FORM_FSTP_M80, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = into->displacement + (int32_t)(16 * k) };
+        error = tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY;
+    }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < returned_count; k += 1)
     {
         const Tier1SelectPart part = returned[k];
