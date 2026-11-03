@@ -183,6 +183,11 @@ typedef enum Tier1SelectRule
     // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32), and its phis
     // TIER1_RULE_PHI's. Only the CFG consumer takes it.
     TIER1_RULE_VECTOR,
+    // An atomic read/modify/write (IR_ATOMIC_RMW, #1059) of the object at the address in values[0], of values[1], by
+    // the operation `immediate` (BUSTER_IR_RMW_EXCHANGE or BUSTER_IR_RMW_ADD): the operand copied to the scratch
+    // register, xchg or lock xadd of it with the object, a full barrier every order takes, and its old value zero-extended
+    // into the destination, as a load's is. Never folded into a consumer, and a barrier no load folds past.
+    TIER1_RULE_ATOMIC_RMW,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -1019,6 +1024,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_MFENCE });
         }
         break;
+    case TIER1_RULE_ATOMIC_RMW:
+    {
+        const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
+        tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+        const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
+                                  : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+        tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
+        const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+        tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        break;
+    }
     case TIER1_RULE_PHI:
         break;
     case TIER1_RULE_ALLOCA:
@@ -1738,8 +1754,9 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     const uint32_t op = function->op[node];
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
-    // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too.
-    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE ||
+    // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
+    // an atomic read/modify/write.
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
            (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
@@ -1774,7 +1791,7 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
-                                   observable_load) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | observable_load) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -3526,6 +3543,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_FENCE;
         base.immediate = a;
         base.intrinsic_cost = a == BUSTER_IR_FENCE_SEQ_CST ? 1 : 0;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_ATOMIC_RMW && tier1_select_memory_width(type) != 0)
+    {
+        // The object's bytes, as a load's, never the narrow value's 32-bit register: a byte's or a short's xchg or lock
+        // xadd of 4 bytes would write past its object.
+        base.rule = TIER1_RULE_ATOMIC_RMW;
+        base.width = (uint8_t)tier1_select_memory_width(type);
+        base.values[0] = a;
+        base.values[1] = b;
+        base.immediate = c;
+        base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;

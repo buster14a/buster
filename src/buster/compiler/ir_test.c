@@ -809,6 +809,28 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         ir_test_pair(tally, &function, scratch, 0, true, "an 8-byte atomic store aligned to 16 rejected");
         function.alignment_log2[2] = 3;
         function.alignment_log2[3] = 3;
+        // An atomic read/modify/write in the load's place: of any C order, its operation an exchange or an addition, an
+        // atomic access alone, aligned to its size at least.
+        ir_test_instruction(&function, 3, IR_ATOMIC_RMW, IR_I64, 1, 0, BUSTER_IR_RMW_EXCHANGE);
+        function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, true, "a seq_cst atomic exchange rejected");
+        function.c[3] = BUSTER_IR_RMW_ADD;
+        function.flags[3] = BUSTER_IR_ATOMIC | 4u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, true, "an acq_rel atomic addition rejected");
+        function.c[3] = BUSTER_IR_RMW_ADD + 1;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic read/modify/write of no operation accepted");
+        function.c[3] = BUSTER_IR_RMW_ADD;
+        function.flags[3] = 5u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "a read/modify/write without an atomic access accepted");
+        function.flags[3] = BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "a volatile atomic read/modify/write accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 6u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic read/modify/write of no C order accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC;
+        function.alignment_log2[3] = 2;
+        ir_test_pair(tally, &function, scratch, 0, false, "an 8-byte atomic read/modify/write aligned to 4 accepted");
+        ir_test_instruction(&function, 3, IR_LOAD, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.alignment_log2[3] = 3;
         function.flags[2] = BUSTER_IR_VOLATILE;
         function.flags[3] = BUSTER_IR_VOLATILE;
         IrUses uses = {

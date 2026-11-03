@@ -5756,6 +5756,62 @@ static void check_lower_atomic_direct(CheckLowerWriter* writer, uint32_t node, c
     check_lower_operand(writer, node, 0 + 3, false, stream->argument_conversions[first].type);
 }
 
+// A direct atomic read/modify/write (#1059, check_program_direct_rmw's `value`), in the typed stream, in its entries'
+// order: the pointer's operand; the operand's, converted to the object's value type (test-and-set's byte 1); a builtin
+// that returns the new value keeps the operand in a temporary (STORE_LOCAL); a subtraction negates it; ATOMIC_RMW of the
+// value type's class leaves the old value; the new one is the old one plus or minus the kept operand; test-and-set's
+// result is whether the old byte was set (its conversion from unsigned char to the node's bool). Narrow classes negate,
+// add and subtract as C's promotions do, in int, and convert back. The result converted to the node's type; its constant
+// order evaluated for nothing, as a direct fence's. The tasks run in reverse.
+static void check_lower_atomic_rmw_direct(CheckLowerWriter* writer, uint32_t node, const CheckBuiltinAtomicEffect* effect, uint32_t value)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = graph->argument_offsets[node];
+    const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(effect->runtime_builtin);
+    const bool test = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_TEST_AND_SET;
+    const bool subtract = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_SUB;
+    const bool fresh = rule->return_kind == CHECK_BUILTIN_ATOMIC_RMW_NEW_BITS;
+    const TypeId object = test ? BUSTER_TYPE_UCHAR : effect->value_type;
+    const uint8_t class = check_lower_class(writer, object);
+    const bool narrow = tier0_class_bytes(class) < 4;
+    const TypeId arithmetic = narrow ? BUSTER_TYPE_INT : object;
+    const uint8_t computed = check_lower_class(writer, arithmetic);
+    const uint32_t kept = fresh ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+    check_lower_convert(writer, object, check_stream_type(stream, node));
+    if (fresh)
+    {
+        check_lower_convert(writer, arithmetic, object);
+        check_lower_instruction(writer, subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD, computed, 0);
+        check_lower_convert(writer, object, arithmetic);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, kept);
+        check_lower_convert(writer, object, arithmetic);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_ATOMIC_RMW, class, value);
+    if (subtract)
+    {
+        check_lower_convert(writer, arithmetic, object);
+        check_lower_instruction(writer, BUSTER_TYPED_NEG, computed, 0);
+        check_lower_convert(writer, object, arithmetic);
+    }
+    if (fresh)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, class, kept);
+    }
+    if (test)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U8, 1);
+    }
+    else
+    {
+        const TypeId checked = stream->argument_conversions[first + 1].type;
+        check_lower_convert(writer, checked, object);
+        check_lower_operand(writer, node, 1 + 3, false, checked);
+    }
+    check_lower_operand(writer, node, 0 + 3, false, stream->argument_conversions[first].type);
+}
+
 static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -9559,8 +9615,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         // constant argument evaluated for nothing.
         const uint32_t atomic = helper == BUSTER_CHECK_NONE ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node) : BUSTER_CHECK_NONE;
         const uint32_t fence = atomic != BUSTER_CHECK_NONE ? check_program_direct_fence(program, node, stream->atomics + atomic) : UINT32_MAX;
-        // And an atomic load or store the plan took as direct, its LOAD or SET with its atomic marker.
+        // And an atomic load or store the plan took as direct, its LOAD or SET with its atomic marker, and an atomic
+        // read/modify/write, its ATOMIC_RMW.
         const uint32_t access = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX ? check_program_direct_access(program, node, stream->atomics + atomic) : UINT32_MAX;
+        const uint32_t rmw = atomic != BUSTER_CHECK_NONE && fence == UINT32_MAX && access == UINT32_MAX ? check_program_direct_rmw(program, node, stream->atomics + atomic)
+                                                                                                         : UINT32_MAX;
         if (fence != UINT32_MAX)
         {
             check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, fence);
@@ -9568,6 +9627,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else if (access != UINT32_MAX)
         {
             check_lower_atomic_direct(writer, node, stream->atomics + atomic, access);
+        }
+        else if (rmw != UINT32_MAX)
+        {
+            check_lower_atomic_rmw_direct(writer, node, stream->atomics + atomic, rmw);
         }
         else if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {

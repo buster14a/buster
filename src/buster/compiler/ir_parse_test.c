@@ -278,6 +278,7 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         // An atomic access aligned below its size (#1059): x86 makes only a naturally aligned one single-copy atomic.
         { "function (ptr) -> i64 {\nb0:\n%0 = param.ptr 0\n%1 = load.i64 %0 align=1 atomic seq_cst\n%2 = ret.void %1\n}\n", IR_PARSE_VERIFY },
         { "function (ptr, i32) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i32 1\n%2 = store.void %0, %1 align=2 atomic release\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function (ptr, i16) -> i16 {\nb0:\n%0 = param.ptr 0\n%1 = param.i16 1\n%2 = rmw.i16 %0, %1 align=1 add seq_cst\n%3 = ret.void %2\n}\n", IR_PARSE_VERIFY },
     };
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {

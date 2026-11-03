@@ -11,7 +11,8 @@
 // build is checked: by both paths, by Tier 0 and by --tier1 (every function Tier 1's), its fences and atomic accesses
 // taken directly (--helper-report), its fenced and seq_cst threads' objects with one mfence each and the others with
 // none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process with one CPU prints
-// that it skipped the runs. And --helper-report's counts of a unit with every kind of helper call
+// that it skipped the runs. A concurrent counter litmus of the direct read/modify/writes (check_test_driver_counters),
+// built and checked the same four ways. And --helper-report's counts of a unit with every kind of helper call
 // (check_test_driver_helper_report). Include after c_check_tier1_driver_test.c, whose decoder of a function's object
 // and Tier 1 report readers this test takes.
 
@@ -230,12 +231,172 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
     unlink(source);
 }
 
+// #1059's concurrent read/modify/writes: four threads add to shared counters by every direct form (GNU's fetch_add, a
+// __sync_ one, an implicit _Atomic object's increment, C11's fetch_sub of a short and GNU's add_fetch of a byte, which
+// wrap) and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
+// increment a volatile counter ten times as often, the control, which may lose updates. Every atomic count must be
+// exact. Each run's threads start together, past a barrier of an add_fetch and an acquire load, so that they overlap
+// where they have CPUs of their own.
+static const char check_test_counter_litmus_source[] =
+    "#define _GNU_SOURCE\n"
+    "#include <pthread.h>\n"
+    "#include <sched.h>\n"
+    "#include <stdio.h>\n"
+    "#include <unistd.h>\n"
+    "#define THREADS 4\n"
+    "#define ITERATIONS 100000\n"
+    "#define CONTROL_ITERATIONS 1000000\n"
+    "static long gnu;\n"
+    "static int legacy;\n"
+    "static _Atomic long implicit;\n"
+    "static _Atomic short down;\n"
+    "static unsigned char bytes;\n"
+    "static int lock;\n"
+    "static long guarded;\n"
+    "static volatile long plain;\n"
+    "static int ready;\n"
+    // A spin that yields past its first spins, so that the threads go on where they share CPUs with others.
+    "static void start(void)\n"
+    "{\n"
+    "    __atomic_add_fetch(&ready, 1, __ATOMIC_ACQ_REL);\n"
+    "    for (int spins = 0; __atomic_load_n(&ready, __ATOMIC_ACQUIRE) < THREADS; spins++)\n"
+    "    {\n"
+    "        if (spins > 64) sched_yield();\n"
+    "    }\n"
+    "}\n"
+    "void* worker(void* unused)\n"
+    "{\n"
+    "    start();\n"
+    "    for (int i = 0; i < ITERATIONS; i++)\n"
+    "    {\n"
+    "        __atomic_fetch_add(&gnu, 1, __ATOMIC_RELAXED);\n"
+    "        __sync_fetch_and_add(&legacy, 2);\n"
+    "        implicit++;\n"
+    "        __c11_atomic_fetch_sub(&down, 1, __ATOMIC_ACQ_REL);\n"
+    "        __atomic_add_fetch(&bytes, 3, __ATOMIC_SEQ_CST);\n"
+    "        for (int spins = 0; __atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE) != 0; spins++)\n"
+    "        {\n"
+    "            if (spins > 64) sched_yield();\n"
+    "        }\n"
+    "        guarded++;\n"
+    "        __atomic_store_n(&lock, 0, __ATOMIC_RELEASE);\n"
+    "    }\n"
+    "    return unused;\n"
+    "}\n"
+    "void* control(void* unused)\n"
+    "{\n"
+    "    start();\n"
+    "    for (int i = 0; i < CONTROL_ITERATIONS; i++) plain++;\n"
+    "    return unused;\n"
+    "}\n"
+    "static int run(void* (*body)(void*))\n"
+    "{\n"
+    "    pthread_t threads[THREADS];\n"
+    "    int created = 0;\n"
+    "    ready = 0;\n"
+    "    while (created < THREADS && pthread_create(&threads[created], 0, body, 0) == 0) created++;\n"
+    "    for (int t = 0; t < created; t++) pthread_join(threads[t], 0);\n"
+    "    return created == THREADS;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    cpu_set_t set;\n"
+    "    alarm(120);\n"
+    "    if (sched_getaffinity(0, sizeof(set), &set) != 0 || CPU_COUNT(&set) < 2) { printf(\"skipped\\n\"); return 0; }\n"
+    "    if (!run(worker) || !run(control)) return 1;\n"
+    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld\\n\", gnu, legacy, (long)implicit, (int)down, (int)bytes, guarded, (long)plain);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_counters(CheckTest* test, const char* executable, const char* directory)
+{
+    char source[512];
+    snprintf(source, sizeof(source), "%s/counter-litmus.c", directory);
+    const bool written = parse_test_write(source, check_test_counter_litmus_source, sizeof(check_test_counter_litmus_source) - 1);
+    check_test_expect(test, written, "counters: the litmus's source is written");
+    static const char* const names[3] = { "start", "worker", "control" };
+    // The program's totals: four threads of 100000 iterations each, a short's and a byte's wrapped, and the control's of
+    // 1000000 each.
+    const long total = 4 * 100000L;
+    const long control = 4 * 1000000L;
+    for (uint32_t build = 0; written && build < 4; build += 1)
+    {
+        const bool tier1 = build >= 2;
+        const bool scalar = (build & 1) != 0;
+        const char* const way = tier1 ? scalar ? "Tier 1, scalar path" : "Tier 1, vector path" : scalar ? "Tier 0, scalar path" : "Tier 0, vector path";
+        char output[512];
+        snprintf(output, sizeof(output), "%s/counter-litmus-%u", directory, build);
+        char* arguments[16] = { (char*)executable, "--helper-report", "--verify" };
+        uint32_t count = 3;
+        if (tier1)
+        {
+            arguments[count++] = "--tier1";
+            arguments[count++] = "--tier1-refusals";
+        }
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = output;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        char* text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        // The worker's six read/modify/writes and the barrier's one, and four atomic accesses (the lock's release, the
+        // barrier's load, and main's loads of the two _Atomic counters), are the typed stream's, none a helper's call.
+        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=7\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=11\thelper=0\tplanned=0\n") != NULL;
+        const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
+        if ((status != 0 || !reported) && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        const bool built = status == 0 && reported && taken;
+        char message[256];
+        snprintf(message, sizeof(message), "counters (%s): the litmus builds, its read/modify/writes taken directly%s", way, tier1 ? " and its threads Tier 1's" : "");
+        check_test_expect(test, built, message);
+        char captured[256] = { 0 };
+        const bool ran = built && check_test_driver_capture(output, captured, sizeof(captured));
+        long gnu = -1;
+        int legacy = -1;
+        long implicit = -1;
+        int down = -1;
+        int bytes = -1;
+        long guarded = -1;
+        long plain = -1;
+        const bool skipped = ran && strcmp(captured, "skipped\n") == 0;
+        const bool read = ran && sscanf(captured, "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld", &gnu, &legacy, &implicit, &down, &bytes, &guarded,
+                                        &plain) == 7;
+        const bool exact = read && gnu == total && legacy == 2 * total && implicit == total && down == (int16_t)-total && bytes == (uint8_t)(3 * total) && guarded == total &&
+                           plain >= 1 && plain <= control;
+        snprintf(message, sizeof(message), "counters (%s): every atomic count is exact (gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld)", way, gnu, legacy,
+                 implicit, down, bytes, guarded);
+        check_test_expect(test, skipped || exact, message);
+        if (read)
+        {
+            // The control's count is the evidence that the threads overlapped: a volatile increment loses updates the locked
+            // ones keep. It may be exact on a run where the threads never did (a loaded machine's, whose threads take turns
+            // on one CPU), which leaves the exact counts beside it weaker, not wrong.
+            printf("counters (%s): %ld of %ld volatile increments kept, every atomic one\n", way, plain, control);
+        }
+        else if (skipped)
+        {
+            printf("counters (%s): the litmus skipped its runs: the process may run on one CPU\n", way);
+        }
+        unlink(output);
+    }
+    unlink(source);
+}
+
 // --helper-report's counts (#1059) of a unit with every kind of direct form and helper call: an implicit _Atomic store,
-// load and compound assignment (a direct load and a compare-exchange's call in its loop), an explicit store and load, a
-// fence, and an asm statement with instructions. Its `direct` columns are the lowered code's direct forms (five
-// accesses, one fence: a seq_cst store's own isn't one), its `helper` columns its call sites of each family's helpers,
-// every call in the object, and `planned` the signatures (the compare-exchange's leaf alone, which the implicit update
-// takes, and the statement's helper). By both paths.
+// load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store and load, a fence, and
+// an asm statement with instructions. Its `direct` columns are the lowered code's direct forms (four accesses, one
+// read/modify/write, one fence: a seq_cst store's own isn't one), its `helper` columns its call sites of each family's
+// helpers, every call in the object (the statement's), and `planned` the signatures (the statement's helper alone: the
+// update takes no compare-exchange's leaf). By both paths.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "_Atomic int a;\n"
@@ -250,9 +411,9 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE);\n"
                                   "}\n";
     static const char* const lines[] = {
-        "helpers\tunits=1\trefused=0\tdirect=6\thelper=2\tplanned=2\n",
-        "helpers.atomic-access\tdirect=5\thelper=0\tplanned=0\n",
-        "helpers.atomic-rmw\tdirect=0\thelper=1\tplanned=1\n",
+        "helpers\tunits=1\trefused=0\tdirect=6\thelper=1\tplanned=1\n",
+        "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
+        "helpers.atomic-rmw\tdirect=1\thelper=0\tplanned=0\n",
         "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
         "helpers.asm\tdirect=0\thelper=1\tplanned=1\n",
         "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
@@ -279,8 +440,8 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
             fprintf(stderr, "%s", text);
         }
         free(text);
-        check_test_expect(test, reported, scalar != 0 ? "helper report (scalar path): every helper call counted, implicit _Atomic accesses' and an asm statement's among them"
-                                                      : "helper report (vector path): every helper call counted, implicit _Atomic accesses' and an asm statement's among them");
+        check_test_expect(test, reported, scalar != 0 ? "helper report (scalar path): every direct form and helper call counted, an implicit update's and an asm statement's among them"
+                                                      : "helper report (vector path): every direct form and helper call counted, an implicit update's and an asm statement's among them");
         unlink(object);
     }
     unlink(source);
