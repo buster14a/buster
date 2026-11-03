@@ -1492,12 +1492,32 @@ takes, code, static initializers, enumerators and `_Static_assert` alike.
 - Each is an `unsigned long`. An operand that isn't what clang takes is an
   error, as clang's is.
 
+clang's type traits of C, `__is_destructible(T)`, `__is_nothrow_destructible(T)`
+and `__is_bitwise_cloneable(T)`, are keywords of the same span and constants
+of the same walk, each an `int` (Sema's `getLogicalOperationType`), as
+`EvaluateUnaryTypeTrait` gives them where no type has a destructor:
+
+- the destructible ones are 1 for every complete type, a variably modified one
+  among them, and 0 for `void`, an array of no bound and a function type;
+- `__is_bitwise_cloneable` is its base element type's (`isBitwiseCloneableType`):
+  1 for a complete one and a function type, 0 for `void`;
+- `CheckUnaryTypeTraitTypeCompleteness` first requires the destructible ones'
+  base element type to be `void` or complete, and `__is_bitwise_cloneable`'s
+  type to be `void`, an array of no bound or complete: an incomplete record or
+  enumeration is an error at the keyword.
+
+`__builtin_ptrauth_type_discriminator(T)`, of the same span, is no constant:
+every use is an error at its keyword, where clang says "this target does not
+support pointer authentication".
+
 A deferred body's lane refuses a body that uses one of the first five (the
 preprocessor's places change as they are read), which source order then reads.
-`__has_builtin` answers 1 for all seven (`pp_implemented_builtin`), and
+`__has_builtin` answers 1 for all eleven (`pp_implemented_builtin`), and
 `__has_constexpr_builtin` 0, as clang's. `test-checker`'s
 `generic-source-places-and-type-queries` runs them natively against clang -O0's
-build by both paths, after a `#line` that names the file.
+build by both paths, after a `#line` that names the file, and `generic-type-traits`
+the traits of complete, incomplete and variably modified types; their source
+fixtures compare every kind of type and context, and the errors, with clang.
 
 ## Intrinsic checking contracts
 

@@ -649,26 +649,35 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 
 // Whether a name is one of the builtins of a constant the walk works out where it reads it (#148,
 // check_input_builtin_constant_prepare): the place's __builtin_LINE, __builtin_COLUMN, __builtin_FILE, __builtin_FILE_NAME
-// and __builtin_FUNCTION, and the queries of a type, __builtin_vectorelements and __builtin_omp_required_simd_align.
+// and __builtin_FUNCTION, the queries of a type, __builtin_vectorelements and __builtin_omp_required_simd_align,
+// clang's type traits of C, __is_destructible, __is_nothrow_destructible and __is_bitwise_cloneable, and
+// __builtin_ptrauth_type_discriminator, which no constant is: clang refuses every use on x86 ("this target does not
+// support pointer authentication", at the keyword).
 static bool check_input_source_builtin(uint32_t name)
 {
     return name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN || name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME ||
-           name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN;
+           name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN ||
+           name == C_NAME_IS_BITWISE_CLONEABLE || name == C_NAME_IS_DESTRUCTIBLE || name == C_NAME_IS_NOTHROW_DESTRUCTIBLE ||
+           name == C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR;
 }
 
 // The span of predefined names (c_intern.c's order) that holds those builtins: __builtin_COLUMN's to
-// __builtin_vectorelements', with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
+// __is_nothrow_destructible's, with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
 // them. The token count tests a name against the span with one comparison (check_input_count_tokens, and its twin
 // check_input_syntax_of), where a comparison per builtin cost the count's vector loop 8.4 million instructions of a
 // sqlite3.c -c (#148); the span's other names only make a few more tokens visited and the table of constants larger.
 #define BUSTER_CHECK_SOURCE_BUILTIN_FIRST ((uint32_t)C_NAME_BUILTIN_COLUMN)
-#define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN + 1))
-_Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_BUILTIN_VECTORELEMENTS && C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN < 16 &&
+#define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_IS_NOTHROW_DESTRUCTIBLE - C_NAME_BUILTIN_COLUMN + 1))
+_Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_IS_NOTHROW_DESTRUCTIBLE - C_NAME_BUILTIN_COLUMN < 16 &&
+               C_NAME_IS_BITWISE_CLONEABLE > C_NAME_BUILTIN_COLUMN && C_NAME_IS_BITWISE_CLONEABLE < C_NAME_IS_NOTHROW_DESTRUCTIBLE &&
+               C_NAME_IS_DESTRUCTIBLE > C_NAME_BUILTIN_COLUMN && C_NAME_IS_DESTRUCTIBLE < C_NAME_IS_NOTHROW_DESTRUCTIBLE &&
+               C_NAME_BUILTIN_VECTORELEMENTS > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_VECTORELEMENTS < C_NAME_IS_NOTHROW_DESTRUCTIBLE &&
                C_NAME_BUILTIN_LINE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_LINE < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_FILE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_FILE_NAME > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE_NAME < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_FUNCTION > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FUNCTION < C_NAME_BUILTIN_VECTORELEMENTS &&
-               C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS,
+               C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR < C_NAME_BUILTIN_VECTORELEMENTS,
                "the builtins of constants the walk works out lie in one short span of predefined names");
 
 static bool check_input_source_builtin_span(uint32_t name)

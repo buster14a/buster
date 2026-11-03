@@ -1609,7 +1609,8 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     check_constant_mark_type(input, separator + 1, close);
                 }
             }
-            else if (valid && (keyword == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN ||
+            else if (valid && (keyword == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN || keyword == C_NAME_IS_BITWISE_CLONEABLE || keyword == C_NAME_IS_DESTRUCTIBLE ||
+                               keyword == C_NAME_IS_NOTHROW_DESTRUCTIBLE || keyword == C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR ||
                                (keyword == C_NAME_BUILTIN_VECTORELEMENTS && token + 1 < close && check_constant_type_start(parser, token + 1))))
             {
                 // A query of a type (#148): __builtin_vectorelements' of an expression evaluates nothing of it.
@@ -1928,7 +1929,8 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
 // __builtin_FUNCTION's string's address (a char *, the string the walk made: check_input_source_string); and an unsigned
 // long, __builtin_vectorelements' count of the elements of its vector type, or of its unevaluated operand's, and
 // __builtin_omp_required_simd_align's alignment in bytes for its type, the unit's target's (16, 32 with AVX, 64 with
-// AVX-512F, as clang's getOpenMPDefaultSimdAlign gives it whatever the type).
+// AVX-512F, as clang's getOpenMPDefaultSimdAlign gives it whatever the type); an int, the type traits'; and none of
+// __builtin_ptrauth_type_discriminator, which clang refuses on x86 (check_input_source_builtin).
 static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t token, uint32_t count, const CheckValue* operands, CheckValue* value)
 {
     CheckInputReader* reader = input->reader;
@@ -1980,6 +1982,35 @@ static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t to
         const uint8_t kind = base != 0 ? type_kind(reader->types, base) : BUSTER_TYPE_KIND_VOID;
         valid = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
         number = valid ? reader->types->types.extent[type_index(base)] : 0;
+    }
+    else if (name == C_NAME_IS_BITWISE_CLONEABLE || name == C_NAME_IS_DESTRUCTIBLE || name == C_NAME_IS_NOTHROW_DESTRUCTIBLE)
+    {
+        // clang's type traits of C, an int (Sema's getLogicalOperationType), as its EvaluateUnaryTypeTrait gives them in
+        // C, where no type has a destructor: __is_destructible and __is_nothrow_destructible are 1 but for a type that
+        // isn't complete (void, an array of no bound) or a function's; __is_bitwise_cloneable
+        // (QualType::isBitwiseCloneableType) is its base element type's, 1 but for one that isn't complete, a function's
+        // among the 1s. Each first requires its operand complete as CheckUnaryTypeTraitTypeCompleteness does: the
+        // destructible ones its base element type, cv void or complete, and __is_bitwise_cloneable the type, cv void, an
+        // array of no bound or complete; an incomplete record or enumeration is an error.
+        const TypeTable* types = reader->types;
+        const bool destructible = name != C_NAME_IS_BITWISE_CLONEABLE;
+        TypeId base = queried != 0 ? type_strip_aligned(types, queried) : 0;
+        while (base != 0 && type_kind_is_array(type_kind(types, base)))
+        {
+            base = type_strip_aligned(types, type_element(types, base));
+        }
+        const TypeId operand = queried != 0 ? type_strip_aligned(types, queried) : 0;
+        const uint8_t operand_kind = operand != 0 ? type_kind(types, operand) : BUSTER_TYPE_KIND_VOID;
+        const uint8_t base_kind = base != 0 ? type_kind(types, base) : BUSTER_TYPE_KIND_VOID;
+        const bool operand_complete = operand_kind == BUSTER_TYPE_KIND_FUNCTION || type_is_complete(types, operand);
+        const bool base_complete = base_kind == BUSTER_TYPE_KIND_FUNCTION || type_is_complete(types, base);
+        // The operand clang requires complete, and whether it may be void or an array of no bound instead.
+        const TypeId required = destructible ? base : operand;
+        const uint8_t required_kind = destructible ? base_kind : operand_kind;
+        valid = queried != 0 && (required_kind == BUSTER_TYPE_KIND_VOID || (!destructible && required_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) ||
+                                 required_kind == BUSTER_TYPE_KIND_FUNCTION || type_is_complete(types, required));
+        number = destructible ? operand_kind != BUSTER_TYPE_KIND_FUNCTION && operand_kind != BUSTER_TYPE_KIND_VOID && operand_complete : base_complete;
+        type = BUSTER_TYPE_INT;
     }
     if (valid)
     {
