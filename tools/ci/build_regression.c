@@ -361,7 +361,8 @@ static bool same_time(struct stat a, struct stat b)
     return a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
 }
 
-// Whether every "output" of build/compile_commands.json names the configuration `config`, and there is one.
+// Whether every "command" of build/compile_commands.json compiles into the configuration `config`'s objects, by its
+// -o argument (CMake 3.25's entries have no "output"), and there is one.
 static bool compile_commands_of(const char* config)
 {
     Text text = read_file("build/compile_commands.json");
@@ -369,16 +370,22 @@ static bool compile_commands_of(const char* config)
     snprintf(directory, sizeof(directory), ".dir/%s/", config);
     uint32_t count = 0;
     bool result = true;
-    for (char* output = strstr(text.data, "\"output\""); output != 0; output = strstr(output + 1, "\"output\""))
+    for (char* command = strstr(text.data, "\"command\""); command != 0; command = strstr(command + 1, "\"command\""))
     {
-        char* end = strchr(output + 8, '\n');
+        char* end = strchr(command, '\n');
         if (end != 0)
         {
             *end = 0;
         }
-        result = result && strstr(output, directory) != 0;
+        char* object = strstr(command, " -o ");
+        char* after = object != 0 ? strchr(object + 4, ' ') : 0;
+        if (after != 0)
+        {
+            *after = 0;
+        }
+        result = result && object != 0 && strstr(object, directory) != 0;
         count += 1;
-        output = end != 0 ? end : output;
+        command = end != 0 ? end : command + strlen(command);
     }
     free(text.data);
     return result && count != 0;
