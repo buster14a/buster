@@ -31,8 +31,8 @@ base pages alone, has an inaccessible page on each side for the same reason. So
 the advice is only where the layout doesn't decide:
 
 - `MADV_NOHUGEPAGE` at the reservation for base pages of 2 MB or more (a units
-  lane's 16 MB floor, the tables reserved in base pages throughout, the
-  deferred checker's slices);
+  lane's 16 MB floor, the tables reserved in base pages throughout, such as
+  the preprocessor's arena of tables, the deferred checker's slices);
 - `MADV_HUGEPAGE` from `base + small` to the mapping's end at the first commit
   that reaches past `base + small` (`Arena.huge`, which the pool keeps), which a
   host whose transparent huge pages are `madvise` needs, and which makes the
@@ -40,7 +40,8 @@ the advice is only where the layout doesn't decide:
 
 An arena that stays in its base pages, as most of a small unit's do, takes one
 `mmap` and one `mprotect` and no advice. An empty file's `-fsyntax-only` made
-146 `madvise` calls before, 48 since.
+146 `madvise` calls before, 48 since, and 12 once the preprocessor's tables
+were base pages throughout in one arena of tables (below).
 
 Fewer arenas save more than less advice: on the 9700X an arena costs 2 to 3.4
 µs with its teardown, by its size, though it holds a page or none, in its
@@ -140,8 +141,8 @@ so that the preprocessor retries with smaller tables. The mapping is advised
 `MADV_NOHUGEPAGE` once, each table's huge pages `MADV_HUGEPAGE`, and one
 `mprotect` commits it whole.
 So a lane's first unit reserves the preprocessor's 27 tables of records, its
-stacks' 12 columns and its file cache with one `mmap`, one `mprotect` and an
-advice call for each table with huge pages, where they took up to four calls
+stacks' 12 columns and its file cache, all of them base pages (#652), with one
+`mmap`, one `mprotect` and one advice call, where they took up to four calls
 each, every one of which takes the address space's lock for writing; and each
 unit discards them with one `MADV_DONTNEED`, one TLB flush sent to the other
 lanes rather than one for each table. The pool matches it by

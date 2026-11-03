@@ -390,7 +390,7 @@ static bool memory_layout_refusal(void)
 // Let exec's loader map its ELF segments and make RELRO read-only. Refuse only the compiler's inaccessible
 // reservations or read/write commits, avoiding a guessed RLIMIT_AS floor that a smaller compiler can pass. Operation 3
 // refuses, as Valgrind may, inaccessible reservations of 8 to 64 GiB with EINVAL: of a unit's, only the preprocessor's
-// arena of tables (pp_initialize_once, 9.72 GB in its full shape with the stacks' columns), between its 4 GiB arenas and
+// arena of tables (pp_initialize_once, 9.65 GB in its full shape with the stacks' columns), between its 4 GiB arenas and
 // its 64 GiB ones, whose refusal the compact shape must take in.
 static bool memory_refuse(uint32_t operation)
 {

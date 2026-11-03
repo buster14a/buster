@@ -479,23 +479,25 @@ makes its own; with one, the units and lanes that share it read each file once
 - **Tables of a fixed size** (#652). The records' tables (ranges, files,
   macros, items and the rest), the three stacks' token columns and a unit's
   own file cache are pushed whole as the unit starts, as the tables of one
-  arena (`arena_reserve_tables`, #1128): `pp_tokens_plan` lays out a stack's
-  columns as `pp_tokens_reserve` lays out the output's in an arena of its own.
-  Each stack's columns and the file cache had an arena of their own. An arena
-  costs 2 to 3.4 µs on the 9700X with its teardown, in its mapping, its
-  protection change and, once touched, its own page tables, though a small
-  unit touches a page of each or none (a benchmark of 90 reservations in a
-  forked process, each committing 64 KB and touching a page: 3.35 µs each at
-  64 GB, 2.11 at 2 MB, 1.36 as ranges of one mapping, 0.49 for the page's
-  fault alone; [the
+  arena (`arena_reserve_tables`, #1128), all of it base pages: `pp_tokens_plan`
+  lays out a stack's columns as `pp_tokens_reserve` lays out the output's in an
+  arena of tables of its own. The stacks' columns and the file cache had four
+  arenas of their own. An arena costs 2 to 3.4 µs on the 9700X with its
+  teardown, in its mapping, its protection change and, once touched, its own
+  page tables, though a small unit touches a page of each or none (a benchmark
+  of 90 reservations in a forked process, each committing 64 KB and touching a
+  page: 3.35 µs each at 64 GB, 2.11 at 2 MB, 1.36 as ranges of one mapping,
+  0.49 for the page's fault alone; [the
   record](https://github.com/buster14a/buster-performance/tree/b8048387bc7a16d89329acb9ae8df96d8f8acdf2/docs/measurements/fewer-arenas-652-2026-11-03)).
-  The file cache's 120 KB, which `file_cache_initialize` writes whole, are
-  base pages, where in an arena of its own the pages past its first 64 KB were
-  a huge page the kernel clears. An empty file's `-fsyntax-only` makes four
-  fewer `mmap`, `mprotect` and `madvise` calls each (241 system calls rather
-  than 254 on a 7940HS). The output's columns keep an arena of tables of their
-  own, whose huge pages pay on large units, and a history table that outgrows
-  its slice still moves to an arena of its own.
+  Huge pages past each table's first pages took an advice call for each table
+  and split the mapping around them: an empty file's `-fsyntax-only` makes 12
+  `madvise` calls rather than 54, and 186 system calls rather than 237, on the
+  9700X. None of the tables grows large enough for base pages to cost the large
+  units much: on `sqlite3.c` the macros touch the most, 368 KB, and on this
+  compiler's `main.c` the items 1.9 MB and the macros 1.1 MB. The output's
+  columns keep an arena of tables of their own, whose huge pages pay on large
+  units, and a history table that outgrows its slice still moves to an arena of
+  its own.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
