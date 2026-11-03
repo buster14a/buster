@@ -676,6 +676,74 @@ The statements, the controls and the tasks' loops, are two thirds of the
 stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
 templates' target.
 
+## Lean steps in the tasks' loop (#1048)
+
+The measurements above rule out a separate pass over every node: #1197's and
+#1201's, scalar and AVX-512, cost more per node than the expansion they would
+replace. #1235 tried the other way around: make the loop's one visit of each
+node cheaper. Its commit `3828a06c` added `c_check_program_lean.c`:
+
+- **The step.** When the vector path's loop popped an EXPRESSION task of one of
+  the expansion's ordinary shapes, a lean step took the node: folded constants,
+  `VALUE` reads and addresses, casts, conversions, selections, `&x`, `*p`,
+  member accesses but bit-fields', the unary, truth and binary operators below
+  VECTOR, the comma, scalar assignment, and pointer arithmetic and subscripts.
+- **Exactness.** It pushed and wrote what `check_lower_expand` would, through
+  the same helpers and in the same order, testing only the expansion's cases
+  before its own.
+- **What it left out.** It read only the columns its case needed, never the
+  node's 96-byte `CheckValue`. It pushed operands inline. It continued with the
+  operand the node evaluates first instead of pushing and popping it.
+- **Everything else** went to the expansion, node by node.
+
+It took 91.35% of `sqlite3.c`'s evaluated nodes. The default compile's objects
+were the same as `--scalar`'s, which keeps the expansion, on all of these:
+
+- `sqlite3.c`, with #136's options and with the frozen corpus's pinned ones;
+- Lua 5.4.8's 34 units;
+- c-testsuite's subset of 220.
+
+callgrind counted the tasks' loop with what it calls (`check_lower_drain`) on
+`sqlite3.c`, on a baseline build with the steps forced on for the count. It
+fell from 124.4 M instructions to 110.2 M. This session's Xeon put the vector
+path's `lower.statements` 5% lower, at medians of 15 alternating runs.
+
+The 9700X ran the same base twice, two separate runs of `measure-compile`'s
+medians of 11 on `sqlite3.c` with perf's counters of 11 compiles. The steps were
+on at `3fee64da`
+([run](https://github.com/buster14a/buster/actions/runs/41650771613/job/125972558973))
+and off at `2309a558`, which is the base's tree plus a source comment
+([run](https://github.com/buster14a/buster/actions/runs/41655565084/job/125989536872)):
+
+| row | steps on | steps off |
+| --- | ---: | ---: |
+| `lower` | 12.233 ms (12.172 to 12.307) | 12.378 ms (12.286 to 12.456) |
+| `lower.statements` | 8.217 ms (8.114 to 8.292) | 8.358 ms (8.228 to 8.465) |
+| `lower.bodies` | 1.522 ms | 1.490 ms |
+| Tier 0 | 4.876 ms | 4.797 ms |
+| the compile's user instructions | 1,181.1 M | 1,200.2 M |
+| the compile's user cycles | 525.7 M | 526.1 M |
+| the compile's user branch misses | 3.07 M | 3.09 M |
+
+The steps removed 19.2 M of the compile's instructions, 1.6%, but no cycles and
+no branch misses. Their `lower.statements` median was 0.14 ms lower. That is
+within the spread of main's own separate runs on earlier bases: 8.34, 8.49 and
+8.53 ms in the two sections above.
+
+So the instructions the steps removed ran beside the loop's critical path,
+which they kept. That path is each node's chain of dependent loads:
+
+- the node's op and payload row;
+- its type, then its type's class and facts;
+- its object, then its local;
+- its operand, then the operand's type.
+
+On Zen 5 the tasks' loop is bound by those chains, not by its instruction count
+or its branches, as on this session's Xeon it was in part. The steps aren't
+kept, and their code stays in #1235's history (`3828a06c`, `3fee64da`). A step
+that pays has to shorten the chain each node waits on, or overlap the chains of
+several nodes, which one node at a time doesn't.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
