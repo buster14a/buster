@@ -13,7 +13,9 @@
 //     alignments; a push that fills the arena exactly, and one more byte, which fails and leaves the arena as it was;
 //     sizes and counts whose arithmetic overflows; pop_to; arenas that couldn't be reserved; a 64 GB reservation of which
 //     only the touched page is committed (mincore); and the page sizes asked for, read back from /proc/self/smaps: base
-//     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there.
+//     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there. An arena
+//     of tables (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a
+//     pool for the same tables alone.
 //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
 //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
 //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
@@ -768,6 +770,82 @@ static bool lane_test_arenas(void)
     arena_pool = saved_pool;
     arena_release(&wide);
     arena_pool_release(&pool);
+
+    // An arena of tables (arena_reserve_tables, #1128): each table zero, writable, on a page and apart from the others, in
+    // the pages an arena of its own would have: base pages alone for a small table, advised against huge pages; base pages
+    // to a huge-page boundary then huge pages for a larger one, with 2 MB or more of base pages advised against them. In a
+    // pool it serves only a reservation of the same tables, which takes it zero again and with its advice; neither another
+    // layout, nor the same tables under a units lane's floor, nor an ordinary reservation of its size.
+    ArenaTable tables[] = {
+        { .bytes = 3 * BUSTER_ARENA_PAGE_BYTES + 5, .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES / 2 },
+        { .bytes = 64, .small = BUSTER_ARENA_SMALL_BYTES },
+        { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES },
+    };
+    const uint32_t table_count = BUSTER_ARRAY_LENGTH(tables);
+    Arena held = arena_reserve_tables(tables, table_count);
+    bool apart = held.base != 0 && held.length == held.capacity;
+    for (uint32_t i = 0; apart && i < table_count; i += 1)
+    {
+        uint8_t* bytes = tables[i].base;
+        apart = bytes != 0 && (uintptr_t)bytes % BUSTER_ARENA_PAGE_BYTES == 0 && bytes >= held.base && bytes + tables[i].bytes <= held.base + held.capacity &&
+                (i == 0 || (uint8_t*)tables[i - 1].base + tables[i - 1].bytes <= bytes) && bytes[0] == 0 && bytes[tables[i].bytes - 1] == 0;
+        if (apart)
+        {
+            memset(bytes, 0xff, tables[i].bytes);
+        }
+    }
+    lane_test_expect(&tally, apart, "an arena of tables' tables aren't zero, writable and apart");
+    uint8_t* const split = tables[1].base;
+    uint8_t* const wide_table = tables[3].base;
+    if (apart)
+    {
+        const bool small_tables = !lane_test_huge_capable((uintptr_t)tables[0].base, &found) && found && !lane_test_huge_capable((uintptr_t)tables[2].base, &found) && found;
+        const bool split_head = ((uintptr_t)split + BUSTER_ARENA_HUGE_PAGE_BYTES / 2) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0 && !lane_test_vm_flag((uintptr_t)split, "hg", &found) && found;
+        const bool split_tail = lane_test_huge_capable((uintptr_t)split + BUSTER_ARENA_HUGE_PAGE_BYTES / 2, &found) && found &&
+                                lane_test_vm_flag((uintptr_t)split + tables[1].bytes - 1, "hg", &found) && found;
+        const bool wide_head = lane_test_vm_flag((uintptr_t)wide_table, "nh", &found) && found &&
+                               lane_test_vm_flag((uintptr_t)wide_table + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES - 1, "nh", &found) && found;
+        const bool wide_tail = ((uintptr_t)wide_table + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0 &&
+                               lane_test_huge_capable((uintptr_t)wide_table + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, &found) && found;
+        lane_test_expect(&tally, small_tables && split_head && split_tail && wide_head && wide_tail, "an arena of tables' pages aren't each table's own arena's");
+    }
+    arena_pool = &pool;
+    const uint8_t* const held_base = held.base;
+    arena_release(&held);
+    Arena plain = arena_reserve(held_base != 0 ? (uint64_t)(wide_table - held_base) + tables[3].bytes : BUSTER_ARENA_HUGE_PAGE_BYTES);
+    lane_test_expect(&tally, held_base != 0 && pool.count == 1 && plain.base != 0 && plain.base != held_base, "an ordinary reservation took an arena of tables");
+    held = arena_reserve_tables(tables, table_count);
+    bool reused = held.base == held_base && held_base != 0 && tables[1].base == split && tables[3].base == wide_table && pool.count == 0;
+    for (uint32_t i = 0; reused && i < table_count; i += 1)
+    {
+        const uint8_t* bytes = tables[i].base;
+        reused = bytes[0] == 0 && bytes[tables[i].bytes - 1] == 0;
+    }
+    reused = reused && lane_test_vm_flag((uintptr_t)split + tables[1].bytes - 1, "hg", &found) && found && lane_test_vm_flag((uintptr_t)wide_table, "nh", &found) && found;
+    lane_test_expect(&tally, reused, "a pooled arena of tables wasn't taken again, zero and with its advice");
+    arena_release(&held);
+    tables[0].bytes += BUSTER_ARENA_PAGE_BYTES;
+    Arena other = arena_reserve_tables(tables, table_count);
+    tables[0].bytes -= BUSTER_ARENA_PAGE_BYTES;
+    const uint64_t saved_floor = arena_small_floor;
+    arena_small_floor = 16ull << 20;
+    Arena floored = arena_reserve_tables(tables, table_count);
+    const bool floored_base = floored.base != 0 && !lane_test_huge_capable((uintptr_t)tables[1].base + BUSTER_ARENA_HUGE_PAGE_BYTES / 2, &found) && found;
+    arena_small_floor = saved_floor;
+    lane_test_expect(&tally, other.base != 0 && other.base != held_base && floored.base != 0 && floored.base != held_base && floored_base && pool.count == 1,
+                     "an arena of tables served another layout, or the floor's");
+    Arena* const tables_held[] = { &plain, &other, &floored };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(tables_held); i += 1)
+    {
+        arena_release(tables_held[i]);
+    }
+    arena_pool = saved_pool;
+    arena_pool_release(&pool);
+    ArenaTable none[] = { { .bytes = 0, .small = 0, .base = (void*)1 } };
+    const Arena refused = arena_reserve_tables(none, 1);
+    const Arena empty_tables = arena_reserve_tables(tables, 0);
+    lane_test_expect(&tally, refused.base == 0 && none[0].base == 0 && empty_tables.base == 0, "an arena of tables reserved a table of no bytes, or no tables");
 
     // The executable's .bss in base pages (arena_static_base_pages): a static of this file's there, and its last page. The
     // static is page-aligned so that its page is a whole page of .bss whatever the linker's layout; the advice leaves out

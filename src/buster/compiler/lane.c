@@ -36,6 +36,8 @@
 //     overwrites what pushes took, for tests of code that reuses an arena, and a thread's ArenaPool (arena_pool) keeps
 //     the arenas it releases for its next reservations, which take them zero-filled, their committed prefixes still
 //     writable unless commit charge is bounded, and their mappings perhaps larger than the capacity asked for.
+//     arena_reserve_tables lays out tables of fixed sizes that are reserved and released together in one arena, each
+//     in the pages an arena of its own would have.
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, LaneSession, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index,
@@ -145,6 +147,9 @@ struct Arena
     // arena_measure): its pages past `small` are huge only if this is past it, and a reservation from the pool takes
     // the arena for any capacity up to it (arena_reserve_policy).
     uint64_t reserved;
+    // For an arena of arena_reserve_tables, its tables' layout (arena_tables_layout), never 0; 0 for any other. The pool
+    // gives an arena only to a reservation of the same layout.
+    uint64_t layout;
 };
 
 // Reserves up to `capacity` bytes (less under address-space constraints), zero-filled. A fresh mapping is initially
@@ -159,6 +164,24 @@ static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
 // page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X. The thread's
 // arena_small_floor, if larger, takes the place of `small`.
 static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint64_t small);
+// One of the tables arena_reserve_tables lays out: its `bytes`, of which the first `small` (with the minimum and the floor
+// of arena_reserve_small's) are base pages and the rest huge pages, as in an arena of its own from arena_reserve_small.
+// The reservation sets `base`, or leaves it null if it fails.
+typedef struct ArenaTable ArenaTable;
+struct ArenaTable
+{
+    uint64_t bytes;
+    uint64_t small;
+    void* base;
+};
+#define BUSTER_ARENA_TABLES 64
+// Reserves one arena for `count` tables of fixed sizes, at most BUSTER_ARENA_TABLES, each zero-filled, writable, starting
+// on a page and in base and huge pages as an arena of its own would be (#1128). A group of tables that are reserved and
+// released together, as a unit's preprocessor's are, so takes one mapping, one commit and one discard rather than one of
+// each per table, every one of which takes the address space's lock or sends the other lanes a TLB flush. The arena is
+// pushed full and released as one (arena_release); the thread's pool gives it again only to a reservation of the same
+// tables. Returns an arena without capacity, and the bases null, if the address space can't be reserved.
+static __attribute__((unused)) Arena arena_reserve_tables(ArenaTable* tables, uint32_t count);
 
 // The base pages every arena the thread reserves starts with, at least (0 for BUSTER_ARENA_SMALL_BYTES alone; a
 // multiple of BUSTER_ARENA_PAGE_BYTES). A thread whose arenas each hold a small and sparse part of its work, as a lane
@@ -348,6 +371,39 @@ static __attribute__((unused)) void arena_report_failure(FILE* stream, const cha
             (unsigned long long)(failure.bytes != 0 ? failure.bytes : requested), strerror(failure.error != 0 ? failure.error : ENOMEM));
 }
 
+// The pooled arena a reservation of `capacity` bytes, `small` of them base pages, takes, or BUSTER_ARENA_POOL_SLOTS for
+// none: of those with the same base pages and page layout, huge pages past `small` or none, the same tables' layout
+// (Arena.layout) and room for the capacity, the smallest, released last.
+static uint32_t arena_pool_choose(const ArenaPool* pool, uint64_t capacity, uint64_t small, uint64_t layout)
+{
+    const uint32_t count = pool != 0 ? pool->count : 0;
+    const bool huge = capacity > small;
+    uint32_t slot = BUSTER_ARENA_POOL_SLOTS;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const Arena* pooled = pool->arenas + i;
+        const Arena* best = pool->arenas + (slot != BUSTER_ARENA_POOL_SLOTS ? slot : i);
+        const bool match = pooled->layout == layout && pooled->small == small && (pooled->reserved > small) == huge && pooled->reserved >= capacity;
+        const bool better = slot == BUSTER_ARENA_POOL_SLOTS || pooled->reserved < best->reserved ||
+                            (pooled->reserved == best->reserved && pool->released[i] > pool->released[slot]);
+        slot = match && better ? i : slot;
+    }
+    return slot;
+}
+
+// Takes the arena in `slot` out of the pool, with the reservation's capacity, as a fresh arena's would be, whatever its
+// mapping holds.
+static Arena arena_pool_take(ArenaPool* pool, uint32_t slot, uint64_t capacity, uint64_t requested)
+{
+    Arena result = pool->arenas[slot];
+    result.capacity = capacity;
+    result.requested_capacity = requested;
+    pool->count -= 1;
+    pool->arenas[slot] = pool->arenas[pool->count];
+    pool->released[slot] = pool->released[pool->count];
+    return result;
+}
+
 // Past the first `small` bytes, base is placed so that base + small starts on a huge-page boundary, a page or more past
 // the mapping's start. The reservation itself is inaccessible and uncharged under strict overcommit; arena_push makes
 // only its used prefix writable.
@@ -371,29 +427,10 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
     small = small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES;
     small = arena_small_floor > small ? arena_small_floor : small;
     ArenaPool* pool = arena_pool;
-    const uint32_t count = pool != 0 ? pool->count : 0;
-    // A pooled arena holds the reservation if it has the same base pages and page layout, huge pages past `small` or
-    // none, and room for the capacity: of those, the smallest, released last. Its capacity is then the reservation's, as
-    // a fresh arena's would be, whatever its mapping holds.
-    const bool huge = capacity > small;
-    uint32_t slot = BUSTER_ARENA_POOL_SLOTS;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const Arena* pooled = pool->arenas + i;
-        const Arena* best = pool->arenas + (slot != BUSTER_ARENA_POOL_SLOTS ? slot : i);
-        const bool match = pooled->small == small && (pooled->reserved > small) == huge && pooled->reserved >= capacity;
-        const bool better = slot == BUSTER_ARENA_POOL_SLOTS || pooled->reserved < best->reserved ||
-                            (pooled->reserved == best->reserved && pool->released[i] > pool->released[slot]);
-        slot = match && better ? i : slot;
-    }
+    const uint32_t slot = arena_pool_choose(pool, capacity, small, 0);
     if (requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY && capacity != 0 && slot != BUSTER_ARENA_POOL_SLOTS)
     {
-        result = pool->arenas[slot];
-        result.capacity = capacity;
-        result.requested_capacity = requested;
-        pool->count -= 1;
-        pool->arenas[slot] = pool->arenas[pool->count];
-        pool->released[slot] = pool->released[pool->count];
+        result = arena_pool_take(pool, slot, capacity, requested);
     }
     else if (requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY)
     {
@@ -455,6 +492,110 @@ static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
 static __attribute__((unused)) Arena arena_reserve_exact(uint64_t capacity, uint64_t small)
 {
     return arena_reserve_policy(capacity, small, false);
+}
+
+// arena_reserve_tables' layout, from a huge-page boundary: each table's start, the end of its base pages and its end, in
+// whole pages. A table larger than its base pages starts where they end on a huge-page boundary and ends on one, as an
+// arena of its own lays them out (arena_reserve_policy); one of base pages alone starts at the next page. Returns the
+// bytes the tables span, and in `layout` a hash of their sizes and base pages, never 0.
+static uint64_t arena_tables_layout(const ArenaTable* tables, uint32_t count, uint64_t* starts, uint64_t* smalls, uint64_t* ends, uint64_t* layout)
+{
+    uint64_t at = 0;
+    uint64_t hash = 0xcbf29ce484222325ull ^ count;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint64_t bytes = (tables[i].bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        uint64_t small = (tables[i].small + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        small = small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES;
+        small = arena_small_floor > small ? arena_small_floor : small;
+        const bool huge = bytes > small;
+        const uint64_t start = huge ? ((at + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) - small : at;
+        starts[i] = start;
+        smalls[i] = start + (huge ? small : bytes);
+        ends[i] = huge ? smalls[i] + ((bytes - small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) : smalls[i];
+        at = ends[i];
+        hash = (hash ^ bytes) * 0x100000001b3ull;
+        hash = (hash ^ small) * 0x100000001b3ull;
+    }
+    *layout = hash | 1;
+    return at;
+}
+
+// The tables' mapping starts its first table on a huge-page boundary, a page or more past its start, and ends an
+// inaccessible page or more past their end. All of it is base pages but the tables' huge pages (#652's advice where the
+// layout doesn't decide): one MADV_NOHUGEPAGE for the mapping and one MADV_HUGEPAGE for each table with huge pages, which
+// stay advised while the pool keeps the mapping. Pushing the arena full commits it in one mprotect.
+static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+{
+    Arena result = { 0 };
+    uint64_t starts[BUSTER_ARENA_TABLES];
+    uint64_t smalls[BUSTER_ARENA_TABLES];
+    uint64_t ends[BUSTER_ARENA_TABLES];
+    uint64_t layout = 0;
+    bool valid = count != 0 && count <= BUSTER_ARENA_TABLES;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        valid = tables[i].bytes != 0 && tables[i].bytes <= BUSTER_ARENA_MAX_CAPACITY / BUSTER_ARENA_TABLES;
+    }
+    const uint64_t bytes = valid ? arena_tables_layout(tables, count, starts, smalls, ends, &layout) : 0;
+    ArenaPool* pool = arena_pool;
+    // An arena of tables' base pages are its capacity (as `small`), so that its commit takes it whole and advises nothing.
+    const uint32_t slot = valid ? arena_pool_choose(pool, bytes, bytes, layout) : BUSTER_ARENA_POOL_SLOTS;
+    if (slot != BUSTER_ARENA_POOL_SLOTS)
+    {
+        result = arena_pool_take(pool, slot, bytes, bytes);
+    }
+    else if (valid)
+    {
+        const uint64_t mapping_bytes = bytes + BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_PAGE_BYTES;
+        bool allowed = true;
+#if BUSTER_SANITIZER_RESOURCES
+        allowed = arena_test_reservation_allowed(mapping_bytes);
+#endif
+        errno = ENOMEM;
+        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+        if (mapping != MAP_FAILED)
+        {
+            const uintptr_t begin = ((uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            const uint64_t offset = begin - (uintptr_t)mapping;
+            if (bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            {
+                madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
+            }
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (ends[i] > smalls[i])
+                {
+                    madvise(mapping + offset + smalls[i], ends[i] - smalls[i], MADV_HUGEPAGE);
+                }
+            }
+            result = (Arena){
+                .base = mapping + offset,
+                .capacity = bytes,
+                .mapping_offset = offset,
+                .small = bytes,
+                .mapping_bytes = mapping_bytes,
+                .committed = offset,
+                .requested_capacity = bytes,
+                .reserved = bytes,
+                .layout = layout,
+            };
+        }
+        else
+        {
+            arena_failure = (ArenaFailure){ .bytes = bytes, .error = errno };
+        }
+    }
+    uint8_t* base = result.base != 0 ? arena_push(&result, bytes, BUSTER_ARENA_PAGE_BYTES) : 0;
+    if (base == 0)
+    {
+        arena_release(&result);
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        tables[i].base = base != 0 ? base + starts[i] : 0;
+    }
+    return result;
 }
 
 // Powers-of-two table capacities keep their hashing invariants. Ten reductions still leave 1024 file records and
@@ -531,6 +672,7 @@ static void arena_release(Arena* arena)
                 .committed = committed,
                 .requested_capacity = arena->requested_capacity,
                 .reserved = arena->reserved,
+                .layout = arena->layout,
             };
         }
         else

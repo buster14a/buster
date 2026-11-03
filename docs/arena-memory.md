@@ -112,7 +112,30 @@ mapping that holds its capacity with the same base pages and page layout (huge
 pages past `small`, or none; `Arena.reserved` is what the mapping was laid out
 for), and gets the capacity it asked for, as from a fresh mapping. Reuse starts
 with zero length and peak and zero-filled pages. A failed reprotection or
-discard unmaps the arena instead. Tests that deliberately
+discard unmaps the arena instead.
+
+An arena of tables (`arena_reserve_tables`, #1128) holds several fixed-size
+tables that are reserved and released together in one mapping: a unit's
+preprocessor tables, each token buffer's four columns, and the parser's token,
+tree and postorder columns. Each table starts on a page and is laid out as an
+arena of its own of its size would be: base pages up to its `small` (with
+`arena_reserve_small`'s minimum and the thread's floor) and, past them, huge
+pages from a huge-page boundary. The mapping is advised `MADV_NOHUGEPAGE` once,
+each table's huge pages `MADV_HUGEPAGE`, and one `mprotect` commits it whole.
+So a lane's first unit reserves the preprocessor's 27 tables with one `mmap`,
+one `mprotect` and an advice call for each table with huge pages, where they
+took up to four calls each, every one of which takes the address space's lock
+for writing; and each unit discards them with one `MADV_DONTNEED`, one TLB
+flush sent to the other lanes rather than 27. The pool matches it by
+`Arena.layout`, a hash of its tables' sizes and base pages: only a reservation
+of the same tables takes it, and no ordinary reservation does. The parser's
+columns follow their unit's token count, so the parser rounds each to a power of
+two, which units of similar sizes then share. `test-lanes` checks the tables'
+zero, writable and separate bytes, their pages' advice against an arena of
+their own's, and the pool's reuse for the same tables alone, not for another
+layout, the floor's or an ordinary reservation.
+
+Tests that deliberately
 poison unused logical capacity explicitly commit that test memory first; a raw
 `base` pointer no longer authorizes touching an owned reservation.
 

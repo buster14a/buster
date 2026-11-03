@@ -11869,8 +11869,10 @@ struct Parser
     ParseStatistics statistics;
     GnuSyntax gnu;
     Arena gnu_arena;
-    // The token columns and the tree's, each in an arena of its own, so that their first pages are base pages
-    // (lane.c), and a parse's temporaries without ParseOptions.scratch.
+    // The token columns and the tree's, whose first pages are each base pages (lane.c): those a parse reserves together
+    // are the tables of one arena, the tokens' in the first, the tree's in the sixth and the postorder's in the twelfth
+    // (parse_columns, #1128), and a column reserved alone has an arena of its own (parse_column). Then a parse's
+    // temporaries without ParseOptions.scratch.
     Arena columns[17];
     Arena scratch;
     // The vector path's arrays (ParseKernels and ParseVectorBuffers): the tree's in its columns, the rest a parse's
@@ -11955,6 +11957,42 @@ static void* parse_column(Parser* parser, uint32_t column, uint64_t count, uint6
     return bytes != 0 ? bytes + BUSTER_PARSE_TOKEN_PADDING * size : 0;
 }
 
+// Padded columns as parse_column's, `count` of them, the ith of `entries[i]` entries of `sizes[i]` bytes, all in arena
+// `column` as its tables (arena_reserve_tables, #1128): columns that a parse reserves together take one mapping and one
+// discard, their first pages each base pages as in an arena of its own. Each table takes a power of two of bytes, from
+// BUSTER_ARENA_SMALL_BYTES: a pooled arena of tables serves only its own layout, which units of a few sizes then share,
+// where each unit's token count would make one of its own. Sets *columns[i] to each, or every one to null if they can't
+// be reserved.
+static bool parse_columns(Parser* parser, uint32_t column, uint32_t count, const uint64_t* entries, const uint64_t* sizes, void** columns[])
+{
+    ArenaTable tables[8];
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint64_t bytes = (entries[i] + 2 * BUSTER_PARSE_TOKEN_PADDING) * sizes[i] + 64;
+        tables[i] = (ArenaTable){
+            .bytes = bytes <= BUSTER_ARENA_SMALL_BYTES ? BUSTER_ARENA_SMALL_BYTES : 1ull << (64 - __builtin_clzll(bytes - 1)),
+            .small = BUSTER_ARENA_SMALL_BYTES,
+        };
+    }
+    arena_release(&parser->columns[column]);
+    parser->columns[column] = arena_reserve_tables(tables, count);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        *columns[i] = tables[i].base != 0 ? (uint8_t*)tables[i].base + BUSTER_PARSE_TOKEN_PADDING * sizes[i] : 0;
+    }
+    return parser->columns[column].base != 0;
+}
+
+// The tree's columns for the unit's tokens, in arena 5 (parse_columns).
+static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
+{
+    const uint64_t count = parser->tokens.count;
+    const uint64_t entries[] = { count, count, count };
+    const uint64_t sizes[] = { 1, 4, 4 };
+    void** columns[] = { (void**)&tree->roles, (void**)&tree->parents, (void**)&tree->depths };
+    return parse_columns(parser, 5, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
+}
+
 // The meaning of every name the unit may use, ordinary but for clang's predeclared typedef names.
 static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 {
@@ -12004,16 +12042,15 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     arena_release(&parser->gnu_arena);
     if (result)
     {
-        // The columns, reserved in turn until one can't be.
+        // The columns, all or none.
         ParseTokens* tokens = &parser->tokens;
-        tokens->kinds = parse_column(parser, 0, capacity, 1);
-        tokens->names = tokens->kinds != 0 ? parse_column(parser, 1, capacity, 4) : 0;
-        tokens->sources = tokens->names != 0 ? parse_column(parser, 2, capacity, 4) : 0;
-        tokens->pragma_sources = tokens->sources != 0 ? parse_column(parser, 3, (uint64_t)output->count + 1, 4) : 0;
-        tokens->pragma_positions = tokens->pragma_sources != 0 ? parse_column(parser, 4, (uint64_t)output->count + 1, 4) : 0;
-        tokens->flags = tokens->pragma_positions != 0 ? parse_column(parser, 10, capacity, 1) : 0;
+        const uint64_t pragmas = (uint64_t)output->count + 1;
+        const uint64_t entries[] = { capacity, capacity, capacity, pragmas, pragmas, capacity };
+        const uint64_t sizes[] = { 1, 4, 4, 4, 4, 1 };
+        void** columns[] = { (void**)&tokens->kinds, (void**)&tokens->names, (void**)&tokens->sources, (void**)&tokens->pragma_sources, (void**)&tokens->pragma_positions,
+                             (void**)&tokens->flags };
+        result = parse_columns(parser, 0, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
         tokens->capacity = (uint32_t)capacity;
-        result = tokens->flags != 0;
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
     if (result)
@@ -12043,10 +12080,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         // sqlite3.c's took 63 MB, which the C driver's checker takes again (#528).
         const uint32_t count = parser->tokens.count;
         ParseTree tree = { 0 };
-        tree.roles = parse_column(parser, 5, count, 1);
-        tree.parents = tree.roles != 0 ? parse_column(parser, 6, count, 4) : 0;
-        tree.depths = tree.parents != 0 ? parse_column(parser, 7, count, 4) : 0;
-        const bool reserved = tree.depths != 0 && parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree) &&
+        const bool reserved = parse_tree_columns_reserve(parser, &tree) && parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree) &&
                               parse_vector_buffers_reserve(&parser->buffers, temporary, count);
         if (reserved)
         {
@@ -12089,10 +12123,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     }
     if (result && scalar)
     {
-        parser->tree.roles = parse_column(parser, 5, parser->tokens.count, 1);
-        parser->tree.parents = parser->tree.roles != 0 ? parse_column(parser, 6, parser->tokens.count, 4) : 0;
-        parser->tree.depths = parser->tree.parents != 0 ? parse_column(parser, 7, parser->tokens.count, 4) : 0;
-        const ParseScalarResult parsed = parser->tree.depths != 0 ?
+        const ParseScalarResult parsed = parse_tree_columns_reserve(parser, &parser->tree) ?
             parse_scalar(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, parser->tokens.count, parser->language, &parser->meanings, &parser->tree,
                          temporary, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
             (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false };
@@ -12125,16 +12156,15 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         // for the passes.
         const uint32_t count = parser->tokens.count;
         const bool sizes = parser->options.sizes;
-        parser->postorder = parse_column(parser, 11, count, 4);
-        parser->positions = parser->postorder != 0 ? parse_column(parser, 13, count, 4) : 0;
-        parser->ends = parser->positions != 0 ? parse_column(parser, 14, count, 4) : 0;
-        parser->first_children = parser->ends != 0 ? parse_column(parser, 15, count, 4) : 0;
-        parser->next_siblings = parser->first_children != 0 ? parse_column(parser, 16, count, 4) : 0;
-        parser->sizes = parser->next_siblings != 0 && sizes ? parse_column(parser, 12, count, 4) : 0;
+        const uint64_t entries[] = { count, count, count, count, count, count };
+        const uint64_t widths[] = { 4, 4, 4, 4, 4, 4 };
+        void** columns[] = { (void**)&parser->postorder,      (void**)&parser->positions,     (void**)&parser->ends,
+                             (void**)&parser->first_children, (void**)&parser->next_siblings, (void**)&parser->sizes };
+        const bool reserved = parse_columns(parser, 11, sizes ? 6 : 5, entries, widths, columns);
         uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
         uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
         uint32_t* starts = sizes ? BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1) : 0;
-        result = parser->next_siblings != 0 && last_children != 0 && before != 0 && (!sizes || (parser->sizes != 0 && starts != 0));
+        result = reserved && last_children != 0 && before != 0 && (!sizes || starts != 0);
         if (result)
         {
             parse_tree_columns(parser->tree.parents, count, last_children, before, parser->postorder, parser->positions, parser->ends, parser->first_children,
