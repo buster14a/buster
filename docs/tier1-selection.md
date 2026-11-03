@@ -28,8 +28,12 @@ patterns are:
   3, 5 or 9; add/shift and three-operand addition through `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
-  into registers, while stores write exactly one/two bytes. Larger displacements
-  return an unsupported result until materialization is implemented. An
+  into registers, while stores write exactly one/two bytes. An address whose
+  constant index, scaled, and offset don't fit a disp32 (#141: `p[1ull << 30]`,
+  a struct array's element past 2 GB) is its own `lea`, the constant in a
+  register (its node's `mov`) as the index and the offset the displacement,
+  which no user folds; one whose offset alone doesn't fit 32 bits is still
+  refused. An
   access's address is walked (`tier1_select_address`, #140) through the nodes
   only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
   typed stream's integers put around every address, addresses (one after

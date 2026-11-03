@@ -3354,6 +3354,23 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             }
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
+        else if (constant_index && operand.offset == (int64_t)(int32_t)operand.offset)
+        {
+            // A constant index whose scaled value doesn't fit the displacement (#141: `p[1ull << 30]`, a struct array's
+            // element past 2 GB): the constant in a register, its own node's mov, as an index the lea scales, and the
+            // offset the displacement. No walk: nothing folds into it, nor it into a user, whose walk stops at it (the
+            // displacement doesn't fit there either), and the bottom-up path's class for it is the REG leaf's
+            // (tier1_burs_displacement), whose pattern is maximal munch's, this one.
+            base.rule = TIER1_RULE_ADDRESS;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.stack_object = BUSTER_IR_NONE;
+            base.displacement = (int32_t)operand.offset;
+            base.scale = (uint8_t)tier1_select_log2(operand.scale);
+            base.fold_count = 0;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
     }
     else if ((op == IR_LOAD && tier1_select_memory_width(type) != 0) || (op == IR_STORE && tier1_select_memory_width(function->type[b]) != 0))
     {

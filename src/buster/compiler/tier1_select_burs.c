@@ -24,8 +24,9 @@
 //   rule's kind (tier1_burs_pick), whose walks fill its fields. A node whose operator the grammar doesn't cover, or whose
 //   rule names a candidate the walks didn't make (a walk past BUSTER_TIER1_SELECT_WALK), takes maximal munch's
 //   (tier1_select_munch), the scalar twin's choice: it is the fallback for what the tables don't cover. An address whose
-//   displacement doesn't fit 32 bits has no candidate at all: its class is the REG leaf's (tier1_burs_displacement),
-//   whose pattern the plan builds for every node, so that the vector path refuses it as the scalar twin does. The cover is
+//   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (tier1_burs_displacement), whose pattern is
+//   munch's, the one candidate it has (its constant index in a register, #141) or none, so that the vector path takes or
+//   refuses it as the scalar twin does. The cover is
 //   the cheapest the grammar has for each tree, and the grammar has every candidate the generator makes for the
 //   operators it covers, so it is never costlier than munch's in the grammar's cost: each pattern's structural bound on
 //   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
