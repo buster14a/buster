@@ -321,7 +321,11 @@ bytes a compare on the vector path and one at a time on its scalar twin, and a
 function without one is the promoted function itself. The rewrite is scalar:
 two passes of one body, counting then writing, on the functions with 128-bit
 values alone (two of `sqlite3.c`'s 2,668, none of Lua's), whose cost is below
-measurement on the compile (the record below). With the split, `--tier1
+measurement on the compile (the record below). Each phi's and call's remapped
+list is appended to the `extra` table, so phis that share a predecessor list,
+as the verifier lets them, can take the output past what a `u32` counts where
+the source isn't: the counting pass counts in 64 bits and refuses such an
+output as a limit before it allocates. With the split, `--tier1
 --tier1-strict` compiles every function of `sqlite3.c` and speedtest1's, whose
 `--verify` hash is unchanged.
 
@@ -347,7 +351,8 @@ programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
 must make the same function, both verifiers, the optimizer and both of Tier 1's
 paths with their certificates, natively, against the IR's interpreter on the
 unsplit function and the programs' stack machine; the split's refusals and its
-scan's twins; and 300 of Tier 0's random long double programs (calls of C
+scan's twins; overlapping `extra` slices, and `I128` phis that share one
+predecessor list past the `u32` limit; and 300 of Tier 0's random long double programs (calls of C
 functions of long doubles, every conversion, NaNs, frame objects, `?:`'s blocks)
 through the optimizer and both of Tier 1's paths natively against their stack
 machine (#141). `test-checker-driver`'s wide values' fixture

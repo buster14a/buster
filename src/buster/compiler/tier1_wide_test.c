@@ -21,7 +21,9 @@
 // unsupported; a function without an I128 instruction, returned as it is; and the scan's vector path against its scalar
 // twin on type columns of every length to 200, each ending at a PROT_NONE page, with an I128 at each place; and nine
 // long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported; and
-// functions whose extra slices overlap, a call's arguments sharing a phi's words, which both split paths keep apart.
+// functions whose extra slices overlap, a call's arguments sharing a phi's words, which both split paths keep apart;
+// and I128 phis that share one predecessor list, whose halves' lists take the output's extra table past a u32's count,
+// which both paths refuse as a limit before they allocate.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -1477,6 +1479,123 @@ static void tier1_wide_test_shared_slices(Tier1WideTest* test)
     }
 }
 
+static void tier1_wide_test_set(IrFunction* function, uint32_t id, uint32_t op, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
+{
+    function->op[id] = (uint8_t)op;
+    function->type[id] = (uint8_t)type;
+    function->a[id] = a;
+    function->b[id] = b;
+    function->c[id] = c;
+}
+
+// A function of `phis` I128 phis that share one list of `predecessors` pairs, as the verifier lets them: b0 loads an
+// I128 from its pointer; blocks 1 to `predecessors` each go to the join, every one but the last on a false constant,
+// to the next block otherwise; the join's phis each take the load from every predecessor, and the last is stored back.
+// Built in its columns: as text, each phi would spell its own list.
+static bool tier1_wide_test_shared_phis(Tier1WideTest* test, uint32_t phis, uint32_t predecessors, IrFunction* function)
+{
+    const uint32_t none = BUSTER_IR_NONE;
+    const uint32_t join = predecessors + 1;
+    const uint32_t first_phi = 4 + predecessors;
+    const IrSizes sizes = {
+        .instruction_count = (uint64_t)first_phi + phis + 2,
+        .block_count = (uint64_t)predecessors + 2,
+        .extra_count = (uint64_t)predecessors * 2,
+        .constant_count = 1,
+        .parameter_count = 1,
+    };
+    const bool ok = tier1_wide_test_expect(test, ir_create(&test->output, &sizes, function) == IR_OK, "create the shared phis' function");
+    if (ok)
+    {
+        function->result_type = IR_VOID;
+        function->parameter_types[0] = IR_PTR;
+        function->constants[0] = (IrConstant){ 0 };
+        tier1_wide_test_set(function, 0, IR_PARAM, IR_PTR, 0, none, none);
+        tier1_wide_test_set(function, 1, IR_LOAD, IR_I128, 0, none, none);
+        function->alignment_log2[1] = 4;
+        tier1_wide_test_set(function, 2, IR_CONST, IR_I1, 0, none, none);
+        tier1_wide_test_set(function, 3, IR_BR, IR_VOID, 1, none, none);
+        function->block_offsets[0] = 0;
+        for (uint32_t k = 1; k <= predecessors; k += 1)
+        {
+            function->block_offsets[k] = 3 + k;
+            if (k < predecessors)
+            {
+                tier1_wide_test_set(function, 3 + k, IR_CBR, IR_VOID, 2, join, k + 1);
+            }
+            else
+            {
+                tier1_wide_test_set(function, 3 + k, IR_BR, IR_VOID, join, none, none);
+            }
+            function->extra[(k - 1) * 2] = k;
+            function->extra[(k - 1) * 2 + 1] = 1;
+        }
+        function->block_offsets[join] = first_phi;
+        for (uint32_t q = 0; q < phis; q += 1)
+        {
+            tier1_wide_test_set(function, first_phi + q, IR_PHI, IR_I128, 0, predecessors, none);
+        }
+        tier1_wide_test_set(function, first_phi + phis, IR_STORE, IR_VOID, 0, first_phi + phis - 1, none);
+        function->alignment_log2[first_phi + phis] = 4;
+        tier1_wide_test_set(function, first_phi + phis + 1, IR_RET, IR_VOID, none, none, none);
+        function->block_offsets[join + 1] = first_phi + phis + 2;
+    }
+    return ok;
+}
+
+// The split's counts past a u32's (#1204's review): phis that share a predecessor list append a list of their own for
+// each half whatever the source's table holds. A small instance must verify, and split by both paths into a function
+// both verifiers take. At 32,768 phis of 32,768 predecessors the halves' lists are 2^32 words past the source's
+// 65,536, which a u32 count wrapped back to the source's own: both paths refuse it as IR_ERROR_LIMIT before they
+// allocate. One phi fewer, 65,536 words short of 2^32, is counted as it is and fails only for the test's output arena,
+// whose 256 MB can't hold 16 GB of extra words.
+static void tier1_wide_test_limit(Tier1WideTest* test)
+{
+    const uint32_t shapes[3][2] = { { 6, 5 }, { 32768, 32768 }, { 32767, 32768 } };
+    const IrError expected[3] = { IR_OK, IR_ERROR_LIMIT, IR_ERROR_MEMORY };
+    for (uint32_t s = 0; s < 3; s += 1)
+    {
+        const uint64_t output_mark = test->output.length;
+        IrFunction function;
+        bool ok = tier1_wide_test_shared_phis(test, shapes[s][0], shapes[s][1], &function);
+        if (ok && s == 0)
+        {
+            IrDominance dominance = { 0 };
+            ok = tier1_wide_test_dominance(test, &function, &dominance);
+            const IrCheck verified = ok ? ir_verify(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+            const IrCheck twin = ok ? ir_verify_scalar(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+            ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK && twin.error == IR_OK, "both verifiers take I128 phis that share one predecessor list");
+        }
+        for (uint32_t path = 0; ok && path < 2; path += 1)
+        {
+            const uint64_t mark = test->output.length;
+            IrWideResult result = { 0 };
+            const IrCheck split = path == 0 ? ir_wide_split(&function, &test->output, &test->scratch, &result) : ir_wide_split_scalar(&function, &test->output, &test->scratch, &result);
+            if (s == 0)
+            {
+                bool fine = tier1_wide_test_expect(test, split.error == IR_OK && result.split && result.function.extra_count == 10 + 6 * 20, "both paths split phis that share a predecessor list, each half's list its own");
+                IrDominance split_dominance = { 0 };
+                fine = fine && tier1_wide_test_dominance(test, &result.function, &split_dominance);
+                const IrCheck checked = fine ? ir_verify(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+                const IrCheck scalar = fine ? ir_verify_scalar(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+                tier1_wide_test_expect(test, checked.error == IR_OK && scalar.error == IR_OK, "the split of phis that share a predecessor list verifies");
+            }
+            else
+            {
+                const bool refused = split.error == expected[s] && !result.split && test->output.length == mark;
+                tier1_wide_test_expect(test, refused, s == 1 ? "both paths refuse an output whose extra table a u32 can't count, before they allocate" : "both paths count an extra table just below a u32's limit as it is");
+                if (!refused)
+                {
+                    printf("test-tier1-wide: %u phis of %u predecessors, %s path: split error %u at %u\n", shapes[s][0], shapes[s][1], path == 0 ? "vector" : "scalar", (unsigned)split.error, split.instruction);
+                }
+            }
+            arena_pop_to(&test->output, mark);
+        }
+        tier1_wide_test_expect(test, test->scratch.length == 0, "the limit's checks return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+    }
+}
+
 // The refusals, a function without an I128 instruction, and the scan's twins.
 static void tier1_wide_test_boundaries(Tier1WideTest* test)
 {
@@ -1630,6 +1749,7 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             {
                 tier1_wide_test_boundaries(&test);
                 tier1_wide_test_shared_slices(&test);
+                tier1_wide_test_limit(&test);
                 typed = tier1_wide_test_typed(&test, BUSTER_TIER1_WIDE_TEST_TYPED);
                 printf("test-tier1-wide: Tier 0's 128-bit programs: %u of %u through the split, the optimizer and Tier 1 natively\n", typed, BUSTER_TIER1_WIDE_TEST_TYPED);
                 const uint32_t x87 = tier1_wide_test_x87(&test, BUSTER_TIER1_WIDE_TEST_TYPED);

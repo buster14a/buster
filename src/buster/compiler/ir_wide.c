@@ -32,8 +32,10 @@
 //
 // The rewrite is two passes of the same code: the first counts the output and places each value (its halves' outputs, or
 // the values they alias), the second writes the columns. Tables are copied whole, the new constants and addresses
-// appended; the extra table keeps its entries' places (each value among them remapped) and the high phis' predecessor
-// lists are appended. SIMD: what pays. Every function --tier1 compiles is scanned for an I128 instruction, 64 type bytes
+// appended; each phi's predecessor list (each half's, for an I128 phi) and each call's arguments are appended to the
+// extra table, their values remapped. The counts are 64-bit, and an output whose instructions or tables a u32 can't
+// count is refused before it is allocated (IR_ERROR_LIMIT): phis can share a predecessor list, so the appended lists
+// can pass the limit where the source's table doesn't (#1204's review). SIMD: what pays. Every function --tier1 compiles is scanned for an I128 instruction, 64 type bytes
 // a compare on the vector path, one at a time on its scalar twin, which must agree; a function without one is returned
 // as it is. The rewrite is scalar: it runs on functions with 128-bit values alone, two of sqlite3.c's 2,668 and none of
 // Lua's 1,088 (docs/tier1.md has its cost against the compile's).
@@ -69,10 +71,14 @@ struct IrWideWork
     uint32_t* high;
     uint8_t* low_kinds;
     uint8_t* high_kinds;
-    uint32_t instruction;
-    uint32_t constant;
-    uint32_t address;
-    uint32_t extra;
+    // The output's counts so far. 64-bit, so that the counting pass sees a count past a u32's rather than its wrap: the
+    // pass checks them after each source instruction, which adds at most 4 * 2^32 extra words, and refuses the output
+    // past UINT32_MAX (IR_ERROR_LIMIT). The writing pass's counts are then below it, and the u32 ids taken from them
+    // exact; the counting pass's ids past it are never written.
+    uint64_t instruction;
+    uint64_t constant;
+    uint64_t address;
+    uint64_t extra;
     IrError error;
     uint32_t error_instruction;
 };
@@ -126,7 +132,7 @@ static bool ir_wide_signature(const IrFunction* function)
 
 static uint32_t ir_wide_emit(IrWideWork* work, uint32_t op, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
 {
-    const uint32_t id = work->instruction;
+    const uint32_t id = (uint32_t)work->instruction;
     if (work->output != 0)
     {
         IrFunction* output = work->output;
@@ -145,7 +151,7 @@ static uint32_t ir_wide_emit(IrWideWork* work, uint32_t op, uint32_t type, uint3
 // A 64-bit constant, its own entry appended to the table.
 static uint32_t ir_wide_constant(IrWideWork* work, uint64_t value)
 {
-    const uint32_t entry = work->constant;
+    const uint32_t entry = (uint32_t)work->constant;
     if (work->output != 0)
     {
         work->output->constants[entry] = (IrConstant){ .low = value };
@@ -229,7 +235,7 @@ static uint32_t ir_wide_high_address(IrWideWork* work, uint32_t pointer)
         index = f->b[pointer];
         address = (IrAddress){ .offset = offset, .scale = f->addresses[f->c[pointer]].scale };
     }
-    const uint32_t entry = work->address;
+    const uint32_t entry = (uint32_t)work->address;
     if (work->output != 0)
     {
         work->output->addresses[entry] = address;
@@ -544,8 +550,8 @@ static bool ir_wide_value(IrWideWork* work, uint32_t i)
             // Each half's predecessor list is appended, its values remapped there: the verifier lets extra's slices
             // overlap (a call's arguments sharing a phi's words), so a remap in the source's place would rewrite another
             // reader's entries (#1204's review).
-            const uint32_t low_list = work->extra;
-            const uint32_t high_list = low_list + b * 2;
+            const uint32_t low_list = (uint32_t)work->extra;
+            const uint32_t high_list = (uint32_t)(work->extra + (uint64_t)b * 2);
             const uint32_t low = ir_wide_emit(work, IR_PHI, IR_I64, low_list, b, none);
             const uint32_t high = ir_wide_emit(work, IR_PHI, IR_I64, high_list, b, none);
             for (uint32_t p = 0; work->output != 0 && p < b; p += 1)
@@ -557,7 +563,7 @@ static bool ir_wide_value(IrWideWork* work, uint32_t i)
                 work->output->extra[high_list + p * 2] = block;
                 work->output->extra[high_list + p * 2 + 1] = ir_wide_high(work, value);
             }
-            work->extra += b * 4;
+            work->extra += (uint64_t)b * 4;
             ir_wide_place(work, i, low, high);
         } break;
         default: supported = false; break;
@@ -616,8 +622,8 @@ static void ir_wide_copy(IrWideWork* work, uint32_t i)
     const uint32_t op = f->op[i];
     const bool phi = op == IR_PHI;
     const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
-    const uint32_t list = work->extra;
-    work->extra += phi ? f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : 0;
+    const uint32_t list = (uint32_t)work->extra;
+    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : 0;
     const uint32_t mask = ir_value_mask(f, i);
     const uint32_t a = phi ? list : (mask & 1) != 0 ? ir_wide_low(work, f->a[i]) : f->a[i];
     const uint32_t b = (mask & 2) != 0 ? ir_wide_low(work, f->b[i]) : f->b[i];
@@ -679,7 +685,7 @@ static void ir_wide_pass(IrWideWork* work)
     {
         if (work->output != 0)
         {
-            work->output->block_offsets[block] = work->instruction;
+            work->output->block_offsets[block] = (uint32_t)work->instruction;
         }
         for (uint32_t i = f->block_offsets[block]; work->error == IR_OK && i < f->block_offsets[block + 1]; i += 1)
         {
@@ -701,11 +707,16 @@ static void ir_wide_pass(IrWideWork* work)
                 work->error = IR_ERROR_UNSUPPORTED;
                 work->error_instruction = i;
             }
+            else if (work->instruction > UINT32_MAX || work->constant > UINT32_MAX || work->address > UINT32_MAX || work->extra > UINT32_MAX)
+            {
+                work->error = IR_ERROR_LIMIT;
+                work->error_instruction = i;
+            }
         }
     }
     if (work->output != 0 && work->error == IR_OK)
     {
-        work->output->block_offsets[f->block_count] = work->instruction;
+        work->output->block_offsets[f->block_count] = (uint32_t)work->instruction;
     }
 }
 
@@ -846,7 +857,7 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
             {
                 memcpy(split.vector_constants, function->vector_constants, (uint64_t)function->vector_constant_count * sizeof(IrSimdValue));
             }
-            const uint32_t instructions = work.instruction;
+            const uint64_t instructions = work.instruction;
             work.output = &split;
             ir_wide_pass(&work);
             check = ir_check(work.instruction == instructions ? work.error : IR_ERROR_STRUCTURE, work.error_instruction, 0);
