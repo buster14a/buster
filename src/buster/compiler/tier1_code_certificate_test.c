@@ -17,6 +17,12 @@
 // them, are refused, a callee being free to write there; and with a frame pointer, rbp set after the allocation instead
 // of right after its push, each epilogue's reset from it moved to match, is refused, rbp no longer being the frame
 // record's (the caller's rbp at it, the return address above it) that the layout's offsets are computed for.
+//
+// A dynamic frame without calls: s(p0, ..., p6), p6 on the stack, saves the stack pointer in one branch (IR_STACK_SAVE
+// alone, which makes the frame dynamic: its rows and its incoming area from rbp, and no alloca or stack restore to leave
+// it uncertified). Its code is certified, p6 read from its incoming slot through rbp. With rbp set after the allocation
+// instead, its epilogues' resets moved to match, p6's load at 16 past rbp and the rows below rbp are elsewhere: it is
+// refused.
 
 typedef struct Tier1CodeCertificateCounts Tier1CodeCertificateCounts;
 struct Tier1CodeCertificateCounts
@@ -39,6 +45,10 @@ struct Tier1CodeCertificateCounts
     uint32_t lowered_refused;
     uint32_t pointers;
     uint32_t pointers_refused;
+    // The dynamic frame's compiles certified, those whose frame pointer was moved, and those refused.
+    uint32_t saved;
+    uint32_t saved_moved;
+    uint32_t saved_refused;
 };
 
 static bool tier1_code_certificate_function(Arena* input, IrFunction* function, uint32_t* call)
@@ -101,6 +111,61 @@ static bool tier1_code_certificate_function(Arena* input, IrFunction* function, 
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->block_offsets[2] = next;
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, p1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->instruction_count = next;
+        function->block_offsets[3] = next;
+    }
+    return created;
+}
+
+// s(p0, ..., p6), p6 on the stack: b0 computes m_k = p_k ^ p6 for k < 6 and branches on p0's low bit to b1 or b2;
+// b1 saves the stack pointer and returns p6 plus every p_k and m_k; b2 returns p6 - p0.
+static bool tier1_code_certificate_saved_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 48,
+        .block_count = 3,
+        .constant_count = 2,
+        .parameter_count = 7,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        for (uint32_t p = 0; p < 7; p += 1)
+        {
+            function->parameter_types[p] = IR_I64;
+        }
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = BUSTER_ABI_INTEGER_ARGUMENTS, .stack_bytes = BUSTER_ABI_SLOT_BYTES };
+        function->constants[0].low = 1;
+        function->constants[1].low = 0;
+        uint32_t next = 0;
+        uint32_t parameters[7];
+        for (uint32_t p = 0; p < 7; p += 1)
+        {
+            parameters[p] = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        uint32_t mixed[6];
+        for (uint32_t p = 0; p < 6; p += 1)
+        {
+            mixed[p] = tier1_select_test_append(function, &next, IR_XOR, IR_I64, parameters[p], parameters[6], BUSTER_IR_NONE);
+        }
+        const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t bit = tier1_select_test_append(function, &next, IR_AND, IR_I64, parameters[0], one, BUSTER_IR_NONE);
+        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t odd = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, bit, zero, IR_NE);
+        tier1_select_test_append(function, &next, IR_CBR, IR_VOID, odd, 1, 2);
+        function->block_offsets[1] = next;
+        tier1_select_test_append(function, &next, IR_STACK_SAVE, IR_I64, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t sum = parameters[6];
+        for (uint32_t p = 0; p < 6; p += 1)
+        {
+            sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, sum, parameters[p], BUSTER_IR_NONE);
+            sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, sum, mixed[p], BUSTER_IR_NONE);
+        }
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[2] = next;
+        const uint32_t difference = tier1_select_test_append(function, &next, IR_SUB, IR_I64, parameters[6], parameters[0], BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, difference, BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->instruction_count = next;
         function->block_offsets[3] = next;
     }
@@ -209,6 +274,25 @@ static bool tier1_code_certificate_pointer_moved(Tier1EmitTest* test, const Tier
     return refused;
 }
 
+// The prologue's records [0, end), its `mov rbp, rsp` record `m` (UINT32_MAX for none) and how far its pushes and
+// allocation after it move rsp.
+static uint32_t tier1_code_certificate_prologue(const Tier1EmitResult* emitted, uint32_t* m, int32_t* delta)
+{
+    const uint32_t prologue = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    uint32_t end = 0;
+    *m = UINT32_MAX;
+    *delta = 0;
+    while (end < emitted->code.count && emitted->origins[end] == prologue)
+    {
+        const X86Instruction record = emitted->code.records[end];
+        const bool set = record.form == X86_FORM_MOV_RM64_R64 && record.mode == BUSTER_X86_REGISTER_DIRECT && record.reg == X86_REGISTER_RSP && record.rm == X86_REGISTER_RBP;
+        *m = set ? end : *m;
+        *delta += *m != UINT32_MAX && !set ? (record.form == X86_FORM_PUSH_R64 ? 8 : record.immediate) : 0;
+        end += 1;
+    }
+    return end;
+}
+
 static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, bool rematerialize, bool pointer, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
@@ -309,18 +393,9 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     }
     // The frame pointer set after the allocation: the prologue's records, its `mov rbp, rsp` among them, and how far rsp
     // moves after it.
-    const uint32_t prologue = tier1_origin(TIER1_ORIGIN_FRAME, 0);
-    uint32_t end = 0;
     uint32_t m = UINT32_MAX;
     int32_t delta = 0;
-    while (certified && end < emitted.code.count && emitted.origins[end] == prologue)
-    {
-        const X86Instruction record = emitted.code.records[end];
-        const bool set = record.form == X86_FORM_MOV_RM64_R64 && record.mode == BUSTER_X86_REGISTER_DIRECT && record.reg == X86_REGISTER_RSP && record.rm == X86_REGISTER_RBP;
-        m = set ? end : m;
-        delta += m != UINT32_MAX && !set ? (record.form == X86_FORM_PUSH_R64 ? 8 : record.immediate) : 0;
-        end += 1;
-    }
+    const uint32_t end = certified ? tier1_code_certificate_prologue(&emitted, &m, &delta) : 0;
     if (pointer && certified)
     {
         const bool movable = m != UINT32_MAX && delta != 0;
@@ -334,6 +409,41 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     arena_pop_to(&test->input, 0);
 }
 
+static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+{
+    IrFunction function;
+    const bool created = tier1_code_certificate_saved_function(&test->input, &function);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the code certificate's dynamic-frame fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the code certificate's dynamic-frame fixture selects");
+    // Thirteen values live into b1, more than the registers: some are spilled, and the prologue allocates their rows
+    // after setting rbp.
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.frame_pointer &&
+                           emitted.frame.base_register == X86_REGISTER_RBP;
+    tier1_emit_test_expect(test, certified, "the dynamic-frame fixture's code, its stack parameter read through rbp, passes its certificate");
+    counts->saved += certified;
+    uint32_t m = UINT32_MAX;
+    int32_t delta = 0;
+    const uint32_t end = certified ? tier1_code_certificate_prologue(&emitted, &m, &delta) : 0;
+    const bool movable = m != UINT32_MAX && delta != 0;
+    tier1_emit_test_expect(test, !certified || movable, "the dynamic-frame fixture's prologue allocates after setting rbp");
+    const bool refused = movable && tier1_code_certificate_pointer_moved(test, &plan, &emitted, m, end, delta);
+    counts->saved_moved += movable;
+    counts->saved_refused += refused;
+    tier1_emit_test_expect(test, !movable || refused, "a dynamic frame's pointer set after its allocation fails the code's certificate: its stack parameter's load and its rows from rbp are elsewhere");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
@@ -341,10 +451,14 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0, &counts);
     }
-    tier1_emit_test_expect(test, counts.certified == 8 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0 && counts.lowered == 8 && counts.pointers == 4,
-                           "the call fixture's compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        tier1_code_certificate_saved(test, variant != 0, &counts);
+    }
+    tier1_emit_test_expect(test, counts.certified == 8 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0 && counts.lowered == 8 && counts.pointers == 4 && counts.saved_moved == 2,
+                           "the fixtures' compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
     printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
-           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused\n",
+           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused\n",
            counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
-           counts.lowered, counts.pointers_refused, counts.pointers);
+           counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved);
 }

@@ -580,8 +580,9 @@ The decoding:
   reach the frame's rows, as C's object model says.
 
 **Not decoded yet**, so not certified, each counted by its reason: by-value
-aggregates (#789's copies, parts and hidden pointers), dynamic and realigned
-frames (`alloca`, a stack restore), a prologue's stack probes, a variadic
+aggregates (#789's copies, parts and hidden pointers), dynamic frames with
+`alloca` or a stack restore (a stack save alone is certified, rbp its base)
+and realigned ones, a prologue's stack probes, a variadic
 definition's register save area,
 an indirect jump to several labels, a call's stack arguments or a stack
 parameter where the frame base register isn't rsp's (or the incoming area's),
@@ -601,7 +602,11 @@ change the register. It compiles the fixture with and without a frame pointer
 and moves the frame: its rows below rsp, every access with them, are refused;
 and rbp set after the allocation instead of right after its push, each
 epilogue's reset from it moved to match, is refused (every register and the
-return address still come back, but rbp is no longer the frame record).
+return address still come back, but rbp is no longer the frame record). A
+dynamic frame without calls, from a stack save alone (its rows and incoming
+area from rbp), is certified with its stack parameter read through rbp; with
+rbp set after its allocation, that load and the rows are elsewhere, and it is
+refused.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an
