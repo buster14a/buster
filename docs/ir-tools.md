@@ -95,7 +95,8 @@ IDs, separated by commas. Compare instructions add a predicate (`eq`, `ne`,
 `lt`, `le`, `gt`, `ge`, `ult`, `ule`, `ugt`, `uge` as applicable).
 `param` takes its parameter index; `stack_addr` a slot; `symbol_addr` a symbol.
 `address` takes `%base + %index * SCALE offset=DISPLACEMENT`, with the index
-term optional. Loads and stores carry `align=N` and optional `volatile`.
+term optional. Loads and stores carry `align=N`, optional `volatile` and, for an atomic access (#1059), `atomic ORDER`
+(a fence's order names).
 Calls take `@SYMBOL(%ARGS) fixed=(TYPES) variadic=0|1`; indirect calls use
 `%TARGET` instead. A phi lists `[%VALUE, bPREDECESSOR]` pairs. Branches name
 blocks, conditional branches take `%CONDITION, bTRUE, bFALSE`, and switches

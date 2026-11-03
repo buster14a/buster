@@ -24,7 +24,9 @@ unit has run. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
 release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED`, and
 the mappings and their writable prefixes kept for the next reservations they
-hold, #1128); and the arenas of a
+hold, #1128; the preprocessor's tables and token columns and the parser's
+columns are arenas of tables, each group one mapping, `arena_reserve_tables`);
+and the arenas of a
 unit of less than 1 MB of source start with 16 MB of base pages
 (`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
 which every reservation took for writing, were what limited the lanes.
@@ -68,7 +70,11 @@ functions beside a small one, whose lanes without units take its functions'
 parts, `--shared-parts`' report, into objects their own alone and executables
 one lane's); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
-jobserver's tokens held while the link writes; and lanes that don't start;
+jobserver's tokens held while the link writes; lanes that don't start; and
+`benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it
+can't take (no lanes, a ninth lane count, runs past 1,000 or 64 bits, a count
+with more than its digits), of forwarded options that set the lanes, and of a
+command that fails every run;
 with `-g`, the executables by `--lanes` 1 and 8, poisoned and by each path the
 same bytes, and each unit's `-c -g` object its own alone. With `--corpus DIR`
 it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
@@ -81,3 +87,20 @@ mixed-tier and actual command-team receipts, is
 `tests/driver/multicore.c` runs it in the shared correctness suite. What
 #149's remaining whole-process performance acceptance still needs is there
 too.
+
+`./build/compiler benchmark-check-units [--executable PATH] [--units N]
+[--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]` (#1128) times one
+command of synth's shape (64 units of 200 functions by default) by `-c`, with
+the options after `--` (absolute paths: the processes run in the program's
+directory), by each lane count (1, 2, 4 and 8 by default), as processes in
+`time-runs`' rotated order, 5 runs of each after a warm-up, every one of which
+must compile the units (`time-runs` alone passes a status that stays the same).
+Counts are whole decimals from 1: at most 4,096 units, 100,000 functions, eight
+lane counts of at most 4,096 lanes, and 1,000 runs. The options after `--` may
+not set the lanes (`--lanes` or `--worker-budget`, either spelling): the driver
+would take theirs over each command's count.
+Then it prints each count's wall time and system time against the first
+count's: lanes that serialize on the kernel, as #1128's did on the address
+space's lock, raise the system time where a busy machine's wall time may hide
+it. The 9700X job runs it by 1, 2, 4 and 8 lanes with the frozen corpus's
+headers and predefines, where `tools/ci/changes.c`'s `check-units` says.

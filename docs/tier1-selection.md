@@ -104,19 +104,21 @@ patterns are:
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
   to the consumer (#141). It moves past the nodes between them that don't write
-  memory, call, access a volatile object, fence or move rsp (arithmetic,
-  constants, addresses, other nonvolatile loads) and past none that do: a store
-  to any address, a call, a volatile load or store, a fence of any order or
-  scope (a signal fence's too), an allocation or a restore of the dynamic
-  stack. A pass of its own after the plan's pass over
+  memory, call, access a volatile or atomic object, fence or move rsp
+  (arithmetic, constants, addresses, other nonvolatile loads) and past none that
+  do: a store to any address, a call, a volatile or atomic load (#1059:
+  `BUSTER_IR_OBSERVABLE`) or store, a fence of any order or scope (a signal
+  fence's too), an allocation or a restore of the dynamic stack; an atomic load
+  folds into nothing. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
-  (the build's `-fno-strict-aliasing`): 40 instructions more per node. The IR has no atomic access of its own: C's atomic operations
-  reach it as calls of the unit's leaves, but a fence of a constant order (#1059), which is the IR's `fence`
-  (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst` and no records for the others, a barrier no
-  selection moves an access across. A volatile load remains a separate
+  (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
+  order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
+  gives their orders, with a seq_cst store's `fence` after it; other atomic operations reach it as calls of the unit's
+  leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
+  and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
@@ -191,9 +193,13 @@ patterns are:
   word is saved and loaded with rounding toward zero around `fistp` of 64 bits
   (`fisttp` is SSE3's, past the baseline), and an unsigned 64-bit result of 2^63
   or more takes 2^63 away first and sets its top bit after (`fucomi`, `fcmovbe`
-  and `setbe`), as Tier 0's. A phi of long doubles is the edges' copies, every
-  operand loaded onto the x87 stack and then every phi's object stored in
-  reverse (a parallel copy; more than 8 on an edge refuse the function). A call
+  and `setbe`), as Tier 0's. That conversion is a node's longest sequence, 20
+  records against every node's share of 6 (`BUSTER_TIER1_EMIT_X87_RECORDS`):
+  the CFG consumer's capacity counts each long double node's 20, so that a block
+  dense with conversions fits, and it refuses a node's sequence past them. A phi
+  of long doubles is the edges' copies, every operand loaded onto the x87 stack
+  and then every phi's object stored in reverse (a parallel copy; more than 8 on
+  an edge refuse the function). A call
   passes a long double in its 16-byte stack slots aligned to 16, its object's
   bytes copied there by `fld` and `fstp` (`tier1_select_next_place`), and its
   long double result comes in st0, which the call stores into its own object; a

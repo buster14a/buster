@@ -67,6 +67,18 @@ static uint8_t ir_typed_stack_class(const Tier0Function* input, uint32_t entry)
     return bytes == 0 ? class : class == BUSTER_TYPED_CLASS_VECTOR ? (uint8_t)BUSTER_TIER0_STACK_VECTOR(bytes) : (uint8_t)tier0_stack_mask(bytes);
 }
 
+// Whether a typed LOAD's, STORE's or SET's `value` is its class's (#1059): any for a class that reads it as bytes (a
+// vector's or a mask's), and for an integer class 0 or an atomic access's marker (BUSTER_TYPED_ACCESS_ATOMIC) with an
+// order its kind takes, as the IR's verifier does (ir_access_flags_valid): a load's relaxed, consume, acquire or seq_cst,
+// a store's relaxed, release or seq_cst.
+static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
+{
+    const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
+    const uint32_t orders = kind == BUSTER_TYPED_LOAD ? 0x27u : 0x29u;
+    const uint64_t order = value & BUSTER_TYPED_FENCE_ORDER;
+    return !integer || value == 0 || ((value & ~(uint64_t)(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_ORDER)) == 0 && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0 && (orders >> order & 1) != 0);
+}
+
 typedef struct IrTypedPlan IrTypedPlan;
 struct IrTypedPlan
 {
@@ -256,10 +268,18 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     stack[depth] = class;
                     depth += 1;
                     break;
+                case BUSTER_TYPED_LOAD:
+                    if (!ir_typed_access_valid(kind, class, value))
+                    {
+                        plan.error = "an atomic access's marker isn't an integer access's with an order its kind takes";
+                        plan.error_code = IR_ERROR_METADATA;
+                        ok = false;
+                    }
+                    stack[depth - 1] = class;
+                    break;
                 case BUSTER_TYPED_NEG:
                 case BUSTER_TYPED_NOT:
                 case BUSTER_TYPED_CONVERT:
-                case BUSTER_TYPED_LOAD:
                 case BUSTER_TYPED_ALLOCA:
                     stack[depth - 1] = class;
                     break;
@@ -277,10 +297,19 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     depth -= 1;
                     break;
                 case BUSTER_TYPED_STORE:
-                    depth -= 1;
-                    stack[depth - 1] = class;
-                    break;
                 case BUSTER_TYPED_SET:
+                    if (!ir_typed_access_valid(kind, class, value))
+                    {
+                        plan.error = "an atomic access's marker isn't an integer access's with an order its kind takes";
+                        plan.error_code = IR_ERROR_METADATA;
+                        ok = false;
+                    }
+                    depth -= kind == BUSTER_TYPED_STORE ? 1 : 2;
+                    if (kind == BUSTER_TYPED_STORE)
+                    {
+                        stack[depth - 1] = class;
+                    }
+                    break;
                 case BUSTER_TYPED_COPY:
                     depth -= 2;
                     break;
@@ -557,6 +586,19 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink*
     }
     sink->sizes.instruction_count += 1;
     return id;
+}
+
+// An integer class's typed access's IR flags (#1059) onto its load or store `id`: an atomic access's marker as
+// BUSTER_IR_ATOMIC and its order, and its natural alignment, which the checker's direct access has proven and the
+// verifier requires of an atomic access. The flags column starts zeroed, which an ordinary access keeps.
+static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* sink, uint32_t id, uint8_t class, uint64_t value)
+{
+    const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
+    if (sink->output != 0 && integer && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0)
+    {
+        sink->output->flags[id] = (uint8_t)(BUSTER_IR_ATOMIC | (value & BUSTER_TYPED_FENCE_ORDER) << BUSTER_IR_ORDER_SHIFT);
+        sink->output->alignment_log2[id] = (uint8_t)__builtin_ctz(tier0_class_bytes(class));
+    }
 }
 
 // A constant of `type`: `bits` its low 64 bits, `high` the rest (an i128's high half, an f80's sign and exponent).

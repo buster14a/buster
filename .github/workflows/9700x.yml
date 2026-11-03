@@ -1297,6 +1297,19 @@ jobs:
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,3,4,6,8 --cpus "2,$others" "${source[@]}"
 
+      - name: Benchmark the translation units' lanes
+        # #1128: one command of synth's shape (64 units of 200 functions) by -c, with the frozen corpus's headers and
+        # predefines, by --lanes 1, 2, 4 and 8, as processes: each count's wall time and system time against one lane's.
+        # Lanes that serialize on the kernel (the address space's lock, which arena reservations, commits and discards
+        # take) raise the system time, where the wall time may hide it.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-units,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          ./build/compiler benchmark-check-units --lanes 1,2,4,8 --runs 5 -- "${options[@]}"
+
       - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
         # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
         # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;

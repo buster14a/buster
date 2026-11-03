@@ -214,6 +214,11 @@ asm (`X86FloatingPoint.cpp`), which clang's code keeps and refuses to break:
 - the template finds the inputs at their depths, and leaves the outputs from
   st(0) down above the inputs it didn't pop (fscale's st(1), fprem's).
 
+A template names a `t` operand `%st` and a `u` operand `%st(1)`, as GCC and
+clang print them (#1115: `"fmul %1, %0" : "+t"(x) : "u"(y)`), which the
+assembler reads with GNU as's operands and AT&T names of the x87's operations
+([the assembler's guide](assembler.md)); a modifier of one is refused.
+
 The helper loads the inputs from the operand block, the deepest first, by their
 types' widths (`flds`, `fldl`, `fldt`). After the template it stores the
 outputs from st(0) down, each popped through its address, then pops the inputs
@@ -371,7 +376,10 @@ or on the instruction's line, on `cmpxchg`, `xadd` and the arithmetic of memory
 destinations; `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
 SSE2's `psrlq` with their siblings; FMA3's scalar forms; the x87's operations on
 the stack's top (`fsqrt`, `fprem`, `frndint` and the rest), `fnstsw %ax` and
-`fistpll`. `rep; bsr` (dr_flac's spelling of `lzcnt`) is `lzcnt`'s form, its
+`fistpll`. Since #1115 the x87's register operands (`fld %st(0)`, `fxch %st(1)`,
+`faddp %st, %st(1)`), the TLS models' relocation modifiers (`movl
+%fs:x@tpoff, %eax`) and the compare-predicate names (`cmpltsd`) are the
+template's too. `rep; bsr` (dr_flac's spelling of `lzcnt`) is `lzcnt`'s form, its
 bytes. [The assembler's guide](assembler.md) has the admitted forms, and the
 bytes of a prefix written alone before a 16-bit instruction.
 
@@ -497,6 +505,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   operands at one depth, which clang compiles as one register's; and an
   integer in an x87 register. An x87 operand named in the template prints as
   its depth's register, `%st` or `%st(1)`, as GCC and clang print it;
+- a template's common symbols (`.comm` of a global, #1115), which only an
+  assembler's object holds (`SHN_COMMON`);
 - symbolic immediates, and constants outside their letter's range;
 - operands of types no general or XMM register holds by value, outside memory,
   but a vector in a template of no instructions that doesn't refer to it;
