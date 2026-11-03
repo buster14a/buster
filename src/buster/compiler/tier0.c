@@ -385,9 +385,10 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
 #define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
-// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes; the mask stack's too (#179).
-#define BUSTER_TIER0_MAX_DEPTH 240
-#define BUSTER_TIER0_MAX_CALL_ARGUMENTS (BUSTER_TIER0_MAX_DEPTH - 1)
+// Masks retain byte depths (#179). Integer, floating and memory values use full-width depths in the deep path.
+#define BUSTER_TIER0_MAX_MASK_DEPTH 240
+// The ABI row's bound is independent of the number of values live across nested calls.
+#define BUSTER_TIER0_MAX_CALL_ARGUMENTS 239
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
 // The alignment an ordinary frame keeps (rsp's at every call, as the convention has it), past which it is realigned.
@@ -598,8 +599,7 @@ typedef enum Tier0Error
     TIER0_OK,
     // An entry no template or deferred emitter covers yet: `node` names it.
     TIER0_ERROR_UNSUPPORTED,
-    // A stack deeper than the deep slots take (BUSTER_TIER0_MAX_DEPTH, tier0_select_deep), the mask stack's among them
-    // (tier0_mask_depths_scalar).
+    // The mask stack exceeds its byte-depth bound, or one deferred entry needs more registers than its window has.
     TIER0_ERROR_DEPTH,
     // The output arena or the scratch arena has no room.
     TIER0_ERROR_MEMORY,
@@ -3311,13 +3311,13 @@ struct Tier0Entries
     // The records every tail call of the function ends with but its stack arguments' copy (tier0_count_tail_finish), once
     // the homes and the frame are known: the vector path's measuring of them (tier0_count_call's).
     uint32_t tail_finish;
-    // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and a
-    // deep entry's depths before it, where `depths` and `floating_depths` hold the ones its records are made at.
+    // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and
+    // full-width depths before every entry and at count, where the byte columns hold the depths its records are made at.
     uint8_t* deep;
-    uint8_t* deep_depths;
-    uint8_t* deep_floating_depths;
+    uint32_t* deep_depths;
+    uint32_t* deep_floating_depths;
     // The mask stack (#179), 0 in a function without masks: each entry's depth before it (tier0_vector_mask_depths and
-    // tier0_mask_depths_scalar), below BUSTER_TIER0_MAX_DEPTH as the other stacks' (both refuse a deeper one), and the
+    // tier0_mask_depths_scalar), below BUSTER_TIER0_MAX_MASK_DEPTH (both refuse a deeper one), and the
     // most masks any entry leaves or finds on it.
     uint8_t* mask_depths;
     uint32_t mask_top;
@@ -3763,8 +3763,8 @@ static int32_t tier0_mask_effect(const Tier0Function* function, uint32_t i)
 // The mask stack's depth before each entry (Tier0Entries.mask_depths), its effects' exclusive prefix sum, and the most
 // masks on it at once (mask_top), for a function with masks: tier0_vector_mask_depths' twin. Both paths make it after
 // phase 2, as a column of its own, so that a function without masks counts nothing for them. Returns TIER0_OK, or
-// TIER0_ERROR_DEPTH where an entry finds BUSTER_TIER0_MAX_DEPTH masks or more, as tier0_select_deep refuses the other
-// stacks: the column's bytes would wrap past 255 (a depth of 256 read as 0, its slot and register the first mask's).
+// TIER0_ERROR_DEPTH where an entry finds BUSTER_TIER0_MAX_MASK_DEPTH masks or more: unlike the other stacks, masks
+// retain byte depths, which would wrap past 255 (a depth of 256 read as 0, its slot and register the first mask's).
 static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
 {
     int32_t depth = 0;
@@ -3776,7 +3776,7 @@ static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0E
         depth += tier0_mask_effect(function, i);
     }
     entries->mask_top = (uint32_t)(depth > deepest ? depth : deepest);
-    return deepest >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
+    return deepest >= BUSTER_TIER0_MAX_MASK_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -7625,8 +7625,8 @@ static Tier0DeepEntry tier0_deep_entry(const Tier0Function* function, const Tier
     Tier0DeepEntry deep;
     deep.before[0] = entries->deep_depths[i];
     deep.before[1] = entries->deep_floating_depths[i];
-    deep.exit[0] = (uint8_t)((int32_t)deep.before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0));
-    deep.exit[1] = (uint8_t)((int32_t)deep.before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0));
+    deep.exit[0] = entries->deep_depths[i + 1] + (jump_value && stack == 1 ? 1 : 0);
+    deep.exit[1] = entries->deep_floating_depths[i + 1] + (jump_value && stack == 2 ? 1 : 0);
     deep.window[0] = entries->depths[i];
     deep.window[1] = entries->floating_depths[i];
     deep.result[0] = leaves == 1;
@@ -8866,6 +8866,90 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
 }
 
+// Full-width depths for the cold path alone. Fusion has already folded each absorbed entry's effects into its
+// consumer. An ordinary entry changes either depth by at most one upward and a few downward; a call can pop up to
+// MAX_CALL_ARGUMENTS plus its indirect target. Its signed-byte delta greater than one is therefore a wrapped negative
+// delta, not a push. The stream's MAX_ENTRIES bound keeps every prefix sum within int32_t. The extra element is the
+// linear depth after the last entry; JUMP_VALUE reinstates its value separately at its taken exit.
+_Static_assert(BUSTER_TIER0_MAX_CALL_ARGUMENTS < 255, "a call's byte effect must unwrap unambiguously");
+static void tier0_wide_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
+{
+    const uint32_t count = function->count;
+    const uint8_t* kinds = function->kinds;
+    const int8_t* integer_effects = entries->integer_effects;
+    const int8_t* floating_effects = entries->floating_effects;
+    uint32_t* integer_depths = entries->deep_depths;
+    uint32_t* floating_depths = entries->deep_floating_depths;
+    int32_t integer = 0;
+    int32_t floating = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        integer_depths[i] = (uint32_t)integer;
+        floating_depths[i] = (uint32_t)floating;
+        const bool call = kinds[i] == BUSTER_TYPED_CALL || kinds[i] == BUSTER_TYPED_TAIL_CALL;
+        const int32_t integer_effect = integer_effects[i];
+        const int32_t floating_effect = floating_effects[i];
+        integer += integer_effect - (call && integer_effect > 1 ? 256 : 0);
+        floating += floating_effect - (call && floating_effect > 1 ? 256 : 0);
+    }
+    integer_depths[count] = (uint32_t)integer;
+    floating_depths[count] = (uint32_t)floating;
+}
+
+#if BUSTER_HOST_VECTOR
+// Inclusive prefix sum in sixteen dword lanes; the masks zero the lanes before each shift, not just the indices.
+static __m512i tier0_wide_prefix(__m512i values)
+{
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint32_t step = 1; step < 16; step *= 2)
+    {
+        const __m512i indices = _mm512_sub_epi32(lanes, _mm512_set1_epi32((int32_t)step));
+        values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32((__mmask16)(0xffffu << step), indices, values));
+    }
+    return values;
+}
+#endif
+
+// The same corrected effects, sixteen entries at a time, with masked tails. The ordinary 64-byte depth scan stays
+// unchanged; only a function already sent to deep selection allocates or computes these wider columns.
+static void tier0_wide_depths_vector(const Tier0Function* function, Tier0Entries* entries)
+{
+#if BUSTER_HOST_VECTOR
+    const uint32_t count = function->count;
+    const uint8_t* kinds = function->kinds;
+    const int8_t* integer_effects = entries->integer_effects;
+    const int8_t* floating_effects = entries->floating_effects;
+    uint32_t* integer_depths = entries->deep_depths;
+    uint32_t* floating_depths = entries->deep_floating_depths;
+    int32_t integer = 0;
+    int32_t floating = 0;
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i wrap = _mm512_set1_epi32(256);
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const uint32_t remaining = count - first;
+        const __mmask16 lanes = remaining >= 16 ? 0xffff : (__mmask16)((1u << remaining) - 1);
+        const __m512i kind = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, kinds + first));
+        const __mmask16 calls = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_TYPED_CALL)) |
+                               _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_TYPED_TAIL_CALL));
+        __m512i integers = _mm512_cvtepi8_epi32(_mm_maskz_loadu_epi8(lanes, integer_effects + first));
+        __m512i floats = _mm512_cvtepi8_epi32(_mm_maskz_loadu_epi8(lanes, floating_effects + first));
+        integers = _mm512_mask_sub_epi32(integers, calls & _mm512_cmpgt_epi32_mask(integers, one), integers, wrap);
+        floats = _mm512_mask_sub_epi32(floats, calls & _mm512_cmpgt_epi32_mask(floats, one), floats, wrap);
+        const __m512i integer_sum = _mm512_add_epi32(tier0_wide_prefix(integers), _mm512_set1_epi32(integer));
+        const __m512i floating_sum = _mm512_add_epi32(tier0_wide_prefix(floats), _mm512_set1_epi32(floating));
+        _mm512_mask_storeu_epi32(integer_depths + first, lanes, _mm512_sub_epi32(integer_sum, integers));
+        _mm512_mask_storeu_epi32(floating_depths + first, lanes, _mm512_sub_epi32(floating_sum, floats));
+        integer = _mm_extract_epi32(_mm512_extracti32x4_epi32(integer_sum, 3), 3);
+        floating = _mm_extract_epi32(_mm512_extracti32x4_epi32(floating_sum, 3), 3);
+    }
+    integer_depths[count] = (uint32_t)integer;
+    floating_depths[count] = (uint32_t)floating;
+#else
+    tier0_wide_depths_scalar(function, entries);
+#endif
+}
+
 // The deep entries of a function whose stacks go past the depth tables (selection's TIER0_ERROR_DEPTH): their values in
 // the frame's deep slots. At each entry's start a stack's values are where its depth says, all in their registers up to
 // the table's depth count (14 integer ones with a frame pointer, 15 without; 16 floating ones) and all in their slots past
@@ -8877,8 +8961,9 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
 // the table. A call deep on either stack takes its arguments from their slots (tier0_emit_deep_call). Every deep entry is
 // deferred, in both paths, and counted in *deep_count. The memory classes' and the vectors' values keep their own slots,
 // by their true depths, for as many depths as the stack reaches (Tier0Frame.memory_depths): a deep entry of theirs reads
-// them from its window's depths, moved by the window's base (tier0_memory_uses). Returns TIER0_OK, or TIER0_ERROR_DEPTH
-// for a stack deeper than BUSTER_TIER0_MAX_DEPTH, which the depth columns' bytes would wrap past.
+// them from its window's depths, moved by the window's base (tier0_memory_uses). Full-width cold columns retain their
+// true depths past 255; the byte columns only name register windows or representable memory depths. The frame and
+// output arenas, not a fixed slot count, bound this path. A single entry whose window cannot fit still refuses.
 static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
 {
     (void)vector;
@@ -8889,18 +8974,32 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
     const uint8_t spill_flags[2] = { BUSTER_TIER0_DEEP_SPILL_INTEGER, BUSTER_TIER0_DEEP_SPILL_FLOATING };
     const uint8_t fill_flags[2] = { BUSTER_TIER0_DEEP_FILL_INTEGER, BUSTER_TIER0_DEEP_FILL_FLOATING };
     entries->deep = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
-    entries->deep_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
-    entries->deep_floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    entries->deep_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    entries->deep_floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
     Tier0Error error = entries->deep != 0 && entries->deep_depths != 0 && entries->deep_floating_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+    if (error == TIER0_OK)
+    {
+        if (BUSTER_VECTOR_PATH(vector))
+        {
+            tier0_wide_depths_vector(function, entries);
+        }
+        else
+        {
+            tier0_wide_depths_scalar(function, entries);
+        }
+    }
     uint32_t slots[2] = { 0, 0 };
+    uint32_t save_slots = 0;
     // The integer depths the stack's values take: an entry pushes one at its depth at most.
     uint32_t deepest = 0;
     for (uint32_t i = 0; i < count && error == TIER0_OK; i += 1)
     {
-        // A stack's depth rises by one entry at a time at most, so one past the limit would have shown here first.
-        const uint32_t before[2] = { entries->depths[i], entries->floating_depths[i] };
-        error = before[0] >= BUSTER_TIER0_MAX_DEPTH || before[1] >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
+        const uint32_t before[2] = { entries->deep_depths[i], entries->deep_floating_depths[i] };
         deepest = before[0] + 1 > deepest ? before[0] + 1 : deepest;
+        // The deferred reach helpers inspect bytes. Saturation preserves "past the register table" rather than
+        // letting a wrapped zero look empty; a flagged entry replaces these with its small operand window below.
+        entries->depths[i] = (uint8_t)(before[0] <= UINT8_MAX ? before[0] : UINT8_MAX);
+        entries->floating_depths[i] = (uint8_t)(before[1] <= UINT8_MAX ? before[1] : UINT8_MAX);
         uint32_t flags = 0;
         uint32_t window[2] = { 0, 0 };
         if (entries->absorbed[i] == 0 && error == TIER0_OK)
@@ -8908,8 +9007,8 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
             const uint8_t kind = function->kinds[i];
             const uint32_t stack = tier0_stack(function->classes[i]);
             const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
-            const uint32_t exit[2] = { (uint8_t)((int32_t)before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0)),
-                                       (uint8_t)((int32_t)before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0)) };
+            const uint32_t exit[2] = { entries->deep_depths[i + 1] + (jump_value && stack == 1 ? 1 : 0),
+                                       entries->deep_floating_depths[i + 1] + (jump_value && stack == 2 ? 1 : 0) };
             if (kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL)
             {
                 const uint32_t call = (uint32_t)function->values[i];
@@ -8922,6 +9021,16 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 }
                 const bool deep = before[0] > limits[0] || exit[0] > limits[0] || before[1] > limits[1] || exit[1] > limits[1] ||
                                   (aggregates && (before[0] >= limits[0] || before[1] >= limits[1]));
+                if (!deep && fills)
+                {
+                    // The first selection used modulo-byte depths: a wrapped call can have a negative apparent
+                    // prefix and an enormous save area. Only ordinary calls save registers; recompute their need.
+                    const uint32_t below = exit[0] - (stack == 1 ? 1 : 0);
+                    const uint32_t floating_below = exit[1] - (stack == 2 ? 1 : 0);
+                    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+                    const uint32_t needed = saved + floating_below;
+                    save_slots = needed > save_slots ? needed : save_slots;
+                }
                 for (uint32_t s = 0; s < 2 && deep; s += 1)
                 {
                     flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] && fills ? fill_flags[s] : 0);
@@ -8953,7 +9062,11 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 for (uint32_t s = 0; s < 2; s += 1)
                 {
                     const bool crosses = (before[s] > limits[s]) != (exit[s] > limits[s]);
-                    const bool deep = crosses || (uses[s] && (before[s] > limits[s] || touch[s] >= (int32_t)limits[s]));
+                    // A memory-only operation can use no depth register at all, but its slot still needs its
+                    // true integer depth. Rebase it too when that depth no longer fits the compact column.
+                    const bool wide_slot = s == 0 && before[0] > UINT8_MAX && tier0_memory_function(function) &&
+                                           (tier0_vector_entry(entries, i) || tier0_memory_entry(entries, i));
+                    const bool deep = crosses || wide_slot || (uses[s] && (before[s] > limits[s] || touch[s] >= (int32_t)limits[s]));
                     flags |= deep ? window_flags[s] | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] ? fill_flags[s] : 0) : 0;
                     slots[s] = deep && before[s] > slots[s] ? before[s] : slots[s];
                     slots[s] = deep && exit[s] > slots[s] ? exit[s] : slots[s];
@@ -8965,8 +9078,6 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
         if (flags != 0)
         {
             // Its depths, and the depths its records are made at on the stacks it is deep on: its windows'.
-            entries->deep_depths[i] = (uint8_t)before[0];
-            entries->deep_floating_depths[i] = (uint8_t)before[1];
             entries->depths[i] = (flags & BUSTER_TIER0_DEEP_INTEGER) != 0 ? (uint8_t)window[0] : entries->depths[i];
             entries->floating_depths[i] = (flags & BUSTER_TIER0_DEEP_FLOATING) != 0 ? (uint8_t)window[1] : entries->floating_depths[i];
             if ((flags & BUSTER_TIER0_DEEP_CALL) == 0 && tier0_memory_function(function) && (tier0_vector_entry(entries, i) || tier0_memory_entry(entries, i)) &&
@@ -8994,6 +9105,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
     {
         // The depth registers within the tables, which the deep entries' records keep to (never a frame pointer's rbp, or a
         // realigned frame's base, r15).
+        frame->save_slots = save_slots;
         frame->deep_slots = slots[0];
         frame->deep_floating_slots = slots[1];
         frame->memory_depths = deepest;
@@ -11511,7 +11623,7 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
 // (tier0_vector_shapes) and the classes, as P1 makes the other stacks' raw effects, an X86 entry's from its row (they are
 // few, as calls are), and the depths their exclusive prefix sums, as P4 makes the others'. Its sums are bytes, the
 // depths modulo 256 (a block's own sum among them, which rows of many masks take past an int8's range), exact while the
-// depths stay below 256; and since an entry pushes one mask at most, the first entry that finds BUSTER_TIER0_MAX_DEPTH
+// depths stay below 256; and since an entry pushes one mask at most, the first entry that finds BUSTER_TIER0_MAX_MASK_DEPTH
 // masks or more finds exactly that many, so that the highest of the bytes refuses what the twin refuses.
 static Tier0Error tier0_vector_mask_depths(const Tier0Function* function, Tier0Entries* entries)
 {
@@ -11582,7 +11694,7 @@ static Tier0Error tier0_vector_mask_depths(const Tier0Function* function, Tier0E
     }
     const uint32_t last = (uint8_t)depth;
     entries->mask_top = last > deepest ? last : deepest;
-    return deepest >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
+    return deepest >= BUSTER_TIER0_MAX_MASK_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
 }
 
 // A template's word (a slot's adds HOME_DEPENDENT and HOME_UNIFORM, in tier0_build_words).
