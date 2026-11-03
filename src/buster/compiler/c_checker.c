@@ -598,18 +598,19 @@ struct CheckOptions
     bool verify_transitions;
 };
 
-// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628).
+// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628). The graph's walk reads its
+// stream's columns, and a value with a payload row is a seventh of them, which the hints say (#1175).
 static CheckValue check_stream_value(const CheckStream* stream, uint32_t node)
 {
     CheckValue result;
-    if (stream->dense_values != NULL)
+    if (__builtin_expect(stream->dense_values != NULL, 0))
     {
         result = stream->dense_values[node];
     }
     else
     {
         const uint32_t row = stream->payload_rows[node];
-        if (row != 0 && row <= stream->payload_count)
+        if (__builtin_expect(row != 0, 0) && row <= stream->payload_count)
         {
             result = stream->payloads[row - 1];
         }
@@ -690,10 +691,11 @@ static bool check_stream_value_rest(const CheckValue* value)
 // the value has more than the columns (check_stream_value_rest), which takes the next row. A node keeps the row a write
 // gave it (check_graph_run clears `payload_rows` first), so that it has at most one, and `payloads` needs no more rows
 // than the stream has nodes, whatever its writes.
-// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_leaf, once per leaf.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_leaf, once per leaf. As in
+// check_stream_value, the columns are the walk's, and a payload row is rare (#1175).
 static inline __attribute__((always_inline)) void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
 {
-    if (stream->dense_values != NULL)
+    if (__builtin_expect(stream->dense_values != NULL, 0))
     {
         stream->dense_values[node] = *value;
     }
@@ -704,13 +706,14 @@ static inline __attribute__((always_inline)) void check_stream_set_value(CheckSt
         stream->value_objects[node] = value->object;
         stream->value_categories[node] = (uint8_t)value->category;
         stream->value_constants[node] = (uint8_t)value->constant_kind;
+        // A row past the payloads is none; row 0 is none already, so one compare decides.
         uint32_t row = stream->payload_rows[node];
-        row = row != 0 && row <= stream->payload_count ? row : 0;
-        if (row == 0 && check_stream_value_rest(value))
+        row = row <= stream->payload_count ? row : 0;
+        if (__builtin_expect(check_stream_value_rest(value), 0) && row == 0)
         {
             row = ++stream->payload_count;
         }
-        if (row != 0)
+        if (__builtin_expect(row != 0, 0))
         {
             stream->payloads[row - 1] = *value;
         }
@@ -807,7 +810,8 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
         graph->types[node] = 0;
         graph->members[node] = 0;
         graph->contexts[node] = 0;
-        if (graph->fp_environments != NULL)
+        // As check_graph_context's: a unit with a floating-point environment of its own is rare (#1175).
+        if (__builtin_expect(graph->fp_environments != NULL, 0))
         {
             graph->fp_environments[node] = 0;
         }
@@ -828,10 +832,26 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
     return result;
 }
 
+// The operators with an argument list: a call and the builtins'. A bit each from CHECK_OP_CALL on, tested without a
+// branch: as eight compares, clang laid out a branch per node of the graph's walk that jumped half the time (#1175).
+#define BUSTER_CHECK_ARGUMENT_OPERATOR(op) (UINT64_C(1) << ((op) - CHECK_OP_CALL))
+static const uint64_t check_graph_argument_operators =
+    BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_CALL) | BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_MISC) |
+    BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_FLOAT) | BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_QUERY) |
+    BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_ATOMIC) | BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_VECTOR) |
+    BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_X86) | BUSTER_CHECK_ARGUMENT_OPERATOR(CHECK_OP_BUILTIN_BIT_CAST);
+_Static_assert(CHECK_OP_BUILTIN_MISC > CHECK_OP_CALL && CHECK_OP_BUILTIN_FLOAT > CHECK_OP_CALL && CHECK_OP_BUILTIN_QUERY > CHECK_OP_CALL &&
+               CHECK_OP_BUILTIN_ATOMIC > CHECK_OP_CALL && CHECK_OP_BUILTIN_VECTOR > CHECK_OP_CALL && CHECK_OP_BUILTIN_X86 > CHECK_OP_CALL &&
+               CHECK_OP_BUILTIN_BIT_CAST > CHECK_OP_CALL && CHECK_OP_BUILTIN_MISC - CHECK_OP_CALL < 64 && CHECK_OP_BUILTIN_FLOAT - CHECK_OP_CALL < 64 &&
+               CHECK_OP_BUILTIN_QUERY - CHECK_OP_CALL < 64 && CHECK_OP_BUILTIN_ATOMIC - CHECK_OP_CALL < 64 && CHECK_OP_BUILTIN_VECTOR - CHECK_OP_CALL < 64 &&
+               CHECK_OP_BUILTIN_X86 - CHECK_OP_CALL < 64 && CHECK_OP_BUILTIN_BIT_CAST - CHECK_OP_CALL < 64,
+               "the operators with arguments fit a 64-bit mask from CHECK_OP_CALL");
+#undef BUSTER_CHECK_ARGUMENT_OPERATOR
+
 static bool check_graph_has_arguments(CheckOp op)
 {
-    return op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY ||
-           op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST;
+    const uint32_t offset = (uint32_t)op - (uint32_t)CHECK_OP_CALL;
+    return (offset < 64) & (uint32_t)(check_graph_argument_operators >> (offset & 63));
 }
 
 static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIntrinsicInfo* info, bool constant_evaluated_context)
@@ -957,7 +977,7 @@ static inline __attribute__((always_inline)) bool check_graph_pure(const CheckGr
     {
         result = graph->leaves != 0 && check_graph_leaf_of(graph, node)->overload_head == 0 && check_graph_builtin(check_graph_leaf_of(graph, node)->type);
     }
-    else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+    else if (__builtin_expect(op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF, 0))
     {
         result = graph->operand0[node] == BUSTER_CHECK_NONE || pure[graph->operand0[node]] != 0;
     }
@@ -994,18 +1014,20 @@ static void check_graph_record_nodes(CheckGraph* graph)
         const bool varargs = op == CHECK_OP_VARARGS;
         CheckGraphValidation* state = &graph->recorded;
         graph->recorded_pure[node] = (uint8_t)check_graph_pure(graph, node, graph->recorded_pure);
-        if (varargs)
+        // A node with arguments is about one in twenty-five, and one of the counters below rarer still (#1175).
+        if (__builtin_expect(varargs, 0))
         {
             state->varargs += 1;
         }
-        else if (count != 0)
+        else if (__builtin_expect(count != 0, 0))
         {
             state->maximum_arguments = count > state->maximum_arguments ? count : state->maximum_arguments;
             state->arguments += count;
         }
         // Most nodes are leaves or ordinary arithmetic. Leave their cold, exceptional counters untouched:
-        // unconditional zero increments otherwise make Clang load/store the complete counter vector per node.
-        switch (op)
+        // unconditional zero increments otherwise make Clang load/store the complete counter vector per node. The hint
+        // expects a VALUE, which takes the default.
+        switch (__builtin_expect(op, CHECK_OP_VALUE))
         {
             case CHECK_OP_BUILTIN_OVERFLOW: state->maximum_effects += 1; break;
             case CHECK_OP_BUILTIN_MISC: state->builtins[0] += 1; break;
@@ -1474,7 +1496,8 @@ static CheckContext check_graph_context(const CheckGraph* graph, uint32_t node, 
         .tag_completion_count = graph->tag_completion_count,
         .source_position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE,
         .extensions = graph->extensions | (check_graph_system_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
-        .fp_environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0,
+        // A unit that changes its floating-point environment (#pragma STDC FENV_ACCESS and the like) is rare (#1175).
+        .fp_environment = __builtin_expect(graph->fp_environments != NULL, 0) ? graph->fp_environments[node] : 0,
         .const_values = graph->const_values,
         .constant_evaluated = constant_evaluated,
     };
@@ -1489,9 +1512,9 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
         .type = graph->types != 0 ? graph->types[node] : 0,
         .member = graph->members != 0 ? graph->members[node] : 0,
         .node = node,
-        .context = check_graph_context(graph, node, stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0),
+        .context = check_graph_context(graph, node, stream->constant_evaluated != NULL && __builtin_expect(stream->constant_evaluated[node] != 0, 0)),
     };
-    if (action->op == CHECK_OP_MEMBER && graph->vector_member_count != 0)
+    if (__builtin_expect(action->op == CHECK_OP_MEMBER, 0) && graph->vector_member_count != 0)
     {
         uint32_t first = 0;
         uint32_t last = graph->vector_member_count;
@@ -2308,19 +2331,22 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
     action.guards = guards;
     // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
     // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
+    // The cases before the action's computation, the last, are rare at a node, and each begins with a hinted test (#1175):
+    // without, clang jumped around each case once a node. A C unit has no overloads.
     const bool overloads = graph->overload_candidate_count != 0;
-    const bool overload = action.op == CHECK_OP_CALL && stream->overload_count < graph->overload_count && graph->overload_calls[stream->overload_count].node == node;
-    bool contextual_call = overload || (action.op == CHECK_OP_CALL && action.operands[0].overload_head != 0);
-    for (uint32_t i = 0; overloads && action.op == CHECK_OP_CALL && i < action.argument_count; i += 1)
+    const bool overload = __builtin_expect(stream->overload_count < graph->overload_count, 0) && action.op == CHECK_OP_CALL &&
+                          graph->overload_calls[stream->overload_count].node == node;
+    bool contextual_call = overload || (__builtin_expect(action.operands[0].overload_head != 0, 0) && action.op == CHECK_OP_CALL);
+    for (uint32_t i = 0; __builtin_expect(overloads, 0) && action.op == CHECK_OP_CALL && i < action.argument_count; i += 1)
     {
         contextual_call |= action.arguments[i].overload_head != 0;
     }
-    const CheckDiagnostic contextual = contextual_call || !overloads ? CHECK_DIAG_NONE : check_graph_overload_operands(types, graph, stream, &action, scratch);
-    if (contextual != CHECK_DIAG_NONE)
+    const CheckDiagnostic contextual = __builtin_expect(overloads, 0) && !contextual_call ? check_graph_overload_operands(types, graph, stream, &action, scratch) : CHECK_DIAG_NONE;
+    if (__builtin_expect(contextual != CHECK_DIAG_NONE, 0))
     {
         result = (CheckActionResult){ .diagnostic = contextual };
     }
-    else if (contextual_call)
+    else if (__builtin_expect(contextual_call, 0))
     {
         const uint32_t head = overload ? graph->overload_calls[stream->overload_count].head :
                               action.operands[0].overload_head != 0 ? action.operands[0].overload_head - 1 : BUSTER_CHECK_NONE;
@@ -2339,7 +2365,7 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
             }
         }
     }
-    else if (action.op == CHECK_OP_BUILTIN_UNARY || action.op == CHECK_OP_BUILTIN_OVERFLOW)
+    else if (__builtin_expect((action.op == CHECK_OP_BUILTIN_UNARY) | (action.op == CHECK_OP_BUILTIN_OVERFLOW), 0))
     {
         const uint32_t count = action.op == CHECK_OP_BUILTIN_UNARY ? 1 : 3;
         const CheckBuiltinAction builtin = {
@@ -2381,7 +2407,7 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
             };
         }
     }
-    else if (action.op == CHECK_OP_VARARGS)
+    else if (__builtin_expect(action.op == CHECK_OP_VARARGS, 0))
     {
         const CheckVarargsCall* call = &graph->varargs_calls[graph->argument_offsets[node]];
         const CheckVarargsAction builtin = {
@@ -2404,7 +2430,7 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
             .mutates_list = checked.mutates_list,
         };
     }
-    else if (check_graph_has_arguments(action.op) && action.op != CHECK_OP_CALL)
+    else if (__builtin_expect(check_graph_has_arguments(action.op) & (action.op != CHECK_OP_CALL), 0))
     {
         check_graph_special_action(types, graph, stream, &action, &result);
     }
@@ -2413,12 +2439,12 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
         // check_action_scalar's own call, which its 15 other callers share, would keep the action out of line (#880).
         check_action_compute(types, &action, &result, 0, NULL);
         // A call of a plain library builtin's declaration that clang folds (#148, the reader's mark in its member).
-        if (action.op == CHECK_OP_CALL && (action.member & BUSTER_CHECK_LIBRARY_CALL) != 0)
+        if (__builtin_expect(action.op == CHECK_OP_CALL, 0) && (action.member & BUSTER_CHECK_LIBRARY_CALL) != 0)
         {
             check_builtin_library_fold_plain(types, action.member, &action, &result);
         }
     }
-    if (action.op == CHECK_OP_STATEMENT_VALUE)
+    if (__builtin_expect(action.op == CHECK_OP_STATEMENT_VALUE, 0))
     {
         check_graph_region_effects(types, graph, stream, node, scratch, &result);
     }

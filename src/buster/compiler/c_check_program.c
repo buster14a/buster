@@ -2749,7 +2749,9 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
             {
                 const uint32_t operand = operands[k];
-                const CheckOverloadResult* selected = operand != BUSTER_CHECK_NONE ? check_program_overload_address(program, node, k) : NULL;
+                // A C unit has no overloads, so no operand's address takes one (#1175).
+                const CheckOverloadResult* selected = __builtin_expect(program->stream->overload_address_count != 0, 0) && operand != BUSTER_CHECK_NONE ?
+                                                      check_program_overload_address(program, node, k) : NULL;
                 if (selected != NULL)
                 {
                     if (!check_program_overload_valid(program, selected))
