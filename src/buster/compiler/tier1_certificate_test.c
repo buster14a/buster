@@ -835,6 +835,51 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     f.renames[0][0][1].destination = 2;
     tier1_cert_test_pair(test, &f, 0, "duplicate phi destination");
 
+    // An undefined phi operand (BUSTER_CERT_NONE, the IR's undef that #141's blocks' lifetimes give promotion): any bits
+    // are the phi's value along its edge, so its fact needs no proof there, whatever its location holds; a defined
+    // operand in another location still fails, and an undefined one still names no destination twice.
+    tier1_cert_test_init(&f);
+    f.program.block_count = 2;
+    f.blocks[0].edge_count = 1;
+    f.edges[0][0].destination = 1;
+    f.edges[0][0].rename_count = 1;
+    f.renames[0][0][0] = (Tier1CertRename){
+        .destination = 2,
+        .source = BUSTER_CERT_NONE,
+    };
+    f.blocks[1].certificate_count = 1;
+    f.facts[1][0] = (Tier1CertFact){
+        .value = 2,
+        .location = 1,
+    };
+    tier1_cert_test_use(&f, 1, 2, 1, false);
+    tier1_cert_test_pair(test, &f, 1, "an undefined phi operand holds its fact in any location");
+    f.renames[0][0][0].source = 0;
+    tier1_cert_test_pair(test, &f, 0, "a defined phi operand must be where its fact says");
+    f.renames[0][0][0].source = 1;
+    tier1_cert_test_pair(test, &f, 1, "a defined phi operand where its fact says");
+    f.edges[0][0].rename_count = 2;
+    f.renames[0][0][0].source = BUSTER_CERT_NONE;
+    f.renames[0][0][1] = (Tier1CertRename){
+        .destination = 2,
+        .source = BUSTER_CERT_NONE,
+    };
+    tier1_cert_test_pair(test, &f, 0, "duplicate phi destination, undefined");
+    f.renames[0][0][1] = (Tier1CertRename){
+        .destination = 3,
+        .source = 0,
+    };
+    f.blocks[1].certificate_count = 2;
+    f.facts[1][1] = (Tier1CertFact){
+        .value = 3,
+        .location = 0,
+    };
+    tier1_cert_test_use(&f, 1, 3, 0, false);
+    tier1_cert_test_pair(test, &f, 1, "an undefined and a defined phi operand on one edge");
+    f.facts[1][1].location = 2;
+    f.code[1][1].locations[0] = 2;
+    tier1_cert_test_pair(test, &f, 0, "the defined one is still proved beside the undefined one");
+
     tier1_cert_test_init(&f);
     f.program.block_count = 3;
     f.blocks[0].edge_count = 1;

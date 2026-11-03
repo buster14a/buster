@@ -466,6 +466,9 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
+// One request's semantic configuration (#1057): the code generation and layout refusals, the checked program's target
+// and predefines and the measurements' receipt, which the driver, the corpus check and the source preparation share.
+#include "buster/compiler/c_check_request.c"
 #include "buster/compiler/c_checker_driver.c"
 // The driver's commands of several source files (#152): their units on lanes, and one executable of them all.
 #include "buster/compiler/c_checker_units.c"
@@ -501,6 +504,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_bits_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
+// #1057: a real C file prepared as -c prepares it, which the source benchmarks and the IR's commands on real C share.
+#include "buster/compiler/c_check_source_prepare.c"
 #pragma clang optimize off
 #include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
@@ -535,6 +540,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_program_templates_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_lanes_benchmark_test.c"
+#include "buster/compiler/c_check_request_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
 #pragma clang optimize on
 
@@ -1088,10 +1094,12 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
+        arena_static_base_pages();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
+        arena_static_base_pages();
         result = run_parse_command(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
@@ -1566,6 +1574,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
+        arena_static_base_pages();
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
         if (!main_information(argc - 1, argv + 1, &result))
         {

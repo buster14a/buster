@@ -28,8 +28,11 @@ requires the complete vector feature set and runs native correctness before
 benchmarks, reusing one build and the existing shared lock. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
-start benchmarks. The existing required check name is retained by a hosted
-aggregation job that fails when either stage fails.
+start benchmarks. A pull request's run stops at its first failure: its test rows
+fail fast, and its tests don't start when the guide-size or DCO hook check
+fails. Pushes to main, the daily and dispatched runs report every row. The
+existing required check name is retained by a hosted aggregation job that fails
+when either stage fails.
 See [the CI guide](../../docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner

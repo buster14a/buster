@@ -123,15 +123,21 @@ jobs:
 
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
-    needs: changes
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
+    # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
+    # policy checks, which finish within `changes`' time, and don't start when one fails: neither they nor the 9700X job
+    # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
+    # regardless, so that every row reports.
+    needs: [changes, agent-guide-size, dco-hooks]
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     runs-on: ubuntu-26.04
     # The sanitizer rows run the whole inventory on runners whose detectors make it several times slower; the driver's
     # in-process commands take tens of minutes each there. The plain rows took about 80 minutes, so they keep a
     # 120-minute bound rather than the sanitizer rows' 360.
     timeout-minutes: ${{ matrix.sanitizer == 'none' && 120 || 360 }}
     strategy:
-      fail-fast: false
+      # On a pull request, the first failing row cancels the other. Elsewhere every row runs to its end: these rows
+      # are main's sanitizer coverage, and one detector's failure must not hide what the others find.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
         host_arch: [x86-64, native]
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, and pushes
@@ -1148,6 +1154,24 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
+          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions), in node order and keyed in
+          # 64-node windows, alone and after scalar work as its regions (`vector`) are.
+          taskset -c 2 ./build/compiler benchmark-checker-source --only transitions "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only transitions --after-scalar 100 "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only windows "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only windows --after-scalar 100 "${source[@]}"
+          # A second corpus, every path: musl's regcomp.c, with the per-file jobs' musl options.
+          musl="$corpus/libc/musl"
+          taskset -c 2 ./build/compiler benchmark-checker-source -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
+            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+            "$musl/src/regex/regcomp.c"
+          # The whole compile with them and without: sqlite3.c's -c with measure-compile's options, as whole processes in a
+          # rotating order, whose objects must be the same bytes.
+          sqlite="$corpus/sqlite"
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          taskset -c 2 ./build/compiler time-runs --runs 21 --list "${options[@]}" -o "$RUNNER_TEMP/regions.o" \
+            --list --check-transitions "${options[@]}" -o "$RUNNER_TEMP/transitions.o"
+          cmp "$RUNNER_TEMP/regions.o" "$RUNNER_TEMP/transitions.o"
 
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g
@@ -1556,6 +1580,34 @@ jobs:
           persist-credentials: false
       - name: Exercise Git hooks in isolated repositories
         run: sh .githooks/test-sign-off.sh
+
+  dco-audit:
+    # Informational: the pull request's own commits' sign-off trailers, pinned to its head, in the job summary
+    # (tools/dco/dco.c audit, CONTRIBUTING.md's "Auditing sign-offs"). Missing trailers don't fail it; incomplete
+    # history does. No required check needs it.
+    name: DCO sign-off audit
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request's history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Audit the head's commits that the base doesn't reach
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/dco" tools/dco/dco.c
+          status=0
+          "$RUNNER_TEMP/dco" audit --base "$BASE" --head "$HEAD" > "$RUNNER_TEMP/audit" || status=$?
+          cat "$RUNNER_TEMP/audit"
+          { echo '```text'; cat "$RUNNER_TEMP/audit"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          test "$status" -le 1
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated
