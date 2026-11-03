@@ -1270,8 +1270,9 @@ The graph walk's other per-node tests, from the same counts, are hinted too:
 - `type_resolved_index`'s aligned type, as #880's `type_strip_aligned`: 241,121 to 119.
 - `check_program`'s overload addresses, which a C unit has none of.
 
-`check_control_children`'s label test was hinted and measured, and left as it was. The loop's back edge took the jump
-instead: a loop takes one taken branch an iteration, whichever its layout.
+`check_control_children`'s label test is hinted too. Its taken branches barely fell (577,979 to 575,627), since the
+loop's back edge took the jump the test had taken: a loop takes one taken branch an iteration, whichever its layout. But
+its iterations ran 2.76 M fewer instructions in both modes below, a run of the head without the hint showed.
 
 **The whole run.**
 
