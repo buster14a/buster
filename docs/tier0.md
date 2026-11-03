@@ -168,6 +168,12 @@ table. The kinds are:
   the scalar validator, as it does a tail call's; the C producer gives a fence of a constant order one
   (`check_program_direct_fence`, [the builtin integration guide](c-builtins-integration.md)'s "Helper contracts and
   direct forms").
+- An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
+  `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
+  bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
+  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
+  the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
+  shape.
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
@@ -299,7 +305,13 @@ without aggregates:
 `BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
 register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A result whose
 `part_bytes` is its size, fewer than 8 bytes, alone in one register (an `_Atomic` vector of 4 bytes, which LLVM returns
-as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). A STACK location with
+as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). So is each of a
+vector's that LLVM splits over two to four of the target's widest vector registers (`tier0_vector_result_parts`, #137: a
+32- or 64-byte vector without AVX, in xmm0 to xmm3, or a 64-byte one with AVX alone, in ymm0 and ymm1), each register
+`part_bytes` of it whole, one after another, which the epilogue loads and a call's object stores. So are the elements of
+an extended vector of three doubles or three longs, which LLVM returns one per register at the baseline (#137): in xmm0,
+xmm1 and st0, and in rax, rdx and rcx, 8 bytes each from the object's first (`tier0_element_parts`; st0's an `fld` and an
+`fstp` of 8 bytes, `tier0_element_x87`, so that a call leaves the x87 stack as it found it). A STACK location with
 `BUSTER_ABI_FLAG_HIGH` or `BUSTER_ABI_FLAG_LOW` is one part too, the high or the low eightbyte alone, in its 8-byte
 slot: a copy of the aggregate's bytes would run into the next argument's slot (#137). A part loads only the
 aggregate's own bytes, which may end at a page's end:
@@ -453,6 +465,16 @@ calls and the arms of `?:` need nothing of their own for it. The class doesn't c
 left below the vector path's 16: the masks took the last one): each entry that makes or moves one has its own, and
 `tier0_validate` follows each depth's width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than
 an entry's is refused, not miscompiled.
+
+A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of more than 64 (AMX's 1024-byte tile among
+them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
+its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
+does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
+and an element of one whose elements are bytes is read and written through that address. What would compute with one
+(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
+builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
+builtins on vectors, as on structs, call libatomic's generic functions.
 
 - **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
   `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,

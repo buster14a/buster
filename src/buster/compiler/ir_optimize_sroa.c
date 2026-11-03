@@ -64,7 +64,7 @@ static uint16_t ir_sroa_escape_mask(const IrSroaUseBatch* batch)
         const __mmask16 memory = first & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)));
         const __mmask16 forward_op = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COPY)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_BITCAST)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADDRESS));
         const __mmask16 forward = first & forward_op & _mm512_cmpneq_epi32_mask(forwarded, _mm512_setzero_si512());
-        const __mmask16 observable = memory & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
+        const __mmask16 observable = memory & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_OBSERVABLE));
         result = valid & (~(memory | forward) | observable);
     }
     return result;
@@ -183,7 +183,7 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
                 {
                     const bool memory = operand.position == 0 && (f->op[i] == IR_LOAD || f->op[i] == IR_STORE);
                     const bool forward = operand.position == 0 && (f->op[i] == IR_COPY || f->op[i] == IR_BITCAST || f->op[i] == IR_ADDRESS) && work->roots[i] == root;
-                    if ((!memory && !forward) || (memory && (f->flags[i] & BUSTER_IR_VOLATILE) != 0))
+                    if ((!memory && !forward) || (memory && (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0))
                     {
                         work->refused[root] = 1;
                     }

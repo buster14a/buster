@@ -247,6 +247,23 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
     return valid;
 }
 
+// The unit's FILE for clang's prototype code P (BuiltinIntrinsicTypeInput.file_type), and its jmp_buf, sigjmp_buf and
+// ucontext_t for J, SJ and K: the type of the file-scope typedef of `spelling` that the call sees, past any block-scope
+// declaration of the name that hides it (clang's ASTContext keeps the last file-scope typedef of the name, which a local
+// `int FILE` doesn't change, and no block-scope one), or 0. A deferred body's lane, whose bindings hold only the names
+// the body spells, leaves it to source order.
+static TypeId check_input_file_type(CheckInputReader* reader, const char* spelling)
+{
+    check_input_lane_refuse(reader, reader->lane, "a library builtin's prototype reads the unit's FILE, jmp_buf or ucontext_t");
+    const uint32_t name = intern_find(reader->pp->table, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
+    uint32_t handle = name != 0 && !reader->lane ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+    while (handle != 0 && reader->bindings.depth[handle - 1] != 0)
+    {
+        handle = reader->bindings.previous[handle - 1];
+    }
+    return handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF ? reader->declared_types[reader->bindings.declaration[handle - 1]] : 0;
+}
+
 static CheckInputIntrinsicDeclaration check_input_intrinsic_decode(CheckInputReader* reader, const BuiltinIntrinsicInfo* info)
 {
     CheckInputIntrinsicDeclaration declaration = { .info = info };
@@ -258,11 +275,27 @@ static CheckInputIntrinsicDeclaration check_input_intrinsic_decode(CheckInputRea
         .attributes_length = info->attributes_length,
         .custom_typechecking = info->custom_typechecking,
         .strict_prototypes = reader->parser->language.standard >= 2023,
+        .half_prototypes = cbuiltin_library_candidate(info->name, info->name_length) &&
+                           cbuiltin_library_half(cbuiltin_library_id(info->name, info->name_length)),
     };
     const bool va_list = memchr(info->encoding, 'a', info->encoding_length) != 0 || memchr(info->encoding, 'A', info->encoding_length) != 0;
     if (va_list && !info->custom_typechecking)
     {
         input.va_list_type = check_input_predefined_type(reader, reader->predefined_names[4]);
+    }
+    if (memchr(info->encoding, 'P', info->encoding_length) != 0 && !info->custom_typechecking)
+    {
+        input.file_type = check_input_file_type(reader, "FILE");
+    }
+    const char* jump = memchr(info->encoding, 'J', info->encoding_length);
+    if (jump != 0 && !info->custom_typechecking)
+    {
+        const bool signal = jump != info->encoding && jump[-1] == 'S';
+        *(signal ? &input.sigjmp_buf_type : &input.jmp_buf_type) = check_input_file_type(reader, signal ? "sigjmp_buf" : "jmp_buf");
+    }
+    if (memchr(info->encoding, 'K', info->encoding_length) != 0 && !info->custom_typechecking)
+    {
+        input.ucontext_type = check_input_file_type(reader, "ucontext_t");
     }
     builtin_intrinsic_types_decode(reader->types, &input, &declaration.types);
     return declaration;
@@ -288,7 +321,7 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
     const uint32_t bound = intrinsics ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
     const uint32_t entry = bound != 0 ? reader->intrinsic_names[name] : 0;
     const bool declared = entry != 0 && reader->bindings.kind[bound - 1] == C_BINDING_FUNCTION &&
-                          reader->linkage[reader->bindings.declaration[bound - 1]] == 2;
+                          check_input_linkage(reader->declaration_bits, reader->bindings.declaration[bound - 1]) == 2;
     const uint32_t hinted = declared ? entry : 0;
     const BuiltinIntrinsicInfo* header = NULL;
     if (hinted != 0)
@@ -412,7 +445,26 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
                 }
                 else
                 {
-                    check_input_report(reader, keyword, CHECK_INPUT_UNSUPPORTED);
+                    // A FILE builtin without the unit's FILE (check_input_file_type) is clang's error, with its warning
+                    // that the builtin needs its header; any other prototype that doesn't decode is refused by name.
+                    const bool file = capacity && declaration.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
+                                      (declaration.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
+                                      declaration.types.error_offset < info->encoding_length && info->encoding[declaration.types.error_offset] == 'P';
+                    if (file)
+                    {
+                        const CheckWarningEvent event =
+                        {
+                            .id = CHECK_WARNING_ID_BUILTIN_HEADER,
+                            .kind = CHECK_WARNING_EVENT_BUILTIN_HEADER,
+                            .token = keyword,
+                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                            .completion = keyword + 1,
+                            .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                        };
+                        check_input_warning_event(reader, &event, NULL, 0);
+                    }
+                    check_input_report(reader, keyword, file ? CHECK_INPUT_UNKNOWN_BUILTIN : CHECK_INPUT_UNSUPPORTED);
                 }
             }
             else

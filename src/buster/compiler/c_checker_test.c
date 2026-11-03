@@ -2303,6 +2303,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];
+    // The oracle's -w (parse_test_clang's): clang then skips its analysis of each function's CFG, and so its misplaced
+    // fallthrough's error (check_input_fallthrough_analyzed), which test-checker-driver compares without -w.
     const PPOptions pp_options = {
         .language = {
             .standard = fixture->standard != 0 ? fixture->standard : 2017,
@@ -2310,6 +2312,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         },
         .no_standard_includes = true,
         .semantic_pragmas = true,
+        .suppress_warnings = true,
         .predefines.char_unsigned = fixture->char_unsigned,
     };
     const ParseOptions parser_options[2] = {
@@ -5980,6 +5983,22 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
     check_test_expect(test, check_input_target_supported(&options), "explicit source evaluation controls the semantic model");
     options.assembly = true;
     check_test_expect(test, !check_input_target_supported(&options), "assembly input is outside the C semantic adapter");
+}
+
+// A column of `count` tokens with `attributes`' entries, for tokens 0 to `count` - 1, in its own pool in `arena`: for the
+// tests that build a CheckInput's attributes from a pointer a token. Returns a null column where the arena has no room.
+static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttributes* const* attributes, uint32_t count)
+{
+    CheckSparsePool* pool = NULL;
+    CheckSparseWide column = { 0 };
+    if (attributes != NULL && check_sparse_reserve_wide(arena, &pool, NULL, 0, &column, 1, count, false, false))
+    {
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            check_sparse_wide_set(pool, column, token, ~(uint64_t)(uintptr_t)attributes[token]);
+        }
+    }
+    return column;
 }
 
 #include "c_check_graph_test.c"

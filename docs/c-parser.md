@@ -502,7 +502,7 @@ failures, corpora, and mutations of them checked against clang.
 
 On the 9700X, at `d59d035`, with `--clang`:
 
-- the tests without files: the 202 snippets (357 since #1127), the four fixtures, 2,000 random
+- the tests without files: the 202 snippets (404 since #1127), the four fixtures (six since), 2,000 random
   streams, the snippets at every block alignment (12,928 inputs), nine kinds of
   nesting 100,000 levels deep and a run of 100,000 attributes, and the driver's
   cases and its failures (6.8 s);
@@ -548,13 +548,14 @@ The mutations compared only the first error's line until #1127: since, a copy
 whose first error clang files as a parse issue must give clang's whole first
 line, its line, its column and its message. Measured in a cloud container (a
 Xeon, not the 9700X; counts, not timings) with clang 23.1.5, the comparison
-first ran on the parser as it was, then on #1127's:
+first ran on the parser as it was, then after #1127's first round, then after
+its second:
 
-| Mutations, whole first line | Before | After |
-| --- | ---: | ---: |
-| A 148-line file of stdio, stdarg, `#pragma pack`, bit-fields, K&R, `cleanup` and statement expressions (2,000, seed 1) | 318 | 10 |
-| Lua 5.4.8's files (3,000, seed 2) | 223 | 4 |
-| `sqlite3.c` 3.50.4 (600, seed 3) | | 1 |
+| Mutations, whole first line | Before | First round | Second round |
+| --- | ---: | ---: | ---: |
+| A 148-line file of stdio, stdarg, `#pragma pack`, bit-fields, K&R, `cleanup` and statement expressions (2,000, seed 1) | 318 | 10 | 0 |
+| Lua 5.4.8's files (3,000, seed 2) | 223 | 4 | 0 |
+| `sqlite3.c` 3.50.4 (600, seed 3) | | 1 | 0 |
 
 Most of the 318 were GNU attributes in glibc's headers: clang expects their
 lists' `)` after the token before (its `ExpectAndConsume`), where it expects a
@@ -568,22 +569,75 @@ after a tag's definition before what can't be a declarator, the builtins'
 commas, brackets before a declarator's name, a field designator, `[[` that
 isn't an attribute, and a do-statement's `while`. A braced initializer in a
 list followed by a postfix operator (`{ {1}[0] }`), which both paths took, is
-now refused at clang's place. What is left: a parameter without declaration
-specifiers (`( * char p`), which clang reads as an implicit int and the parser
-refuses at its first token; a `(` after an asm label, which clang reads as a
-C++-style initializer; and a subscript followed by a string (`a[0] "x"`), which
-the vector path takes (K6 lets a string follow any `]`, for asm operands'
-`[name] "constraint"`) where the scalar parser and clang refuse it.
+now refused at clang's place.
+
+The second round took what the first left:
+
+- A `#pragma pack` after a tag's body: clang's `isValidAfterTypeSpecifier`
+  takes it as a tag's follower, so the tag's specifiers go on into the next
+  declaration's, which the checker refuses with clang's
+  `cannot combine with previous 'struct' declaration specifier`. The
+  conversion marks the token a `#pragma pack` (or its `_Pragma`) comes before
+  with `BUSTER_PARSE_AFTER_PRAGMA_PACK`, a flag bit the preprocessor's output
+  never has, and the scalar parser reads it where it checks what follows a tag.
+- A parameter without declaration specifiers (`int f(*p)`, `( * char p`), which
+  clang reads as an implicit int: the parser takes its declarator, and a
+  typeless declarator without a name (`f(*)`, `(const)1`, `const : 3`) has its
+  error where the name would be, as clang's.
+- A declarator ends at its attributes and asm label: an array suffix after them
+  is clang's error at clang's place, and a declaration's `(` there is clang's
+  C++-style direct initializer (`int x __attribute__((unused)) (3);`), an
+  expression list after which only `,` or `;` may come. The checker refuses
+  that initializer, as GCC does.
+- K6 no longer lets a string follow any `]` (meant for asm operands'
+  `[name] "constraint"`, which the scalar parser reads anyway), so the vector
+  path no longer takes `g(a[0] "x")`.
+- GNU's array designator without its `=` (`{ [1] -f(1) }`) gives the value its
+  own tree: the designator's `]`, whose search for its parent a prefix operator
+  or a cast would end, searches past the value as an assignment's left operand
+  would and leaves the candidates of the value's operands, so the `]` and the
+  value are siblings where an `=` would be their parent (a fixture). The vector
+  path sends every such declaration to the scalar parser, and keeps the `=`
+  form. After a single array designator, a token that can't begin a value is
+  `expected expression`, as clang reads the value GNU lets follow it.
+
+The driver's campaign below, on the source rather than the -E text, found
+three more, which the second round also takes:
+
+- A declarator's group holds no initializer: clang closes it at the `=`
+  (`int (*fp(int, ...) = 0;`).
+- What can't continue a declarator ends it, and clang's Sema takes the
+  declarator, saying a missing type, before the parser looks at what follows:
+  the implicit int's error comes first (`static const char *name( (int c)`
+  then `{`), but after clang asks for a function's body (`ParseDeclGroup`) or
+  takes a keyword for a parameter's name, and not in the declarator's own
+  parentheses, whose `)` is due first (`int f( (a, b);`).
+- At the end of the file, what the statement stack waits for comes before the
+  block's `}`: a do-statement's `while`, a head's or a label's statement
+  (`expected expression`), and a function declarator's body.
 
 The driver's own first error (`-fsyntax-only`, the checker's errors among
 them) on 400 copies of the 148-line file, with a token deleted, duplicated or
 swapped in the source rather than in the -E text, as #1127's campaign: 327 and
-333 identical to clang's (seeds 7 and 11) before, 355 and 354 after; most of
-the rest are clang's semantic errors, where the checker's messages differ
-(#1107). The checker words its refusals of declaration specifiers
-(`cannot combine with previous 'double' declaration specifier`) and of numeric
-constants (`invalid digit '9' in octal constant`, at the digit) as clang does
-(`c_check_declspec.c`, `c_check_literal_diagnostic.c`).
+333 identical to clang's (seeds 7 and 11) before, 355 and 354 after the first
+round, 363 and 361 after the second, with no copy that one of the two
+accepts and the other refuses, and none left whose first errors are both
+syntax errors. The rest are clang's semantic errors: where the checker's
+messages differ (#1107), and where clang finds one in the statement in which
+the parse fails, before its own syntax error there (`args va_list;` is
+`use of undeclared identifier 'args'` first), which the checker, run on what
+parsed, doesn't reach. The checker words its refusals of
+declaration specifiers (`cannot combine with previous 'double' declaration
+specifier`) and of numeric constants (`invalid digit '9' in octal constant`, at
+the digit) as clang does (`c_check_declspec.c`,
+`c_check_literal_diagnostic.c`); a constant before a unit's first syntax
+error, which only the parse reached, is checked before the parse's errors are
+printed, so that its error is clang's first. The checker takes what clang
+takes there: C2y's `0o17` (in `#if` too), and GNU's designator without its `=`,
+with the values clang gives, whatever begins the value. What stays out:
+`1.5q`, as every `__float128` constant (`__float128 z = 1.5;` is "not a
+constant expression" to the checker), and GNU's `member: value` designator,
+which the checker doesn't support yet.
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or

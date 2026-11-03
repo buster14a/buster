@@ -290,10 +290,11 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
 }
 
 // #1059's inventory, against the helpers' code: every family has its contract, its effects apart from what a direct
-// form needs of its function, only the fences a direct form, a helper no family names UNMODELED's, and every helper each
-// emitter makes (the atomic loads and stores of every width, the fences, every read/modify/write of every width and
-// format, the terminal builtins, FLT_ROUNDS, every math builtin and every x86 leaf), each family's exact count of them,
-// keeps its family's contract (check_test_helper_contract), and an unnamed helper with others' code UNMODELED's bounds.
+// form needs of its function, only the fences and the atomic accesses a direct form, a helper no family names
+// UNMODELED's, and every helper each emitter makes (the atomic loads and stores of every width, the fences, every
+// read/modify/write of every width and format, the terminal builtins, FLT_ROUNDS, every math builtin and every x86
+// leaf), each family's exact count of them, keeps its family's contract (check_test_helper_contract), and an unnamed
+// helper with others' code UNMODELED's bounds.
 // An asm statement's helper is its template's, which UNMODELED covers whole.
 static void check_test_program_helper_contracts(CheckTest* test)
 {
@@ -301,8 +302,8 @@ static void check_test_program_helper_contracts(CheckTest* test)
     {
         const CheckProgramHelperContract* contract = &check_program_helper_contracts[f];
         check_test_expect(test, contract->name != NULL && contract->helper != NULL && contract->effects != 0 && (contract->effects & ~BUSTER_CHECK_HELPER_EFFECTS) == 0 &&
-                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE),
-                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences a direct form");
+                                    (contract->requirements & ~BUSTER_CHECK_HELPER_REQUIREMENTS) == 0 && (contract->direct != NULL) == (f == CHECK_PROGRAM_HELPER_FENCE || f == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS),
+                          "every helper family publishes its contract, its effects apart from its direct form's requirements, and only the fences and the atomic accesses a direct form");
     }
     // The family of each helper by what names it, and a helper no family names (a load or a store of another id, a
     // read/modify/write without its rule) UNMODELED's, with every effect; a load reads and a store writes, each alone.

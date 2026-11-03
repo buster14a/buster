@@ -649,6 +649,13 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // where their time goes.
 #include "buster/compiler/compile_measure.c"
 
+// #1128's benchmark-check-units: a command of several units timed as processes by each lane count, with its system time
+// against one lane's (time-runs' runs, of test-check-units' program of synth's shape).
+#include "buster/compiler/c_check_units_benchmark.c"
+// measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
+// processes in a rotating order, against each other.
+#include "buster/compiler/tier1_programs_measure.c"
+
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
 // order) and its tests, for the parallel and test-parallel commands.
 #include "buster/compiler/parallel.c"
@@ -1310,6 +1317,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_lanes_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-units") == 0)
+    {
+        result = run_check_units_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {
         result = run_checker_binding_benchmark(argc - 2, argv + 2);
@@ -1559,6 +1570,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-compile") == 0)
     {
         result = run_measure_compile_command(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-programs") == 0)
+    {
+        result = run_tier1_programs_measure(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {

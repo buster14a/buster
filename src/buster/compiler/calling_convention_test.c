@@ -3707,6 +3707,9 @@ struct AbiTestWorld
     // A compiled world for x86-64-v4, whose C passes vectors too: those of 16, 32 and 64 bytes the producer takes (#717),
     // which need AVX-512F and AVX-512VL.
     bool vectors;
+    // A compiled world for x86-64's baseline, whose C passes the same vectors in SSE's 16-byte registers (#137): those of
+    // 32 and 64 bytes in memory as arguments, and split over two or four of the registers as results.
+    bool narrow_vectors;
 };
 
 static void abi_test_world_add(AbiTestWorld* world, TypeId type)
@@ -4119,11 +4122,11 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     };
     // (A vector compiled world's of 4, 8, 16, 32 and 64 bytes, the producer's VECTOR values: those of 4 and 8 bytes the
     // intrinsics' narrow vectors and MMX's __m64, which the convention passes as an integer and as an SSE eightbyte, or
-    // <1 x double> in memory.)
-    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements) && (!world->compiled || world->vectors); e += 1)
+    // <1 x double> in memory; and of 1 and 2 bytes, which it passes as integers and the producer by their bytes, #137.)
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements) && (!world->compiled || world->vectors || world->narrow_vectors); e += 1)
     {
         const bool floating = type_kind(table, elements[e]) == BUSTER_TYPE_KIND_FLOATING;
-        for (uint64_t bytes = world->compiled ? 4 : 2; bytes <= 64; bytes *= 2)
+        for (uint64_t bytes = 1; bytes <= 64; bytes *= 2)
         {
             const bool gcc_divergent = (floating && bytes <= 4) || (elements[e] == BUSTER_TYPE_INT128 && bytes == 16);
             if (bytes >= type_size(table, elements[e]) && !(world->gcc && gcc_divergent))
@@ -4133,9 +4136,11 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             }
         }
     }
-    if (!world->gcc && world->vectors)
+    if (!world->gcc && (world->vectors || world->narrow_vectors))
     {
-        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes.
+        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes;
+        // at 16 bytes LLVM returns three doubles' and three longs' elements a register each, in xmm0, xmm1 and st0 and in
+        // rax, rdx and rcx (tier0_element_parts, #137).
         const uint32_t extended[][2] = {
             { BUSTER_TYPE_FLOAT, 3 },
             { BUSTER_TYPE_INT, 3 },
@@ -4150,6 +4155,25 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(extended); i += 1)
         {
             abi_test_world_add(world, type_vector(table, extended[i][0], extended[i][1], true));
+        }
+    }
+    if (!world->gcc && world->compiled && (world->vectors || world->narrow_vectors))
+    {
+        // A compiled clang world's vectors of bool (#137), which the producer passes by their bytes: those the convention
+        // takes (eight to 64 bools, as integers or an SSE eightbyte); the signatures pass none of those it refuses, which
+        // records hold.
+        const uint32_t lengths[] = {
+            8,
+            9,
+            16,
+            33,
+            64,
+            65,
+            200,
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(lengths); i += 1)
+        {
+            abi_test_world_add(world, type_vector(table, BUSTER_TYPE_BOOL, lengths[i], true));
         }
     }
     if (!world->gcc && !world->compiled)
@@ -4284,7 +4308,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             abi_test_world_add(world, refused ? 0 : type_atomic(table, type_unqualified(base)));
             table->last_error = TYPE_ERROR_NONE;
         }
-        else if (pick < 14 || (world->compiled && !world->vectors))
+        else if (pick < 14 || (world->compiled && !world->vectors && !world->narrow_vectors))
         {
             abi_test_world_add(world, type_pointer(table, abi_test_world_pick(world, &random, false)));
         }
@@ -4641,9 +4665,10 @@ static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
 // complex _Float16, __bf16, float, double, long double or __float128 (the half-precision ones an aggregate of their two
 // parts' bits), a complex integer (GNU's, of __int128 too) and a complex _BitInt of any
 // width, __float128 (an aggregate's value in its C, whose operations are libgcc's), a struct or a union, and a vector of
-// 4, 8, 16, 32 or 64 bytes of integers or floating values of
-// up to 8 bytes (which only a vector world, AbiTestWorld.vectors, makes), at any alignment the world makes (a value
-// aligned past 8 bytes is an object of its own, and past 16 one in a realigned frame).
+// 1, 2, 4, 8, 16, 32 or 64 bytes of integers or floating values of up to 8 bytes, or of bools (which only a vector world,
+// AbiTestWorld.vectors or narrow_vectors, makes: those of 1 and 2 bytes and of bools the producer passes by their bytes,
+// #137), at any alignment the world makes (a value aligned past 8 bytes is an object of its own, and past 16 one in a
+// realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
@@ -4656,8 +4681,10 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
                                                                code == BUSTER_TYPE_CODE_FLOAT16 || code == BUSTER_TYPE_CODE_BF16));
     const uint32_t element = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? abi_resolved_index(table, table->types.base[resolved]) : 0;
     const uint8_t element_kind = table->types.kind[element];
-    const bool vector = element != 0 && (size == 4 || size == 8 || size == 16 || size == 32 || size == 64) && table->types.size[element] <= 8 &&
-                        table->types.code[element] != BUSTER_TYPE_CODE_BOOL && (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_FLOATING);
+    const bool boolean = element != 0 && table->types.code[element] == BUSTER_TYPE_CODE_BOOL;
+    const bool vector = element != 0 && (boolean || ((size == 1 || size == 2 || size == 4 || size == 8 || size == 16 || size == 32 || size == 64) &&
+                                                     table->types.size[element] <= 8 &&
+                                                     (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_FLOATING)));
     const uint32_t complex_element = kind == BUSTER_TYPE_KIND_COMPLEX ? abi_resolved_index(table, table->types.base[resolved]) : 0;
     const bool complex_bit_int = complex_element != 0 && table->types.kind[complex_element] == BUSTER_TYPE_KIND_BIT_INT;
     const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
@@ -6786,6 +6813,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
         world.gcc = gcc;
         world.compiled = compiled;
         world.vectors = compiled && vector_bytes == 64;
+        world.narrow_vectors = compiled && vector_bytes == 16;
         abi_test_world_build(&world, seed, 600);
         // GCC's worlds have neither nullptr_t nor packing, and compiled ones not the directed records, whose runs of
         // bit-fields past 64 bits the producer refuses, but a directed record of their own.

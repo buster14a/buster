@@ -84,6 +84,7 @@ jobs:
       check_debug_rows: ${{ steps.files.outputs.check_debug_rows }}
       files: ${{ steps.files.outputs.files }}
       compile_time: ${{ steps.files.outputs.compile_time }}
+      tier1_programs: ${{ steps.files.outputs.tier1_programs }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
@@ -1297,6 +1298,19 @@ jobs:
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,3,4,6,8 --cpus "2,$others" "${source[@]}"
 
+      - name: Benchmark the translation units' lanes
+        # #1128: one command of synth's shape (64 units of 200 functions) by -c, with the frozen corpus's headers and
+        # predefines, by --lanes 1, 2, 4 and 8, as processes: each count's wall time and system time against one lane's.
+        # Lanes that serialize on the kernel (the address space's lock, which arena reservations, commits and discards
+        # take) raise the system time, where the wall time may hide it.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-units,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          ./build/compiler benchmark-check-units --lanes 1,2,4,8 --runs 5 -- "${options[@]}"
+
       - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
         # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
         # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
@@ -1515,6 +1529,46 @@ jobs:
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-tier1-certificate "${source[@]}"
+
+      - name: Check out the pinned Lua scripts of Tier 1's program measurement
+        if: needs.changes.outputs.tier1_programs != 'false'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster-performance
+          ref: 818cfbbc0be238da287c16d8e2a91fd7275cf228 # Reviewed main, with the cc3387f record's five original scripts.
+          path: build/tier1-programs-evidence
+          sparse-checkout: docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua
+          persist-credentials: false
+
+      - name: Time speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc
+        # #138 and #1189: the programs Tier 1 is measured by against clang -O2, each built by this compiler's Tier 0 and
+        # --tier1, clang -O0 and -O2 and tcc. Their outputs must agree (speedtest1's verification hash, each script's
+        # output clang -O0's); then every build runs every program in each of 11 rounds, in an order that rotates by round,
+        # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
+        # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
+        # dispatched runs.
+        if: needs.changes.outputs.tier1_programs != 'false'
+        timeout-minutes: 5
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          # SQLite 3.53.2's test/speedtest1.c (#136's) and Lua 5.4.8's release, by their hashes.
+          inputs="$RUNNER_TEMP/tier1-programs"
+          mkdir -p "$inputs"
+          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
+          curl --fail --location --retry 3 --output "$inputs/lua-5.4.8.tar.gz" https://www.lua.org/ftp/lua-5.4.8.tar.gz
+          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" \
+            4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$inputs/lua-5.4.8.tar.gz" | sha256sum --check
+          tar -xzf "$inputs/lua-5.4.8.tar.gz" -C "$inputs"
+          # tcc as measure-compile's step pins it.
+          tcc="$(command -v tcc)"
+          printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
+          scripts="$PWD/build/tier1-programs-evidence/docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua"
+          clang --version | head -1
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler measure-tier1-programs --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
 
       - name: Benchmark the verified Tier 1 optimization passes
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')

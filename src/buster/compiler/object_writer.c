@@ -166,6 +166,19 @@ struct ObjectOptions
     // Optional bytes indexed by SymbolId: discard a marked local unless a relocation needs its own symbol.
     const uint8_t* temporary_symbols;
     uint32_t temporary_symbol_count;
+    // Optional, for an assembler's objects (#1115): undefined symbols the object lists though no relocation refers to
+    // them, after those that do, in this order (GNU as's .comm symbols and the _GLOBAL_OFFSET_TABLE_ it declares); and
+    // indexed by SymbolId, a common symbol's alignment, or 0 for any other symbol. An undefined symbol with an alignment
+    // is a common one: SHN_COMMON, an OBJECT whose st_value is the alignment and st_size its size.
+    const SymbolId* declared_symbols;
+    uint32_t declared_symbol_count;
+    const uint32_t* common_alignments;
+    uint32_t common_alignment_count;
+    // Optional, for an assembler's objects (#1115): indexed by SymbolId, a defined symbol's st_size, at least the Link's.
+    // GNU as writes a size that reaches past the symbol's section end (`.size` beyond it, or `.set tail, object+2` of a
+    // 4-byte object, which takes its size), where a Link symbol lies within its atom.
+    const uint64_t* symbol_sizes;
+    uint32_t symbol_size_count;
     // The DWARF of each unit's functions, indexed by unit (debug_count of them, the units' count), or null for none:
     // each object takes its unit's entry (in object_write_units too), and an entry without sections or functions gives
     // it none. A unit's entry describes its functions alone: object_build refuses another unit's.
@@ -484,10 +497,12 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
     {
         prepared = atoms->unit[atom] < unit_count;
     }
-    // The symbols' sources and types, 64 at a time: an absolute symbol, which no unit holds, refuses the link, and an
-    // IFUNC makes its unit's object ELFOSABI_GNU (whose units are found below, since IFUNCs are rare).
+    // The symbols' sources and types, 64 at a time: an absolute symbol, which no unit holds, refuses the link, an
+    // IFUNC makes its unit's object ELFOSABI_GNU and a common symbol leaves its atom to the linker (whose atoms and
+    // units are found below, since IFUNCs and commons are rare).
     uint64_t absolute = 0;
     uint64_t ifunc = 0;
+    uint64_t common = 0;
     for (SymbolId first = 1; first < symbols->count; first += 64)
     {
         const uint64_t left = symbols->count - first;
@@ -496,6 +511,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
         absolute |= _mm512_mask_cmpeq_epi8_mask(valid, sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
         ifunc |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC));
+        common |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_COMMON));
     }
     prepared = prepared && absolute == 0;
     ObjectUnits result = {
@@ -526,13 +542,33 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
     uint32_t* cursors = prepared ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, keys > 2 * unit_count ? keys : 2 * unit_count) : 0;
     uint64_t* unnamed = prepared ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, unit_count) : 0;
     prepared = prepared && cursors != 0 && unnamed != 0;
+    // A common symbol's atom (BUSTER_LINK_SYMBOL_COMMON, #147), which its object leaves to the linker: no section holds
+    // it, and its symbol is SHN_COMMON's. Only a link with one, which the pass above found, marks them, 64 symbols'
+    // types at a time.
+    uint8_t* commons = prepared && common != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, atoms->count) : NULL;
+    prepared = prepared && (common == 0 || commons != NULL);
+    if (prepared && commons != NULL)
+    {
+        memset(commons, 0, atoms->count);
+        for (SymbolId first = 1; first < symbols->count; first += 64)
+        {
+            const uint64_t left = symbols->count - first;
+            const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+            const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+            for (uint64_t found = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_COMMON)); found != 0; found &= found - 1)
+            {
+                const AtomId atom = symbols->atom[first + (SymbolId)__builtin_ctzll(found)];
+                commons[atom] = atom != 0 ? 1 : commons[atom];
+            }
+        }
+    }
     if (prepared)
     {
         // Atoms by unit and class: count each key's atoms after its entry, add up, then place them in id order.
         memset(result.atom_begin, 0, (keys + 1) * sizeof(uint32_t));
         for (AtomId atom = 1; atom < atoms->count; atom += 1)
         {
-            result.atom_begin[(uint64_t)atoms->unit[atom] * BUSTER_LINK_CLASS_COUNT + atoms->class[atom] + 1] += 1;
+            result.atom_begin[(uint64_t)atoms->unit[atom] * BUSTER_LINK_CLASS_COUNT + atoms->class[atom] + 1] += commons == NULL || commons[atom] == 0 ? 1 : 0;
         }
         for (uint64_t key = 0; key < keys; key += 1)
         {
@@ -542,8 +578,11 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         for (AtomId atom = 1; atom < atoms->count; atom += 1)
         {
             const uint64_t key = (uint64_t)atoms->unit[atom] * BUSTER_LINK_CLASS_COUNT + atoms->class[atom];
-            result.atoms[cursors[key]] = atom;
-            cursors[key] += 1;
+            if (commons == NULL || commons[atom] == 0)
+            {
+                result.atoms[cursors[key]] = atom;
+                cursors[key] += 1;
+            }
             result.atom_name[atom] = 0;
         }
 
@@ -953,8 +992,9 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
 
     // Room for every fixup to refer to a different undefined symbol; and the object's stamp, after a clear once the
     // stamps have wrapped around.
-    builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, builder->fixup_count);
-    bool result = (builder->undefined != 0 || builder->fixup_count == 0) && builder->symbols->count == symbols->count &&
+    const uint64_t declared_count = builder->options.declared_symbol_count;
+    builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, builder->fixup_count + declared_count);
+    bool result = (builder->undefined != 0 || builder->fixup_count + declared_count == 0) && builder->symbols->count == symbols->count &&
                   (builder->options.temporary_symbols == 0 || builder->local_count == 0 || builder->local_places != 0);
     builder->error = result ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     builder->symbols->stamp += 1;
@@ -1045,6 +1085,18 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     }
                 }
             }
+        }
+    }
+    // The undefined symbols the options declare though no relocation refers to them (ObjectOptions.declared_symbols).
+    for (uint64_t i = 0; result && i < declared_count; i += 1)
+    {
+        const SymbolId target = builder->options.declared_symbols[i];
+        if ((entries[target] & ~(uint64_t)UINT32_MAX) != stamp)
+        {
+            entries[target] = stamp | BUSTER_OBJECT_SYMBOL_UNDEFINED | (uint32_t)undefined_count;
+            undefined[undefined_count] = target;
+            undefined_count += 1;
+            names += symbol_name_bytes[target];
         }
     }
     builder->undefined_count = undefined_count;
@@ -1725,6 +1777,7 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
     const AtomId* symbol_atoms = link->symbols.atom;
     const uint64_t* symbol_values = link->symbols.value;
     const uint64_t* symbol_sizes = link->symbols.size;
+    const uint64_t* elf_sizes = builder->options.symbol_sizes;
     const uint8_t* symbol_flags = link->symbols.flags;
     const uint8_t* const* name_bytes = link->names.bytes;
     const uint32_t* symbol_name_bytes = units->symbol_name_bytes;
@@ -1797,17 +1850,20 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         const uint32_t name_bytes_with_nul = symbol_name_bytes[symbol];
         const bool labelled = name_bytes_with_nul == 0 && i < begin[1];
         const AtomId atom = symbol_atoms[symbol];
-        const uint32_t section = sections[atom_section[atom]].index;
         const uint8_t flags = symbol_flags[symbol];
+        // A common symbol is SHN_COMMON's, its value its atom's alignment, as GNU as writes .comm's (object_prepare
+        // places no section of its atom).
+        const bool common = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+        const uint32_t section = common ? SHN_COMMON : sections[atom_section[atom]].index;
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 || labelled ? (uint32_t)name : 0,
             .st_info = link_symbol_elf_info(flags),
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
-            .st_shndx = object_symbol_section_index(section),
-            .st_value = atom_offset[atom] + symbol_values[symbol],
-            .st_size = symbol_sizes[symbol],
+            .st_shndx = (uint16_t)(common ? SHN_COMMON : object_symbol_section_index(section)),
+            .st_value = common ? UINT64_C(1) << link->atoms.alignment_log2[atom] : atom_offset[atom] + symbol_values[symbol],
+            .st_size = elf_sizes != 0 ? elf_sizes[symbol] : symbol_sizes[symbol],
         };
-        if (extended != 0 && section >= SHN_LORESERVE)
+        if (extended != 0 && !common && section >= SHN_LORESERVE)
         {
             extended[entry - entries] = section;
         }
@@ -1827,19 +1883,24 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         }
         entry += 1;
     }
-    // The undefined symbols: no type but TLS, as GNU as writes them, with their binding and visibility.
+    // The undefined symbols: no type but TLS, as GNU as writes them, with their binding and visibility; and the common
+    // ones (ObjectOptions.common_alignments), OBJECTs of SHN_COMMON with their alignment and size.
     const SymbolId* undefined = builder->undefined;
+    const uint32_t* common_alignments = builder->options.common_alignments;
     for (uint64_t i = 0; i < builder->undefined_count; i += 1)
     {
         const SymbolId symbol = undefined[i];
         const uint32_t name_bytes_with_nul = symbol_name_bytes[symbol];
         const uint8_t flags = symbol_flags[symbol];
         const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+        const uint32_t alignment = common_alignments != 0 ? common_alignments[symbol] : 0;
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 ? (uint32_t)name : 0,
-            .st_info = (flags & BUSTER_LINK_SYMBOL_BINDING) | (tls ? STT_TLS : STT_NOTYPE),
+            .st_info = (flags & BUSTER_LINK_SYMBOL_BINDING) | (alignment != 0 ? STT_OBJECT : tls ? STT_TLS : STT_NOTYPE),
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
-            .st_shndx = SHN_UNDEF,
+            .st_shndx = alignment != 0 ? SHN_COMMON : SHN_UNDEF,
+            .st_value = alignment,
+            .st_size = alignment != 0 ? symbol_sizes[symbol] : 0,
         };
         if (name_bytes_with_nul != 0)
         {
@@ -1948,7 +2009,18 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
         .error = OBJECT_ERROR_NONE,
     };
     bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
-                 (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count);
+                 (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count) &&
+                 (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count) &&
+                 (options.symbol_sizes == 0 || options.symbol_size_count == link->symbols.count) &&
+                 (options.declared_symbol_count == 0 || options.declared_symbols != 0);
+    for (uint32_t i = 0; built && options.symbol_sizes != 0 && i < options.symbol_size_count; i += 1)
+    {
+        built = options.symbol_sizes[i] >= link->symbols.size[i];
+    }
+    for (uint32_t i = 0; built && i < options.declared_symbol_count; i += 1)
+    {
+        built = options.declared_symbols[i] != 0 && options.declared_symbols[i] < link->symbols.count && link->symbols.atom[options.declared_symbols[i]] == 0;
+    }
     if (!built)
     {
         builder.error = OBJECT_ERROR_RANGE;

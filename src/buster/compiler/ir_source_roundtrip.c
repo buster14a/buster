@@ -537,6 +537,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         "tests/ir/empty.ir",
         "tests/ir/tier0-add.ir",
         "tests/ir/fences.ir",
+        "tests/ir/atomics.ir",
         "tests/ir/wide.ir",
     };
     IrSourceTextTests tests = { 0 };

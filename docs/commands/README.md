@@ -77,13 +77,13 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |
 | `test-streaming, benchmark-streaming` | `streaming.c` | [streaming](streaming.md) |
 | `test-tier0, benchmark-backend, benchmark-backend-source` | `tier0.c` | [tier0](tier0.md) |
-| `test-tier1-select, test-tier1-pipeline, test-tier1-masks` | `tier1_select.c` | [tier1](tier1.md) |
+| `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` | `tier1_select.c`, `tier1_programs_measure.c` | [tier1](tier1.md) |
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
 | `benchmark-tier1-certificate`, allocation certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
 | `test-tier1-cfg, test-tier1-cfg-source` | `tier1_cfg.c` | [tier1-cfg](tier1-cfg.md) |
 | `test-tier1-frame, test-tier1-frame-execution` | `tier1_frame.c` | [tier1-frame](tier1-frame.md) |
 | `test-tier1-schedule, benchmark-tier1-schedule` | `tier1_schedule.c` | [tier1-schedule](tier1-schedule.md) |
-| `test-check-units` | `c_checker_driver.c` | [translation-units](translation-units.md) |
+| `test-check-units, benchmark-check-units` | `c_checker_units.c` | [translation-units](translation-units.md) |
 | `test-types, benchmark-types` | `c_types.c` | [types](types.md) |
 | `test-unwind, benchmark-unwind` | `unwind_tier0.c` | [unwind](unwind.md) |
 | `disassemble, test-x86-disassembler` | `x86_64_disassembler.c` | [x86-disassembler](x86-disassembler.md) |

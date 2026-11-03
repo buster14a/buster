@@ -626,7 +626,8 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
             result = left == BUSTER_IR_NONE ? 0 : values[left];
             break;
         case IR_FENCE:
-            // One thread's accesses in program order, as this runs them: nothing to do.
+            // One thread's accesses in program order, as this runs them: nothing to do. A fence orders other threads' views
+            // of them (#1059).
             break;
         default:
             assert(false);
@@ -932,8 +933,8 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 // nodes. Its load reads p + i (address 0); address 1 is p + 8 and address 2 p + 16; constant 0 is 7. The consumers
 // have no lea for the costed cover to prefer over the fold (an add's: the cover keeps its load apart). A call's shape
 // is planned alone, since this emitter refuses calls (tier1_select_test_call_barriers runs them through the native
-// one); the IR has no atomic access of its own: C's atomic operations reach it as calls. A fence (#1059), a thread
-// fence of seq_cst's mfence or a signal fence's no record, keeps the load's own record before it.
+// one); a fence (#1059), a thread fence of seq_cst's mfence or a signal fence's no record, keeps the load's own record
+// before it. An atomic load is a barrier too, and folds into nothing itself (#1059).
 typedef struct Tier1SelectTestBarrier Tier1SelectTestBarrier;
 struct Tier1SelectTestBarrier
 {
@@ -969,12 +970,15 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
     { "not past a thread fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, BUSTER_IR_FENCE_SEQ_CST, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "not past a signal fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 2 | BUSTER_IR_FENCE_SIGNAL, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "after a fence before the load", { IR_FENCE, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_VOID, IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { BUSTER_IR_FENCE_SEQ_CST, 0, 4, 2, 6 }, { N, 1, N, 5, N }, { N, 0, N, N, N }, 5, 5, 6, true },
+    { "not past an acquire fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, false },
+    { "not an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, { 0, BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
 };
 #undef N
 
 // tier1_select_barriers against its scalar twin and an oracle (each node's last barrier before it, by a scan back), on
-// random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, loads volatile or
-// not, other nodes, and flag bits besides volatile's) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
+// random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, loads volatile,
+// atomic or neither, other nodes, and flag bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
 // page, the entries' page poisoned before them.
 static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
 {
@@ -1014,7 +1018,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             uint32_t before = node;
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
-                                    ops[before - 1] == IR_FENCE || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_VOLATILE) != 0)))
+                                    ops[before - 1] == IR_FENCE || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_OBSERVABLE) != 0)))
             {
                 before -= 1;
             }
@@ -1093,6 +1097,8 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
                 const uint32_t node = 3 + i;
                 tier1_select_test_node(&function, node, shape->op[i], shape->type[i], shape->a[i], shape->b[i], shape->c[i]);
                 function.flags[node] = shape->flags[i];
+                // An atomic access's natural alignment, its i64's, which the verifier requires.
+                function.alignment_log2[node] = (shape->flags[i] & BUSTER_IR_ATOMIC) != 0 ? 3 : 0;
                 const bool pooled = node != shape->consumer && shape->type[i] != IR_VOID;
                 assert(!pooled || next < BUSTER_ARRAY_LENGTH(pool));
                 registers[node] = pooled ? pool[next++] : X86_REGISTER_RAX;
@@ -3740,6 +3746,123 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, const Tier1Selec
     arena_pop_to(input, 0);
 }
 
+// A constant index (#141): `p + c * s + k` with c a constant node. Where c * s + k fits 32 bits, the address is one
+// displacement, folded into its user; where it doesn't (`p[1ull << 30]`), the address is its own lea, the constant in a
+// register as its index and k its displacement, which no user folds, by both paths alike; and an offset k past 32 bits
+// is refused by both. Each runs natively as the IR says, as a load, a store and a pointer, with p placed so that the
+// address lands in the memory.
+static const int64_t tier1_select_test_constant_indices[] = {
+    3, -3, INT32_MAX - 8, INT32_MAX - 7, INT64_C(1) << 31, (int64_t)INT32_MIN - 8, (int64_t)INT32_MIN - 9, INT64_C(1) << 40, -(INT64_C(1) << 40), (INT64_C(1) << 60) + 5,
+};
+
+static void tier1_select_test_constant_index(Tier1SelectTest* test, int64_t constant, int64_t offset, uint32_t shape, uint32_t scale, Arena* input, Arena* output, Arena* scratch, uint64_t* random)
+{
+    const uint32_t address = 4;
+    const uint32_t count = shape == 1 ? 8 : 7;
+    const IrSizes sizes =
+    {
+        .instruction_count = count,
+        .block_count = 1,
+        .constant_count = 1,
+        .address_count = 1,
+        .parameter_count = 2,
+    };
+    IrFunction function;
+    const bool created = ir_create(input, &sizes, &function) == IR_OK;
+    tier1_select_test_expect(test, created, "create constant index fixture");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.block_offsets[1] = count;
+        function.parameter_types[0] = IR_I64;
+        function.parameter_types[1] = IR_I64;
+        function.constants[0].low = (uint64_t)constant;
+        function.addresses[0] = (IrAddress){ .offset = offset, .scale = (uint8_t)scale };
+        tier1_select_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_INTTOPTR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, address, IR_ADDRESS, IR_PTR, 2, 3, 0);
+        if (shape == 0)
+        {
+            tier1_select_test_node(&function, 5, IR_LOAD, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else if (shape == 1)
+        {
+            tier1_select_test_node(&function, 5, IR_COPY, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_STORE, IR_VOID, address, 5, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 7, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else
+        {
+            tier1_select_test_node(&function, 5, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+    }
+    // The address's constant part, wrapping as the IR's 64-bit arithmetic does, and whether it fits a displacement.
+    const uint64_t term = (uint64_t)constant * scale + (uint64_t)offset;
+    int64_t product = 0;
+    int64_t sum = 0;
+    const bool fits = !__builtin_mul_overflow(constant, (int64_t)scale, &product) && !__builtin_add_overflow(product, offset, &sum) && sum == (int64_t)(int32_t)sum;
+    const bool offset_fits = offset == (int64_t)(int32_t)offset;
+    const uint32_t root = shape == 1 ? 6 : 5;
+    Tier1SelectPlan plans[2];
+    if (created && !fits && !offset_fits)
+    {
+        Tier1SelectError errors[2];
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            uint32_t failed = 0;
+            errors[path] = tier1_select_plan(&function, 0, output, scratch, path == 0, &plans[path], &failed);
+            arena_pop_to(output, 0);
+        }
+        tier1_select_test_expect(test, errors[0] != TIER1_SELECT_OK && errors[0] == errors[1], "an address whose offset doesn't fit 32 bits beside a constant index is refused by both paths");
+    }
+    else if (created && tier1_select_test_walk_plans(test, &function, 0, root, output, scratch, plans, "constant index fixture selects") == 2)
+    {
+        const Tier1SelectPattern* own = &plans[0].patterns[address];
+        const Tier1SelectPattern* twin = &plans[1].patterns[address];
+        tier1_select_test_expect(test, fits || (!plans[0].covered[address] && own->rule == TIER1_RULE_ADDRESS && own->values[0] == 2 && own->values[1] == 3 && own->displacement == (int32_t)offset &&
+                                                own->scale == tier1_select_log2(scale) && !plans[0].covered[3] && twin->rule == own->rule &&
+                                                memcmp(twin->values, own->values, sizeof(own->values)) == 0 && twin->displacement == own->displacement && twin->scale == own->scale),
+                                 "a constant index past a displacement's 32 bits is its own lea's register index, by both paths");
+        uint8_t registers[16];
+        memset(registers, X86_REGISTER_RAX, sizeof(registers));
+        registers[0] = X86_REGISTER_RDI;
+        registers[1] = X86_REGISTER_RSI;
+        registers[2] = X86_REGISTER_R9;
+        registers[3] = X86_REGISTER_R8;
+        registers[address] = X86_REGISTER_R10;
+        registers[5] = shape == 1 ? X86_REGISTER_RCX : X86_REGISTER_RAX;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const uint64_t mark = output->length;
+            if (tier1_select_test_walk_load(test, &plans[path], registers, output))
+            {
+                uint64_t memory[64];
+                uint64_t expected_memory[64];
+                for (uint32_t word = 0; word < BUSTER_ARRAY_LENGTH(memory); word += 1)
+                {
+                    memory[word] = tier1_select_test_random(random);
+                }
+                memcpy(expected_memory, memory, sizeof(memory));
+                // p so far below or above the memory that the address lands at its word 32.
+                const uint64_t p = (uintptr_t)(memory + 32) - term;
+                const uint64_t expected_p = (uintptr_t)(expected_memory + 32) - term;
+                const uint64_t value = tier1_select_test_random(random);
+                const uint64_t expected = tier1_select_test_interpret(&function, expected_p, value, 0);
+                const uint64_t actual = tier1_select_test_call(test, p, value, 0);
+                const bool same = shape == 0 ? actual == expected : shape == 2 ? actual - p == expected - expected_p : memcmp(memory, expected_memory, sizeof(memory)) == 0;
+                tier1_select_test_expect(test, same, "a constant index accesses the address the IR computes");
+            }
+            arena_pop_to(output, mark);
+        }
+    }
+    arena_pop_to(output, 0);
+    arena_pop_to(input, 0);
+}
+
 // #140's selection (#141's items): C's truth values through their zero extensions and `icmp ne/eq ..., 0` links back to
 // the comparison they test, as the extension's setcc and the branch's jcc; loads, stores and pointers through the typed
 // stream's conversions, nested addresses, constant indices and additions of constants, in one memory operand or lea; a
@@ -3796,6 +3919,17 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
             for (uint32_t scale = 1; scale <= 8; scale *= 2)
             {
                 tier1_select_test_index_walk(test, &tier1_select_test_indices[form], shape, scale, &input, &output, &scratch, &random);
+            }
+        }
+    }
+    for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(tier1_select_test_constant_indices); form += 1)
+    {
+        for (uint32_t shape = 0; shape < 3; shape += 1)
+        {
+            for (uint32_t scale = 1; scale <= 8; scale *= 2)
+            {
+                tier1_select_test_constant_index(test, tier1_select_test_constant_indices[form], 8, shape, scale, &input, &output, &scratch, &random);
+                tier1_select_test_constant_index(test, tier1_select_test_constant_indices[form], INT64_C(1) << 33, shape, scale, &input, &output, &scratch, &random);
             }
         }
     }

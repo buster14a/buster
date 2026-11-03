@@ -100,7 +100,7 @@ static bool check_program_alias_same(String8 a, String8 b)
 // A declaration's asm label (not a register variable's), or an empty one.
 static String8 check_program_alias_label(const CheckInput* input, uint32_t token)
 {
-    const CheckInputAttributes* attributes = input->registers[token] ? NULL : input->attributes[token];
+    const CheckInputAttributes* attributes = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? NULL : check_input_attributes_at(input, token);
     String8 label = { 0 };
     for (uint32_t i = 0; attributes != NULL && label.length == 0 && i < attributes->count; i += 1)
     {
@@ -117,8 +117,8 @@ static bool check_program_alias_named(const CheckProgram* program, const CheckPr
 {
     const CheckInput* input = program->input;
     const uint32_t object = input->objects[token];
-    const uint32_t entry = input->declarations[token] == token && input->static_objects[token] && input->linkage[token] != 0 && !input->registers[token] &&
-                           !input->compound_objects[token] && object != 0 && object < program->object_count ? check_program_alias_of(aliases, count, object) :
+    const uint32_t entry = input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && check_input_linkage(input->declaration_bits, token) != 0 && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) &&
+                           !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) && object != 0 && object < program->object_count ? check_program_alias_of(aliases, count, object) :
                                                                                                                 UINT32_MAX;
     return entry == 0 || (entry != UINT32_MAX && aliases[entry - 1].kind != CHECK_PROGRAM_WEAKREF);
 }
@@ -188,7 +188,7 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
     uint32_t label_count = 0;
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_nonzero(input->static_objects, first, token_count);
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -255,7 +255,7 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
         {
             overloaded[object] = 2;
             mangle = mangle.arena == NULL ? scratch_begin(scratch) : mangle;
-            mangling.internal = input->linkage[token] == 1;
+            mangling.internal = check_input_linkage(input->declaration_bits, token) == 1;
             String8 spelling = { 0 };
             const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[token], mangle.arena, &spelling);
             // A signature the mangling refuses names nothing here, and the emission refuses it if it emits the function.
@@ -280,7 +280,7 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
     // An identifier names its object where no declaration of it has a label, but an overloadable function's.
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_nonzero(input->static_objects, first, token_count);
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -304,19 +304,19 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
     const uint64_t* by_target = valid && group_count > 1 ? c_bindings_sort(objects, objects + count, group_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : objects;
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_nonzero(input->static_objects, first, token_count);
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            const uint32_t object = input->declarations[token] == token && input->static_objects[token] ? input->objects[token] : 0;
+            const uint32_t object = input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) ? input->objects[token] : 0;
             const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
-            const bool defines = input->defined[token] || (!function && input->tentative[token]);
+            const bool defines = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || (!function && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE));
             for (uint32_t i = object != 0 ? check_program_alias_lower(by_target, group_count, object) : group_count;
                  i < group_count && (uint32_t)(by_target[i] >> 32) == object; i += 1)
             {
                 const uint32_t group = (uint32_t)by_target[i];
-                definitions[group] = input->defined[token] && definitions[group] == BUSTER_CHECK_NONE ? token : definitions[group];
-                tentatives[group] = !function && input->tentative[token] && tentatives[group] == BUSTER_CHECK_NONE ? token : tentatives[group];
+                definitions[group] = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) && definitions[group] == BUSTER_CHECK_NONE ? token : definitions[group];
+                tentatives[group] = !function && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) && tentatives[group] == BUSTER_CHECK_NONE ? token : tentatives[group];
             }
             // An alias's or ifunc's own object that the unit also defines: a variable's tentative definition after the
             // alias, which clang takes as the alias's (Sema refuses the others).
@@ -408,7 +408,7 @@ static bool check_program_alias_chains(CheckProgram* program, CheckProgramAlias*
                                kind == CHECK_PROGRAM_IFUNC && returned != BUSTER_TYPE_KIND_POINTER && returned != BUSTER_TYPE_KIND_NULLPTR ? CHECK_PROGRAM_ALIAS_RESOLVER :
                                kind == CHECK_PROGRAM_ALIAS && function && !function_aliasee ? CHECK_PROGRAM_ALIAS_TO_VARIABLE :
                                kind == CHECK_PROGRAM_ALIAS && !function && function_aliasee ? CHECK_PROGRAM_ALIAS_TO_FUNCTION :
-                               kind == CHECK_PROGRAM_ALIAS && !function && input->thread_local[alias->token] != input->thread_local[definition] ?
+                               kind == CHECK_PROGRAM_ALIAS && !function && check_input_bit(input->declaration_bits, alias->token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(input->declaration_bits, definition, BUSTER_CHECK_BITS_THREAD_LOCAL) ?
                                    CHECK_PROGRAM_ALIAS_THREAD_LOCAL :
                                    CHECK_PROGRAM_ALIAS_OK;
                 // An aliased ifunc's base is its resolver, with its error: its errors are its own, which a valid alias of
@@ -418,7 +418,7 @@ static bool check_program_alias_chains(CheckProgram* program, CheckProgramAlias*
                 alias->base = !based ? 0 : aliased != NULL ? aliased->base : aliasee;
                 alias->type = kind == CHECK_PROGRAM_IFUNC || ifunc ? BUSTER_LINK_SYMBOL_IFUNC :
                               function ? BUSTER_LINK_SYMBOL_FUNCTION :
-                              definition != BUSTER_CHECK_NONE && input->thread_local[definition] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+                              definition != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, definition, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
             }
         }
     }
@@ -455,7 +455,7 @@ static bool check_program_aliases(CheckProgram* program, CheckProgramTargetEvent
         if (e == 0 || keys[e] >> 32 != keys[e - 1] >> 32)
         {
             const uint32_t token = (uint32_t)keys[e];
-            const CheckInputAttributes* attributes = input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
             const CheckInputAttribute* weakref = NULL;
             const CheckInputAttribute* ifunc = NULL;
             const CheckInputAttribute* alias = NULL;

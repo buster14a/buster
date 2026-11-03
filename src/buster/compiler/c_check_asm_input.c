@@ -736,43 +736,15 @@ static bool check_input_asm_label_use(const CheckInputReader* reader, uint32_t t
     return evaluated;
 }
 
-// Of the next 8 tokens from `first` below `end`, those with attributes: few have them. The scalar path takes them all.
-static uint32_t check_input_asm_attributed(const CheckInput* input, uint32_t first, uint32_t end, bool scalar)
-{
-    (void)scalar;
-
-    return BUSTER_SCALAR_PATH(scalar) ? (uint32_t)check_input_scan_all(first, end) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, end);
-}
-
-// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877): AVX-512 tests
-// the column's pointers 8 at a time; the scalar path, its twin, tests each token's. The asm labels' passes read them
+// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): the
+// vector path skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8
+// at a time (check_sparse_wide_entries); the scalar path, its twin, tests each token's. The asm labels' passes read them
 // rather than the column, which a unit's few attributed tokens left them sweeping three times.
 static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens, bool scalar)
 {
     (void)scalar;
 
-    uint32_t found = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
-    {
-        for (uint32_t token = 0; token < limit; token += 1)
-        {
-            if (input->attributes[token] != NULL)
-            {
-                tokens[found++] = token;
-            }
-        }
-    }
-    else
-    {
-        for (uint32_t first = 0; first < limit; first += 8)
-        {
-            for (uint32_t selected = check_input_scan_pointers((const void* const*)input->attributes, first, limit); selected != 0; selected &= selected - 1)
-            {
-                tokens[found++] = first + (uint32_t)__builtin_ctz(selected);
-            }
-        }
-    }
-    return found;
+    return check_sparse_wide_entries(input->attributes, limit, !BUSTER_SCALAR_PATH(scalar), tokens);
 }
 
 // Whether bit `index` of `bits` is set: words of 32 bits, as the kernels below gather them.
@@ -869,7 +841,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     for (uint32_t a = 0; !present && a < attributed_count; a += 1)
     {
         const uint32_t token = attributed[a];
-        const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+        const CheckInputAttributes* attributes = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
         for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
         {
             present |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && attributes->records[i].end <= limit;
@@ -889,7 +861,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
         for (uint32_t a = 0; a < attributed_count; a += 1)
         {
             const uint32_t token = attributed[a];
-            const CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+            const CheckInputAttributes* attributes = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
             const uint32_t object = input->objects[token];
             for (uint32_t i = 0; object != 0 && object < slots && attributes != NULL && i < attributes->count; i += 1)
             {
@@ -919,7 +891,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
                     const uint32_t object = input->objects[declaration];
                     if (declaration == token)
                     {
-                        CheckInputAttributes* attributes = !input->registers[token] ? input->attributes[token] : NULL;
+                        CheckInputAttributes* attributes = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
                         for (uint32_t i = 0; attributes != NULL && i < attributes->count && !input->resource; i += 1)
                         {
                             CheckInputAttribute* attribute = attributes->records + i;
@@ -950,7 +922,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 }
                             }
                         }
-                        states[object] |= input->defined[token] ? 4 : 0;
+                        states[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? 4 : 0;
                     }
                     else if (reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && check_input_asm_label_use(reader, token))
                     {
@@ -964,7 +936,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     for (uint32_t a = 0; a < attributed_count && !input->resource; a += 1)
     {
         const uint32_t token = attributed[a];
-        const CheckInputAttributes* attributes = input->registers[token] ? input->attributes[token] : NULL;
+        const CheckInputAttributes* attributes = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
         for (uint32_t i = 0; attributes != NULL && token < reader->expression_limit && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + i;
@@ -983,6 +955,37 @@ static void check_input_asm_labels(CheckInputReader* reader)
         }
     }
     arena_pop_to(reader->scratch, mark);
+}
+
+// Whether the unit has an asm goto with a label (check_input_vla_finish's jumps).
+static bool check_input_asm_gotos(const CheckInput* input)
+{
+    bool found = false;
+    for (uint32_t a = 0; a < input->asm_count; a += 1)
+    {
+        found |= input->asm_statements[a].is_goto && input->asm_statements[a].label_count != 0;
+    }
+    return found;
+}
+
+// Whether the asm goto whose keyword is `token` jumps where clang's JumpScopeChecker refuses (#147, #1126's review): to
+// a label of its own in a variable-length array's or a cleanup's scope it isn't in (check_input_vla_finish's scope
+// marks), or out of `innermost`, the innermost cleanup's scope that holds it, if any.
+static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_t token, const CheckInputCleanup* innermost)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t id = check_input_asm_id(reader->output, token);
+    const CheckInputAsm* assembly = id != 0 ? reader->output->asm_statements + id - 1 : NULL;
+    bool refused = false;
+    for (uint32_t l = 0; assembly != NULL && assembly->token == token && assembly->is_goto && l < assembly->label_count; l += 1)
+    {
+        const uint32_t label = assembly->labels[l].target;
+        const uint32_t declaration = label < parser->tokens.count && reader->scope_marks[label] != 0 ? reader->scope_marks[label] - 1 : BUSTER_CHECK_NONE;
+        const bool enters = declaration != BUSTER_CHECK_NONE && (token < declaration || token >= reader->vla_scope_ends[declaration]);
+        const bool exits = innermost != NULL && label < parser->tokens.count && (label <= innermost->declaration || label >= innermost->end);
+        refused |= enters || exits;
+    }
+    return refused;
 }
 
 static void check_input_asm_finish(CheckInputReader* reader)
@@ -1075,12 +1078,9 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
                     check_action_source_complete(types, value.type, &action);
         }
         valid &= !memory || (original.flags & BUSTER_CHECK_BIT_FIELD) == 0;
-        if (valid && (source->flags & CHECK_ASM_FLAG) != 0)
-        {
-            uint32_t width = 0;
-            bool sign = false;
-            valid = check_action_integer_type(types, original.type, &width, &sign);
-        }
+        // clang refuses a _BitInt operand of any constraint ("invalid type in asm input", #147), and takes a flag
+        // output of any other type, whose size its code generation (and the lowering, by name) limits.
+        valid &= check_action_kind(types, type_strip_aligned(types, original.type)) != BUSTER_TYPE_KIND_BIT_INT;
         if (valid && (source->flags & CHECK_ASM_MATCH) != 0)
         {
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;

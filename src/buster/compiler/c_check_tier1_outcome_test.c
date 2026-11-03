@@ -157,7 +157,7 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
 {
     Arena arena = arena_reserve(1u << 20);
     const uint32_t many = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
-    const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .call_count = 5, .call_type_count = 3 + many + 4, .abi_call_count = 2, .passed_count = 3 };
+    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .call_count = 6, .call_type_count = 3 + many + 8, .abi_call_count = 3, .passed_count = 7 };
     IrFunction function;
     const bool created = arena.base != NULL && ir_create(&arena, &sizes, &function) == IR_OK;
     check_lanes_test_expect(tally, created, "create the call kinds' IR", NULL);
@@ -165,8 +165,9 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
     {
         // f(int, double, long double) -> double; (*p)(short, long..., __int128) of one argument past the boundary's
         // limit, the __int128, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
-        // h(long) of two parameters -> long double; k(a, b) of two 64-byte aggregates, each whole in a zmm register,
-        // whose parts take 16 staging slots; and a constant.
+        // h(long) of two parameters -> long double; k(a, b, c, d) of four 32-byte aggregates, each whole in a ymm
+        // register, whose parts take 16 staging slots; m(a, b) of two 64-byte ones, each whole in a zmm register, whose
+        // parts wait in zmm16 and on instead (#141); and a constant.
         function.call_types[0] = IR_I32;
         function.call_types[1] = IR_F64;
         function.call_types[2] = IR_F80;
@@ -178,34 +179,39 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
         function.call_types[2 + many] = IR_I128;
         function.call_types[3 + many] = IR_I64;
         function.call_types[4 + many] = IR_I64;
-        function.call_types[5 + many] = IR_PTR;
-        function.call_types[6 + many] = IR_PTR;
+        for (uint32_t k = 5 + many; k < 11 + many; k += 1)
+        {
+            function.call_types[k] = IR_PTR;
+        }
         function.calls[0] = (IrCall){ .type_first = 0, .argument_count = 3, .parameter_count = 3, .result_type = IR_F64 };
         function.calls[1] = (IrCall){ .type_first = 3, .argument_count = many, .parameter_count = many, .result_type = IR_I128, .variadic = true };
         function.calls[2] = (IrCall){ .type_first = 3 + many, .argument_count = 1, .parameter_count = 1, .result_type = IR_VOID, .abi = 1 };
         function.calls[3] = (IrCall){ .type_first = 4 + many, .argument_count = 1, .parameter_count = 2, .result_type = IR_F80 };
-        function.calls[4] = (IrCall){ .type_first = 5 + many, .argument_count = 2, .parameter_count = 2, .result_type = IR_VOID, .abi = 2 };
+        function.calls[4] = (IrCall){ .type_first = 5 + many, .argument_count = 4, .parameter_count = 4, .result_type = IR_VOID, .abi = 2 };
+        function.calls[5] = (IrCall){ .type_first = 9 + many, .argument_count = 2, .parameter_count = 2, .result_type = IR_VOID, .abi = 3 };
         function.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = UINT32_MAX }, .passed = 0, .result_size = 0 };
         function.abi_calls[1] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 1, .result_size = 0 };
+        function.abi_calls[2] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 5, .result_size = 0 };
         function.passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
-        for (uint32_t k = 0; k < 2; k += 1)
+        for (uint32_t k = 0; k < 6; k += 1)
         {
-            const AbiLocation whole = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | k), BUSTER_ABI_REGISTER_NONE } };
-            function.passed[1 + k] = (IrPassed){ .size = 64, .location = whole };
+            const uint32_t reg = k < 4 ? k : k - 4;
+            const AbiLocation whole = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | reg), BUSTER_ABI_REGISTER_NONE } };
+            function.passed[1 + k] = (IrPassed){ .size = k < 4 ? 32 : 64, .location = whole };
         }
-        static const uint8_t ops[6] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CALL, IR_CONST };
-        static const uint8_t results[6] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_VOID, IR_I32 };
-        for (uint32_t node = 0; node < 6; node += 1)
+        static const uint8_t ops[7] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CALL, IR_CALL, IR_CONST };
+        static const uint8_t results[7] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_VOID, IR_VOID, IR_I32 };
+        for (uint32_t node = 0; node < 7; node += 1)
         {
             function.op[node] = ops[node];
             function.type[node] = results[node];
-            function.b[node] = node < 5 ? node : 0;
+            function.b[node] = node < 6 ? node : 0;
             function.c[node] = BUSTER_IR_NONE;
         }
-        // A double and a long double, argument or result, are the boundary's since #141, and so is each of k's records;
-        // the short isn't, nor the 17th argument, the __int128 result, the record's area, the missing argument or k's 16
-        // slots past the 14. The 17th is still an __int128.
-        const uint32_t expected[6] = {
+        // A double and a long double, argument or result, are the boundary's since #141, and so is each of k's and m's
+        // records, and m's parts' zmm registers; the short isn't, nor the 17th argument, the __int128 result, the
+        // record's area, the missing argument or k's 16 slots past the 14. The 17th is still an __int128.
+        const uint32_t expected[7] = {
             0,
             1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
                 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
@@ -213,12 +219,13 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             1u << CHECK_TIER1_CALL_ARGUMENT_COUNT,
             1u << CHECK_TIER1_CALL_ABI_RECORD,
             0,
+            0,
         };
         const uint32_t taken = 1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC;
-        for (uint32_t node = 0; node < 6; node += 1)
+        for (uint32_t node = 0; node < 7; node += 1)
         {
             check_lanes_test_expect(tally, check_tier1_call_kinds(&function, node) == expected[node], "a refused call's kinds are its descriptor's shapes", ir_op_names[ops[node]]);
-            check_lanes_test_expect(tally, node == 5 || tier1_select_call_supported(&function, node) == ((check_tier1_call_kinds(&function, node) & ~taken) == 0),
+            check_lanes_test_expect(tally, node == 6 || tier1_select_call_supported(&function, node) == ((check_tier1_call_kinds(&function, node) & ~taken) == 0),
                                     "a call has a kind past indirect and variadic exactly where the selector refuses it", ir_op_names[ops[node]]);
         }
         CheckTier1Outcome outcome = check_tier1_failure(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 1, 0);

@@ -68,15 +68,53 @@ its capacity bounds the total available and borrowed explicit tokens. The
 recovery storage is private to the clean guardian and is released before its
 acknowledgement completes.
 
-The lease and team size stay fixed for the emission phase. Tokens which another
-file returns after dispatch cannot enlarge an already running team. In an uneven
-build, two large files can receive seven lanes and one lane; when the first team
-finishes, the one-lane team can leave capacity idle at the tail. Active-team
-resizing and changes to the existing profitability rule remain separate work.
-This ownership policy uses no machine-wide idle sampling or racy retuning.
+### A team that grows
+
+A team the jobserver gives fewer lanes than its bodies pay for grows while it
+runs (`CheckEmitGrowth`, `c_check_program_emit.c`): in an uneven build two
+large files reach their emissions together, the first takes the six spare
+tokens and the second none, and without growth the second ran its bodies on one
+lane after the first team had given its tokens back. Such a team, in the C
+driver's flow and under a jobserver, cuts its bodies' parts for every lane it may
+take (the lane rule's, the explicit cap's and the session's), 16 per lane rather
+than a round's 64, and takes them in one order: the costliest first, then the
+others in source order. Lane 0 takes most of the parts of a team that grows late
+or never, and each part, and cost order, costs it some of one lane's locality:
+on the 9700X, `sqlite3.c`'s `-c` under a jobserver without a spare token took
+1.36% more wall time than main's one-lane emission in cost order with 64 parts
+per lane, 0.83% in this order with 64, 0.70% with 32 and 0.20% with 16
+(`time-runs`, medians of 22 runs over two copies of each executable). Lane 0 takes
+them alone, or in a round of all those lanes once it has admitted another, where
+each lane past the admitted ones sleeps on the admission's word until lane 0
+admits it. Between its parts, at most every
+100 µs, lane 0 reads the jobserver's spare tokens (`FIONREAD`,
+`worker_budget_available`). It takes them under a lease of its own
+(`worker_budget_grow`, a guardian like the first's), up to the lanes it may
+take and the parts left, when the parts left pay for the guardian's start:
+their tokens on the admitted lanes less on that many more must be at least
+`BUSTER_CHECK_EMIT_GROW_TOKENS`, about a guardian's 160 µs of one lane's
+emission. With `--lanes N` the team grows whatever the parts left pay. A team
+holds up to eight leases. When lane 0 finds no part left it closes the
+admission, so that the lanes still asleep leave, and the round ends as every
+round does. Every lease is returned after the round, before a serial retry or
+the merge. The output is one lane's, whatever lanes took the parts.
+
+A team that starts on one lane and never grows takes its parts on lane 0 alone,
+without waking a lane, at the cost of the clock read per part and a `FIONREAD`
+per 100 µs, and of its parts' order and count. A team the jobserver granted
+some of its lanes starts its round at once on all of them: the lanes past the
+grant wake for the round, sleep until lane 0 admits them, and wake again as it
+closes, which the round's end waits for.
+Ownership stays the jobserver's: a team takes only spare tokens, never waits
+for one, and no machine-wide idle sampling decides anything.
 
 With `--time-stages`, `worker-budget` reports the external mode, explicit cap,
-requested and granted workers, attempted active team and serial-fallback reason.
+requested and granted workers, the team at its end, the lanes it grew by, the
+lanes that took a part of the bodies (one when the calling thread ran them
+alone, a serial retry's among them; never more than the team) and the
+serial-fallback reason. The team, its growth and its lanes are a single unit's
+emission's: with several source files, the team is their units' lanes, and
+the other two are 0.
 This also identifies pipe-style recipes whose descriptors were unavailable;
 ordinary source diagnostics retain their previous bytes and ordering.
 
@@ -125,8 +163,8 @@ recipes and resource wrappers. Median whole-cohort wall times were:
 
 The saturated large cohort uses 4.58% less wall time than unrestricted teams.
 The uneven cohort costs 4.80% more wall time, alongside fewer cycles, switches
-and migrations; its fixed leases expose the tail limitation above. Tiny-file
-ranges overlap. These are one-placement workload results with retained major
+and migrations: its leases were fixed as each team started, the tail that a
+team that grows now closes (below). Tiny-file ranges overlap. These are one-placement workload results with retained major
 faults, not a universal throughput or neutrality guarantee.
 
 A same-head one-file control with spare tokens uses eight lanes in both cases:
@@ -136,6 +174,31 @@ had added 1,549 faults and 1.28% wall time in its matched control. Clean spawnin
 removes that measured copy-on-write amplification without reserving credits
 during the front end. Exact method, counters, identities and rejected controls
 are retained with #673's performance evidence.
+
+### Growing teams' qualification
+
+The [growing teams' record](https://github.com/buster14a/buster-performance/tree/908be6e2a36247da0226cc7f5b5e2f86f1d84c2b/docs/measurements/tail-growth-673-2026-11-02)
+reruns the same harness on the 9700X, main `3ce71ec3` against `e7416f30` (#1161), in two rounds of
+12 cohorts per policy. Medians of whole-cohort wall time:
+
+| Eight-file workload | Build | Jobserver (ms) | Cap one (ms) | Unrestricted (ms) |
+| --- | --- | ---: | ---: | ---: |
+| Two SQLite and six tiny | main | 147.099, 146.914 | 145.331, 144.990 | 139.306, 139.926 |
+| | `e7416f30` | 137.855, 137.309 | 144.940, 144.687 | 140.783, 140.460 |
+| Eight SQLite units | main | 301.304, 301.201 | 302.414, 303.212 | 321.145, 320.512 |
+| | `e7416f30` | 299.902, 300.995 | 302.465, 302.687 | 319.443, 320.413 |
+| Eight tiny units | main | 7.225 | 7.287 | 7.223 |
+| | `e7416f30` | 7.175 | 7.156 | 7.192 |
+
+- **Uneven.** The jobserver's cohort takes 6.3–6.5% less wall time than main's and is the fastest of the
+  three. In every cohort, the SQLite file it started on one lane grew to seven.
+- **Eight SQLite.** It moves −0.5% and −0.1%, with a few files growing at the tail.
+- **The other policies.** Cap one and unrestricted, whose paths the change leaves alone, move −0.5%
+  to +1.1% on the two SQLite workloads.
+- **Objects.** They are one lane's in every cohort.
+- **Controls.** `time-runs` on `sqlite3.c`'s `-c`, against main: wall time +0.17% for a team that
+  never grows, −0.08% for one granted 4 of 8 lanes, +0.20% with every lane granted and −0.38%
+  without a jobserver.
 
 ## The phase
 
@@ -330,10 +393,17 @@ that takes the largest body takes at least as long as it. #113's deferred reader
   empty and partial supplies, exact exceptional bytes, caps, malformed and
   overridden flags, escaped paths, stale/reused descriptor numbers, resource
   limits, unchanged inherited flags, caller signal state, ignored SIGCHLD,
-  and whole compiler-process-group SIGTERM/SIGKILL;
+  and whole compiler-process-group SIGTERM/SIGKILL; and growth: no guardian
+  without a spare byte, each growth bounded by what it asks for and what the
+  pipe holds, the start's report kept, every lease's bytes returned once, and
+  none on a dry run or without a jobserver;
 - budgeted real emissions and their failed-start/resource retries, by both
   paths with and without rows/unwind: one lane's objects or failures, with
   every owned byte returned once;
+- a growing team in the driver, under a jobserver pipe of no byte or one,
+  whose lane 0 supplies more after its first part: the team reported at its
+  end and its growth, up to `--lanes 4`, one lane's object, and every byte
+  back once, those it had no lane for never taken;
 
 - generated programs of up to 600 functions of many kinds, among them
   libgcc's functions in random first-use orders, computed gotos through static
