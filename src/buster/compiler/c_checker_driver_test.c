@@ -3113,10 +3113,10 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2 &&
                          templates != NULL && sscanf(templates, "\ttemplates=%" SCNu64, &template_nodes) == 1 && lean != NULL &&
                          sscanf(lean, "\tlean=%" SCNu64, &lean_nodes) == 1;
-    // #1048's lean steps take most of the nodes on both host paths, and the vector path's fragments (#624) and node
-    // templates (#1048) the ones they leave, if any; the scalar path's take none.
-    check_test_expect(test, counted && expression_nodes != 0 && lean_nodes != 0 && expression_nodes >= batch_nodes + template_nodes + lean_nodes &&
-                                (BUSTER_HOST_VECTOR || (batch_nodes == 0 && template_nodes == 0)),
+    // The vector path's lean steps (#1048) take most of the nodes, and its fragments (#624) and node templates (#1048) the
+    // ones they leave, if any; the scalar path's take none.
+    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes + template_nodes + lean_nodes &&
+                                (BUSTER_HOST_VECTOR ? lean_nodes != 0 : batch_nodes == 0 && template_nodes == 0 && lean_nodes == 0),
                       "--time-stages reports evaluated expressions and the lean steps', the fragments' and the templates' shares");
     free(text);
     text = NULL;
