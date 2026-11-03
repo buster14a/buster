@@ -346,6 +346,10 @@ struct CheckInputNakedDiagnostic
 #define CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY 0x20u
 // Source-prefix evidence for ISO inline rules; later declarations never rewrite an already emitted warning.
 #define CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION 0x40u
+// A function declared noreturn (_Noreturn, [[noreturn]], [[_Noreturn]] or GNU's noreturn, an attribute not ignored), or
+// redeclaring one, which inherits it as clang's redeclarations inherit the attribute and the function type's noreturn:
+// the fallthrough analysis's calls that never complete (check_input_fallthrough_noreturn, #1126's review).
+#define CHECK_INPUT_FUNCTION_NORETURN 0x80u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -1034,6 +1038,12 @@ struct CheckInputReader
     CheckConstexprValue* constexpr_values;
     uint32_t constexpr_count;
     uint32_t implicit_function_capacity;
+    // The fallthrough null statements whose placement clang's analysis of the function's CFG checks, which the controls'
+    // walk records (check_input_fallthrough_record) and check_input_fallthrough_placements checks once the bindings'
+    // replay has resolved the uses that analysis reads: a callee's declaration, a constant's (#1126's review).
+    uint32_t* fallthrough_tokens;
+    uint32_t fallthrough_count;
+    uint32_t fallthrough_capacity;
     uint32_t kr_diagnostic_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
@@ -1947,6 +1957,18 @@ static uint32_t check_input_scan_pointers(const void* const* column, uint32_t fi
 
 #include "c_check_attribute.c"
 static const CheckInputAttribute* check_input_naked_attribute(const CheckInputAttributes* attributes);
+
+// Whether a declaration's attributes hold a noreturn one that isn't ignored: the _Noreturn keyword's, [[noreturn]],
+// [[_Noreturn]], GNU's noreturn, or an implicit library declaration's (CHECK_INPUT_FUNCTION_NORETURN).
+static bool check_input_noreturn_attribute(const CheckInputAttributes* attributes)
+{
+    bool noreturn = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        noreturn |= attributes->records[i].kind == CHECK_ATTRIBUTE_NORETURN && !attributes->records[i].ignored;
+    }
+    return noreturn;
+}
 static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous);
 
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
@@ -5437,6 +5459,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
                         reader->naked_functions = true;
                     }
+                    if (function && !is_typedef && check_input_noreturn_attribute(attributes))
+                    {
+                        reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NORETURN;
+                    }
                 }
                 // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793).
                 reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2;
@@ -5684,7 +5710,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             reader->objects[token] = reader->objects[previous];
             if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
             {
-                reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
+                reader->output->function_flags[token] |= reader->output->function_flags[previous] & (CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION | CHECK_INPUT_FUNCTION_NORETURN);
             }
             check_input_naked_inherit(reader, token, previous);
             const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
@@ -5736,7 +5762,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 reader->objects[token] = reader->objects[previous];
                 if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
                 {
-                    reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
+                    reader->output->function_flags[token] |= reader->output->function_flags[previous] & (CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION | CHECK_INPUT_FUNCTION_NORETURN);
                 }
                 check_input_naked_inherit(reader, token, previous);
                 if (library_redeclaration && compatible == TYPE_ANSWER_NO)
@@ -9075,6 +9101,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
+            if (reader.fallthrough_count != 0 && !input->resource)
+            {
+                check_input_fallthrough_placements(&reader);
+            }
             check_input_diagnostic_recover(&reader, resolved);
             for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)
             {

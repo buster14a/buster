@@ -151,7 +151,8 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 input->declarations[token] = token;
                 reader->declared_types[token] = type;
                 reader->declaration_kinds[token] = C_BINDING_FUNCTION;
-                input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT | (library ? CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY : 0);
+                input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT | (library ? CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY : 0) |
+                                               (attributes != NULL ? CHECK_INPUT_FUNCTION_NORETURN : 0);
                 input->attributes[token] = attributes;
                 reader->objects[token] = token + 1;
                 reader->static_objects[token] = true;

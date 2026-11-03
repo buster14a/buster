@@ -141,6 +141,65 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "an unreachable fallthrough before a label no goto names", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; __attribute__((fallthrough)); here: ; case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "a fallthrough after a conditional return", "int f(int x, int y) {\nswitch (x) {\ncase 1: if (y) return 2; __attribute__((fallthrough)); x++; case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "a fallthrough after a return and a case", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; case 5: __attribute__((fallthrough)); x++; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        // Statements that never complete through calls (#1126's review): a function declared noreturn, by any spelling and
+        // through redeclarations, called wherever the statement runs (an operand, an argument, an initializer, a declaration's,
+        // an if's, a switch's, a loop's condition); a library function and a builtin clang marks noreturn; __builtin_assume
+        // of a false condition. And conditions folded as clang's CFG builder folds them, through && and ||, `!` and a const
+        // object. But a call in a short-circuited operand, a conditional's arm, sizeof, through a pointer, a declaration
+        // alone, a for's increment, and a condition that doesn't fold leave the fallthrough reachable.
+        { "unreachable fallthroughs after calls that never return",
+          "__attribute__((noreturn)) void die(void);\n_Noreturn void quit(int);\nvoid stop(void);\n_Noreturn void stop(void);\n_Noreturn int fail(void);\nint fail(void);\n"
+          "void abort(void);\nvoid exit(int);\nint g(int);\nint f(int x, int y) {\nswitch (x) {\n"
+          "case 1: die(); __attribute__((fallthrough)); x++;\ncase 2: (void)quit(y); __attribute__((fallthrough)); y++;\n"
+          "case 3: stop(); __attribute__((fallthrough)); y++;\ncase 4: x = fail() + 1; __attribute__((fallthrough)); y++;\n"
+          "case 5: (&die)(); __attribute__((fallthrough)); y++;\ncase 6: if (y) die(); else quit(x); __attribute__((fallthrough)); y++;\n"
+          "case 7: { quit(x++); } __attribute__((fallthrough)); y++;\ncase 8: g(fail()); __attribute__((fallthrough)); y++;\n"
+          "case 9: y++; int z = fail(); __attribute__((fallthrough)); y += z;\ncase 10: abort(); __attribute__((fallthrough)); y++;\n"
+          "case 11: exit(1); __attribute__((fallthrough)); y++;\ncase 12: __builtin_abort(); __attribute__((fallthrough)); y++;\n"
+          "case 13: __builtin_assume(0); __attribute__((fallthrough)); y++;\ncase 14: if (fail()) y++; __attribute__((fallthrough)); y++;\n"
+          "case 15: switch (fail()) { } __attribute__((fallthrough)); y++;\ncase 16: while (fail()) y++; __attribute__((fallthrough)); y++;\n"
+          "case 17: do y++; while (fail()); __attribute__((fallthrough)); y++;\ncase 18: for (int i = fail(); ;) break; __attribute__((fallthrough)); y++;\n"
+          "case 19: y++; long q[2] = { fail() }; __attribute__((fallthrough)); y += (int)q[0];\n"
+          "case 20: (void)__builtin_expect(fail(), 0); __attribute__((fallthrough)); y++;\ncase 21: return y;\n}\nreturn 0;\n}\n" },
+        { "unreachable fallthroughs after folded conditions",
+          "enum { K = 1 };\nstatic const int k = 1;\nint f(int x, int y) {\nswitch (x) {\n"
+          "case 1: if (2 - 1) return 2; __attribute__((fallthrough)); x++;\ncase 2: if (k) return 3; __attribute__((fallthrough)); x++;\n"
+          "case 3: if (K && sizeof(int) == 4) return 4; __attribute__((fallthrough)); x++;\ncase 4: if (y || 1) return 5; __attribute__((fallthrough)); x++;\n"
+          "case 5: if (y && 0) ; else return 6; __attribute__((fallthrough)); x++;\ncase 6: if (!(y && 0)) return 7; __attribute__((fallthrough)); x++;\n"
+          "case 7: while (2 - 1) ; __attribute__((fallthrough)); x++;\ncase 8: for (; 1 + 1;) ; __attribute__((fallthrough)); x++;\n"
+          "case 9: do ; while (!0); __attribute__((fallthrough)); x++;\ncase 10: if (1.5) return 8; __attribute__((fallthrough)); x++;\n"
+          "case 11: if ((void*)0) ; else return 9; __attribute__((fallthrough)); x++;\ncase 12: if ((y++, 1)) return 10; __attribute__((fallthrough)); x++;\n"
+          "case 13: return 1;\n}\nreturn 0;\n}\n" },
+        // Each alone: clang's analysis of a function doesn't run after an earlier function's error.
+        { "a reachable fallthrough after a short-circuited call", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; y && (die(), 1); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a conditional's arm", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; y ? die() : g(); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after sizeof", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; (void)sizeof(fail()); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a call through a pointer", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; { void (*p)(void) = die; p(); } __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after __builtin_assume of a variable", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; __builtin_assume(y); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a condition that doesn't fold", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; if (y || 0) return 2; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a variable condition", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; int k2 = 1; if (k2) return 3; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after an and of a variable", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; if (y && 1) return 4; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a declaration of a noreturn function", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; { _Noreturn void quit(void); } __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a for's increment", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; for (;; fail()) break; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after one branch", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; if (y) die(); else g(); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a right operand", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
+          "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; (void)(y && fail()); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        // Clang's analysis runs at a function's end only where no error came before it.
+        { "a misplaced fallthrough after an undeclared identifier",
+          "int f(int x) {\nswitch (x) {\ncase 1: undeclared_thing; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a misplaced fallthrough before a later function's undeclared identifier",
+          "int f(int x) {\nswitch (x) {\ncase 1: x++; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\nint g(void) {\nreturn nope;\n}\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/label-attributes.c", directory);
