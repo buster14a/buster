@@ -1497,9 +1497,9 @@ struct Tier1SelectForest
     const uint32_t* blocks;
     const uint32_t* uses;
     const uint32_t* costs;
-    // Each node's last memory barrier before it, plus one (0 for none): a store, a call or a volatile access, which a
-    // load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no atomic access of its own:
-    // C's atomic operations reach it as calls of the unit's leaves.
+    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a volatile access, a fence or
+    // a move of rsp, which a load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no
+    // atomic access of its own: C's atomic operations reach it as calls of the unit's leaves, and its fences as IR_FENCE.
     const uint32_t* barriers;
     // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
     const uint8_t* canonical;
@@ -1509,7 +1509,10 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
-    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+    // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
+    // past it, so that the access stays on the fence's side the program put it.
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE ||
+           (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -1542,7 +1545,8 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const __mmask16 volatile_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | volatile_load) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) | volatile_load) &
+                                  active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
