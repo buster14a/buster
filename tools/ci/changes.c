@@ -2377,7 +2377,7 @@ static bool changes_oracle_policy(Text workflow)
         hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
         hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
         native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test, fuzz]");
-        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}");
         native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}");
         native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
     }
@@ -2387,6 +2387,9 @@ static bool changes_oracle_policy(Text workflow)
 static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
 {
     changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
+    const char* source = text_terminated(workflow);
+    changes_expect(test, strstr(source, "    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]") != NULL, "draft transitions trigger a fresh current-revision run", (Text){ 0 });
+    changes_expect(test, strstr(source, "tools/ci/qualification.c") != NULL && strstr(source, "PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}") != NULL, "aggregate qualification uses the tested draft-aware policy", (Text){ 0 });
     static const struct
     {
         const char* before;
@@ -2400,6 +2403,8 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
         { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
         { " && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'))", "" },
         { "needs.fuzz.result == 'success'", "needs.fuzz.result != 'failure'" },
+        { " && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)", "" },
+        { "github.event.pull_request.draft == false", "github.event.pull_request.draft != true" },
         // Pull requests skip the fuzz campaigns; nothing else may.
         { "github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
         { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",

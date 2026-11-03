@@ -42,6 +42,12 @@ fail fast, and its tests don't start when the guide-size or DCO hook check
 fails. Pushes to main, the daily and dispatched runs report every row. The
 existing required check name is retained by a hosted aggregation job that fails
 when either stage fails.
+Draft PRs retain hosted feedback but cannot queue hardware. Ready/draft transitions
+start a new run and cancel the superseded run in the same PR group. The required
+aggregate explicitly fails a code-changing draft until ready; the selector's
+legitimate no-code exemption still passes. Its C predicate in
+`tools/ci/qualification.c` exhaustively tests the allowed outcomes, including
+missing/invalid/skipped results and event/selector consistency.
 See [the CI guide](../../docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
@@ -122,3 +128,17 @@ there at a time, so everything takes one lock:
   benchmark's step, the tables or the shards.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## Queue and execution timing
+
+The hosted-only `CI latency report` workflow runs at 07:07 Europe/Madrid and on
+manual dispatch. It samples the latest 100 main CI workflow runs, reports median
+and nearest-rank p95 by PR/main/scheduled-manual event class, and retains raw API
+responses plus normalized observations in workflow artifacts. It does not run
+benchmarks, weaken the hardware gate, or change the daily benchmark schedule.
+
+Read `docs/ci.md` for metric definitions and limitations. In particular, runner
+hook duration includes overhead and is not an exact shared-lock wait; missing
+timestamps are unknown rather than zero. Run its network-free fixtures with
+`bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
+in this repository's retired `docs/measurements` path.

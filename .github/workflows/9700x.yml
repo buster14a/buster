@@ -15,6 +15,7 @@ on:
   # documentation gets the job skipped by `changes`, which counts as passed, rather than no check at all, which blocks
   # the merge.
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
 
 permissions:
   contents: read
@@ -102,6 +103,8 @@ jobs:
           set -euo pipefail
           cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/changes" tools/ci/changes.c
           "$RUNNER_TEMP/changes" --self-test
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
+          "$RUNNER_TEMP/qualification" --self-test
 
       - id: files
         shell: bash
@@ -550,8 +553,9 @@ jobs:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
     needs: [changes, test, fuzz]
     # Both hosted variants must pass before any hardware work, including native
-    # correctness. This also covers scheduled/manual runs, whose selector is skipped.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}
+    # correctness. Drafts keep hosted feedback but cannot occupy the hardware.
+    # This also covers scheduled/manual runs, whose selector is skipped.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -1654,6 +1658,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
+      - name: Check out the qualification policy
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Require hosted and native correctness before successful qualification
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
@@ -1664,17 +1673,8 @@ jobs:
           FUZZ_RESULT: ${{ needs.fuzz.result }}
           BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
           EVENT_NAME: ${{ github.event_name }}
+          PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
         shell: bash
         run: |
-          if [ "$CHANGES_RESULT" = success ] && [ "$CODE_CHANGED" = false ] &&
-              [ "$SIZE_RESULT" = success ] && [ "$DCO_RESULT" = success ] &&
-              [ "$TEST_RESULT" = skipped ] && [ "$FUZZ_RESULT" = skipped ] && [ "$BENCHMARK_RESULT" = skipped ]; then
-              echo 'Documentation-only change; no compilation or measurements required.'
-          else
-              test "$SIZE_RESULT" = success
-              test "$DCO_RESULT" = success
-              test "$TEST_RESULT" = success
-              # Pull requests don't run the fuzz campaigns.
-              test "$FUZZ_RESULT" = success || { [ "$EVENT_NAME" = pull_request ] && [ "$FUZZ_RESULT" = skipped ]; }
-              test "$BENCHMARK_RESULT" = success
-          fi
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
+          "$RUNNER_TEMP/qualification"
