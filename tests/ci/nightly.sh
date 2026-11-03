@@ -368,7 +368,8 @@ chmod +x "$work/identity-bin"/*
 identity()
 {
     : > "$GITHUB_OUTPUT"
-    PATH="$work/identity-bin:$PATH" bash "$identity_step" > /dev/null 2>&1
+    # As the workflow's shell runs a step: errexit and pipefail.
+    PATH="$work/identity-bin:$PATH" bash -eo pipefail "$identity_step" > /dev/null 2>&1 || true
     sed -n 's/^host=//p' "$GITHUB_OUTPUT"
 }
 first=$(identity)

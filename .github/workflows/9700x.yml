@@ -736,7 +736,9 @@ jobs:
                       files+=("$owned")
                   fi
               done < <(pacman -Qlq $owners 2> /dev/null || true)
-              if hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | xargs -0 -r -n 256 -P 8 sha256sum | LC_ALL=C sort -k 2); then
+              # A file that can't be hashed marks the hashes, whatever the shell's pipefail: then there is no identity.
+              hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | { xargs -0 -r -n 256 -P 8 sha256sum 2> /dev/null || printf 'unhashable\n'; } | LC_ALL=C sort -k 2)
+              if [[ "$hashes" != *unhashable* ]]; then
                   software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
               fi
           fi
@@ -848,7 +850,9 @@ jobs:
                       files+=("$owned")
                   fi
               done < <(pacman -Qlq $owners 2> /dev/null || true)
-              if hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | xargs -0 -r -n 256 -P 8 sha256sum | LC_ALL=C sort -k 2); then
+              # A file that can't be hashed marks the hashes, whatever the shell's pipefail: then there is no identity.
+              hashes=$(printf '%s\0' "${files[@]}" | LC_ALL=C sort -zu | { xargs -0 -r -n 256 -P 8 sha256sum 2> /dev/null || printf 'unhashable\n'; } | LC_ALL=C sort -k 2)
+              if [[ "$hashes" != *unhashable* ]]; then
                   software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
               fi
           fi
