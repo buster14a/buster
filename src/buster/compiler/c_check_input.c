@@ -1035,8 +1035,9 @@ struct CheckInputReader
     uint32_t* declaration_specifiers;
     TypeId* declaration_deduced;
     TypeId* declaration_bases;
-    // The C89 declaration-start column: entry q is the first token of the declaration whose declarator name is q, the
-    // start a candidate's implicit declaration begins at (check_input_declaration_starts). 0 where the unit isn't C89.
+    // The declaration-start column: entry q is the first token of the declaration whose declarator name is q, the
+    // start a candidate's implicit declaration or a declarator's attribute begins at (check_input_declaration_starts).
+    // 0 where the parse has no roles.
     uint32_t* declaration_starts;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
@@ -4923,8 +4924,8 @@ static void check_input_declaration_starts(const Parser* parser, uint32_t* colum
     }
 }
 
-// The first token of the declaration whose declarator name is `name`: the start column where the reader has one (the C89
-// modes, whose implicit declarations ask for it per name), else the walk.
+// The first token of the declaration whose declarator name is `name`: the start column where the reader has one
+// (every unit with roles), else the walk.
 static uint32_t check_input_declaration_first(const CheckInputReader* reader, uint32_t name)
 {
     return reader->declaration_starts != 0 ? reader->declaration_starts[name] : check_input_declaration_begin(reader->parser, name);
@@ -6427,7 +6428,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         // the declaration the `*` starts: the attribute token would otherwise start at itself and leave the `*` to the
         // expressions' walk.
         uint32_t declaration_first = implicit ? implicit_first : i;
-        if (!implicit && (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 &&
+        if (!implicit && !reader->ignored[i] && (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 &&
             (role == PARSE_ROLE_QUALIFIER_LEFT || role == PARSE_ROLE_OPEN_ATTRIBUTE_LEFT))
         {
             declaration_first = check_input_declaration_first(reader, i);
@@ -8668,9 +8669,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(return_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(definition_origins, uint32_t);
-    // C89's implicit declarations ask where a candidate's declaration starts per name (check_input_starts_implicit_declaration):
-    // the column answers each in constant time. Other modes keep the walk for their rare static function note alone.
-    const bool declaration_starts = valid && parser->language.standard < 1999 && parser->tree.roles != 0;
+    // The declaration a name's or a declarator attribute's starts at is asked per C89 implicit candidate and per
+    // attribute in every mode (check_input_resolve_range), and for the rare static function note: the column answers
+    // each in constant time, where a backward walk per attribute of one declarator list was quadratic in its length.
+    const bool declaration_starts = valid && parser->tree.roles != 0;
     reader.declaration_starts = declaration_starts ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
     valid &= !declaration_starts || reader.declaration_starts != 0;
     BUSTER_CHECK_INPUT_ARRAY(ignored, uint8_t);

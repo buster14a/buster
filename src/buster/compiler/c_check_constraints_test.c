@@ -2892,6 +2892,124 @@ static void check_test_implicit_int(CheckTest* test, const char* clang, const ch
     printf("test-checker: implicit int: %u fixtures, %u checks\n", (uint32_t)(BUSTER_ARRAY_LENGTH(check_implicit_int_fixtures) * BUSTER_ARRAY_LENGTH(modes)), checks);
 }
 
+// One generated declaration-scaling source in one mode: clang's acceptance, then the checker's on both paths
+// (check_corpus_file_outcome).
+static void check_test_declaration_scale_row(CheckTest* test, const char* clang, const char* directory, bool* ready,
+                                             const char* source, size_t length, const CheckImplicitIntMode* mode, const char* rule)
+{
+    char standard[24];
+    snprintf(standard, sizeof(standard), "-std=%s", mode->name);
+    const PPOptions options =
+    {
+        .language =
+        {
+            .standard = mode->standard,
+            .gnu = mode->gnu,
+            .digraphs = mode->digraphs,
+        },
+        .no_standard_includes = true,
+        .quiet = true,
+        .clang_features = true,
+        .semantic_pragmas = true,
+    };
+    const char* arguments[] =
+    {
+        "--no-default-config",
+        "--target=x86_64-linux-gnu",
+        standard,
+        "-nostdinc",
+    };
+    char path[4300];
+    snprintf(path, sizeof(path), "%s/declaration_scale_%s.c", directory, mode->name);
+    CheckCorpusOracle oracle;
+    const bool written = *ready && check_corpus_write(path, source, length);
+    const bool row = written && check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
+    char description[512];
+    snprintf(description, sizeof(description), "%s (%s): clang %s, the fixture records acceptance", rule, standard,
+             row && oracle.rejected ? "rejects" : "accepts");
+    check_test_expect(test, row && !oracle.rejected, description);
+    if (row)
+    {
+        CheckCorpusTally tally = { 0 };
+        CheckCorpusOutcome outcome;
+        const bool different = check_corpus_file_outcome(&tally, path, rule, "declaration-scale", &options, &oracle, NULL, 64, &outcome);
+        snprintf(description, sizeof(description), "%s (%s): the checker gives clang's acceptance, on both paths", rule, standard);
+        check_test_expect(test, !different, description);
+    }
+    snprintf(description, sizeof(description), "%s (%s): the fixture's file is removed", rule, standard);
+    check_test_expect(test, !written || unlink(path) == 0, description);
+    *ready = written;
+}
+
+// The declaration-start lookup's scaling shapes (#1121), generated: a file-scope declaration of many independently
+// named pointers, each with its own GNU attribute, whose every attribute the walk resolves a first token for, in the
+// C99 modes; and a C89 initializer of `&vN` operands, each a candidate's name. A backward walk per attribute or
+// candidate across the one declaration was quadratic in its length.
+static void check_test_declaration_scales(CheckTest* test, const char* clang, const char* directory, bool made)
+{
+    enum { DECLARATORS = 4000 };
+    static const CheckImplicitIntMode attribute_modes[] =
+    {
+        { 1999, false, "c99", 0 },
+        { 1999, true, "gnu99", 0 },
+    };
+    uint32_t checks = 0;
+    bool ready = made;
+    char* source = NULL;
+    size_t length = 0;
+    FILE* stream = open_memstream(&source, &length);
+    if (stream != NULL)
+    {
+        fputs("int *__attribute__((unused)) p0", stream);
+        for (uint32_t d = 1; ready && d < DECLARATORS; d += 1)
+        {
+            ready = fprintf(stream, ", *__attribute__((unused)) p%u", d) > 0;
+        }
+        ready = ready && fputs(";\n", stream) > 0 && fclose(stream) == 0;
+    }
+    else
+    {
+        ready = false;
+    }
+    for (uint32_t m = 0; ready && m < BUSTER_ARRAY_LENGTH(attribute_modes); m += 1)
+    {
+        check_test_declaration_scale_row(test, clang, directory, &ready, source, length, &attribute_modes[m],
+                                         "a declaration's pointer declarators, each with a GNU attribute");
+        checks += 1;
+    }
+    free(source);
+    source = NULL;
+    length = 0;
+    stream = open_memstream(&source, &length);
+    if (ready && stream != NULL)
+    {
+        fputs("static int v0", stream);
+        for (uint32_t d = 1; ready && d < DECLARATORS; d += 1)
+        {
+            ready = fprintf(stream, ", v%u", d) > 0;
+        }
+        ready = ready && fputs(";\nstatic void *table[] = { &v0", stream) > 0;
+        for (uint32_t d = 1; ready && d < DECLARATORS; d += 1)
+        {
+            ready = fprintf(stream, ", &v%u", d) > 0;
+        }
+        ready = ready && fputs(" };\n", stream) > 0 && fclose(stream) == 0;
+        if (ready)
+        {
+            static const CheckImplicitIntMode c89 = { 1989, false, "c89", 0 };
+            check_test_declaration_scale_row(test, clang, directory, &ready, source, length, &c89,
+                                             "a file-scope initializer's address operands");
+            checks += 1;
+        }
+    }
+    else if (stream != NULL)
+    {
+        fclose(stream);
+    }
+    free(source);
+    printf("test-checker: declaration-start scaling shapes: %u checks\n", checks);
+}
+
 static void check_test_constraints(CheckTest* test, const char* clang)
 {
     char directory[4096];
@@ -2970,6 +3088,7 @@ static void check_test_constraints(CheckTest* test, const char* clang)
         check_test_expect(test, ready, "the constraint fixture's file is removed");
     }
     check_test_implicit_int(test, clang, directory, made);
+    check_test_declaration_scales(test, clang, directory, made);
     printf("test-checker: constraint catalogue: %u fixtures, %u sources, %u of them errors\n", (uint32_t)BUSTER_ARRAY_LENGTH(check_constraint_fixtures),
            (uint32_t)(2 * BUSTER_ARRAY_LENGTH(check_constraint_fixtures)), errors);
     check_test_expect(test, !made || rmdir(directory) == 0, "the constraint catalogue's directory is removed");

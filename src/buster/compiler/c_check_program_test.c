@@ -3405,6 +3405,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "}\n";
         check_test_program_source_standard(test, implicit_int_source, "implicit-int-c89", clang, 1989, false, "-std=c89");
         check_test_program_source_standard(test, implicit_int_source, "implicit-int-gnu89", clang, 1989, true, "-std=gnu89");
+        // The issue's whole old-style program, run (#1121): a file-scope static and `helper`'s old-style definition
+        // read implicit int, `tested`'s `n` is the undeclared identifier-list kind and `i` a block-scope register —
+        // the call and the declarations' types decide the value clang's build of the same source computes.
+        static const char implicit_int_program_source[] =
+            "static x = 3;\n"
+            "helper(a) int a; { return a + 1; }\n"
+            "tested(n) { register i; i = helper(x + n); return i; }\n";
+        check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-c89", clang, 1989, false, "-std=c89");
+        check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-gnu89", clang, 1989, true, "-std=gnu89");
     }
     if (check_test_takes())
     {
