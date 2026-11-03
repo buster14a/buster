@@ -1525,8 +1525,9 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
             const CheckValue* value = root < graph->count ? &root_value : NULL;
             const uint32_t declaration = value != NULL && value->object != 0 ? value->object - 1 : BUSTER_CHECK_NONE;
             const bool local = value != NULL && value->category == CHECK_LVALUE && declaration < input->token_count &&
-                               check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count && !input->static_objects[declaration] &&
-                               !input->thread_local[declaration];
+                               check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
             if (local && check_common_in_return(parser, graph->tokens[root]))
             {
                 const uint32_t name = parser->tokens.names[declaration];
@@ -2060,11 +2061,11 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         if (format_index == UINT32_MAX && program != NULL && callee_object != 0 && callee_object <= program->object_count)
         {
             const uint32_t definition = program->object_declarations[callee_object];
-            bool found = definition < input->token_count && input->attributes != NULL &&
-                         check_common_format_attribute(input->attributes[definition], &format_index, &first_argument);
+            bool found = definition < input->token_count &&
+                         check_common_format_attribute(check_input_attributes_at(input, definition), &format_index, &first_argument);
             const uint32_t canonical = definition < input->token_count && input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
-            found = found || (canonical < input->token_count && input->attributes != NULL &&
-                              check_common_format_attribute(input->attributes[canonical], &format_index, &first_argument));
+            found = found || (canonical < input->token_count &&
+                              check_common_format_attribute(check_input_attributes_at(input, canonical), &format_index, &first_argument));
         }
         const uint32_t offset = graph->argument_offsets[node];
         const uint32_t count = graph->argument_counts[node];
@@ -3522,8 +3523,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 const uint32_t declaration = input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
                 const uint32_t order = input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                 if (declaration < count && order < graph->count && input->declaration_kinds[declaration] == C_BINDING_OBJECT &&
-                    check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count && !input->static_objects[declaration] &&
-                    !input->thread_local[declaration] && check_common_sparse_get(input->initializer_nodes, declaration) == BUSTER_CHECK_NONE && !addressed[declaration])
+                    check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
+                    !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
+                    !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
+                    check_common_sparse_get(input->initializer_nodes, declaration) == BUSTER_CHECK_NONE && !addressed[declaration])
                 {
                     if (evaluated == NULL || evaluated[order] != 0)
                     {
@@ -3685,7 +3688,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         for (uint32_t declaration = 0; valid && declaration < count; declaration += 1)
         {
             const bool local = input->declaration_kinds[declaration] == C_BINDING_OBJECT && check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
-                               !input->static_objects[declaration] && !input->thread_local[declaration];
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
+                               !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
             const bool parameter = local && parameters[declaration] != 0;
             const bool plain = local && !parameter && !addressed[declaration];
             const TypeId type = local ? input->declared_types[declaration] : 0;

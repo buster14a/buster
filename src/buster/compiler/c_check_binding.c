@@ -81,7 +81,7 @@ static bool check_input_in_main_file(const CheckInputReader* reader, uint32_t to
 // a label or tag, or a name whose object is never emitted. Parameters are marked from their definitions' chains.
 static bool check_input_unused_suppressed(const CheckInput* input, uint32_t token, uint32_t kind)
 {
-    const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
+    const CheckInputAttributes* attributes = token < input->token_count ? check_input_attributes_at(input, token) : NULL;
     bool marked = false;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
@@ -162,7 +162,8 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         for (uint32_t event = 0; valid && event < events->count; event += 1)
         {
             const uint32_t token = events->declaration[event];
-            if (events->operation[event] == C_BINDING_DECLARE && token < count && output->defined != NULL && output->defined[token] != 0)
+            if (events->operation[event] == C_BINDING_DECLARE && token < count && output->declaration_bits != NULL &&
+                check_input_bit(output->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED))
             {
                 chain_definition[chain_first[event]] = token;
             }
@@ -185,7 +186,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
                               !check_input_unused_marked_chain(output, events, event, kind) && main_file &&
-                              (parameter || local || (token < count && output->linkage[token] == 1));
+                              (parameter || local || (token < count && check_input_linkage(output->declaration_bits, token) == 1));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
         const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
@@ -297,8 +298,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     }
     const bool unused_columns = check_sparse_present(output->body_declarations) && check_sparse_present(output->parameters) &&
                                 check_sparse_present(output->parameter_next) && check_sparse_present(output->declaration_bodies) &&
-                                output->declaration_kinds != NULL && output->static_objects != NULL &&
-                                output->thread_local != NULL && output->linkage != NULL;
+                                output->declaration_kinds != NULL && output->declaration_bits != NULL;
     if (valid && unused_columns && output->report_count == 0 && events->count != 0)
     {
         uint8_t* used = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
