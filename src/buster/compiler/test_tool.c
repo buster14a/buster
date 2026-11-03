@@ -3,7 +3,8 @@
 //
 // The external tools' probe (#1129). A cross-check that spawns perf, GCC or binutils asks this once, before its
 // sections, and reports a missing or older tool as a skip with the version it found. The probe runs the tool's
-// --version with its standard output and errors on one pipe, so a tool that prints its version there is seen too.
+// --version in its own process group, its standard output and errors on one pipe, so a tool that prints its version
+// there is seen too and a deadline kill takes a wrapper's subprocesses with it.
 #ifndef BUSTER_TEST_TOOL_SOURCE_INCLUDED
 #define BUSTER_TEST_TOOL_SOURCE_INCLUDED
 
@@ -43,39 +44,107 @@ static uint32_t test_tool_number(const char** cursor)
     return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
 }
 
-// The first dotted decimal run in `text` ("13.3.0" in "gcc (Ubuntu 13.3.0) 13.3.0"), up to BUSTER_TEST_TOOL_COMPONENTS
-// components. False when `text` has no digit.
+// One dotted decimal run at `cursor` (at a digit), its first BUSTER_TEST_TOOL_COMPONENTS components into `values`.
+// Returns the run's component count and leaves `cursor` past the run.
+static uint32_t test_tool_version_run(const char** cursor, uint32_t* values)
+{
+    uint32_t length = 0;
+    while (**cursor >= '0' && **cursor <= '9')
+    {
+        const uint32_t value = test_tool_number(cursor);
+        if (length < BUSTER_TEST_TOOL_COMPONENTS)
+        {
+            values[length] = value;
+        }
+        length += 1;
+        if ((*cursor)[0] != '.' || (*cursor)[1] < '0' || (*cursor)[1] > '9')
+        {
+            break;
+        }
+        *cursor += 1;
+    }
+    return length;
+}
+
+// The version a tool's --version prints, on the first output line that holds a digit. GNU banners put the package's
+// identification in parentheses and the version after them ("gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0"), so the run
+// wins among the digit runs after the line's first ')' — or, where none follow it ("perf version 6.8.12"), among the
+// ones before its first '('. The run with the most components is the version, the first on a tie: a target-prefixed
+// name ("x86_64-conda-linux-gnu-gcc (conda-forge gcc 9.4.0-1) 9.4.0") is then 9.4.0, not 86 or the package's, and a
+// trailing date ("gcc (GCC) 16.2.1 20260101") or suffix ("perf version 6.8.12-1-generic") doesn't win either.
+// `version` keeps up to BUSTER_TEST_TOOL_COMPONENTS components. False when no line has a digit.
 static bool test_tool_parse_version(const char* text, uint32_t* version, uint32_t* count)
 {
     bool parsed = false;
-    const char* cursor = text;
-    while (!parsed && cursor != 0 && *cursor != 0)
+    const char* line = text;
+    while (!parsed && line != 0 && *line != 0)
     {
-        if (*cursor >= '0' && *cursor <= '9')
+        const char* end = line;
+        while (*end != 0 && *end != '\n')
         {
-            uint32_t values[BUSTER_TEST_TOOL_COMPONENTS] = { 0 };
-            uint32_t length = 0;
-            while (length < BUSTER_TEST_TOOL_COMPONENTS && *cursor >= '0' && *cursor <= '9')
+            end += 1;
+        }
+        const char* paren = 0;
+        const char* close = 0;
+        for (const char* at = line; at < end; at += 1)
+        {
+            if (*at == '(' && paren == 0)
             {
-                values[length] = test_tool_number(&cursor);
-                length += 1;
-                if (*cursor != '.' || cursor[1] < '0' || cursor[1] > '9')
+                paren = at;
+            }
+            else if (*at == ')' && close == 0)
+            {
+                close = at;
+            }
+        }
+        const char* begin = line;
+        const char* limit = paren != 0 ? paren : end;
+        if (close != 0)
+        {
+            bool digits_after_close = false;
+            for (const char* at = close + 1; at < end; at += 1)
+            {
+                digits_after_close = digits_after_close || (*at >= '0' && *at <= '9');
+            }
+            if (digits_after_close)
+            {
+                begin = close + 1;
+                limit = end;
+            }
+        }
+        uint32_t best_values[BUSTER_TEST_TOOL_COMPONENTS] = { 0 };
+        uint32_t best = 0;
+        const char* cursor = begin;
+        while (cursor < limit)
+        {
+            if (*cursor >= '0' && *cursor <= '9')
+            {
+                uint32_t values[BUSTER_TEST_TOOL_COMPONENTS] = { 0 };
+                const uint32_t length = test_tool_version_run(&cursor, values);
+                if (length > best)
                 {
-                    break;
+                    best = length;
+                    for (uint32_t i = 0; i < BUSTER_TEST_TOOL_COMPONENTS; i += 1)
+                    {
+                        best_values[i] = values[i];
+                    }
                 }
+            }
+            else
+            {
                 cursor += 1;
             }
+        }
+        if (best != 0)
+        {
             for (uint32_t i = 0; i < BUSTER_TEST_TOOL_COMPONENTS; i += 1)
             {
-                version[i] = values[i];
+                version[i] = best_values[i];
             }
-            *count = length;
+            *count = best < BUSTER_TEST_TOOL_COMPONENTS ? best : BUSTER_TEST_TOOL_COMPONENTS;
             parsed = true;
         }
-        else
-        {
-            cursor += 1;
-        }
+        line = *end == '\n' ? end + 1 : end;
     }
     return parsed;
 }
@@ -159,7 +228,9 @@ static int test_tool_run_version(const char* command, char* text, size_t capacit
     int result = -1;
     int fds[2] = { -1, -1 };
     posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
     bool actions_initialized = false;
+    bool attributes_initialized = false;
     *error = 0;
     if (capacity != 0)
     {
@@ -168,13 +239,21 @@ static int test_tool_run_version(const char* command, char* text, size_t capacit
     if (pipe(fds) == 0)
     {
         actions_initialized = posix_spawn_file_actions_init(&actions) == 0;
-        bool ready = actions_initialized && posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO) == 0 &&
+        attributes_initialized = posix_spawnattr_init(&attributes) == 0;
+        bool ready = actions_initialized && attributes_initialized && posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO) == 0 &&
                      posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO) == 0;
+        if (ready)
+        {
+            // The probe's own process group, so the deadline below kills a wrapper's subprocesses with it.
+            short spawn_flags = 0;
+            ready = posix_spawnattr_getflags(&attributes, &spawn_flags) == 0 && posix_spawnattr_setflags(&attributes, spawn_flags | POSIX_SPAWN_SETPGROUP) == 0 &&
+                    posix_spawnattr_setpgroup(&attributes, 0) == 0;
+        }
         char* arguments[] = { (char*)command, (char*)"--version", 0 };
         pid_t child = 0;
         if (ready)
         {
-            *error = posix_spawnp(&child, command, &actions, 0, arguments, environ);
+            *error = posix_spawnp(&child, command, &actions, &attributes, arguments, environ);
             ready = *error == 0;
         }
         else if (*error == 0)
@@ -226,7 +305,12 @@ static int test_tool_run_version(const char* command, char* text, size_t capacit
             }
             else
             {
-                kill(child, SIGKILL);
+                // The probe's whole group: a tool's subprocesses die with it. The direct kill covers a group that
+                // somehow never formed.
+                if (kill(-child, SIGKILL) != 0)
+                {
+                    kill(child, SIGKILL);
+                }
                 int waited_status = 0;
                 pid_t waited = -1;
                 do
@@ -254,6 +338,10 @@ static int test_tool_run_version(const char* command, char* text, size_t capacit
     if (actions_initialized)
     {
         posix_spawn_file_actions_destroy(&actions);
+    }
+    if (attributes_initialized)
+    {
+        posix_spawnattr_destroy(&attributes);
     }
     return result;
 }
@@ -419,6 +507,12 @@ static uint32_t test_tool_test(void)
     test_tool_check(parsed && count == 2 && version[0] == 2 && version[1] == 42, "as 2.42 parses", &failures, &checks);
     parsed = test_tool_parse_version("perf version 6.8.12-1-generic", version, &count);
     test_tool_check(parsed && count == 3 && version[0] == 6 && version[1] == 8 && version[2] == 12, "perf 6.8.12 parses", &failures, &checks);
+    parsed = test_tool_parse_version("x86_64-linux-gnu-gcc (GCC) 16.2.1", version, &count);
+    test_tool_check(parsed && count == 3 && version[0] == 16 && version[1] == 2 && version[2] == 1, "a target-prefixed gcc parses its version, not the target's digits", &failures, &checks);
+    parsed = test_tool_parse_version("x86_64-conda-linux-gnu-gcc (conda-forge gcc 9.4.0-1) 9.4.0", version, &count);
+    test_tool_check(parsed && count == 3 && version[0] == 9 && version[1] == 4 && version[2] == 0, "a digit-bearing package name doesn't hide the version", &failures, &checks);
+    parsed = test_tool_parse_version("gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0", version, &count);
+    test_tool_check(parsed && count == 3 && version[0] == 13 && version[1] == 3 && version[2] == 0, "a distribution's package doesn't hide the version", &failures, &checks);
     parsed = test_tool_parse_version("no version here", version, &count);
     test_tool_check(!parsed, "text without a version doesn't parse", &failures, &checks);
     const uint32_t sixteen[] = { 16 };
@@ -464,6 +558,41 @@ static uint32_t test_tool_test(void)
         hanging_written = close(hanging_descriptor) == 0 && hanging_written;
     }
     test_tool_check(hanging_written, "the hanging tool is written", &failures, &checks);
+    // A tool that waits on a subprocess of its own, which the deadline's group kill must take with it. The subprocess's
+    // pid goes to a file the test reads, so it can check the kill reached the whole group rather than the tool alone.
+    char wrapper_path[4200];
+    snprintf(wrapper_path, sizeof(wrapper_path), "%s/buster-test-tool-XXXXXX", temporary);
+    const int wrapper_descriptor = mkstemp(wrapper_path);
+    char pid_path[4200];
+    snprintf(pid_path, sizeof(pid_path), "%s/buster-test-tool-XXXXXX", temporary);
+    const int pid_descriptor = mkstemp(pid_path);
+    if (pid_descriptor >= 0)
+    {
+        close(pid_descriptor);
+        unlink(pid_path);
+    }
+    char wrapper_script[4600];
+    const int wrapper_length = snprintf(wrapper_script, sizeof(wrapper_script), "#!/bin/sh\n/bin/sleep 30 &\nprintf '%%s\\n' \"$!\" > \"%s\"\nwait\n", pid_path);
+    bool wrapper_written = wrapper_length > 0 && (size_t)wrapper_length < sizeof(wrapper_script) && wrapper_descriptor >= 0 &&
+                           write(wrapper_descriptor, wrapper_script, (size_t)wrapper_length) == (ssize_t)wrapper_length && fchmod(wrapper_descriptor, 0755) == 0;
+    if (wrapper_descriptor >= 0)
+    {
+        wrapper_written = close(wrapper_descriptor) == 0 && wrapper_written;
+    }
+    test_tool_check(wrapper_written && pid_descriptor >= 0, "the wrapping tool is written", &failures, &checks);
+    // A target-prefixed tool whose own version is old: the gate must read the version, not the target's digits.
+    char target_path[4200];
+    snprintf(target_path, sizeof(target_path), "%s/buster-test-tool-XXXXXX", temporary);
+    const int target_descriptor = mkstemp(target_path);
+    const char target_script[] = "#!/bin/sh\nprintf 'x86_64-conda-linux-gnu-gcc (conda-forge gcc 9.4.0-1) 9.4.0\\n'\n";
+    bool target_written = target_descriptor >= 0 && write(target_descriptor, target_script, sizeof(target_script) - 1) == (ssize_t)(sizeof(target_script) - 1) &&
+                          fchmod(target_descriptor, 0755) == 0;
+    if (target_descriptor >= 0)
+    {
+        target_written = close(target_descriptor) == 0 && target_written;
+    }
+    test_tool_check(target_written, "the target-prefixed tool is written", &failures, &checks);
+    const uint32_t minimum_fifteen[] = { 15 };
     const uint32_t minimum_sixteen[] = { 16 };
     const uint32_t minimum_seventeen[] = { 17 };
     TestTool modern = { 0 };
@@ -490,6 +619,71 @@ static uint32_t test_tool_test(void)
     }
     test_tool_check(hanging_written && hanging.found && hanging.timed_out && !hanging.version_parsed && !test_tool_available(&hanging),
                     "a hanging tool is killed and unavailable", &failures, &checks);
+    TestTool wrapper = { 0 };
+    long grandchild = 0;
+    if (wrapper_written)
+    {
+        const uint32_t saved_seconds = test_tool_run_seconds;
+        test_tool_run_seconds = 1;
+        wrapper = test_tool_probe("gcc", wrapper_path, minimum_sixteen, 1);
+        test_tool_run_seconds = saved_seconds;
+        FILE* pid_file = fopen(pid_path, "r");
+        if (pid_file != 0)
+        {
+            if (fscanf(pid_file, "%ld", &grandchild) != 1)
+            {
+                grandchild = 0;
+            }
+            fclose(pid_file);
+        }
+    }
+    // The recorded subprocess must have died with the probe's group: gone entirely, or a zombie that a reaping init
+    // collects. A live one means the kill missed the group; it is killed here so a regression doesn't leak it.
+    bool subprocess_gone = false;
+    for (uint32_t tries = 0; grandchild > 0 && !subprocess_gone && tries < 200; tries += 1)
+    {
+        char process_path[64];
+        snprintf(process_path, sizeof(process_path), "/proc/%ld/stat", grandchild);
+        FILE* process_file = fopen(process_path, "r");
+        if (process_file != 0)
+        {
+            char status[256] = { 0 };
+            const size_t got = fread(status, 1, sizeof(status) - 1, process_file);
+            fclose(process_file);
+            const char* after = got > 0 ? strrchr(status, ')') : 0;
+            const char state = after != 0 && after[1] == ' ' ? after[2] : 0;
+            subprocess_gone = state == 'Z' || state == 'X' || state == 'x';
+        }
+        else
+        {
+            subprocess_gone = kill(grandchild, 0) != 0 && errno == ESRCH;
+        }
+        if (!subprocess_gone)
+        {
+            const struct timespec pause = {
+                .tv_sec = 0,
+                .tv_nsec = 10000000,
+            };
+            nanosleep(&pause, 0);
+        }
+    }
+    if (grandchild > 0 && !subprocess_gone)
+    {
+        kill(grandchild, SIGKILL);
+    }
+    test_tool_check(wrapper.found && wrapper.timed_out && !test_tool_available(&wrapper) && subprocess_gone,
+                    "a tool's whole process group is killed at the deadline", &failures, &checks);
+    TestTool target = { 0 };
+    if (target_written)
+    {
+        target = test_tool_probe("gcc", target_path, minimum_fifteen, 1);
+    }
+    test_tool_check(target.found && target.version_parsed && !test_tool_available(&target) && strcmp(target.version_text, "9.4.0") == 0,
+                    "a target-prefixed gcc 9.4.0 doesn't meet 15", &failures, &checks);
+    if (target_written)
+    {
+        test_tool_check_skip(&target, "test target", "test target: skipped: needs gcc >= 15, found 9.4.0\n", &failures, &checks);
+    }
     if (written)
     {
         test_tool_check_skip(&old, "test old", "test old: skipped: needs gcc >= 17, found 16.2.1\n", &failures, &checks);
@@ -531,6 +725,15 @@ static uint32_t test_tool_test(void)
     {
         unlink(hanging_path);
     }
+    if (wrapper_descriptor >= 0)
+    {
+        unlink(wrapper_path);
+    }
+    if (target_descriptor >= 0)
+    {
+        unlink(target_path);
+    }
+    unlink(pid_path);
     printf("test tools: %u checks, %u failed\n", checks, failures);
     return failures;
 }

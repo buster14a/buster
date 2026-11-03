@@ -16,11 +16,15 @@ requirements. [Command index](README.md).
 
 `src/buster/compiler/test_tool.c` (included by `main.c`, with its declarations
 in `test_tool.h`) probes an external tool a cross-check spawns, once per
-command (#1129): `test_tool_probe` runs `NAME --version`, keeps the first
-dotted decimal version, and compares it with a minimum; `test_tool_available`
+command (#1129): `test_tool_probe` runs `NAME --version` in its own process
+group, keeps the version its banner's first digit-bearing line prints — the
+dotted run with the most components after the line's first `)`, or before its
+`(` where none follow it, so a target-prefixed or digit-bearing package name
+doesn't hide it — and compares it with a minimum; `test_tool_available`
 says whether the tool may be used; `test_tool_skip` prints
 `SECTION: skipped: needs NAME >= V, found W`, or `not found on PATH`, or
-`found version unreadable`, or `didn't end within N s`. A skipped section is
+`found version unreadable`, or `didn't end within N s`, a deadline whose kill
+takes the whole group so a wrapper's subprocesses die with it. A skipped section is
 not a correctness failure, so the rest of the command still runs and its real
 failures still fail; a tool
 that is present and compatible and gives wrong output still fails. The callers

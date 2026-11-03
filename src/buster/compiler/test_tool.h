@@ -35,7 +35,7 @@ struct TestTool
 
 // Probes `command` (or `name` where command is 0) with --version, and compares it with `minimum`'s first
 // `minimum_count` components (0 for no minimum). Never starts the tool again. A tool whose --version doesn't end within
-// its deadline is killed and reported unavailable.
+// its deadline has its whole process group killed and is reported unavailable.
 static TestTool test_tool_probe(const char* name, const char* command, const uint32_t* minimum, uint32_t minimum_count);
 
 // Whether a probe found a tool whose version meets its minimum, or any tool at all without one.
