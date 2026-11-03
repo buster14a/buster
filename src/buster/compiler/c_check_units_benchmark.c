@@ -11,7 +11,9 @@
 // serialize on the kernel (#1128: the address space's lock, which arena reservations, commits and discards take) raise
 // the system time, where the wall time on a busy machine may hide it. Fails if a process fails or the program can't be
 // written. Counts are whole decimals from 1: at most 4096 units, 100,000 functions, 8 lane counts of at most 4096 lanes
-// each, and 1,000 runs, as time-runs takes.
+// each, and 1,000 runs, as time-runs takes. The lane counts are the benchmark's own: the options after `--` may not set
+// one (--lanes or --worker-budget, either spelling), which the driver would take over each command's, under the
+// benchmark's label (#1203's review).
 
 #define BUSTER_CHECK_UNITS_BENCHMARK_LANE_COUNTS 8
 #define BUSTER_CHECK_UNITS_BENCHMARK_MAX_FUNCTIONS 100000
@@ -77,7 +79,20 @@ static int run_check_units_benchmark(int argc, char** argv)
             parsed = false;
         }
     }
-    if (!parsed)
+    // The forwarded options, which may not set the lanes.
+    bool owned = true;
+    for (uint32_t o = 0; parsed && owned && o < option_count; o += 1)
+    {
+        const char* option = options[o];
+        owned = strcmp(option, "--lanes") != 0 && strncmp(option, "--lanes=", 8) != 0 && strcmp(option, "--worker-budget") != 0 &&
+                strncmp(option, "--worker-budget=", 16) != 0;
+    }
+    if (!owned)
+    {
+        fprintf(stderr, "benchmark-check-units: the options after -- can't set the lanes (--lanes, --worker-budget), which --lanes' counts decide\n");
+    }
+    parsed = parsed && owned;
+    if (!parsed && owned)
     {
         fprintf(stderr, "usage: benchmark-check-units [--executable PATH] [--units N] [--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]\n");
     }

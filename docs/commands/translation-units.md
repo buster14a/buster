@@ -73,7 +73,8 @@ reported and its memory released (a lane's partial setup among them); the
 jobserver's tokens held while the link writes; lanes that don't start; and
 `benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it
 can't take (no lanes, a ninth lane count, runs past 1,000 or 64 bits, a count
-with more than its digits) and of a command that fails every run;
+with more than its digits), of forwarded options that set the lanes, and of a
+command that fails every run;
 with `-g`, the executables by `--lanes` 1 and 8, poisoned and by each path the
 same bytes, and each unit's `-c -g` object its own alone. With `--corpus DIR`
 it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
@@ -95,7 +96,9 @@ directory), by each lane count (1, 2, 4 and 8 by default), as processes in
 `time-runs`' rotated order, 5 runs of each after a warm-up, every one of which
 must compile the units (`time-runs` alone passes a status that stays the same).
 Counts are whole decimals from 1: at most 4,096 units, 100,000 functions, eight
-lane counts of at most 4,096 lanes, and 1,000 runs.
+lane counts of at most 4,096 lanes, and 1,000 runs. The options after `--` may
+not set the lanes (`--lanes` or `--worker-budget`, either spelling): the driver
+would take theirs over each command's count.
 Then it prints each count's wall time and system time against the first
 count's: lanes that serialize on the kernel, as #1128's did on the address
 space's lock, raise the system time where a busy machine's wall time may hide
