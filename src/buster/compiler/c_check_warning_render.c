@@ -465,6 +465,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER)
+                    {
+                        // Scope-pop warnings: clang pops a scope's unused declarations before replaying the
+                        // body's deferred diagnostics at that boundary.
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else
                     {
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);

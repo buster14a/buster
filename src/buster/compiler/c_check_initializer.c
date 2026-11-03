@@ -307,7 +307,11 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
 
 #include "c_check_init_history.c"
 
-static void check_init_warning(CheckInitWalker* walker, uint32_t token)
+// Above the warning bit in an excess event's payload.data: the initialized object's type goes in first_type and
+// the string-overflow form gets this marker, so the render picks clang's "initializer-string" message.
+#define CHECK_INIT_EXCESS_STRING UINT32_C(0x10000)
+
+static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId object_type, bool string)
 {
     if (walker->result->warning_count == 0)
     {
@@ -321,7 +325,8 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token)
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = walker->warning_completion,
-        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS },
+        .payload = { .first_type = object_type, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                     .data = (UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS) | (string ? CHECK_INIT_EXCESS_STRING : 0) },
     };
     check_init_semantic_warning(walker, &event, NULL, 0);
     CheckInitWarningCollector* warnings = walker->warnings;
@@ -2095,7 +2100,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             {
                 if (size < string->byte_count - unit)
                 {
-                    check_init_warning(walker, token);
+                    check_init_warning(walker, token, type, true);
                 }
                 const CheckInitPart part = {
                     .kind = CHECK_INIT_BYTES,
@@ -2304,7 +2309,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     {
                         // Expression checking already visited this span. It contributes no initialization,
                         // conversion, runtime evaluation or reference, including calls and string addresses.
-                        check_init_warning(walker, token);
+                        check_init_warning(walker, token, frame->type, false);
                         token = stop;
                         after_value = true;
                         excess = true;

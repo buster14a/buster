@@ -493,7 +493,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
         if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
         {
             valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count &&
-                    event->payload.data == CHECK_WARNING_EXCESS_INITIALIZERS;
+                    (event->payload.data & 0xffff) == CHECK_WARNING_EXCESS_INITIALIZERS;
             if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
             {
                 const CheckWarningSeverity severity = check_diagnostic_severity(input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS);
@@ -503,7 +503,17 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity >= CHECK_WARNING_ERROR ? (source_error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
-                    pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s", check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS));
+                    const TypeId object = event->payload.first_type != 0 ? type_unqualified(type_strip_aligned(types, event->payload.first_type)) : 0;
+                    const uint8_t object_kind = object != 0 ? type_kind(types, object) : 0;
+                    const char* subject = object_kind == BUSTER_TYPE_KIND_ARRAY || object_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? "array" :
+                                          object_kind == BUSTER_TYPE_KIND_STRUCT ? "struct" :
+                                          object_kind == BUSTER_TYPE_KIND_UNION ? "union" : "scalar";
+                    const bool string = (event->payload.data & CHECK_INIT_EXCESS_STRING) != 0;
+                    const char* message = string ? "initializer-string for char array is too long" :
+                                          object != 0 ? check_warning_text(scratch, "excess elements in %s initializer", subject) :
+                                          check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS);
+                    pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s [-W%sexcess-initializers]",
+                                          message, severity >= CHECK_WARNING_ERROR ? "error," : "");
                     valid = !pp->diagnostic_collection_failed;
                 }
             }
@@ -624,6 +634,8 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
         if (body->return_warning != 0 && token < parser->tokens.count &&
             (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)))
         {
+            // The body's analysis boundary: the queued diagnostics' boundary is the `}` lookahead, and the
+            // return warning's RETURN phase keeps it after them, before the uninit SEMANTICs.
             const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
             const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
             if (severity != CHECK_WARNING_IGNORE && (uint64_t)publication * 4 + PP_DIAGNOSTIC_RETURN < first_error)

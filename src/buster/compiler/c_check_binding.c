@@ -195,8 +195,27 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                                     parameter ? CHECK_WARNING_EVENT_UNUSED_PARAMETER : CHECK_WARNING_EVENT_UNUSED_VARIABLE;
         if (selected && token == chosen && !reported[token])
         {
-            const uint32_t body = check_sparse_get(output->declaration_bodies, token);
-            const uint32_t closing = body < count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
+            // Clang publishes a declaration's unused warning when the scope holding it completes — the nearest
+            // enclosing `}` — rather than at its function's end, so an inner block's warnings order before the
+            // function-level ones. Only block, body and compound braces close a scope: a `struct S { } s`
+            // declaration walks past its type's own braces without stopping.
+            uint32_t closing = BUSTER_CHECK_NONE;
+            for (uint32_t ancestor = token, steps = 0; ancestor < count && steps < count; steps += 1)
+            {
+                const uint32_t parent = parser->tree.parents[ancestor];
+                if (parent == BUSTER_CHECK_NONE || parent >= count || parent == ancestor)
+                {
+                    break;
+                }
+                ancestor = parent;
+                const uint8_t ancestor_role = parser->tree.roles[ancestor];
+                if (ancestor_role == PARSE_ROLE_CLOSE_BLOCK || ancestor_role == PARSE_ROLE_CLOSE_BODY ||
+                    ancestor_role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+                {
+                    closing = ancestor;
+                    break;
+                }
+            }
             const CheckWarningEvent warning = {
                 .id = id,
                 .kind = event_kind,
