@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+name: Issue 1192 workbench
+on:
+  push:
+    branches: [agent/1192-workbench]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 96b6cbcd122ffdc45700cf01d6e8adb40a81243c
+          persist-credentials: false
+      - name: Archive the pinned public source for isolated development
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1192-source
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
