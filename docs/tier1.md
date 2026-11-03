@@ -296,7 +296,9 @@ compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 
 ## Where the gap to clang -O2 is (#1189)
 
-#1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145))
+#1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
+[the record](https://github.com/buster14a/buster-performance/tree/caa665509d9c68ce3e0091a360f47400170f71f2/docs/measurements/tier1-gap-1189-2026-11-03)
+has the tool, the experiment patches and the counts)
 counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
 scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
 instruction and agrees with the 9700X's `perf stat` on c-testsuite 00040 to the
