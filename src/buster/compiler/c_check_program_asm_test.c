@@ -105,7 +105,10 @@ static void check_test_program_asm_flags(CheckTest* test, const char* clang)
                                      "static int cc_%s(int a,int b){int r=7;__asm__(\"cmpl %%2, %%1\" : \"=@cc%s\"(r) : \"r\"(a), \"r\"(b));return r;}\n",
                                      conditions[c], conditions[c]);
     }
-    length += (uint64_t)snprintf(source + length, sizeof(source) - length, "int tested(int n){unsigned s=0;for(int i=0;i<9;i++)for(int j=0;j<9;j++){int a=values[i]+n,b=values[j];\n");
+    // Each pair of the values, the extremes among them, compared as they are: the harness's n (-3 to 19) rotates the first
+    // one's choice rather than offsetting it, which would overflow INT_MAX (#1126's review).
+    length += (uint64_t)snprintf(source + length, sizeof(source) - length,
+                                 "int tested(int n){unsigned s=0;for(int i=0;i<9;i++)for(int j=0;j<9;j++){int a=values[(unsigned)(i+n+27)%%9u],b=values[j];\n");
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conditions); c += 1)
     {
         length += (uint64_t)snprintf(source + length, sizeof(source) - length, "s=s*3+(unsigned)cc_%s(a,b);\n", conditions[c]);

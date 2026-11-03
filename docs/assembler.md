@@ -138,7 +138,11 @@ subtraction or division whose destination is st(i) (`fsub %st, %st(1)`,
 and clang assemble it (the System V assembler's convention: `fsub %st, %st(1)`
 is Intel's `fsubr st(1), st`); Intel syntax takes them as Intel's manual has
 them. An x87 memory operand without a width (`fstp (%rax)`), which GNU as takes
-with a warning as its default width, is refused, as clang refuses it.
+with a warning as its default width, is refused, as clang refuses it. Two GNU
+as spellings are refused too (#1126's review; #1223 has them): `ffreep %st(i)`,
+which no form row has, and the reversed operands of the commutative popping
+forms (`faddp %st(1), %st`, `fmulp`'s), which GNU as warns it translates to
+`faddp %st, %st(1)`.
 
 About 6,100 forms pass, of about 1,900 mnemonics (the index has 4,096
 buckets). The target intersection then keeps out every form the target's
