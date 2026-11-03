@@ -376,8 +376,8 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 // The call-save row that emitted record `r` stores to or loads from, as a bit of the rows' set, with *load saying which;
 // 0 for any other record. The rows are a general register's (bits 0 to 15: tier1_emit_call_save's mov), an xmm
 // register's (bits 16 to 31: a floating value's movsd, #141, or in a function with vectors the widest one's move, #141)
-// and an opmask register's (bits 32 to 39: a mask's kmov of its width, #179), the latter two the CFG consumer's. Each row is the frame's, apart from every spill slot, so its
-// displacement tells it from a spill of the same register.
+// and an opmask register's (bits 32 to 39: a mask's kmov of its width, #179), the latter two the CFG consumer's. Each
+// row is the frame's, apart from every spill slot, so its displacement tells it from a spill of the same register.
 static uint64_t tier1_emit_test_save_row(const Tier1EmitResult* emitted, uint32_t r, bool* load)
 {
     const X86Instruction* record = &emitted->code.records[r];

@@ -190,7 +190,8 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
         function.passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
         for (uint32_t k = 0; k < 2; k += 1)
         {
-            function.passed[1 + k] = (IrPassed){ .size = 64, .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | k), BUSTER_ABI_REGISTER_NONE } } };
+            const AbiLocation whole = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | k), BUSTER_ABI_REGISTER_NONE } };
+            function.passed[1 + k] = (IrPassed){ .size = 64, .location = whole };
         }
         static const uint8_t ops[6] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CALL, IR_CONST };
         static const uint8_t results[6] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_VOID, IR_I32 };
