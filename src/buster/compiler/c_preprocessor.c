@@ -17533,6 +17533,35 @@ static void pp_run_file(Preprocessor* pp, uint32_t file)
     }
 }
 
+// The tree whose build/ holds the executable at `path`, an absolute path, cut in place to it: the parent of the path's
+// last build/ directory, whatever is below it (build/compiler, which build.sh publishes, and
+// build/cmake/VARIANT/CONFIG/compiler, each configuration's own), or, in a path without one, two levels up, as from
+// build/compiler. Returns whether a directory is left.
+static bool pp_buster_tree(char* path)
+{
+    char* build = 0;
+    for (char* found = strstr(path, "/build/"); found != 0; found = strstr(found + 1, "/build/"))
+    {
+        build = found;
+    }
+    bool result = true;
+    if (build != 0)
+    {
+        result = build != path;
+        *build = 0;
+    }
+    for (uint32_t up = 0; build == 0 && result && up < 2; up += 1)
+    {
+        char* slash = strrchr(path, '/');
+        result = slash != 0 && slash != path;
+        if (result)
+        {
+            *slash = 0;
+        }
+    }
+    return result;
+}
+
 // buster's own headers' directory: src/buster/include in the tree whose build/ holds the executable (as clang finds its
 // resource directory from its executable). Returns whether it exists; optionally counts its stat attempt.
 static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t* stat_count)
@@ -17543,16 +17572,7 @@ static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t*
     if (result)
     {
         executable[length] = 0;
-        // Up from build/compiler to the tree.
-        for (uint32_t up = 0; result && up < 2; up += 1)
-        {
-            char* slash = strrchr(executable, '/');
-            result = slash != 0 && slash != executable;
-            if (result)
-            {
-                *slash = 0;
-            }
-        }
+        result = pp_buster_tree(executable);
         result = result && (uint32_t)snprintf(path, capacity, "%s/src/buster/include", executable) < capacity;
         struct stat stats;
         if (stat_count != 0)
