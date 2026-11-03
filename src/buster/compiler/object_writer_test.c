@@ -520,7 +520,9 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         if (symbol_valid && !reserved)
         {
             const Elf64_Shdr* defining = &view->sections[section];
-            symbol_valid = symbol->st_value <= defining->sh_size && symbol->st_size <= defining->sh_size - symbol->st_value;
+            // Its value lies within its section; its size may reach past the end, as GNU as writes one (#1115: `.size`
+            // beyond it, or `.set tail, object+2`), and the assembler's objects do (ObjectOptions.symbol_sizes).
+            symbol_valid = symbol->st_value <= defining->sh_size;
             symbol_valid = symbol_valid && (type != STT_TLS || (defining->sh_flags & SHF_TLS) != 0);
             symbol_valid = symbol_valid && (type != STT_SECTION || (symbol->st_value == 0 && symbol->st_size == 0 && symbol->st_name == 0 && binding == STB_LOCAL));
         }

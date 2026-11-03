@@ -294,6 +294,29 @@ static void asm_object_options(AsmParser* parser)
             parser->result.object_options.common_alignment_count = alignments != 0 ? link->symbols.count : 0;
         }
     }
+    // The object's st_size of each symbol whose size reaches past its section's end; the others keep the Link's.
+    if (parser->result.error == 0 && parser->beyond_count != 0)
+    {
+        uint64_t* sizes = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint64_t, link->symbols.count);
+        if (sizes == 0)
+        {
+            asm_fail(parser, 0, "arena exhausted publishing object metadata");
+        }
+        else
+        {
+            memcpy(sizes, link->symbols.size, link->symbols.count * sizeof(uint64_t));
+            for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+            {
+                const AsmSymbol* symbol = &parser->symbols[i];
+                if (symbol->beyond != 0 && symbol->link != 0)
+                {
+                    sizes[symbol->link] = symbol->beyond;
+                }
+            }
+            parser->result.object_options.symbol_sizes = sizes;
+            parser->result.object_options.symbol_size_count = link->symbols.count;
+        }
+    }
 }
 
 // Stable section ranges are shared by layout and emission. Reserve one extra order entry for post-layout CFI.

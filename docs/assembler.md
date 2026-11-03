@@ -282,9 +282,11 @@ when the target is defined by then (a later `.type` or `.size` of the target
 isn't copied), or once a target defined later is. GCC writes `.weak alias` and
 `.set alias,original` for a weak function alias, which is then FUNC with the
 function's size. An `.lcomm` object's alias is OBJECT, and the alias's own
-`.type` and `.size` replace them. A symbol whose size reaches past its section's
-end, which GNU as writes (an alias of `object+2` takes the object's size), is
-refused: a `Link` symbol lies within its atom.
+`.type` and `.size` replace them. GNU as writes a size that reaches past the
+symbol's section end (`.size` beyond it, or an alias of `object+2`, which takes
+the object's size). A `Link` symbol lies within its atom, so it holds the bytes
+that remain, and `ObjectOptions.symbol_sizes` gives the object GNU as's
+`st_size`.
 
 `.comm name, size[, alignment]` and `.lcomm name, size` (#1115) are GNU as's
 for ELF. A global's `.comm` (C's tentative definitions under `-fcommon`) is a

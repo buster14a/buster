@@ -174,6 +174,11 @@ struct ObjectOptions
     uint32_t declared_symbol_count;
     const uint32_t* common_alignments;
     uint32_t common_alignment_count;
+    // Optional, for an assembler's objects (#1115): indexed by SymbolId, a defined symbol's st_size, at least the Link's.
+    // GNU as writes a size that reaches past the symbol's section end (`.size` beyond it, or `.set tail, object+2` of a
+    // 4-byte object, which takes its size), where a Link symbol lies within its atom.
+    const uint64_t* symbol_sizes;
+    uint32_t symbol_size_count;
     // The DWARF of each unit's functions, indexed by unit (debug_count of them, the units' count), or null for none:
     // each object takes its unit's entry (in object_write_units too), and an entry without sections or functions gives
     // it none. A unit's entry describes its functions alone: object_build refuses another unit's.
@@ -1746,6 +1751,7 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
     const AtomId* symbol_atoms = link->symbols.atom;
     const uint64_t* symbol_values = link->symbols.value;
     const uint64_t* symbol_sizes = link->symbols.size;
+    const uint64_t* elf_sizes = builder->options.symbol_sizes;
     const uint8_t* symbol_flags = link->symbols.flags;
     const uint8_t* const* name_bytes = link->names.bytes;
     const uint32_t* symbol_name_bytes = units->symbol_name_bytes;
@@ -1826,7 +1832,7 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = object_symbol_section_index(section),
             .st_value = atom_offset[atom] + symbol_values[symbol],
-            .st_size = symbol_sizes[symbol],
+            .st_size = elf_sizes != 0 ? elf_sizes[symbol] : symbol_sizes[symbol],
         };
         if (extended != 0 && section >= SHN_LORESERVE)
         {
@@ -1976,7 +1982,12 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
     bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
                  (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count) &&
                  (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count) &&
+                 (options.symbol_sizes == 0 || options.symbol_size_count == link->symbols.count) &&
                  (options.declared_symbol_count == 0 || options.declared_symbols != 0);
+    for (uint32_t i = 0; built && options.symbol_sizes != 0 && i < options.symbol_size_count; i += 1)
+    {
+        built = options.symbol_sizes[i] >= link->symbols.size[i];
+    }
     for (uint32_t i = 0; built && i < options.declared_symbol_count; i += 1)
     {
         built = options.declared_symbols[i] != 0 && options.declared_symbols[i] < link->symbols.count && link->symbols.atom[options.declared_symbols[i]] == 0;

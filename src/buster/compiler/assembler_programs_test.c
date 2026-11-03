@@ -71,14 +71,17 @@ static const char asm_test_predicate_fixture[] =
 // `.set` aliases' types and sizes, as GNU as copies them (copy_symbol_attributes): a weak alias of a function (GCC's
 // `__attribute__((weak, alias("original")))`), an alias of a label typed only after it (which isn't copied), of a
 // function defined after it, a chain declared before its target, an object's, one whose own .size replaces the copied
-// one, and an .lcomm object's and a local .comm one's.
+// one, an .lcomm object's and a local .comm one's; and sizes that reach past their section's end, which GNU as
+// writes: an alias of an object past its start (`tail`, which takes the object's size), and a `.size` beyond it.
 static const char asm_test_alias_fixture[] =
     ".text\n.globl original\n.type original,@function\noriginal: mov $42,%eax\nret\n.size original,.-original\n.weak alias\n"
     ".set alias,original\n.globl untyped\nuntyped: ret\n.set early,untyped\n.globl early\n.type untyped,@function\n"
     ".size untyped,.-untyped\n.set forward,later\n.globl forward\n.type later,@function\nlater: ret\n.size later,.-later\n"
     ".set second,first\n.set first,original\n.globl first\n.globl second\n"
     ".data\nobj: .long 1\n.type obj,@object\n.size obj,4\n.set oalias,obj\n.globl oalias\n.set salias,obj\n.size salias,2\n"
-    ".globl salias\n.lcomm buf,16\n.set balias,buf\n.globl balias\n.local lbuf\n.comm lbuf,24,8\n.set lalias,lbuf\n.globl lalias\n";
+    ".globl salias\n.lcomm buf,16\n.set balias,buf\n.globl balias\n.local lbuf\n.comm lbuf,24,8\n.set lalias,lbuf\n.globl lalias\n"
+    ".section .rodata.tail,\"a\",@progbits\n.globl whole\n.type whole,@object\nwhole: .long 1\n.size whole,4\n.globl tail\n.set tail,whole+2\n"
+    ".globl short\nshort: .long 2\n.size short, 8\n";
 #define BUSTER_ASM_TEST_FAR5 "jmp .Lh_far\njmp .Lh_far\njmp .Lh_far\njmp .Lh_far\njmp .Lh_far\n"
 static const char asm_test_relax_fixture[] =
     ".section .text.backward,\"ax\",@progbits\nbackward: jmp .Lb_far\n.skip 13, 0x90\n.Lb_target: .skip 7, 0x90\n.p2align 4, 0xcc, 10\n"
@@ -189,9 +192,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
     // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
     // characters; %st(8); fsubp of ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an
-    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); malformed base64; and a symbol
-    // whose size reaches past its section's end, by `.size` or as an alias of an object past its start, which GNU as
-    // writes and a Link symbol can't hold.
+    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); and malformed base64.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
@@ -225,8 +226,6 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".data\n.base64 \"A=AA\"\n",
         ".data\n.base64 \"AA==AAAA\"\n",
         ".data\n.base64 label\n",
-        ".data\nshort: .long 1\n.size short, 8\n",
-        ".data\nobj: .long 1\n.type obj, @object\n.size obj, 4\n.set oalias, obj+2\n.globl oalias\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
@@ -253,7 +252,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     }
     asm_test_check(test, okay && found == 3, "common symbols are SHN_COMMON objects and the GOT symbol is declared", error);
     // The writer refuses declared symbols it can't take before it writes: a count without a list, a defined symbol, an
-    // id past the table, and common alignments short of the symbols.
+    // id past the table, common alignments short of the symbols, and the same of symbol sizes.
     ObjectUnits units;
     ObjectSymbols symbols;
     if (common.error == 0 && object_prepare(&units, &common.link, 1, &test->vector) && object_map_symbols(&symbols, &common.link, &test->vector))
@@ -277,9 +276,25 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         options = common.object_options;
         options.common_alignment_count -= 1;
         const Object short_alignments = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
-        asm_test_check(test, defined != 0 && no_list.error == OBJECT_ERROR_RANGE && declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE &&
-                                 short_alignments.error == OBJECT_ERROR_RANGE && test->vector.length == saved,
-                       "invalid declared symbols and common alignments are refused before output allocation", 0);
+        // And symbol sizes short of the symbols, or one below the Link's size.
+        uint64_t sizes[64] = { 0 };
+        SymbolId sized = 0;
+        for (SymbolId s = 1; s < common.link.symbols.count && s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+        {
+            sizes[s] = common.link.symbols.size[s];
+            sized = sized == 0 && sizes[s] != 0 ? s : sized;
+        }
+        options = common.object_options;
+        options.symbol_sizes = sizes;
+        options.symbol_size_count = common.link.symbols.count - 1;
+        const Object short_sizes = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
+        sizes[sized] -= sized != 0 ? 1 : 0;
+        options.symbol_size_count = common.link.symbols.count;
+        const Object smaller_size = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
+        asm_test_check(test, defined != 0 && sized != 0 && common.link.symbols.count <= BUSTER_ARRAY_LENGTH(sizes) && no_list.error == OBJECT_ERROR_RANGE &&
+                                 declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE && short_alignments.error == OBJECT_ERROR_RANGE &&
+                                 short_sizes.error == OBJECT_ERROR_RANGE && smaller_size.error == OBJECT_ERROR_RANGE && test->vector.length == saved,
+                       "invalid declared symbols, common alignments and symbol sizes are refused before output allocation", 0);
     }
     else
     {

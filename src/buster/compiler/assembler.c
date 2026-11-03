@@ -96,6 +96,9 @@ struct AsmSymbol
     // An alias whose target wasn't defined at its `.set`, which takes the target's type and size once it is (GNU as's
     // copy_symbol_attributes; asm_alias_inherit).
     bool inherits;
+    // A size that reaches past its section's end, which GNU as writes and the Link's symbol, within its atom, can't
+    // hold: the object's st_size (ObjectOptions.symbol_sizes), or 0.
+    uint64_t beyond;
     // `.comm` and `.lcomm` (#1115): ASM_COMMON_GLOBAL for a common symbol (SHN_COMMON, of common_size bytes aligned to
     // common_alignment), ASM_COMMON_BSS for one .bss holds (.lcomm, or a local's .comm), placed after .bss's other
     // contents in directive order (common_next, from AsmParser.common_first), as GNU as places them.
@@ -321,6 +324,8 @@ struct AsmParser
     uint32_t common_count;
     // The source's symbol aliases (AsmSymbol.alias).
     uint32_t alias_count;
+    // The symbols whose sizes reach past their sections' ends (AsmSymbol.beyond).
+    uint32_t beyond_count;
 };
 
 static uint64_t asm_clock(void)
@@ -4659,13 +4664,14 @@ static void asm_emit(AsmParser* parser)
         {
             asm_fail(parser, symbol->location, "symbol alias outside its target's section");
         }
-        else if (symbol->defined && (uint64_t)size.value > link->atoms.size[parser->sections[definition->section].atom] - (uint64_t)position)
-        {
-            // GNU as writes such a size (`.set alias, object+2` of a 4-byte object takes its size, #1115); a Link symbol
-            // lies within its atom, and link_add_symbol would refuse it.
-            asm_fail(parser, symbol->location, "symbol size reaches past its section's end");
-        }
-        symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
+        // GNU as writes a size that reaches past the section's end (`.set tail, object+2` of a 4-byte object takes its
+        // size, #1115). A Link symbol lies within its atom, so its size is what remains there, and the object's st_size
+        // is the source's (asm_object_options).
+        const uint64_t remaining = symbol->defined && position >= 0 && position <= link->atoms.size[parser->sections[definition->section].atom] ? link->atoms.size[parser->sections[definition->section].atom] - (uint64_t)position : 0;
+        const bool beyond = symbol->defined && (uint64_t)size.value > remaining;
+        symbol->beyond = beyond ? (uint64_t)size.value : 0;
+        parser->beyond_count += beyond;
+        symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, beyond ? remaining : (uint64_t)size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
     }
     parser->result.directives = link->symbols.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint8_t, link->symbols.count) : 0;
     if (link->symbols.count != 0 && parser->result.directives == 0)
