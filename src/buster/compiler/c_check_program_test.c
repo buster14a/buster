@@ -1044,6 +1044,18 @@ static const char check_test_program_harness[] =
     "int external_apply_atomic_h2(_Atomic(ExternalAtomicH2)(*f)(_Atomic(ExternalAtomicH2),int),int n){ExternalAtomicH2 v={(short)n,(short)(-7*n)};"
     "_Atomic(ExternalAtomicH2) out=f(v,3);ExternalAtomicH2 r=out;return r[0]*5+r[1];}\n"
     "#endif\n"
+    // Vectors of 32 and 64 bytes both ways at every -march (#1193): passed in memory where the target's registers are
+    // narrower, and returned split across them as LLVM returns them (xmm0 and xmm1, xmm0 to xmm3, ymm0 and ymm1), or
+    // in ymm0 or zmm0 whole. Each element is changed, and the results are folded by their bytes.
+    "typedef int ExternalWide8 __attribute__((vector_size(32)));typedef double ExternalWide16 __attribute__((vector_size(64)));"
+    "static unsigned external_wide_fold(const void*p,unsigned long n){const unsigned char*b=p;unsigned h=2166136261u;"
+    "for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}"
+    "ExternalWide8 external_wide8(ExternalWide8 x,int k){for(int i=0;i<8;i++)x[i]=x[i]*3+k-i;return x;}"
+    "ExternalWide16 external_wide16(ExternalWide16 x,int k){for(int i=0;i<8;i++)x[i]=x[i]*0.5+k+i;return x;}"
+    "int external_apply_wide8(ExternalWide8(*f)(ExternalWide8,int),int n){ExternalWide8 v;for(int i=0;i<8;i++)v[i]=n*(i+3)-i;"
+    "ExternalWide8 r=f(v,n+1);return (int)external_wide_fold(&r,sizeof(r));}"
+    "int external_apply_wide16(ExternalWide16(*f)(ExternalWide16,int),int n){ExternalWide16 v;for(int i=0;i<8;i++)v[i]=n*0.25+i;"
+    "ExternalWide16 r=f(v,n+2);return (int)external_wide_fold(&r,sizeof(r));}\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
     // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
@@ -2292,6 +2304,51 @@ static void check_test_program_local_bits(CheckTest* test)
     }
 }
 
+// The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by its scalar twin, the same targets
+// and the same first failure, for counts across the masks' tails, the kinds at a page's end, the four branch kinds among
+// the kinds beside them, and every label with an entry, or some out of range or without one.
+static void check_test_program_resolve_labels(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && page >= 200 && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "the branches' kinds have a protected tail");
+    uint64_t values[200];
+    uint64_t twin_values[200];
+    uint32_t labels[16];
+    bool same = true;
+    uint32_t resolved = 0;
+    uint32_t failed = 0;
+    for (uint32_t round = 0; ready && round < 600; round += 1)
+    {
+        const uint32_t count = round % 200;
+        // Every label with an entry in a third of the rounds; some out of range or without one in the others.
+        const bool whole = round % 3 == 0;
+        uint8_t* kinds = mapping + page - count;
+        const uint32_t label_count = 1 + check_test_random(test) % 16;
+        for (uint32_t l = 0; l < label_count; l += 1)
+        {
+            labels[l] = !whole && check_test_random(test) % 8 == 0 ? BUSTER_CHECK_NONE : check_test_random(test) % 1000;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            kinds[i] = (uint8_t)(BUSTER_TYPED_BRANCH_FALSE - 2 + check_test_random(test) % 8);
+            values[i] = check_test_random(test) % (whole ? label_count : label_count + 2);
+        }
+        memcpy(twin_values, values, (uint64_t)count * sizeof(uint64_t));
+        const bool twin = check_lower_resolve_labels_scalar(kinds, twin_values, count, labels, label_count);
+        const bool vector = check_lower_resolve_labels(kinds, values, count, labels, label_count);
+        same &= twin == vector && memcmp(values, twin_values, (uint64_t)count * sizeof(uint64_t)) == 0;
+        resolved += twin;
+        failed += !twin;
+    }
+    check_test_expect(test, same && resolved != 0 && failed != 0, "the branches' targets by 64 kinds at a time are their scalar twin's, and so is the first failure");
+    if (mapping != MAP_FAILED && mapping != 0)
+    {
+        munmap(mapping, page * 2);
+    }
+}
+
 // A program fixture checked and lowered by both paths for a target (null for x86-64's): accepted or not, lowered or
 // refused, with the references and initializations it keeps; and, for a refusal with `reason`, the feature the refusal
 // names (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
@@ -2342,6 +2399,16 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
             check_test_expect(test, built == accepted && program.status == (accepted ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID), description);
             if (built)
             {
+                // The lowering's bounds' node counts (check_lower_node_counts), by 16 ops at a time, are their scalar twin's.
+                // A fixture named for the ops' masks has no _Atomic kind in its type table, so that they, not the rules,
+                // take it.
+                const CheckLowerNodeCounts twin = check_lower_node_counts_scalar(&program);
+                const CheckLowerNodeCounts counted = check_lower_node_counts(&program);
+                const bool atomic_kinds = memchr(types.table.types.kind, BUSTER_TYPE_KIND_ATOMIC, types.table.types.count) != NULL;
+                check_test_expect(test, counted.builtins == twin.builtins && counted.integer_builtins == twin.integer_builtins && counted.atomics == twin.atomics &&
+                                            counted.lane_calls == twin.lane_calls && counted.lane_arguments == twin.lane_arguments &&
+                                            (strstr(name, "node-counts-masks") == NULL || (!atomic_kinds && twin.atomics != 0)),
+                                  "the lowering's node counts are their scalar twin's");
                 uint32_t writes = 0;
                 for (uint32_t i = 0; i < program.control_count; i += 1)
                 {
@@ -3319,6 +3386,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_addressed(test);
         check_test_program_scans(test);
         check_test_program_local_bits(test);
+        check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
     }
     if (check_test_takes())
@@ -4915,6 +4983,19 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "struct S{int x;};struct S value={42};int values[3]={1,2,3};", "objects-only-no-abi", true, true, 0, 0);
         check_test_program_boundary(test, "int main(void){}", "implicit-main-return", true, true, 0, 0);
         check_test_program_boundary(test, "int tested(int n){int x=n+1;return x*2;}", "program-rollback", true, true, 0, 1);
+        // The node counts' terms (check_lower_node_counts): the builtins of each kind, a vector's libm builtins, whose lanes
+        // call the C library, and past 16 nodes the masks' partial tails; and with an _Atomic type, the rules for every node.
+        check_test_program_boundary(test,
+            "typedef float V __attribute__((vector_size(16)));"
+            "int tested(int n){V v={n,2,3,4};V w=__builtin_elementwise_sin(v);V p=__builtin_elementwise_pow(v,w);"
+            "int o;return (int)(w[0]+p[1])+__builtin_popcount(n)+__builtin_add_overflow(n,1,&o)+(int)__builtin_fabs((double)n);}",
+            "node-counts-vector-libm", true, true, 0, 3);
+        check_test_program_boundary(test, "_Atomic int a;int tested(int n){a+=n;int x=a;return x+__builtin_popcount(n);}", "node-counts-atomic-type", true, true, 1, 1);
+        // The atomic builtins on plain objects, which the ops' masks count (no _Atomic kind in the table).
+        check_test_program_boundary(test,
+            "signed char a;unsigned long d;int tested(int n){__atomic_store_n(&a,n-120,5);__atomic_store_n(&d,(unsigned long)n+9,3);"
+            "__atomic_thread_fence(5);__sync_synchronize();int x=__atomic_load_n(&a,0);return x+(int)__atomic_fetch_add(&d,1,5);}",
+            "node-counts-masks-atomic-builtins", true, true, 2, 1);
         check_test_program_boundary(test, "int tested(int n){return (int)__builtin_sqrt(n+4);}", "math-runtime-symbol-rollback", true, true, 0, 0);
         check_test_program_boundary(test, "double __errno_location(void);int tested(int n){return (int)__builtin_sqrt(n+4);}",
                                     "incompatible-errno-accessor-function", true, false, 0, 0);

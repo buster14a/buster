@@ -32,8 +32,8 @@
 // vector or aggregate value but an address), never for an atomic, complex, bit-field or _BitInt value, an overload, a
 // compound literal or a variable-length array. A writer takes templates only where its caller asks
 // (check_program_lower_templates, the tests), and not with -g's tokens, a tracked stack or a program with a _BitInt type or
-// an overloaded address: this scalar classification costs about as much as the tasks it saves (docs/c-lowering.md), so
-// no compile takes it until its steps are data-parallel.
+// an overloaded address: on the 9700X these scalar steps cost about three times what the splices save (docs/c-lowering.md),
+// so no compile takes them until they are data-parallel.
 #ifndef BUSTER_C_CHECK_PROGRAM_TEMPLATES_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_TEMPLATES_INCLUDED
 

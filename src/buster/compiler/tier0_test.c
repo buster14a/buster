@@ -4091,6 +4091,10 @@ struct Tier0TestPassing
 #define BUSTER_TIER0_TEST_RESULT(kind, flags, part_bytes, first, second)                                                \
     { BUSTER_ABI_RESULT_##kind, (flags), (part_bytes), { (first), (second), BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N }, 0 }
 #define BUSTER_TIER0_TEST_NO_RESULT BUSTER_TIER0_TEST_RESULT(IGNORE, 0, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N)
+// A vector result split across `count` XMM registers from xmm0, 16 bytes each (#1193).
+#define BUSTER_TIER0_TEST_SPLIT(count)                                                                                  \
+    { BUSTER_ABI_RESULT_REGISTERS, 0, 16, { BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_X(1), (count) > 2 ? BUSTER_TIER0_TEST_X(2) : BUSTER_TIER0_TEST_N,             \
+      (count) > 2 ? BUSTER_TIER0_TEST_X(3) : BUSTER_TIER0_TEST_N }, 0 }
 
 static const Tier0TestPassing tier0_test_passings[] = {
     // Each kind of general part, and aggregates on the stack whole: a 24-byte one aligned to 16 in a slot at 56, which
@@ -4160,9 +4164,12 @@ static const Tier0TestPassing tier0_test_passings[] = {
         BUSTER_TIER0_TEST_AGGREGATE(10, 1, STACK, BUSTER_TIER0_TEST_LOW, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 16),
         BUSTER_TIER0_TEST_VALUE(I64, STACK, BUSTER_TIER0_TEST_N, 24),
     }, BUSTER_TIER0_TEST_NO_RESULT, 0 },
-    // A vector LLVM splits over two of the target's vector registers (#137: a 32-byte one without AVX), a part each.
-    { "a vector result split over xmm0 and xmm1", 0, 0, { { 0 } },
-      BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 16, BUSTER_TIER0_TEST_X(0), BUSTER_TIER0_TEST_X(1)), 32 },
+    // A vector wider than the target's registers, returned split across them as LLVM returns it (#1193): 32 bytes in
+    // xmm0 and xmm1, and 64 in xmm0 to xmm3, at 16 bytes a register (an SSE target's).
+    { "a vector split across xmm0 and xmm1", 1, 0, {
+        BUSTER_TIER0_TEST_VALUE(I64, REGISTERS, BUSTER_ABI_RDI, 0),
+    }, BUSTER_TIER0_TEST_SPLIT(2), 32 },
+    { "a vector split across xmm0 to xmm3", 0, 0, { { 0 } }, BUSTER_TIER0_TEST_SPLIT(4), 64 },
 };
 
 // The words of the stack a probe records and a driver passes, a hidden result's bytes, each parameter's place in the out
@@ -4173,8 +4180,10 @@ static const Tier0TestPassing tier0_test_passings[] = {
 #define BUSTER_TIER0_TEST_ADDRESS_AT 40
 // Two placements of the bytes (ending at a PROT_NONE page, and starting after one) by each encoder.
 #define BUSTER_TIER0_TEST_AGGREGATE_RUNS 4
+// The vector registers a result comes back in: xmm0 and xmm1, and xmm2 and xmm3 for a vector split across four.
+#define BUSTER_TIER0_TEST_RESULT_VECTORS 4
 
-// What a probe saw, or a driver's call returned (rax, rdx, xmm0 and xmm1), and the bytes a caller copied its result
+// What a probe saw, or a driver's call returned (rax, rdx, xmm0 to xmm3), and the bytes a caller copied its result
 // object to or a function its parameters: the run in progress's (runs[0]), copied to its own after it.
 typedef struct Tier0TestSeen Tier0TestSeen;
 struct Tier0TestSeen
@@ -4188,7 +4197,7 @@ struct Tier0TestSeen
     uint8_t hidden[BUSTER_TIER0_TEST_HIDDEN_BYTES];
 };
 
-// What a probe returns (rax, rdx, xmm0 and xmm1, and with hidden_flag the bytes it writes where rdi points, or else
+// What a probe returns (rax, rdx, xmm0 to xmm3, and with hidden_flag the bytes it writes where rdi points, or else
 // into the sink), and what a driver passes (the argument registers and the stack's slots).
 typedef struct Tier0TestPreset Tier0TestPreset;
 struct Tier0TestPreset
@@ -4301,16 +4310,20 @@ static uint32_t tier0_test_aggregate_probe(X86Instruction* records, uint64_t see
     }
     records[count] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, rax), 0);
     records[count + 1] = tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, rdx), 0);
-    records[count + 2] = tier0_instruction(X86_FORM_MOVUPS_X_XM, 0, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestPreset, vectors), 0);
-    records[count + 3] = tier0_instruction(X86_FORM_MOVUPS_X_XM, 1, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, vectors) + 16), 0);
-    records[count + 4] = tier0_instruction(X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RDI, BUSTER_X86_REGISTER_DIRECT, 0, 0);
-    records[count + 5] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
-    return count + 6;
+    count += 2;
+    for (uint32_t v = 0; v < BUSTER_TIER0_TEST_RESULT_VECTORS; v += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOVUPS_X_XM, (uint8_t)v, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestPreset, vectors) + 16 * v), 0);
+        count += 1;
+    }
+    records[count] = tier0_instruction(X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RDI, BUSTER_X86_REGISTER_DIRECT, 0, 0);
+    records[count + 1] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
+    return count + 2;
 }
 
 // The driver: `stack_words` of `preset`'s stack slots stored below a frame that leaves rsp a multiple of 16 at the call,
 // every argument register loaded from it (the general ones through r10, last), the function at `callee` called through
-// r11, and rax, rdx, xmm0 and xmm1 recorded into `seen`. Returns the count.
+// r11, and rax, rdx, xmm0 to xmm3 recorded into `seen`. Returns the count.
 static uint32_t tier0_test_aggregate_driver(X86Instruction* records, uint64_t preset, uint64_t seen, uint64_t callee, uint32_t stack_words)
 {
     const int32_t frame = (int32_t)((8 * stack_words + 15) / 16 * 16 + 8);
@@ -4339,11 +4352,15 @@ static uint32_t tier0_test_aggregate_driver(X86Instruction* records, uint64_t pr
     records[count + 2] = tier0_instruction(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_R10, 0, (int32_t)(seen >> 32), (int32_t)(uint32_t)seen);
     records[count + 3] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, rax), 0);
     records[count + 4] = tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RDX, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, rdx), 0);
-    records[count + 5] = tier0_instruction(X86_FORM_MOVUPS_XM_X, 0, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)offsetof(Tier0TestSeen, vectors), 0);
-    records[count + 6] = tier0_instruction(X86_FORM_MOVUPS_XM_X, 1, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestSeen, vectors) + 16), 0);
-    records[count + 7] = tier0_instruction(X86_FORM_ADD_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, frame);
-    records[count + 8] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
-    return count + 9;
+    count += 5;
+    for (uint32_t v = 0; v < BUSTER_TIER0_TEST_RESULT_VECTORS; v += 1)
+    {
+        records[count] = tier0_instruction(X86_FORM_MOVUPS_XM_X, (uint8_t)v, X86_REGISTER_R10, BUSTER_X86_MEMORY_BASE, (int32_t)(offsetof(Tier0TestSeen, vectors) + 16 * v), 0);
+        count += 1;
+    }
+    records[count] = tier0_instruction(X86_FORM_ADD_RM64_IMM32, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, frame);
+    records[count + 1] = tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0);
+    return count + 2;
 }
 
 // A fixture's caller: the probe's address (the callee, pushed first), each aggregate's address (`addresses`) and each
@@ -4703,6 +4720,8 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
         {
             shared->preset.vectors[0][i] = (uint8_t)(0xc0 + i);
             shared->preset.vectors[1][i] = (uint8_t)(0xd0 + i);
+            shared->preset.vectors[2][i] = (uint8_t)(0x90 + i);
+            shared->preset.vectors[3][i] = (uint8_t)(0x80 + i);
         }
         const bool hidden = fixture->result.kind == BUSTER_ABI_RESULT_MEMORY;
         shared->preset.hidden_flag = hidden ? 1 : 0;
@@ -5002,6 +5021,15 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a low eightbyte on the stack with HIGH", 13, false, BUSTER_TIER0_TEST_METADATA },
     { "LOW in registers", 2, false, BUSTER_TIER0_TEST_METADATA },
     { "a low eightbyte's slot past the call's area", 13, false, BUSTER_TIER0_TEST_METADATA },
+    // A vector split across vector registers (#1193, #137): only from the first on, in order, 2 or 4 of 16, 32 or 64 bytes
+    // (a transport vector of more than 64 bytes returns in zmm's), its bytes theirs, without HIGH, into an object with
+    // room for them.
+    { "a split vector's registers out of order", 15, true, BUSTER_TIER0_TEST_METADATA },
+    { "a split vector in three registers", 15, true, BUSTER_TIER0_TEST_METADATA },
+    { "a split vector's size unlike its registers'", 14, true, BUSTER_TIER0_TEST_METADATA },
+    { "a split vector of 24-byte parts", 14, true, BUSTER_TIER0_TEST_METADATA },
+    { "a call's split vector with HIGH", 14, false, BUSTER_TIER0_TEST_METADATA },
+    { "a call's split vector object too small for its registers", 15, false, BUSTER_TIER0_TEST_METADATA },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -5234,6 +5262,27 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             break;
         case 60:
             locations[2].stack_offset = 32;
+            break;
+        case 61:
+            callee->function.result.registers[0] = BUSTER_TIER0_TEST_X(1);
+            callee->function.result.registers[1] = BUSTER_TIER0_TEST_X(0);
+            break;
+        case 62:
+            callee->function.result.registers[3] = BUSTER_TIER0_TEST_N;
+            callee->function.result_size = 48;
+            break;
+        case 63:
+            callee->function.result_size = 48;
+            break;
+        case 64:
+            callee->function.result.part_bytes = 24;
+            callee->function.result_size = 48;
+            break;
+        case 65:
+            caller->call.result.flags |= BUSTER_ABI_FLAG_HIGH;
+            break;
+        case 66:
+            caller->local_sizes[0] = 48;
             break;
         default:
             break;

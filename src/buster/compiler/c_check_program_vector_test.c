@@ -8,7 +8,9 @@
 // realign its frame (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their
 // operators, calls, members, arrays, globals, casts to and from integers of their bytes and nontemporal stores, and their
 // divisions' floating-point flags under FENV_ACCESS; and _Atomic vectors of 4 to 64 bytes, their atomic loads, stores,
-// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets.
+// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets, and
+// #1193 their vectors wider than the targets' registers: results split across them, with clang's code both ways, and
+// operators split into pieces they hold.
 // Unsupported operations and widths are refused by name. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
@@ -559,6 +561,30 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "long double guard=n;for(int i=0;i<3;i++){d3 c=pick(a,b,(n+i)&1);__builtin_memcpy(v,&c,24);FOLD(v);}\n"
           "long w[4]={7,-8,n,0};l3 d;__builtin_memcpy(&d,w,32);l3 e=back(d);__builtin_memcpy(w,&e,24);FOLD(w);guard*=2;double g=(double)guard;FOLD(g);return (int)h;}\n"
         },
+        // #1193: vectors of 32 and 64 bytes returned split across the target's registers (xmm0 and xmm1, xmm0 to xmm3,
+        // ymm0 and ymm1) or whole, by the program's functions, by the harness's (clang's) to the program and by the
+        // program's to the harness through pointers.
+        { "baseline-wide-results",
+          "typedef int W8 __attribute__((vector_size(32)));typedef double W16 __attribute__((vector_size(64)));typedef unsigned char W64 __attribute__((vector_size(64)));\n"
+          "W8 external_wide8(W8,int);W16 external_wide16(W16,int);int external_apply_wide8(W8(*)(W8,int),int);int external_apply_wide16(W16(*)(W16,int),int);\n"
+          "static W8 own8(W8 a,int k){a[k&7]=k*5;W8 b=a;return b;}static W16 own16(W16 a,int k){a[k&7]=k*0.5;return a;}\n"
+          "static W64 bytes64(int n){W64 v;fill(&v,64,n);v[(unsigned)n%64]=7;return v;}static W8 chain8(W8 a,int k){return own8(external_wide8(a,k),k+1);}\n"
+          "int tested(int n){unsigned h=2166136261u;W8 a;W16 d;fill(&a,32,n);filld((double*)&d,8,n);\n"
+          "W8 r[]={own8(a,n),external_wide8(a,n),chain8(a,n)};FOLD(r);W16 s[]={own16(d,n),external_wide16(d,n),own16(external_wide16(d,n+1),n)};FOLD(s);\n"
+          "W64 b=bytes64(n);FOLD(b);int e[]={external_apply_wide8(own8,n),external_apply_wide16(own16,n),external_apply_wide8(external_wide8,n)};FOLD(e);return (int)h;}\n"
+        },
+        // #1193: operators on vectors wider than the target's registers, split into pieces they hold as LLVM splits them:
+        // integers of each element size, unsigned compares, splats, negations (a float's through its sign bit) and floats.
+        { "baseline-wide-operators",
+          "typedef long long v8di __attribute__((vector_size(64)));\n"
+          "int tested(int n){unsigned h=2166136261u;v8si a,b;v16su u,v;v8sf f,g;v8df d,e;v64qi c,q;v16hi k,l;v4di x,y;\n"
+          "fill(&a,32,n);fill(&b,32,n+1);fill(&u,64,n+2);fill(&v,64,n+3);fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);filld((double*)&d,8,n);filld((double*)&e,8,n+2);\n"
+          "fill(&c,64,n+4);fill(&q,64,n+5);fill(&k,32,n+6);fill(&l,32,n+7);fill(&x,32,n+8);fill(&y,32,n+9);g+=1.0f;e+=1.0;\n"
+          "v8si r[]={a+b,a-b,a*b,a&b,a|b,a^b,~a,-b,a<b,a==b,a>=b,a+n};FOLD(r);v16su t[]={u+v,u-v,u*v,u<v,u>=v,u!=v,u+(unsigned)n,~u};FOLD(t);\n"
+          "v8sf w[]={f+g,f-g,f*g,f/g,-f,f+2.5f};FOLD(w);v8si fc[]={f<g,f>=g,f==g,f!=g};FOLD(fc);v8df z[]={d+e,d-e,d*e,d/e,-d,d*1.5};FOLD(z);v8di dc[]={d<e,d>=e};FOLD(dc);\n"
+          "v64qi m[]={c+q,c-q,c<q,c==q,~c,c+(signed char)n};FOLD(m);v16hi o[]={k+l,k*l,k<l,-k};FOLD(o);v4di p[]={x+y,x-y,-x,x^y,x+(long long)n};FOLD(p);\n"
+          "v16su mem[2]={u,v};mem[(unsigned)n&1]+=u;FOLD(mem);return (int)h;}\n"
+        },
         { "baseline-floating-pressure",
           "static double consume(double a,double b,double c,double d,double e,double f,double g,double h,double i,double j,double k,double l,double m,double o,double p,double q,v4si v){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+v[1];}\n"
           "int tested(int n){v4si a={n,1,2,3},b={4,n,5,6};return (int)consume(n,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15,a*b+a);}\n"
@@ -567,7 +593,10 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#include <emmintrin.h>\n"
           "int tested(int n){unsigned h=2166136261u;__m128i a,b;__m128 f,g;fill(&a,16,n);fill(&b,16,n+1);fill(&f,16,n+2);fill(&g,16,n+3);\n"
           "__m128i r[]={_mm_add_epi32(a,b),_mm_shuffle_epi32(a,0x1b),_mm_shufflehi_epi16(a,0x4e),_mm_shufflelo_epi16(b,0xb1),_mm_slli_si128(a,3),_mm_srli_si128(a,15),_mm_srli_si128(b,16),_mm_packs_epi32(a,b),_mm_packus_epi16(a,b),_mm_madd_epi16(a,b),_mm_mulhi_epi16(a,b),_mm_mul_epu32(a,b),_mm_insert_epi16(a,n*31,6),_mm_cvtps_epi32(f),_mm_slli_epi16(a,n&15),_mm_srli_epi16(b,n&15),_mm_srai_epi16(a,n&15),_mm_slli_epi32(a,n&31),_mm_srli_epi32(b,n&31),_mm_srai_epi32(a,n&31),_mm_slli_epi64(a,n&63),_mm_srli_epi64(b,n&63)};FOLD(r);\n"
-          "__m128 m[]={_mm_shuffle_ps(f,g,0x1b),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);return (int)h;}\n"
+          "__m128 m[]={_mm_shuffle_ps(f,g,0x1b),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);\n"
+          // #1193: the sign masks and the scalar conversions to integers, of NaNs and values past int's range too.
+          "__m128d c=_mm_castps_pd(f),k=_mm_castps_pd(g);int s[]={_mm_movemask_epi8(a),_mm_movemask_ps(f),_mm_movemask_pd(c),_mm_cvttss_si32(f),_mm_cvtss_si32(g),"
+          "_mm_cvttsd_si32(c),_mm_cvtsd_si32(k)};FOLD(s);long long l[]={_mm_cvttss_si64(f),_mm_cvtss_si64(g),_mm_cvttsd_si64(k),_mm_cvtsd_si64(c)};FOLD(l);return (int)h;}\n"
         },
     };
     const X86Target native = x86_target_native();
@@ -609,9 +638,9 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         }
         if (parsed)
         {
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));int tested(V a,V b){V c;c=a+b;return c[0];}",
-                                               "baseline-wide-vector-operator", true, false, 0, 0,
-                                               "vector operations wider than the target's registers", &target);
+            // A wide operator's pieces are refused by their own reason (#1193).
+            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a/b;}",
+                                               "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
                                                "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
         }

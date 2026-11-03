@@ -1534,7 +1534,7 @@ of 16, 32 and 64 bytes in clang's runs,
 `AbiTestWorld.vectors`), and at 16 bytes the same vectors (`-march=x86-64`,
 `AbiTestWorld.narrow_vectors`): those of 32 and 64 bytes are arguments in
 memory and results LLVM splits over two or four of SSE's registers, which
-Tier 0 returns and stores a register after another (`tier0_split_vector_parts`),
+Tier 0 returns and stores a register after another (`tier0_vector_result_parts`),
 and clang's extended vectors of three doubles and three longs, whose results
 LLVM returns an element a register, in xmm0, xmm1 and st0 and in rax, rdx and
 rcx (`tier0_element_parts`, an `fld` and an `fstp` of 8 bytes for st0's), in clang's runs `_Atomic`s of every type C makes

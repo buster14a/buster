@@ -9,6 +9,15 @@ requirements. [Command index](README.md).
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
+Each row's inventory runs as 4 shards, a runner each that builds the compiler
+itself (a native build must run on the CPU it was built for): `parallel --shard
+K/4 --costs tools/ci/correctness.costs` deals the commands by their hosted
+costs, the same deal on every shard's runner, so the shards run each command
+once. A plain row's test step took 14.6 minutes on one 4-CPU runner; its shards
+take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
+arena checks, the parser smoke test, the performance readers and the TSan/MSan
+`main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
+report when the shards' times drift apart ([the runner guide](parallel.md)).
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
@@ -28,8 +37,17 @@ requires the complete vector feature set and runs native correctness before
 benchmarks, reusing one build and the existing shared lock. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
-start benchmarks. The existing required check name is retained by a hosted
-aggregation job that fails when either stage fails.
+start benchmarks. A pull request's run stops at its first failure: its test rows
+fail fast, and its tests don't start when the guide-size or DCO hook check
+fails. Pushes to main, the daily and dispatched runs report every row. The
+existing required check name is retained by a hosted aggregation job that fails
+when either stage fails.
+Draft PRs retain hosted feedback but cannot queue hardware. Ready/draft transitions
+start a new run and cancel the superseded run in the same PR group. The required
+aggregate explicitly fails a code-changing draft until ready; the selector's
+legitimate no-code exemption still passes. Its C predicate in
+`tools/ci/qualification.c` exhaustively tests the allowed outcomes, including
+missing/invalid/skipped results and event/selector consistency.
 See [the CI guide](../../docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
@@ -51,10 +69,11 @@ there at a time, so everything takes one lock:
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
-  includes, for one built as a unit of its own (`build.sh`'s `*_benchmark.c`),
+  includes, for one built as a unit of its own (the build's `*_benchmark.c`),
   or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
   units (the files that define the functions it calls); or the benchmark's own
-  step. A change to `build.sh` runs every one, and so does a push to main, so
+  step. A change to the build's description (`build.sh`, `CMakeLists.txt`,
+  `cmake/`) runs every one, and so does a push to main, so
   that main has each benchmark's numbers at every commit. A new benchmark's
   step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
   others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
@@ -97,9 +116,29 @@ there at a time, so everything takes one lock:
   step that hide its command in each must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
-  `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
+  `zen5`'s digit, closures through includes, the build's description, pushes).
+  It also fails when the hosted test job's shards disagree
+  (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
+  without a gap, and the same N must be in the job's name, the run step's
+  `--shard "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1
+  to N of each architecture), since a list and an N that disagree would leave a
+  shard's commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
-  benchmark's step or the tables.
+  benchmark's step, the tables or the shards.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## Queue and execution timing
+
+The hosted-only `CI latency report` workflow runs at 07:07 Europe/Madrid and on
+manual dispatch. It samples the latest 100 main CI workflow runs, reports median
+and nearest-rank p95 by PR/main/scheduled-manual event class, and retains raw API
+responses plus normalized observations in workflow artifacts. It does not run
+benchmarks, weaken the hardware gate, or change the daily benchmark schedule.
+
+Read `docs/ci.md` for metric definitions and limitations. In particular, runner
+hook duration includes overhead and is not an exact shared-lock wait; missing
+timestamps are unknown rather than zero. Run its network-free fixtures with
+`bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
+in this repository's retired `docs/measurements` path.
