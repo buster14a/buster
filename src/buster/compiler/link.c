@@ -137,6 +137,10 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_NOTYPE 0x00
 #define BUSTER_LINK_SYMBOL_OBJECT 0x01
 #define BUSTER_LINK_SYMBOL_FUNCTION 0x02
+// STT_COMMON's number: a tentative definition of GNU's common attribute (#147), an object defined in its zero-filled BSS
+// atom, which a relocatable object writes as SHN_COMMON (st_value its atom's alignment), the units' merge keeps the
+// largest of (and gives a strong definition's place to), and an executable writes as an object (link_symbol_elf_info).
+#define BUSTER_LINK_SYMBOL_COMMON 0x05
 #define BUSTER_LINK_SYMBOL_TLS 0x06
 // STT_GNU_IFUNC: a function whose address its resolver, the code at the symbol, returns when the program starts (as
 // libc.a's memcpy and strlen are).
@@ -903,14 +907,16 @@ static bool link_symbol_flags_are_valid(uint8_t flags)
 {
     const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
     return type == BUSTER_LINK_SYMBOL_NOTYPE || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_TLS ||
-           type == BUSTER_LINK_SYMBOL_IFUNC;
+           type == BUSTER_LINK_SYMBOL_IFUNC || type == BUSTER_LINK_SYMBOL_COMMON;
 }
 
-// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10).
+// An Elf64_Sym's st_info for symbol flags: their type and binding, BUSTER_LINK_SYMBOL_UNIQUE's STB_GNU_UNIQUE (10), and
+// a common symbol's STT_OBJECT, as a linker writes the object it allocates for one.
 static __attribute__((unused)) uint8_t link_symbol_elf_info(uint8_t flags)
 {
     const bool unique = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE;
-    return (uint8_t)(unique ? 10u << 4 | (flags & BUSTER_LINK_SYMBOL_TYPE) : flags & BUSTER_LINK_SYMBOL_INFO);
+    const uint8_t type = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON ? BUSTER_LINK_SYMBOL_OBJECT : flags & BUSTER_LINK_SYMBOL_TYPE;
+    return (uint8_t)(unique ? 10u << 4 | type : (flags & BUSTER_LINK_SYMBOL_BINDING) | type);
 }
 
 // Whether a symbol with `flags` can be defined in `atom`, which exists, at `value` with `size`: within the atom, and a

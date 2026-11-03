@@ -3390,13 +3390,12 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
     result = result && clang_arguments != 0;
     if (result)
     {
-        clang_arguments[0] = "-U__GCC_ASM_FLAG_OUTPUTS__";
         for (int i = 0; i < argument_count; i += 1)
         {
-            clang_arguments[i + 1] = arguments[i];
+            clang_arguments[i] = arguments[i];
         }
     }
-    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count + 1, path, true) : (PPClangOutput){ 0 };
+    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count, path, true) : (PPClangOutput){ 0 };
     free(clang_arguments);
     char* theirs = clang.status == PP_CLANG_ACCEPTED ? clang.text : 0;
     result = theirs != 0 && ours != 0;
@@ -3818,8 +3817,7 @@ static bool pp_test_predefines(const char* directory)
         size_t ours_length = passed ? made : 0;
         size_t clang_length = 0;
         char* clang_arguments[3] = { (char*)modes[m][0], (char*)modes[m][1], 0 };
-        clang_arguments[count] = "-U__GCC_ASM_FLAG_OUTPUTS__";
-        free(pp_test_clang(clang_arguments, count + 1, empty_path, clang_path, &clang_length));
+        free(pp_test_clang(clang_arguments, count, empty_path, clang_path, &clang_length));
         FILE* file = fopen(clang_path, "r");
         char* theirs = malloc(1 << 20);
         clang_length = file != 0 && theirs != 0 ? fread(theirs, 1, (1 << 20) - 1, file) : 0;
@@ -7080,8 +7078,8 @@ static bool pp_test_number(const char* text, uint64_t* value)
     return result;
 }
 
-// The default capability inventory requires source checking and both required consumers; action folding alone
-// remains private to its action API. Clang's oracle mode retains its independent frozen tables and raw operands.
+// __GCC_ASM_FLAG_OUTPUTS__: clang's 1 by default and in clang's feature mode, since the C driver lowers flag outputs
+// (#147); -D and -U after it, and a --predefines file's own, as for any predefined macro.
 static bool pp_test_asm_flag_predefine(const char* directory)
 {
     static const char source[] = "#ifdef __GCC_ASM_FLAG_OUTPUTS__\nvalue __GCC_ASM_FLAG_OUTPUTS__\n#else\nabsent\n#endif\n";
@@ -7091,9 +7089,10 @@ static bool pp_test_asm_flag_predefine(const char* directory)
         bool explicit_predefines;
         const char* expected;
     } cases[] = {
-        { NULL, false, "absent" },
-        { "--clang-features", false, "absent" },
+        { NULL, false, "value 1" },
+        { "--clang-features", false, "value 1" },
         { "-D__GCC_ASM_FLAG_OUTPUTS__=7", false, "value 7" },
+        { "-U__GCC_ASM_FLAG_OUTPUTS__", false, "absent" },
         { "-U__GCC_ASM_FLAG_OUTPUTS__", true, "absent" },
         { NULL, true, "value 3" },
         { "-D__GCC_ASM_FLAG_OUTPUTS__=7", true, "value 7" },
@@ -7295,6 +7294,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_CANONICALIZE, "__builtin_canonicalize", false, true, false },
         { CBUILTIN_CANONICALIZEF, "__builtin_canonicalizef", false, true, false },
         { CBUILTIN_CANONICALIZEL, "__builtin_canonicalizel", false, true, false },
+        { CBUILTIN_CANONICALIZEF16, "__builtin_canonicalizef16", false, true, false },
         { CBUILTIN_SQRT, "__builtin_sqrt", false, true, false },
         { CBUILTIN_SQRTF, "__builtin_sqrtf", false, true, false },
         { CBUILTIN_COPYSIGN, "__builtin_copysign", false, true, false },
@@ -7603,6 +7603,35 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_EH_RETURN_DATA_REGNO, "__builtin_eh_return_data_regno", false, true, true },
         { CBUILTIN_DWARF_CFA, "__builtin_dwarf_cfa", false, true, false },
         { CBUILTIN_LAUNDER, "__builtin_launder", false, true, true },
+        { CBUILTIN_ALLOCA_UNINITIALIZED, "__builtin_alloca_uninitialized", false, true, false },
+        { CBUILTIN_ALLOCA_WITH_ALIGN, "__builtin_alloca_with_align", false, true, false },
+        { CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED, "__builtin_alloca_with_align_uninitialized", false, true, false },
+        { CBUILTIN_ALLOW_RUNTIME_CHECK, "__builtin_allow_runtime_check", false, true, false },
+        { CBUILTIN_ALLOW_SANITIZE_CHECK, "__builtin_allow_sanitize_check", false, true, false },
+        { CBUILTIN_ANNOTATION, "__builtin_annotation", false, true, false },
+        { CBUILTIN_ADDRESSOF, "__builtin_addressof", false, true, true },
+        { CBUILTIN_FUNCTION_START, "__builtin_function_start", false, true, true },
+        { CBUILTIN_COMPLEX, "__builtin_complex", false, true, true },
+        { CBUILTIN_ARITHMETIC_FENCE, "__arithmetic_fence", false, true, true },
+        { CBUILTIN_XRAY_CUSTOMEVENT, "__xray_customevent", false, true, false },
+        { CBUILTIN_XRAY_TYPEDEVENT, "__xray_typedevent", false, true, false },
+        { CBUILTIN_WARN_MEMSET_ZERO_LEN, "__warn_memset_zero_len", false, true, false },
+        { CBUILTIN_TRIVIALLY_RELOCATE, "__builtin_trivially_relocate", false, true, false },
+        { CBUILTIN_OPERATOR_NEW, "__builtin_operator_new", false, true, true },
+        { CBUILTIN_OPERATOR_DELETE, "__builtin_operator_delete", false, true, true },
+        { CBUILTIN_PTRAUTH_AUTH, "__builtin_ptrauth_auth", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_AND_RESIGN, "__builtin_ptrauth_auth_and_resign", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_LOAD_RELATIVE_AND_SIGN, "__builtin_ptrauth_auth_load_relative_and_sign", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_WITH_PC_AND_RESIGN, "__builtin_ptrauth_auth_with_pc_and_resign", false, true, false },
+        { CBUILTIN_PTRAUTH_BLEND_DISCRIMINATOR, "__builtin_ptrauth_blend_discriminator", false, true, false },
+        { CBUILTIN_PTRAUTH_SIGN_CONSTANT, "__builtin_ptrauth_sign_constant", false, true, true },
+        { CBUILTIN_PTRAUTH_SIGN_GENERIC_DATA, "__builtin_ptrauth_sign_generic_data", false, true, false },
+        { CBUILTIN_PTRAUTH_SIGN_UNAUTHENTICATED, "__builtin_ptrauth_sign_unauthenticated", false, true, false },
+        { CBUILTIN_PTRAUTH_STRING_DISCRIMINATOR, "__builtin_ptrauth_string_discriminator", false, true, true },
+        { CBUILTIN_PTRAUTH_STRIP, "__builtin_ptrauth_strip", false, true, false },
+        { CBUILTIN_CPU_INIT, "__builtin_cpu_init", false, true, false },
+        { CBUILTIN_CPU_IS, "__builtin_cpu_is", false, true, false },
+        { CBUILTIN_CPU_SUPPORTS, "__builtin_cpu_supports", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
