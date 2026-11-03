@@ -163,13 +163,6 @@ static __int128 check_common_integer_value(const CheckValue* value, uint32_t wid
     return result;
 }
 
-static bool check_common_simple_operand(CheckOp op)
-{
-    const bool result = op == CHECK_OP_VALUE || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_CONVERT ||
-                        op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
-    return result;
-}
-
 static bool check_common_write_op(CheckOp op)
 {
     const bool result = op == CHECK_OP_ASSIGN || op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_MULTIPLY_ASSIGN ||
@@ -212,9 +205,12 @@ static bool check_common_conversion_changes(const TypeTable* types, TypeId sourc
         {
             changes = (unsigned __int128)original != bits;
         }
-        else if (!target_signed && original == -1)
+        else if (!target_signed && original < 0)
         {
-            changes = false;
+            // Conversion to unsigned is defined modulo the target range: clang exempts every negative constant that
+            // still names a value in the target width's signed half — `-2` to unsigned char is a defined 254 — and
+            // reports only one whose magnitude the signed half cannot hold, like -4294967295 to unsigned int.
+            changes = target_width < 128 && original < -((__int128)1 << (target_width - 1));
         }
         else
         {
@@ -288,10 +284,15 @@ static bool check_common_statement_terminator(const Parser* parser, uint32_t tok
         {
             const uint32_t owner = parser->tree.parents[at];
             const uint8_t owner_role = owner < parser->tokens.count ? parser->tree.roles[owner] : PARSE_ROLE_NONE;
+            // A block, a label or a control statement's un-braced head (`if (c) s;`, `else s;`, `do s;`)
+            // owns the `;` that ends a discarded expression statement. A for's `)` owns both its head's
+            // separators and its un-braced body's `;`: only the body's comes after the `)`.
             result = owner < parser->tokens.count && (owner_role == PARSE_ROLE_OPEN_BLOCK || owner_role == PARSE_ROLE_CLOSE_BLOCK ||
                                                        owner_role == PARSE_ROLE_OPEN_BODY || owner_role == PARSE_ROLE_CLOSE_BODY ||
                                                        owner_role == PARSE_ROLE_LABEL || owner_role == PARSE_ROLE_OPEN_CASE ||
-                                                       owner_role == PARSE_ROLE_CLOSE_CASE);
+                                                       owner_role == PARSE_ROLE_CLOSE_CASE || owner_role == PARSE_ROLE_CLOSE_CONDITION ||
+                                                       owner_role == PARSE_ROLE_ELSE || owner_role == PARSE_ROLE_DO ||
+                                                       (owner_role == PARSE_ROLE_CLOSE_FOR && at > owner));
             break;
         }
         if (role != PARSE_ROLE_CLOSE_GROUP)
@@ -309,7 +310,8 @@ static bool check_common_effect_role(uint8_t role)
                         role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY ||
                         role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_BITWISE_XOR ||
                         role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR || role == PARSE_ROLE_PREFIX ||
-                        role == PARSE_ROLE_POSTFIX || role == PARSE_ROLE_CLOSE_CAST;
+                        role == PARSE_ROLE_POSTFIX || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_SUBSCRIPT ||
+                        role == PARSE_ROLE_MEMBER || role == PARSE_ROLE_MEMBER_OPERATOR;
     return result;
 }
 
@@ -413,6 +415,16 @@ static void check_common_report_unused(const Parser* parser, Preprocessor* pp, c
     check_common_report_at(parser, pp, input, token, check_common_function_end(parser, token), id, false, message, notes, note_count, scratch);
 }
 
+// The deferred publication an expression warning gets inside a function: every unused-result, bounds,
+// conversion, division and sign diagnostic lands at the body's end and keeps the order it was emitted in.
+static void check_common_report_deferred(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
+                                         bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count,
+                                         Arena* scratch)
+{
+    check_common_report_at(parser, pp, input, token, check_common_function_end(parser, token), id, default_ignored, message, notes,
+                           note_count, scratch);
+}
+
 // A closer's opener is the token whose parent it is; the closer's own parent is the enclosing construct.
 static uint32_t check_common_cast_opener(const Parser* parser, uint32_t closer)
 {
@@ -461,6 +473,21 @@ static bool check_common_expression_has_effect(const Parser* parser, uint32_t fi
     return effect;
 }
 
+// Clang judges a discarded expression by its own top-level operation: `a[i++]` and `f() + x` still report
+// unused because the subscript and the add produce a value nobody reads, while assignments, calls and
+// increments carry their own effect. A nested comma's contribution is the right operand it yields, so the
+// caller hands in the unwrapped operand node.
+static bool check_common_node_effect(const CheckGraph* graph, uint32_t node)
+{
+    const uint8_t op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool result = op == CHECK_OP_ASSIGN || op == CHECK_OP_CALL || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_VARARGS ||
+                        (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
+                        op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_BUILTIN_MISC ||
+                        op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_ATOMIC || op == CHECK_OP_BUILTIN_VECTOR ||
+                        op == CHECK_OP_BUILTIN_X86;
+    return result;
+}
+
 static bool check_common_void_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                    const TypeTable* types, uint32_t token)
 {
@@ -486,20 +513,491 @@ static bool check_common_void_pointer_cast(const CheckStream* stream, const Type
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        Arena* scratch);
+static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                            TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
+                                            TypeId target, Arena* scratch);
+
+// The deferred expression warnings — unused results, out-of-bounds subscripts, lossy conversions, division
+// by zero and sign mismatches — publish at their enclosing function's end, so the order they print in is
+// the order this traversal emits them. Clang emits a discarded expression's warnings in a value
+// post-order: division by zero first, nested subexpressions next, the discard marker after them, each
+// operand root's own warning after the marker, and sign comparisons last.
+typedef struct CheckCommonEmission
+{
+    const Parser* parser;
+    Preprocessor* pp;
+    const CheckInput* input;
+    const CheckStream* stream;
+    TypeTable* types;
+    CheckWarningSpelling* spell;
+    const uint8_t* evaluated;
+    const uint32_t* parents;
+    uint8_t* emitted;
+    Arena* scratch;
+} CheckCommonEmission;
+
+static void check_common_emit_tree(CheckCommonEmission* emission, uint32_t node);
+static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node);
+static void check_common_own(CheckCommonEmission* emission, uint32_t node);
+
+// The node a discard marker points at inside an operand: a comma resolves to its result and a conditional
+// to its else arm, so `x, 0` and `x ? y : z` report at the `0` and the `z`.
+static uint32_t check_common_result_root(const CheckGraph* graph, uint32_t node)
+{
+    uint32_t result = node;
+    for (uint32_t steps = 0; result < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = graph->ops[result];
+        const uint32_t next = op == CHECK_OP_COMMA ? graph->operand1[result] :
+                              op == CHECK_OP_CONDITIONAL ? graph->operand2[result] : BUSTER_CHECK_NONE;
+        if (next >= graph->count)
+        {
+            break;
+        }
+        result = next;
+    }
+    return result;
+}
+
+// The `expr, 0` idiom: a literal integer 0 result stays silent — it exists to sequence the left operand's
+// effect. Only a bare numeric literal counts: `+0`, `0.0`, `'\0'` and enum zeros still report.
+static bool check_common_literal_zero(const Parser* parser, const CheckStream* stream, const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t token = node < graph->count ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    const bool result = node < graph->count && graph->ops[node] == CHECK_OP_VALUE && token < parser->tokens.count &&
+                        parser->tokens.kinds[token] == PARSE_KIND_NUMBER && check_common_integer_constant(stream, node) &&
+                        check_stream_value(stream, node).integer == 0;
+    return result;
+}
+
+// Whether a conditional's arm carries an effect along its own value path and so keeps the statement quiet:
+// `x ? f() : y` and `x ? (y, x = 1) : z` do not report, while `x ? (x = 1, y) : z` still does because the
+// comma's value is the quiet `y`.
+static bool check_common_arm_effect(const CheckGraph* graph, uint32_t node)
+{
+    bool result = false;
+    if (node < graph->count)
+    {
+        const CheckOp op = graph->ops[node];
+        result = op == CHECK_OP_CONDITIONAL ? check_common_arm_effect(graph, graph->operand1[node]) || check_common_arm_effect(graph, graph->operand2[node]) :
+                 op == CHECK_OP_COMMA ? check_common_arm_effect(graph, graph->operand1[node]) : check_common_node_effect(graph, node);
+    }
+    return result;
+}
+
+// The subtree warnings a node's own slot precedes. A conditional's arms report where its value is used —
+// at its own slot — so only its condition descends here.
+static void check_common_emit_children(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    if (node >= graph->count)
+    {
+        return;
+    }
+    const uint32_t slots = graph->ops[node] == CHECK_OP_CONDITIONAL ? 1u : 3u;
+    for (uint32_t i = 0; i < slots; i += 1)
+    {
+        check_common_emit_tree(emission, i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node]);
+    }
+    if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+    {
+        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+        {
+            check_common_emit_tree(emission, graph->argument_nodes[graph->argument_offsets[node] + i]);
+        }
+    }
+}
+
+// The warnings one evaluated node's subtree produces, in value order: children first, then the node's own.
+static void check_common_emit_tree(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    if (node >= graph->count || emission->emitted[node] != 0 || (emission->evaluated != NULL && emission->evaluated[node] == 0))
+    {
+        return;
+    }
+    emission->emitted[node] = 1;
+    if (graph->ops[node] == CHECK_OP_COMMA)
+    {
+        check_common_comma_emit(emission, node);
+        return;
+    }
+    check_common_emit_children(emission, node);
+    check_common_own(emission, node);
+}
+
+// The division warnings inside an evaluated subtree, in evaluation order: they precede every other
+// warning the expression produces.
+static void check_common_div_scan(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    if (node >= graph->count || (emission->evaluated != NULL && emission->evaluated[node] == 0))
+    {
+        return;
+    }
+    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    {
+        check_common_div_scan(emission, operands[i]);
+    }
+    if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+    {
+        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+        {
+            check_common_div_scan(emission, graph->argument_nodes[graph->argument_offsets[node] + i]);
+        }
+    }
+    const CheckOp op = graph->ops[node];
+    if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
+    {
+        const uint32_t divisor = graph->operand1[node];
+        const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
+        const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
+        if (!ice && check_common_integer_constant(emission->stream, divisor) && check_stream_value(emission->stream, divisor).integer == 0)
+        {
+            uint32_t width = 0;
+            bool sign = false;
+            if (check_common_integer(emission->types, check_stream_type(emission->stream, graph->operand0[node]), &width, &sign))
+            {
+                check_common_report_deferred(emission->parser, emission->pp, emission->input, graph->tokens[node], CHECK_WARNING_ID_DIVISION_BY_ZERO,
+                                             false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined",
+                                             NULL, 0, emission->scratch);
+            }
+        }
+    }
+}
+
+// The sign-mismatch warnings inside an evaluated subtree, in evaluation order: they follow every other
+// warning the expression produces.
+static void check_common_signcmp_scan(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    if (node >= graph->count || (emission->evaluated != NULL && emission->evaluated[node] == 0))
+    {
+        return;
+    }
+    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    {
+        check_common_signcmp_scan(emission, operands[i]);
+    }
+    if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
+    {
+        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+        {
+            check_common_signcmp_scan(emission, graph->argument_nodes[graph->argument_offsets[node] + i]);
+        }
+    }
+    const CheckOp op = graph->ops[node];
+    const CheckStream* stream = emission->stream;
+    const Parser* parser = emission->parser;
+    TypeTable* types = emission->types;
+    Arena* scratch = emission->scratch;
+    if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
+    {
+        const uint32_t left = graph->operand0[node];
+        const uint32_t right = graph->operand1[node];
+        uint32_t left_width = 0;
+        uint32_t right_width = 0;
+        bool left_signed = false;
+        bool right_signed = false;
+        bool integer = left < graph->count && right < graph->count &&
+                       check_common_integer(types, check_stream_type(stream, left), &left_width, &left_signed) &&
+                       check_common_integer(types, check_stream_type(stream, right), &right_width, &right_signed);
+        // Integer promotions apply before the comparison: signed char and unsigned char both promote to
+        // int, so the sign comparison sees the promoted operand, not the narrow type spelled at the source.
+        if (left_width != 0 && left_width < 32)
+        {
+            left_width = 32;
+            left_signed = true;
+        }
+        if (right_width != 0 && right_width < 32)
+        {
+            right_width = 32;
+            right_signed = true;
+        }
+        bool constant_suppressed = false;
+        if (integer && left_signed != right_signed)
+        {
+            const uint32_t signed_operand = left_signed ? left : right;
+            const uint32_t unsigned_operand = left_signed ? right : left;
+            const uint32_t signed_width = left_signed ? left_width : right_width;
+            const uint32_t unsigned_width = left_signed ? right_width : left_width;
+            if (check_common_integer_constant(stream, signed_operand) && unsigned_width != 0)
+            {
+                const CheckValue signed_value = check_stream_value(stream, signed_operand);
+                const __int128 constant = check_common_integer_value(&signed_value, signed_width, true);
+                constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(unsigned_width);
+            }
+            else if ((op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && check_common_integer_constant(stream, unsigned_operand) && signed_width != 0)
+            {
+                const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
+                const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
+                constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(signed_width);
+            }
+            else if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && check_common_integer_constant(stream, unsigned_operand) &&
+                     unsigned_width != 0)
+            {
+                // Clang canonicalizes the signed operand to the left; a zero unsigned constant leaves the
+                // result unchanged for `<` and `>=`, whose truth is already the same for every signed value.
+                const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
+                const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
+                CheckOp normalized = op;
+                if (right_signed)
+                {
+                    normalized = op == CHECK_OP_LESS ? CHECK_OP_GREATER : op == CHECK_OP_LESS_EQUAL ? CHECK_OP_GREATER_EQUAL :
+                                 op == CHECK_OP_GREATER ? CHECK_OP_LESS : CHECK_OP_LESS_EQUAL;
+                }
+                constant_suppressed = constant == 0 && (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
+            }
+            const CheckOp signed_op = graph->ops[signed_operand];
+            constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
+                                  signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR;
+        }
+        if (integer && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
+        {
+            const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
+                                                                check_stream_type(stream, left), 0);
+            const String8 right_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
+                                                                 check_stream_type(stream, right), 0);
+            if (left_name.length != 0 && right_name.length != 0)
+            {
+                const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
+                                                          (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
+                check_common_report_deferred(parser, emission->pp, emission->input, graph->tokens[node], CHECK_WARNING_ID_SIGN_COMPARE, true,
+                                             message, NULL, 0, scratch);
+            }
+        }
+    }
+}
+
+// The warning a node carries at its own root: a lost value in an initializer, assignment, conversion or
+// call argument, a self-assignment, or a constant subscript past its bound. A conditional has no warning
+// of its own — its arms report at its slot instead.
+static void check_common_own(CheckCommonEmission* emission, uint32_t node)
+{
+    const Parser* parser = emission->parser;
+    Preprocessor* pp = emission->pp;
+    const CheckInput* input = emission->input;
+    const CheckStream* stream = emission->stream;
+    TypeTable* types = emission->types;
+    CheckWarningSpelling* spell = emission->spell;
+    Arena* scratch = emission->scratch;
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t token = graph->tokens[node];
+    if (op == CHECK_OP_CONDITIONAL)
+    {
+        check_common_emit_tree(emission, graph->operand1[node]);
+        check_common_emit_tree(emission, graph->operand2[node]);
+        return;
+    }
+    if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
+    {
+        const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
+        const uint32_t conversion = op == CHECK_OP_ASSIGN ? 1u : 0u;
+        const uint32_t flags = stream->conversions[node].operands[conversion].flags;
+        if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
+            check_common_integer_constant(stream, source))
+        {
+            const CheckValue value_storage = check_stream_value(stream, source);
+            const CheckValue* value = &value_storage;
+            const TypeId target = check_stream_type(stream, node);
+            check_common_conversion_warning(parser, pp, input, stream, types, spell, source, value, target, scratch);
+        }
+        if (op == CHECK_OP_ASSIGN)
+        {
+            const uint32_t left = graph->operand0[node];
+            const uint32_t right = graph->operand1[node];
+            const CheckValue left_value = left < graph->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
+            const CheckValue right_value = right < graph->count ? check_stream_value(stream, right) : (CheckValue){ 0 };
+            const bool volatile_object = left < graph->count &&
+                (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
+            if (!volatile_object && left < graph->count && right < graph->count && left_value.category == CHECK_LVALUE &&
+                right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
+                left_value.offset == 0 && right_value.offset == 0)
+            {
+                const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
+                if (type_name.length != 0)
+                {
+                    const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
+                                                              (int)type_name.length, type_name.pointer);
+                    check_common_report_deferred(parser, pp, input, token, CHECK_WARNING_ID_SELF_ASSIGN, true, message, NULL, 0, scratch);
+                }
+            }
+        }
+    }
+    else if (op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL &&
+             stream->argument_conversions != NULL)
+    {
+        // A call's converted arguments: a constant that loses value going into its parameter warns at the
+        // argument, where an initializer or return conversion would already have been diagnosed. As clang
+        // reports them, an unprototyped call's arguments are checked against each parameter's promoted type:
+        // a K&R `short` parameter receives `int`, so a constant it holds warns only against the prototype's
+        // declared type.
+        const uint32_t callee = graph->operand0[node];
+        TypeId function = callee < graph->count ? check_stream_type(stream, callee) : 0;
+        function = function != 0 ? type_unqualified(type_strip_aligned(types, function)) : 0;
+        if (function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER)
+        {
+            function = type_unqualified(type_strip_aligned(types, type_element(types, function)));
+        }
+        const bool prototype = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION &&
+                               (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+        const uint32_t offset = graph->argument_offsets[node];
+        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+        {
+            const uint32_t argument = graph->argument_nodes[offset + i];
+            const CheckConversion conversion = stream->argument_conversions[offset + i];
+            if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
+                (conversion.flags & BUSTER_CHECK_CONVERT_CAST) == 0 && check_common_integer_constant(stream, argument))
+            {
+                const TypeId destination = prototype ? conversion.type : type_default_argument_promote(types, conversion.type);
+                const CheckValue value_storage = check_stream_value(stream, argument);
+                check_common_conversion_warning(parser, pp, input, stream, types, spell, argument, &value_storage,
+                                                destination, scratch);
+            }
+        }
+    }
+    else if (op == CHECK_OP_SUBSCRIPT)
+    {
+        const uint32_t array = graph->operand0[node];
+        const uint32_t index = graph->operand1[node];
+        const uint32_t root = check_common_address_root(graph, stream, types, array, false);
+        if (array < graph->count && root < graph->count && check_common_integer_constant(stream, index))
+        {
+            const TypeId array_type = check_stream_type(stream, array);
+            TypeId type = type_unqualified(type_strip_aligned(types, array_type));
+            if (type_kind(types, type) == BUSTER_TYPE_KIND_ARRAY && types->types.extent[type_index(type)] != 0)
+            {
+                const uint64_t extent = types->types.extent[type_index(type)];
+                uint32_t width = 0;
+                bool sign = false;
+                if (check_common_integer(types, check_stream_type(stream, index), &width, &sign))
+                {
+                    const CheckValue index_value = check_stream_value(stream, index);
+                    const __int128 value = check_common_integer_value(&index_value, width, sign);
+                    // The lvalue's use decides the bound: `&a[i]` permits one past the end along the spine
+                    // it takes the address of, a cast or a ternary condition discards the lvalue unchecked,
+                    // and a nested index inside an address-of's operand goes unchecked as well.
+                    bool checked = emission->evaluated == NULL || emission->evaluated[node] != 0;
+                    bool relaxed = false;
+                    if (checked && emission->parents != NULL)
+                    {
+                        uint32_t at = node;
+                        uint32_t parent = emission->parents[at];
+                        for (uint32_t steps = 0; parent < graph->count && steps < graph->count; steps += 1)
+                        {
+                            const CheckOp parent_op = graph->ops[parent];
+                            const bool spine = (parent_op == CHECK_OP_SUBSCRIPT || parent_op == CHECK_OP_MEMBER || parent_op == CHECK_OP_ARROW) && graph->operand0[parent] == at;
+                            const uint32_t parent_token = graph->tokens[parent];
+                            // The implicit cast an expression statement wraps its value in is transparent
+                            // here: `a[i];` still reads the lvalue. An explicit cast discards it unchecked.
+                            const bool statement_cast = parent_op == CHECK_OP_CAST && parent_token < parser->tokens.count &&
+                                                        (parser->tree.roles[parent_token] == PARSE_ROLE_TERMINATOR ||
+                                                         parser->tree.roles[parent_token] == PARSE_ROLE_CLOSE_FOR);
+                            const bool value_path = (parent_op == CHECK_OP_COMMA && graph->operand1[parent] == at) ||
+                                                    (parent_op == CHECK_OP_CONDITIONAL && (graph->operand1[parent] == at || graph->operand2[parent] == at)) ||
+                                                    parent_op == CHECK_OP_CONVERT || statement_cast;
+                            if (parent_op == CHECK_OP_CONDITIONAL && graph->operand0[parent] == at)
+                            {
+                                checked = false;
+                                break;
+                            }
+                            if (parent_op == CHECK_OP_CAST && !statement_cast)
+                            {
+                                checked = false;
+                                break;
+                            }
+                            if (!spine && !value_path)
+                            {
+                                break;
+                            }
+                            at = parent;
+                            parent = emission->parents[at];
+                        }
+                        if (checked && parent < graph->count && graph->ops[parent] == CHECK_OP_ADDRESS)
+                        {
+                            relaxed = true;
+                        }
+                        else if (checked)
+                        {
+                            for (uint32_t up = parent, steps = 0; up < graph->count && steps < graph->count; up = emission->parents[up], steps += 1)
+                            {
+                                if (graph->ops[up] == CHECK_OP_ADDRESS)
+                                {
+                                    checked = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    const bool past = checked && value >= 0 && (relaxed ? (unsigned __int128)value > extent : (unsigned __int128)value >= extent);
+                    const bool before = checked && value < 0;
+                    if (past || before)
+                    {
+                        const String8 array_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, array_type, 0);
+                        char number[48];
+                        check_common_number(number, sizeof(number), value);
+                        const char* message = past && array_name.length != 0 ?
+                            check_warning_text(scratch, "array index %s is past the end of the array (that has type %.*s)", number,
+                                               (int)array_name.length, array_name.pointer) :
+                            array_name.length != 0 ? check_warning_text(scratch, "array index %s is before the beginning of the array", number) : NULL;
+                        CheckCommonNote note = { 0 };
+                        const uint32_t root_object = check_stream_object(stream, root);
+                        const uint32_t declaration = root_object != 0 ? root_object - 1 : BUSTER_CHECK_NONE;
+                        const uint32_t name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+                        if (declaration < parser->tokens.count && name != 0)
+                        {
+                            note.token = check_common_declaration_start(parser, declaration);
+                            note.message = check_warning_text(scratch, "array '%.*s' declared here",
+                                                              (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        if (message != NULL)
+                        {
+                            check_common_report_deferred(parser, pp, input, graph->tokens[root], CHECK_WARNING_ID_ARRAY_BOUNDS, false, message,
+                                                         note.message != NULL ? &note : NULL, note.message != NULL ? 1u : 0u, scratch);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // The diagnostics for one evaluated comma: every left operand is evaluated for effect only — a discarded
-// comparison reports as a comparison, anything else as the operand's own value, and a nested comma's
-// contribution is its right operand's. A chain ending a statement or for clause leaves its result unused.
-static void check_common_comma(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                               const TypeTable* types, uint32_t node, Arena* scratch)
+// comparison reports as a comparison when the operand's own root is the comparison, anything else as the
+// operand's own value, and a nested comma's contribution is its right operand's. A chain ending a
+// statement or for clause leaves its result unused.
+static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node)
 {
-    const CheckGraph* graph = &input->graph;
+    const CheckGraph* graph = &emission->input->graph;
+    const Parser* parser = emission->parser;
+    Preprocessor* pp = emission->pp;
+    const CheckInput* input = emission->input;
+    const CheckStream* stream = emission->stream;
+    const TypeTable* types = emission->types;
+    Arena* scratch = emission->scratch;
     const uint32_t count = parser->tokens.count;
     const uint32_t comma = graph->tokens[node];
-    uint32_t left_node = graph->operand0[node];
-    for (uint32_t steps = 0; left_node < graph->count && graph->ops[left_node] == CHECK_OP_COMMA && steps < graph->count; steps += 1)
+    const uint32_t left_node = graph->operand0[node];
+    const uint32_t right_node = graph->operand1[node];
+    // Each operand's deep warnings come first; a nested comma runs its own sequence.
+    if (left_node < graph->count && graph->ops[left_node] == CHECK_OP_COMMA)
     {
-        left_node = graph->operand1[left_node];
+        check_common_comma_emit(emission, left_node);
+    }
+    else
+    {
+        check_common_emit_children(emission, left_node);
+    }
+    if (right_node < graph->count && graph->ops[right_node] == CHECK_OP_COMMA)
+    {
+        check_common_comma_emit(emission, right_node);
+    }
+    else
+    {
+        check_common_emit_children(emission, right_node);
     }
     uint32_t left = comma - 1;
     for (uint32_t steps = 0; steps < count; steps += 1)
@@ -511,37 +1009,47 @@ static void check_common_comma(const Parser* parser, Preprocessor* pp, const Che
         }
         left = up;
     }
-    left = check_common_subtree_start(parser, left);
-    if (left < comma && !check_common_expression_has_effect(parser, left, comma))
+    const uint32_t left_start = check_common_subtree_start(parser, left);
+    const uint32_t left_result = check_common_result_root(graph, left_node);
+    const bool left_effect = left_node < graph->count ?
+                             (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_effect(graph, left_node) :
+                              check_common_node_effect(graph, left_result)) :
+                             check_common_expression_has_effect(parser, left_start, comma);
+    // A left operand that resolves to a literal 0 through commas of its own stays quiet, like the
+    // `expr, 0` result does — a bare `0, x` still reports the `0`, and so does a conditional's `0` arm.
+    uint32_t left_zero_node = left_node;
+    for (uint32_t steps = 0; left_zero_node < graph->count && graph->ops[left_zero_node] == CHECK_OP_COMMA && steps < graph->count; steps += 1)
     {
-        uint32_t report = left_node < graph->count && graph->tokens[left_node] < count ? graph->tokens[left_node] : left;
+        left_zero_node = graph->operand1[left_zero_node];
+    }
+    const bool left_zero = left_zero_node != left_node && left_zero_node < graph->count &&
+                           check_common_literal_zero(parser, stream, graph, left_zero_node);
+    if (left_start < comma && !left_effect && !left_zero)
+    {
+        uint32_t report = left_result < graph->count && graph->tokens[left_result] < count ? graph->tokens[left_result] : left;
         uint8_t report_role = report < count ? parser->tree.roles[report] : PARSE_ROLE_NONE;
-        // Clang points a discarded ternary at its else arm and a discarded member at the member's name.
-        if (report_role == PARSE_ROLE_CLOSE_TERNARY && report + 1 < count)
+        const uint8_t left_role = left < count ? parser->tree.roles[left] : PARSE_ROLE_NONE;
+        // Clang points a discarded member at the member's name.
+        if (report_role == PARSE_ROLE_MEMBER_OPERATOR && report + 1 < count)
         {
             report += 1;
             report_role = parser->tree.roles[report];
         }
-        else if (report_role == PARSE_ROLE_MEMBER_OPERATOR && report + 1 < count)
+        if (left_role == PARSE_ROLE_EQUALITY || left_role == PARSE_ROLE_RELATIONAL)
         {
-            report += 1;
-            report_role = parser->tree.roles[report];
-        }
-        if (report_role == PARSE_ROLE_EQUALITY || report_role == PARSE_ROLE_RELATIONAL)
-        {
-            const bool equality = report_role == PARSE_ROLE_EQUALITY;
-            const char* message = equality ? (parser->tokens.kinds[report] == PARSE_KIND_EQUALEQUAL ? "equality comparison result unused" : "inequality comparison result unused") :
+            const bool equality = left_role == PARSE_ROLE_EQUALITY;
+            const char* message = equality ? (parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "equality comparison result unused" : "inequality comparison result unused") :
                                              "relational comparison result unused";
-            const CheckCommonNote note = { report, parser->tokens.kinds[report] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
-                                                     parser->tokens.kinds[report] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
+            const CheckCommonNote note = { report, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
+                                                     parser->tokens.kinds[left] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
             check_common_report(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
                                 note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
         }
         else if (report_role == PARSE_ROLE_CLOSE_CAST)
         {
             const bool void_cast = check_common_void_cast(parser, pp, input, stream, types, report);
-            const bool void_pointer = !void_cast && left_node < graph->count && graph->ops[left_node] == CHECK_OP_CAST &&
-                                      check_common_void_pointer_cast(stream, types, left_node);
+            const bool void_pointer = !void_cast && left_result < graph->count && graph->ops[left_result] == CHECK_OP_CAST &&
+                                      check_common_void_pointer_cast(stream, types, left_result);
             const uint32_t cast = check_common_cast_opener(parser, report);
             if (!void_cast)
             {
@@ -563,6 +1071,23 @@ static void check_common_comma(const Parser* parser, Preprocessor* pp, const Che
                                        "left operand of comma operator has no effect", NULL, 0, scratch);
         }
     }
+    // The operand roots' own warnings follow the left operand's marker.
+    if (left_node < graph->count && graph->ops[left_node] != CHECK_OP_COMMA)
+    {
+        check_common_own(emission, left_node);
+    }
+    if (right_node < graph->count && graph->ops[right_node] != CHECK_OP_COMMA)
+    {
+        check_common_own(emission, right_node);
+    }
+    if (left_node < graph->count)
+    {
+        emission->emitted[left_node] = 1;
+    }
+    if (right_node < graph->count)
+    {
+        emission->emitted[right_node] = 1;
+    }
     const uint32_t parent = check_common_parent(parser, comma);
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const uint32_t grandparent = parent < count ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
@@ -572,20 +1097,28 @@ static void check_common_comma(const Parser* parser, Preprocessor* pp, const Che
     const bool discarded = check_common_statement_terminator(parser, parent) || for_init || parent_role == PARSE_ROLE_CLOSE_FOR;
     if (discarded)
     {
-        uint32_t right_node = graph->operand1[node];
-        for (uint32_t steps = 0; right_node < graph->count && graph->ops[right_node] == CHECK_OP_COMMA && steps < graph->count; steps += 1)
+        // The `expr, 0` idiom looks through nested comma results only: a conditional arm that happens to
+        // be a literal 0 is still a discarded conditional, not the sequencing marker.
+        uint32_t zero_node = right_node;
+        for (uint32_t steps = 0; zero_node < graph->count && graph->ops[zero_node] == CHECK_OP_COMMA && steps < graph->count; steps += 1)
         {
-            right_node = graph->operand1[right_node];
+            zero_node = graph->operand1[zero_node];
         }
-        const uint32_t right = right_node < graph->count && graph->tokens[right_node] < count ? graph->tokens[right_node] : comma + 1;
+        const uint32_t right_result = check_common_result_root(graph, right_node);
+        const uint32_t right = right_result < graph->count && graph->tokens[right_result] < count ? graph->tokens[right_result] : comma + 1;
         const uint32_t right_start = right < count ? check_common_subtree_start(parser, right) : right;
         const bool right_cast = right < count && parser->tree.roles[right] == PARSE_ROLE_CLOSE_CAST;
         const bool right_void = right_cast && check_common_void_cast(parser, pp, input, stream, types, right);
-        if (right_start < parent && !right_void && !check_common_expression_has_effect(parser, right_start, parent))
+        const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
+        const bool right_effect = right_node < graph->count ?
+                                  (graph->ops[right_node] == CHECK_OP_CONDITIONAL ? check_common_arm_effect(graph, right_node) :
+                                   check_common_node_effect(graph, right_result)) :
+                                  check_common_expression_has_effect(parser, right_start, parent);
+        if (right_start < parent && !right_void && !right_zero && !right_effect)
         {
             const uint32_t cast = right_cast ? check_common_cast_opener(parser, right) : BUSTER_CHECK_NONE;
-            const bool void_pointer = right_cast && right_node < graph->count && graph->ops[right_node] == CHECK_OP_CAST &&
-                                      check_common_void_pointer_cast(stream, types, right_node);
+            const bool void_pointer = right_cast && right_result < graph->count && graph->ops[right_result] == CHECK_OP_CAST &&
+                                      check_common_void_pointer_cast(stream, types, right_result);
             if (void_pointer)
             {
                 check_common_report(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : right, CHECK_WARNING_ID_UNUSED_VALUE, false,
@@ -593,20 +1126,115 @@ static void check_common_comma(const Parser* parser, Preprocessor* pp, const Che
             }
             else
             {
-                check_common_report_unused(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : right, CHECK_WARNING_ID_UNUSED_VALUE,
+                // A discarded member reports at the member's name, like the left operand does.
+                const uint32_t spot = right < count && parser->tree.roles[right] == PARSE_ROLE_MEMBER_OPERATOR && right + 1 < count ?
+                                      right + 1 : right;
+                check_common_report_unused(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : spot, CHECK_WARNING_ID_UNUSED_VALUE,
                                            "expression result unused", NULL, 0, scratch);
             }
         }
     }
 }
 
+// The discard marker for an expression that ends a statement or a for clause: a bare comparison keeps its
+// eager comparison warning and an arm that carries an effect keeps the conditional quiet.
+static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const Parser* parser = emission->parser;
+    const uint32_t token = graph->tokens[node];
+    const uint32_t count = parser->tokens.count;
+    const uint32_t parent = check_common_parent(parser, token);
+    const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
+    const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+    const uint32_t grandparent = parent < count ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
+    const bool for_init = parent_role == PARSE_ROLE_TERMINATOR && grandparent < count &&
+                          parser->tree.roles[grandparent] == PARSE_ROLE_CLOSE_FOR &&
+                          !check_common_for_condition(parser, token, parent);
+    const bool discarded = check_common_statement_terminator(parser, parent) || for_init || parent_role == PARSE_ROLE_CLOSE_FOR;
+    const CheckOp op = graph->ops[node];
+    if (discarded && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
+    {
+        // An indirect comparison takes the generic marker; a direct one already reported as a comparison.
+        if (parent_role != PARSE_ROLE_TERMINATOR)
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, token, CHECK_WARNING_ID_UNUSED_VALUE,
+                                       "expression result unused", NULL, 0, emission->scratch);
+        }
+    }
+    else if (discarded && op == CHECK_OP_CONDITIONAL)
+    {
+        if (!check_common_arm_effect(graph, graph->operand1[node]) && !check_common_arm_effect(graph, graph->operand2[node]))
+        {
+            const uint32_t root = check_common_result_root(graph, node);
+            const uint32_t report = root < graph->count && graph->tokens[root] < count ? graph->tokens[root] : token;
+            check_common_report_unused(parser, emission->pp, emission->input, report, CHECK_WARNING_ID_UNUSED_VALUE,
+                                       "expression result unused", NULL, 0, emission->scratch);
+        }
+    }
+    else if (discarded && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
+             check_common_effect_role(role) && role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY &&
+             role != PARSE_ROLE_RELATIONAL &&
+             !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
+             parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
+             parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
+             !check_common_node_effect(graph, node))
+    {
+        // A discarded member read points at the member's name, like the comma's left operand does.
+        const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) :
+                                role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < count ? token + 1 : token;
+        const bool void_pointer = op == CHECK_OP_CAST && check_common_void_pointer_cast(emission->stream, emission->types, node);
+        // A `void *` question reports with the cast itself; an ordinary unused result waits for the body's end.
+        if (void_pointer)
+        {
+            check_common_report(parser, emission->pp, emission->input, report != BUSTER_CHECK_NONE ? report : token, CHECK_WARNING_ID_UNUSED_VALUE,
+                                false, "expression result unused; should this cast be to 'void'?", NULL, 0, emission->scratch);
+        }
+        else
+        {
+            check_common_report_unused(parser, emission->pp, emission->input, report != BUSTER_CHECK_NONE ? report : token,
+                                       CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, emission->scratch);
+        }
+    }
+}
+
+// The deferred warnings one evaluated expression root produces, in clang's order: divisions first, the
+// deep subtree and the discard marker next, the root's own warning after them, and sign comparisons last.
+static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
+{
+    const Parser* parser = emission->parser;
+    const CheckGraph* graph = &emission->input->graph;
+    check_common_div_scan(emission, node);
+    // An expression statement — and a for clause's init and increment — wraps its value in an implicit void
+    // cast at the `;` or the `)`: the discarded expression is the cast's operand.
+    uint32_t expr = node;
+    const uint32_t token = graph->tokens[node];
+    if (graph->ops[node] == CHECK_OP_CAST && token < parser->tokens.count &&
+        (parser->tree.roles[token] == PARSE_ROLE_TERMINATOR || parser->tree.roles[token] == PARSE_ROLE_CLOSE_FOR))
+    {
+        expr = graph->operand0[node];
+    }
+    if (expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA)
+    {
+        check_common_comma_emit(emission, expr);
+    }
+    else if (expr < graph->count)
+    {
+        check_common_emit_children(emission, expr);
+        check_common_stmt_marker(emission, expr);
+        check_common_own(emission, expr);
+    }
+    emission->emitted[node] = 1;
+    if (expr < graph->count)
+    {
+        emission->emitted[expr] = 1;
+    }
+    check_common_signcmp_scan(emission, node);
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
-    const CheckGraph* graph = &input->graph;
-    // A comma's operand reports order with the statements around them, so the evaluated set is needed
-    // before the statement walk rather than for a second pass of its own.
-    uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, scratch);
     const uint32_t count = parser->tokens.count;
     for (uint32_t token = 0; token < count; token += 1)
     {
@@ -646,82 +1274,18 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             check_common_report(parser, pp, input, token, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
                                 "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
         }
-        else if (role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL)
+        else if ((role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL) &&
+                 parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
+                 check_common_statement_terminator(parser, parent))
         {
-            if (check_common_statement_terminator(parser, parent))
-            {
-                const bool direct = parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR;
-                if (!direct)
-                {
-                    check_common_report_unused(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, scratch);
-                }
-                else
-                {
-                    const bool equality = role == PARSE_ROLE_EQUALITY;
-                    const char* message = equality ? (parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "equality comparison result unused" : "inequality comparison result unused") :
-                                                    "relational comparison result unused";
-                    const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
-                                                             parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
-                    check_common_report(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
-                                        note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
-                }
-            }
+            const bool equality = role == PARSE_ROLE_EQUALITY;
+            const char* message = equality ? (parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "equality comparison result unused" : "inequality comparison result unused") :
+                                            "relational comparison result unused";
+            const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
+                                                     parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
+            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
+                                note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
         }
-        else if (role == PARSE_ROLE_OPEN_TERNARY && parent_role == PARSE_ROLE_CLOSE_TERNARY &&
-                 check_common_statement_terminator(parser, parser->tree.parents[parent]))
-        {
-            const uint32_t last = parent + 1 < parser->tokens.count ? parent + 1 : token;
-            check_common_report_unused(parser, pp, input, last, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, scratch);
-        }
-        else if (check_common_statement_terminator(parser, parent) && check_common_effect_role(role) &&
-                 role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY && role != PARSE_ROLE_RELATIONAL &&
-                 !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, pp, input, stream, types, token)) &&
-                 parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
-                 parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS)
-        {
-            const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) : token;
-            const uint32_t node = role == PARSE_ROLE_CLOSE_CAST && input->token_nodes != NULL && token < input->token_count ?
-                                  input->token_nodes[token] : BUSTER_CHECK_NONE;
-            const bool void_pointer = node < input->graph.count && input->graph.ops[node] == CHECK_OP_CAST &&
-                                      check_common_void_pointer_cast(stream, types, node);
-            // A `void *` question reports with the cast itself; an ordinary unused result waits for the body's end.
-            if (void_pointer)
-            {
-                check_common_report(parser, pp, input, report != BUSTER_CHECK_NONE ? report : token, CHECK_WARNING_ID_UNUSED_VALUE, false,
-                                    "expression result unused; should this cast be to 'void'?", NULL, 0, scratch);
-            }
-            else
-            {
-                check_common_report_unused(parser, pp, input, report != BUSTER_CHECK_NONE ? report : token, CHECK_WARNING_ID_UNUSED_VALUE,
-                                           "expression result unused", NULL, 0, scratch);
-            }
-        }
-        else
-        {
-            // An evaluated expression comma reports its operands in source order with the statements
-            // around it; declaration, call and initializer separators carry no graph node.
-            const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-            if (node < graph->count && graph->ops[node] == CHECK_OP_COMMA && evaluated != NULL && evaluated[node] != 0)
-            {
-                check_common_comma(parser, pp, input, stream, types, node, scratch);
-                evaluated[node] = 0;
-            }
-        }
-    }
-    // A comma hanging off a token that is not its own `,` — a VLA bound's comma stays at its sizeof token —
-    // never shows up in the statement walk, so graph order reports the stragglers.
-    for (uint32_t node = 0; evaluated != NULL && node < graph->count; node += 1)
-    {
-        if (graph->ops[node] != CHECK_OP_COMMA || evaluated[node] == 0)
-        {
-            continue;
-        }
-        const uint32_t comma = graph->tokens[node];
-        if (comma == 0 || comma >= count || (input->token_nodes != NULL && comma < input->token_count && input->token_nodes[comma] == node))
-        {
-            continue;
-        }
-        check_common_comma(parser, pp, input, stream, types, node, scratch);
     }
 }
 
@@ -862,202 +1426,96 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
     }
 }
 
+// A value-changing implicit integer conversion of a constant: the warning clang spells at the constant's own
+// token, shared by initializers, assignments, return conversions and a call's per-argument assignment.
+static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                            TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
+                                            TypeId target, Arena* scratch)
+{
+    __int128 converted = 0;
+    if (check_common_conversion_changes(types, value->type, target, value, &converted))
+    {
+        const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
+        const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, 0);
+        if (source_name.length != 0 && target_name.length != 0)
+        {
+            char original[48];
+            char changed[48];
+            uint32_t source_width = 0;
+            uint32_t target_width = 0;
+            bool source_signed = false;
+            bool target_signed = false;
+            check_common_integer(types, value->type, &source_width, &source_signed);
+            check_common_integer(types, target, &target_width, &target_signed);
+            check_common_number(original, sizeof(original), check_common_integer_value(value, source_width, source_signed));
+            check_common_number(changed, sizeof(changed), converted);
+            const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
+                                                      (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
+                                                      original, changed);
+            check_common_report_deferred(parser, pp, input, input->graph.tokens[source], CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message,
+                                         NULL, 0, scratch);
+        }
+    }
+}
+
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, CheckWarningSpelling* spell, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
-    for (uint32_t node = 0; node < graph->count; node += 1)
+    // Division and subscript warnings apply only to evaluated operands: sizeof and alignof operands, unselected
+    // constant ternary arms, short-circuited sides and _Generic's other arms never run.
+    uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, scratch);
+    // Each node's parent in the graph, for a subscript's use context: an `&a[i]` spine relaxes the bound to
+    // allow one past the end, an explicit `(void)` cast discards the lvalue unchecked, and any other operand
+    // inside an address-of's subtree — a nested index — is unchecked as well.
+    uint32_t* parents = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
+    if (parents != NULL)
     {
-        if (stream->diagnostics[node] != CHECK_DIAG_NONE)
+        memset(parents, 0xff, (uint64_t)graph->count * sizeof(uint32_t));
+        for (uint32_t node = 0; node < graph->count; node += 1)
         {
-            continue;
-        }
-        const CheckOp op = graph->ops[node];
-        const uint32_t token = graph->tokens[node];
-        if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
-        {
-            const uint32_t divisor = graph->operand1[node];
-            const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
-            const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
-            if (!ice && check_common_integer_constant(stream, divisor) && check_stream_value(stream, divisor).integer == 0)
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
-                uint32_t width = 0;
-                bool sign = false;
-                if (check_common_integer(types, check_stream_type(stream, graph->operand0[node]), &width, &sign))
+                if (operands[i] < graph->count)
                 {
-                    check_common_report(parser, pp, input, token, CHECK_WARNING_ID_DIVISION_BY_ZERO, false,
-                                        op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined", NULL, 0, scratch);
+                    parents[operands[i]] = node;
                 }
             }
-        }
-        else if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
-        {
-            const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
-            const uint32_t conversion = op == CHECK_OP_ASSIGN ? 1u : 0u;
-            const uint32_t flags = stream->conversions[node].operands[conversion].flags;
-            if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
-                check_common_integer_constant(stream, source))
+            if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
             {
-                const CheckValue value_storage = check_stream_value(stream, source);
-                const CheckValue* value = &value_storage;
-                const TypeId target = check_stream_type(stream, node);
-                __int128 converted = 0;
-                if (check_common_conversion_changes(types, value->type, target, value, &converted))
+                for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                 {
-                    const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
-                    const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, 0);
-                    if (source_name.length != 0 && target_name.length != 0)
+                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+                    if (argument < graph->count)
                     {
-                        char original[48];
-                        char changed[48];
-                        uint32_t source_width = 0;
-                        uint32_t target_width = 0;
-                        bool source_signed = false;
-                        bool target_signed = false;
-                        check_common_integer(types, value->type, &source_width, &source_signed);
-                        check_common_integer(types, target, &target_width, &target_signed);
-                        check_common_number(original, sizeof(original), check_common_integer_value(value, source_width, source_signed));
-                        check_common_number(changed, sizeof(changed), converted);
-                        const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
-                                                                  (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
-                                                                  original, changed);
-                        check_common_report(parser, pp, input, graph->tokens[source], CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
-                    }
-                }
-            }
-            if (op == CHECK_OP_ASSIGN)
-            {
-                const uint32_t left = graph->operand0[node];
-                const uint32_t right = graph->operand1[node];
-                const CheckValue left_value = left < graph->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
-                const CheckValue right_value = right < graph->count ? check_stream_value(stream, right) : (CheckValue){ 0 };
-                const bool volatile_object = left < graph->count &&
-                    (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
-                if (!volatile_object && left < graph->count && right < graph->count && left_value.category == CHECK_LVALUE &&
-                    right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
-                    left_value.offset == 0 && right_value.offset == 0)
-                {
-                    const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
-                    if (type_name.length != 0)
-                    {
-                        const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
-                                                                  (int)type_name.length, type_name.pointer);
-                        check_common_report(parser, pp, input, token, CHECK_WARNING_ID_SELF_ASSIGN, true, message, NULL, 0, scratch);
+                        parents[argument] = node;
                     }
                 }
             }
         }
-        else if (op == CHECK_OP_SUBSCRIPT)
+    }
+    uint8_t* emitted = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (emitted != NULL)
+    {
+        memset(emitted, 0, graph->count);
+        CheckCommonEmission emission = { parser, pp, input, stream, types, spell, evaluated, parents, emitted, scratch };
+        // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
+        // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order.
+        for (uint32_t node = 0; node < graph->count; node += 1)
         {
-            const uint32_t array = graph->operand0[node];
-            const uint32_t index = graph->operand1[node];
-            const uint32_t root = check_common_address_root(graph, stream, types, array, false);
-            if (array < graph->count && root < graph->count && check_common_integer_constant(stream, index))
+            if (stream->diagnostics[node] == CHECK_DIAG_NONE && (evaluated == NULL || evaluated[node] != 0) &&
+                parents != NULL && parents[node] == BUSTER_CHECK_NONE && emitted[node] == 0)
             {
-                const TypeId array_type = check_stream_type(stream, array);
-                TypeId type = type_unqualified(type_strip_aligned(types, array_type));
-                if (type_kind(types, type) == BUSTER_TYPE_KIND_ARRAY && types->types.extent[type_index(type)] != 0)
-                {
-                    const uint64_t extent = types->types.extent[type_index(type)];
-                    uint32_t width = 0;
-                    bool sign = false;
-                    if (check_common_integer(types, check_stream_type(stream, index), &width, &sign))
-                    {
-                        const CheckValue index_value = check_stream_value(stream, index);
-                        const __int128 value = check_common_integer_value(&index_value, width, sign);
-                        const bool past = value >= 0 && (unsigned __int128)value >= extent;
-                        const bool before = value < 0;
-                        if (past || before)
-                        {
-                            const String8 array_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, array_type, 0);
-                            char number[48];
-                            check_common_number(number, sizeof(number), value);
-                            const char* message = past && array_name.length != 0 ?
-                                check_warning_text(scratch, "array index %s is past the end of the array (that has type %.*s)", number,
-                                                   (int)array_name.length, array_name.pointer) :
-                                array_name.length != 0 ? check_warning_text(scratch, "array index %s is before the beginning of the array", number) : NULL;
-                            CheckCommonNote note = { 0 };
-                            const uint32_t root_object = check_stream_object(stream, root);
-                            const uint32_t declaration = root_object != 0 ? root_object - 1 : BUSTER_CHECK_NONE;
-                            const uint32_t name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
-                            if (declaration < parser->tokens.count && name != 0)
-                            {
-                                note.token = check_common_declaration_start(parser, declaration);
-                                note.message = check_warning_text(scratch, "array '%.*s' declared here",
-                                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                            }
-                            if (message != NULL)
-                            {
-                                check_common_report(parser, pp, input, graph->tokens[root], CHECK_WARNING_ID_ARRAY_BOUNDS, false, message,
-                                                    note.message != NULL ? &note : NULL, note.message != NULL ? 1u : 0u, scratch);
-                            }
-                        }
-                    }
-                }
+                check_common_emit_root(&emission, node);
             }
         }
-        else if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
+        // Anything a root walk did not reach still reports its own warning at its own place.
+        for (uint32_t node = 0; node < graph->count; node += 1)
         {
-            const uint32_t left = graph->operand0[node];
-            const uint32_t right = graph->operand1[node];
-            uint32_t left_width = 0;
-            uint32_t right_width = 0;
-            bool left_signed = false;
-            bool right_signed = false;
-            bool integer = left < graph->count && right < graph->count &&
-                           check_common_integer(types, check_stream_type(stream, left), &left_width, &left_signed) &&
-                           check_common_integer(types, check_stream_type(stream, right), &right_width, &right_signed);
-            bool constant_suppressed = false;
-            if (integer && left_signed != right_signed)
+            if (stream->diagnostics[node] == CHECK_DIAG_NONE && (evaluated == NULL || evaluated[node] != 0) && emitted[node] == 0)
             {
-                const uint32_t signed_operand = left_signed ? left : right;
-                const uint32_t unsigned_operand = left_signed ? right : left;
-                const uint32_t signed_width = left_signed ? left_width : right_width;
-                const uint32_t unsigned_width = left_signed ? right_width : left_width;
-                if (check_common_integer_constant(stream, signed_operand) && unsigned_width != 0)
-                {
-                    const CheckValue signed_value = check_stream_value(stream, signed_operand);
-                    const __int128 constant = check_common_integer_value(&signed_value, signed_width, true);
-                    constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(unsigned_width);
-                }
-                else if ((op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && check_common_integer_constant(stream, unsigned_operand) && signed_width != 0)
-                {
-                    const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
-                    const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
-                    constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(signed_width);
-                }
-                else if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && check_common_integer_constant(stream, unsigned_operand) &&
-                         unsigned_width != 0)
-                {
-                    // Clang canonicalizes the signed operand to the left; a zero unsigned constant leaves the result
-                    // unchanged for `<` and `>=`, whose truth is already the same for every signed value.
-                    const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
-                    const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
-                    CheckOp normalized = op;
-                    if (right_signed)
-                    {
-                        normalized = op == CHECK_OP_LESS ? CHECK_OP_GREATER : op == CHECK_OP_LESS_EQUAL ? CHECK_OP_GREATER_EQUAL :
-                                     op == CHECK_OP_GREATER ? CHECK_OP_LESS : CHECK_OP_LESS_EQUAL;
-                    }
-                    constant_suppressed = constant == 0 && (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
-                }
-                const CheckOp signed_op = graph->ops[signed_operand];
-                constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
-                                      signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR;
-            }
-            const bool simple = left < graph->count && right < graph->count &&
-                                check_common_simple_operand(graph->ops[left]) && check_common_simple_operand(graph->ops[right]);
-            const bool constant_operand = check_common_integer_constant(stream, left) || check_common_integer_constant(stream, right);
-            if (integer && (simple || constant_operand) && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
-            {
-                const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, left), 0);
-                const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), 0);
-                if (left_name.length != 0 && right_name.length != 0)
-                {
-                    const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
-                                                              (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
-                    check_common_report(parser, pp, input, token, CHECK_WARNING_ID_SIGN_COMPARE, true, message, NULL, 0, scratch);
-                }
+                check_common_own(&emission, node);
             }
         }
     }
