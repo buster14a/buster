@@ -11585,11 +11585,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                           BUSTER_SCALAR_PATH(scalar));
         }
     }
-    // #1048's node templates are verified against the tasks (test-lowering-templates) but no compile takes them yet: this
-    // scalar classification costs about as much as the tasks it saves (docs/c-lowering.md's "Node templates over a body:
-    // the first path"), which a data-parallel one must not.
+    // #1048's node templates: the vector path's compile takes them where they're allowed, and the scalar path keeps the
+    // tasks alone, the exact rules test-lowering-templates checks the templates against on any host. Their pass is still
+    // scalar (docs/c-lowering.md's "Node templates over a body: the first path"); measure-compile's lower.statements and
+    // lower.bodies rows weigh what its splices save against what it costs.
     shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0;
-    shared->templates = false;
+    shared->templates = shared->templates_allowed && !BUSTER_SCALAR_PATH(scalar);
     shared->template_check = false;
     return valid;
 }

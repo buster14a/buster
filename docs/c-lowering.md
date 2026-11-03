@@ -280,7 +280,7 @@ evaluated expression occurrences, those handled by vector operation fragments,
 their percentage, and records classified; then the evaluated nodes and the
 entries #1048's node templates spliced (`templates` and `template-entries`)
 with their shares of the evaluated nodes and the entries (`template-share` and
-`entry-share`), which are 0 while no compile takes the templates. This counts
+`entry-share`), which are 0 on the scalar path, whose compile takes no templates. This counts
 repeated graph uses and excludes unevaluated operands and unselected
 definitions. Scalar leaf templates
 are excluded from the vector expression-node share. The optional packed type table costs four bytes per type; failure keeps
@@ -495,11 +495,15 @@ general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
 The splices save about 12.4 M of the tasks' 111.8 M there. The pass's cost is
 spread over its steps (the scatter about a fifth, the fast twin a third, the
 classification step's bookkeeping a quarter) with no one line more than a few
-percent: the scalar steps can't pay by trimming. So no compile takes the
-templates (`CheckLowerShared.templates` is set only by
-`check_program_lower_templates`), and the default compile's objects are the
-same as before (`sqlite3.c`'s byte for byte). What remains is the issue's
-point: the three steps 64 nodes at a time. The scatter's table is by op
+percent: the scalar steps can't pay by trimming. So at first no compile took
+the templates (`CheckLowerShared.templates` was set only by
+`check_program_lower_templates`). Those measurements are the scalar host
+path's, though, where the tasks' own loop is slower too; the vector path's
+compile now takes them (`check_lower_prepare`), so that the 9700X's
+`lower.statements` and `lower.bodies` rows weigh the splices against the pass
+there. The scalar path's compile keeps the tasks alone, and both paths'
+objects are the same, since the templates write what the tasks write. What
+remains is the issue's point: the three steps 64 nodes at a time. The scatter's table is by op
 alone. The fast twin's shapes read the stream's columns and #570's classes and
 facts. The closure can run over prefix sums of the slots' counts. The vector
 pass's results are to be checked against these scalar ones, and the lowering
