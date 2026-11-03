@@ -388,8 +388,8 @@ static __attribute__((unused)) uint32_t check_sparse_wide_group(CheckSparseWide 
         const __m512i none = _mm512_set1_epi64((long long)BUSTER_CHECK_SPARSE_WIDE_NONE);
         const uint32_t block = __atomic_load_n(column.directory + (first >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
         const uint64_t* values = (const uint64_t*)(column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
-        const __m512i low = _mm512_maskz_load_epi64((__mmask8)lanes, values);
-        const __m512i high = _mm512_maskz_load_epi64((__mmask8)(lanes >> 8), values + 8);
+        const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)lanes, values);
+        const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), values + 8);
         set = (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)lanes, low, none) | (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)(lanes >> 8), high, none) << 8;
     }
     else
