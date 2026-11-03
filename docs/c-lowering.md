@@ -505,6 +505,65 @@ facts. The closure can run over prefix sums of the slots' counts. The vector
 pass's results are to be checked against these scalar ones, and the lowering
 against the tasks, by the same command.
 
+## The preparation's node counts and the branches' targets (#1048)
+
+Before the bodies, `check_lower_prepare` bounds the writers' room by counts
+over every node of the unit's graph: its builtins (the integer ones too, which
+share a recipe pool), the nodes that may lower an atomic access (an atomic
+builtin, or a node whose type or whose update's destination is `_Atomic`), and
+the C library's calls of a vector's libm builtins and strict rounds
+(`__builtin_elementwise_round` under `FENV_ACCESS`), one a lane. Its loop read
+both types' kinds through `type_strip_aligned` for every node. callgrind on
+`sqlite3.c` (#136's options, a baseline build of main at `171d6301`) counts
+49.1 M instructions in `check_lower_prepare`, 19.6 M of them that loop's,
+about 30 for each of the graph's 647,114 nodes.
+
+`check_lower_node_counts` takes the counts from the ops alone, 16 at a time:
+the masks of their compares, which population counts add up. A node's type,
+or its update's destination, is `_Atomic` only where the type table has an
+`_Atomic` kind (an aligned typedef's base is a type of the table too), so a
+unit without one reads no node's type, and a unit with one takes the rules
+for every node. A vector builtin's node takes the rules for its lane calls.
+The loop is the scalar twin (`check_lower_node_counts_scalar`, which
+`--scalar` takes), and `test-checker` compares the two on every boundary
+fixture of its program tests, among them a vector's libm builtins, an
+`_Atomic` global (the rules) and the atomic builtins on plain objects (the
+masks, whose fixture's table the test requires to have no `_Atomic` kind).
+
+After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
+take their targets: their labels' entries. The loop compared every entry's
+kind and branched on it, a branch whose outcome follows the branches' places
+among the entries: 4.7 M instructions over `sqlite3.c`'s 407,396 entries.
+`check_lower_resolve_labels` compares the kinds 64 at a time, and only the
+branches among them take their targets, in entry order, up to the first label
+without an entry, as its scalar twin (`check_lower_resolve_labels_scalar`)
+does. `test-checker` compares the two on random kinds at a page's end,
+across the masks' tails, with labels that all have entries and with some that
+don't.
+
+On the 9700X (`measure-compile`'s medians of 11 runs on `sqlite3.c`), the
+`lower` stage went from 13.541 ms (13.472 to 13.603, #1143's last run at
+`425f57c7`) to 12.485 ms (12.399 to 12.708) with both, and perf's share of
+`check_lower_prepare`'s own samples from 1.46% to 0.75% of the compile's.
+`--time-stages`' rows (#1048) then split the stage, on one lane (the step pins
+the compile to one CPU; on several lanes the parts' time is the `lanes`
+stage's), each row its own median, so that they add up to 12.508 ms, 0.023 ms
+more than the stage's median. That run's `--time-stages` costs 0.588 ms
+(0.51%) of the default compile's median wall time, against 0.196 ms (0.10%)
+in the compile-time guide's older figure, which later splits compare with:
+
+| row | ms | of `lower` |
+| --- | ---: | ---: |
+| `lower.prepare` | 1.356 | 10.9% |
+| `lower.statements` | 8.339 | 66.8% |
+| `lower.bodies` | 1.573 | 12.6% |
+| `lower.validate` | 1.194 | 9.6% |
+| `lower.rest` | 0.046 | 0.4% |
+
+The statements, the controls and the tasks' loops, are two thirds of the
+stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
+templates' target.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
