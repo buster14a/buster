@@ -508,9 +508,13 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 "$BUSTER_COMPILER" test-tier1-liveness
 "$BUSTER_COMPILER" test-tier1-emit
 "$BUSTER_COMPILER" test-tier1-pipeline --cross-check
-# #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
-# interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
+# #179: hand-written IR of AVX-512's masks (and #141's vectors) through Tier 1's selection and CFG consumer, natively
+# against the IR's interpreter where the host has every feature of x86-64-v4 (compiled and checked only elsewhere).
 "$BUSTER_COMPILER" test-tier1-masks
+# #141: the 128-bit integers split into 64-bit halves (ir_wide.c): hand-written and random 128-bit IR and Tier 0's random
+# 128-bit programs through the split, the optimizer and Tier 1 natively, against the IR's interpreter and the programs'
+# stack machine.
+"$BUSTER_COMPILER" test-tier1-wide
 # #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
 "$BUSTER_COMPILER" test-mask-spills
 "$BUSTER_COMPILER" test-tier1-model
@@ -606,11 +610,18 @@ rm -rf "$errors" "$directory"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
-== Test fences through the IR's lowerings, promotion, text and interpreter against clang
+== Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
 # #1059: each fence of a constant order is the typed stream's FENCE and the IR's fence, which both lowerings, both
 # promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/fences.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/fences.c
+# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET (and a seq_cst
+# store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomics.c
+"$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/atomics.c
+# The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
+# print their natural alignment.
+test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution

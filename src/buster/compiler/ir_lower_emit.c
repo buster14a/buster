@@ -24,6 +24,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     const uint32_t dispatch_block = plan->block_count + 1;
     IrTypedSink sink = {
         .output = output,
+        .ignored_arguments = plan->ignored_arguments,
         .sizes = {
             .block_count = (uint64_t)plan->block_count + 1 + dispatch,
             .slot_count = (uint64_t)dispatch_slot + dispatch,
@@ -236,6 +237,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 stack[depth - 1] = ir_typed_emit(&sink, IR_LOAD, type, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                ir_typed_access(&sink, stack[depth - 1], class, value);
                 classes[depth - 1] = class;
                 break;
             }
@@ -249,7 +251,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 const uint32_t stored = stack[depth - 1];
                 const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 2], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stored, BUSTER_IR_NONE, 0);
+                const uint32_t store = ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stored, BUSTER_IR_NONE, 0);
+                ir_typed_access(&sink, store, class, value);
                 depth -= 2;
                 if (kind == BUSTER_TYPED_STORE)
                 {

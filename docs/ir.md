@@ -39,10 +39,9 @@ The stable printer's text is read back by `ir_parse.c` (#175).
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
-the SSA promoter's transactional refusal of a function with vectors, not
-successful promotion, and promotion of one whose only SIMD values are masks,
-which the promoter takes (#179); ordinary corpus mode continues to require
-promotion. The shared
+promotion of a function with vectors (#141) and of one whose only SIMD values
+are masks (#179), as ordinary corpus mode requires promotion of every
+function. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
 vector/mask calls remain unsupported. Native selection of vectors is
@@ -124,6 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
+| `mulhu` | `a,b` are `i64`, result `i64`: the high 64 bits of their unsigned 128-bit product (#141), which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); a pure operation the optimizer doesn't fold |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -160,7 +160,10 @@ fixed parameters; additional variadic arguments must be nonvoid. `symbol_count`
 is an exclusive bound supplied by the translation unit; `UINT32_MAX` permits any
 nonzero, nonsentinel link ID. Zero is reserved by `link.c` and is rejected for
 both direct calls and symbol addresses. A call that passes or returns an
-aggregate by value has ABI records (`IrCall.abi`, below); the typed stream loses
+aggregate by value has ABI records (`IrCall.abi`, below), and so does one that
+passes an aggregate the convention ignores, as an empty struct of no bytes is,
+which a call without records would place in a register by its type (#141); the
+typed stream loses
 the named/variadic parameter boundary, as described below.
 
 ### Labels and `br_indirect`
@@ -443,6 +446,36 @@ reads every order of both scopes back, `test-ir-optimize`'s `fence-dce` and
 executor traces a fence among the stores, volatile loads and calls), and
 `tests/ir-source/fences.c` runs through both lowerings, promotion, the text's
 round trip and the IR's three forms against clang.
+
+### Atomic accesses (#1059)
+
+A `load` or a `store` with `BUSTER_IR_ATOMIC` in its flags is an atomic access
+of a C memory order (`BUSTER_IR_ORDER`'s bits: a load's `relaxed`, `consume`,
+`acquire` or `seq_cst`; a store's `relaxed`, `release` or `seq_cst`), of an
+integer of 1, 2, 4 or 8 bytes or a pointer, whose `align=N` is its size at
+least; printed after `align=N` (and `volatile`) as `atomic ORDER`. It is one access of its type's bytes that no pass
+splits, widens, merges, eliminates, forwards or moves past another access, a
+call or a fence: the guarantees of a volatile access (`BUSTER_IR_OBSERVABLE`,
+which promotion, private-field replacement, Tier 1's folding and both
+interpreters read in place of `BUSTER_IR_VOLATILE`) and those of its order. Its
+machine obligations are an ordinary access's, since a naturally aligned access
+of 1, 2, 4 or 8 bytes is atomic on x86-64 and its total store order gives a
+load's and a release store's orders, and, for a seq_cst store, the
+`fence.void seq_cst` after it, which the producer writes as its own instruction.
+Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
+any row with flags past `volatile` to the scalar rule), and the type and the
+alignment (`ir_atomic_access`): an atomic access declared below its natural
+alignment is refused, since the backend emits one access of its size whatever
+the address. The typed stream's producer is the C lowering's direct
+atomic load or store ([the builtin integration guide](c-builtins-integration.md)'s
+"Helper contracts and direct forms"): its marked `LOAD`, `STORE` or `SET`
+(`BUSTER_TYPED_ACCESS_ATOMIC`), which `ir_lower` translates with its class's
+natural alignment, which the checker proved, and refuses in another shape. `tests/ir/atomics.ir` reads every order back, `test-ir`'s verifier
+cases refuse an order a kind doesn't take, an order without the flag and an
+order past `seq_cst` and an 8-byte access aligned to 1 or 4 (as `test-ir-parse`
+refuses one written as text), and `tests/ir-source/atomics.c` runs through both
+lowerings, promotion, the text's round trip and the IR's three forms against
+clang, its `long`'s accesses printed `align=8`.
 
 ### Dynamic stack contract
 

@@ -74,7 +74,7 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
         direct += 1;
         direct_end -= 1;
     }
-    const uint32_t assignment = reader->output->compound_objects[declaration] ? declaration : begin - 1;
+    const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
     const bool static_read = valid && count == 1 && reader->static_initializers[assignment] && direct + 1 == direct_end &&
                              reader->parser->tokens.kinds[direct] == PARSE_KIND_IDENTIFIER && values[0].category == CHECK_LVALUE &&
                              !check_init_aggregate(reader->types, values[0].type);

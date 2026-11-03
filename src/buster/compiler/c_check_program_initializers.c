@@ -41,7 +41,7 @@ static bool check_lower_init_selected(const CheckProgram* program, uint32_t plan
     const CheckInput* input = program->input;
     const uint32_t declaration = program->initializers->declaration_tokens[plan];
     bool wanted = selected[plan] != 0;
-    if (!wanted && declaration < input->token_count && input->compound_objects[declaration] && !input->static_objects[declaration] &&
+    if (!wanted && declaration < input->token_count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
         program->compound_initializers != NULL && program->compound_initializers[plan] != 0)
     {
         const uint32_t opening = check_sparse_get(input->declaration_bodies, declaration);
@@ -61,7 +61,7 @@ static bool check_lower_init_selected(const CheckProgram* program, uint32_t plan
         }
         wanted = first < program->body_count && program->bodies[first].opening == opening;
     }
-    return wanted && declaration < input->token_count && !input->static_objects[declaration] &&
+    return wanted && declaration < input->token_count && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
            (type_qualifiers(type_strip_aligned(program->types, program->initializers->plans[plan].type)) & BUSTER_TYPE_VOLATILE) == 0;
 }
 

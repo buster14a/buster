@@ -453,6 +453,14 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
     {
+        .name = "check-units",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
+                   "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime|profile",
+    },
+    {
         .name = "checker",
         .unit = "c_checker_benchmark.c",
     },
