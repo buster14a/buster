@@ -41,8 +41,12 @@ waits until a lane gives its memory back (at its unit's end while one waits,
 and once it has no unit left, before it helps on the board), and a unit alone
 always runs.
 `--units-memory=BYTES`, a test option, sets that budget and reports how many
-units waited and the most lanes that held memory at once. Each lane releases what its units shared, into its pool and
-then the pool itself, on the lane once it takes no more units, and the
+units waited and the most lanes that held memory at once. Each lane releases
+what its units shared, into its pool and then the pool itself, on the lane as
+soon as it takes no more units, before it helps the others' functions (#777);
+without a link, in a command whose process exits after the lanes (main's,
+which releases no memory), the lane that stops taking units last leaves its
+memory to the exit and returns its share of the budget alone. The
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
 that lane 0 announces and every lane runs, with a worker-budget lease of its

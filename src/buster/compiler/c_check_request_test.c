@@ -368,7 +368,9 @@ static void check_test_request_read(CheckTest* test, const char* file)
 
 static void check_test_request_program_options(CheckTest* test)
 {
-    Preprocessor* pp = calloc(1, sizeof(Preprocessor));
+    // A preprocessor at its own alignment (64 bytes, which calloc's 16 doesn't give), zero as a fresh arena's pages are.
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    Preprocessor* pp = arena.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&arena, Preprocessor, 1) : NULL;
     const bool ready = pp != NULL;
     check_test_expect(test, ready, "request: a preprocessor for the program's options");
     if (ready)
@@ -396,7 +398,7 @@ static void check_test_request_program_options(CheckTest* test)
                                 made.scalar && made.lifetimes && made.unselected_operands,
                           "request: the program's options keep the unit's own fields and the client's overrides");
     }
-    free(pp);
+    arena_release(&arena);
 }
 
 // The receipt of `file` prepared with `options` and the client's `overrides` (check_source_receipt) in *receipt:

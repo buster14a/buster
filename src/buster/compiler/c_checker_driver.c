@@ -2752,7 +2752,7 @@ struct CheckDriverCommand
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
-static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock);
+static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
@@ -3343,7 +3343,7 @@ static void check_driver_flow(void* argument)
         {
             run->lanes->units_flow = &run->units_flow;
             check_units_flow_begin(&run->units_flow);
-            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
+            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock, run->release);
             check_units_flow_end(&run->units_flow);
             run->lanes->units_flow = NULL;
         }

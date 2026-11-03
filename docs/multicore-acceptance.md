@@ -108,7 +108,9 @@ The translation-unit guide also records two important limits that this change
 does not erase: the rejected global prewalk experiment is not a measurement of
 a concurrent process-wide shared cache, and the historical #777 two-process
 comparison whose child statuses were not verified is not valid performance
-acceptance. Their owning issues retain those decisions and evidence requirements.
+acceptance; the guide's verified control, whose processes' statuses and
+outputs are checked in every run, replaces it. Their owning issues retain those
+decisions and evidence requirements.
 
 ## Provenance
 
