@@ -4122,7 +4122,9 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
     // run's start (which its 32-byte alignment takes), the second at the next 16-byte boundary, 20 bytes in all — not
     // the 36 that padding each member to the section's largest alignment would write between the bounds.
     const AtomId wide0 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 5, 8, 0, 0) : 0;
-    const AtomId sec2 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 32, 0, 0) : 0;
+    // sec2's 4 bytes leave bst_sec's end short of 16, so bst_two's run — the same bucket's, of the same largest
+    // alignment — starts only at the next 16: a run's start is its section's alignment's, not its first member's.
+    const AtomId sec2 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 4, 0, 0) : 0;
     const AtomId wide1 = built ? executable_test_data(&test, BUSTER_LINK_CLASS_DATA, 4, 4, 0, 0) : 0;
     built = built && sec0 != 0 && between != 0 && two0 != 0 && sec1 != 0 && two1 != 0 && after != 0 && wide0 != 0 && sec2 != 0 && wide1 != 0 &&
             link_set_atom_section(link, sec0, section) && link_set_atom_section(link, sec1, section) && link_set_atom_section(link, sec2, section) &&
@@ -4145,7 +4147,8 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
         executable_test_expect(&tally, written && file.pointer != 0 && (first.pointer == 0 || (file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0)),
                                "every lane count writes the same file", lanes);
         first = first.pointer == 0 ? file : first;
-        static const uint64_t spans[] = { 96, 64, 20 };
+        static const uint64_t spans[] = { 68, 64, 20 };
+        static const uint64_t aligns[] = { 16, 16, 32 };
         for (uint32_t s = 0; s < 3; s += 1)
         {
             uint64_t start = UINT64_MAX;
@@ -4155,6 +4158,7 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
                                    "__start at the section's first atom", lanes * 10 + s);
             executable_test_expect(&tally, written && found && link->symbols.reference[stops[s]] == (uint32_t)end, "__stop at the section's last end", lanes * 10 + s);
             executable_test_expect(&tally, written && found && end - start == spans[s], "the section's run", lanes * 10 + s);
+            executable_test_expect(&tally, written && found && start % aligns[s] == 0, "the run starts at its section's alignment", lanes * 10 + s);
         }
         executable_test_expect(&tally, written && link->symbols.reference[starts[3]] == (uint32_t)(0 - BUSTER_EXECUTABLE_BASE) &&
                                            link->symbols.source[starts[3]] == BUSTER_LINK_SOURCE_NONE,

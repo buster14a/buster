@@ -1743,6 +1743,74 @@ static void check_test_driver_section_bounds_static(CheckTest* test, const char*
     unlink(linked_path);
 }
 
+// #1122: two bound sections of one bucket, whose largest member alignments match while their members' don't, so the
+// second run's start is its section's alignment's, not the alignment its first member's. GNU ld and lld align the run
+// as its output section's; a run that only aligned its first member to the member's own would start inside the first
+// section's alignment gap, changing the span the bounds report.
+static void check_test_driver_section_bounds_align(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "#include <stdint.h>\n"
+                                  "__attribute__((section(\"aaa\"), aligned(16), used)) int a0 = 1;\n"
+                                  "__attribute__((section(\"aaa\"), aligned(4), used)) int a1 = 2;\n"
+                                  "__attribute__((section(\"bbb\"), aligned(4), used)) int b0 = 3;\n"
+                                  "__attribute__((section(\"bbb\"), aligned(16), used)) int b1 = 4;\n"
+                                  "extern char __start_aaa[], __stop_aaa[], __start_bbb[], __stop_bbb[];\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    printf(\"aaa start%%16=%lu span=%ld; bbb start%%16=%lu span=%ld\\n\",\n"
+                                  "           (unsigned long)((uintptr_t)__start_aaa % 16),\n"
+                                  "           (long)(__stop_aaa - __start_aaa),\n"
+                                  "           (unsigned long)((uintptr_t)__start_bbb % 16),\n"
+                                  "           (long)(__stop_bbb - __start_bbb));\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    static const char expected[] = "aaa start%16=0 span=8; bbb start%16=0 span=20\n";
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds-align.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds-align.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-align-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-align-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the two sections' fixture is written");
+    char* text = NULL;
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[128];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "cc's link starts each run at its section's alignment");
+    static const char* const option_names[] = { "the direct path starts each run at its section's alignment", "--tier1 starts each run at its section's alignment",
+                                                "--tier1 --scalar starts each run at its section's alignment" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          option_names[path]);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+}
+
 // #591: member accesses whose lookups take every kind of record's: a struct of 2,000 members, with an anonymous union
 // every 40th and an anonymous struct of two bit-fields every 60th, written, read and their offsets taken; and 300 small
 // structs each read by a function of its own. Both paths must write the same object, which clang links into a program
@@ -6548,6 +6616,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_section_bounds(&test, clang, executable, directory);
                 check_test_driver_section_bounds_exact(&test, clang, executable, directory);
                 check_test_driver_section_bounds_static(&test, executable, directory);
+                check_test_driver_section_bounds_align(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

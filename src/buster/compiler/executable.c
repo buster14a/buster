@@ -3715,8 +3715,9 @@ static bool executable_bound_sections(Link* link, bool crt, Arena* arena, Execut
         uint32_t* bound_tail = bound_pad != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count) : 0;
         uint64_t* group_end = bound_tail != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_EXECUTABLE_BUCKETS) : 0;
         AtomId* last_marked = group_end != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, BUSTER_EXECUTABLE_BUCKETS) : 0;
+        uint32_t* last_group = last_marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_EXECUTABLE_BUCKETS) : 0;
         fits = by_group != 0 && order != 0 && current != 0 && buckets != 0 && group_bucket != 0 && starts != 0 && bound != 0 &&
-               bound_pad != 0 && bound_tail != 0 && group_end != 0 && last_marked != 0;
+               bound_pad != 0 && bound_tail != 0 && group_end != 0 && last_marked != 0 && last_group != 0;
         if (fits)
         {
             for (uint32_t g = 0; g < group_count; g += 1)
@@ -3793,16 +3794,22 @@ static bool executable_bound_sections(Link* link, bool crt, Arena* arena, Execut
             // atom's is then a fixed count the lanes can add wherever the atom's range falls.
             memset(group_end, 0, (uint64_t)BUSTER_EXECUTABLE_BUCKETS * sizeof(*group_end));
             memset(last_marked, 0, (uint64_t)BUSTER_EXECUTABLE_BUCKETS * sizeof(*last_marked));
+            memset(last_group, 0, (uint64_t)BUSTER_EXECUTABLE_BUCKETS * sizeof(*last_group));
             for (AtomId p = 1; p < atoms->count; p += 1)
             {
                 const uint32_t log2 = executable_alignment_log2(atoms->class[p], atoms->alignment_log2[p], atoms->size[p], crt);
                 if (bound[p] != 0)
                 {
                     const uint32_t b = bound[p] - 1;
-                    const uint64_t aligned = executable_align(group_end[b], 1ull << log2);
+                    const uint32_t g = group_of[order[p]];
+                    // A run's first member starts at the section's largest member alignment, the output section's
+                    // alignment GNU ld and lld give it; a member inside it, at its own.
+                    const uint32_t want = last_group[b] == g ? log2 : group_alignment[g - 1];
+                    const uint64_t aligned = executable_align(group_end[b], 1ull << want);
                     bound_pad[p] = (uint32_t)(aligned - group_end[b]);
                     group_end[b] = aligned + atoms->size[p];
                     last_marked[b] = p;
+                    last_group[b] = g;
                 }
                 else
                 {
