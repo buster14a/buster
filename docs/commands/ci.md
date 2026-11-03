@@ -146,18 +146,24 @@ the policy. In short:
 - Every `9700x.yml` run has an `evidence` job, which must succeed. For a push
   it checks the merged pull request's newest run: the identical tree, its 9700X
   job, aggregate and plain rows green, within a day, its coverage record
-  agreeing. A push it qualifies that way skips its 9700X job in the nightly
-  mode, and the required context passes, naming the source run. A nightly
+  agreeing. In the nightly mode such a push skips its 9700X job once the
+  `host-identity` job finds the host identity that run recorded (kernel,
+  microcode, system GCC, glibc). Otherwise native correctness runs after all.
+  The required context passes, naming the source run. A nightly
   dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows, and enforces
   04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
-  takes the lock.
+  takes the lock, before any setup.
 - Every run's `record` job writes the `coverage-record-ATTEMPT` artifact. The
   coordinator, `.github/workflows/nightly-backfill.yml`, harvests those
   records into its ledger. It pins the cycle's snapshot, prepares hosted
   qualifications before the window, and dispatches `9700x.yml` on
   `nightly/SHA` branches with `purpose` `backlog` or `snapshot`. It runs one
-  9700X run at a time, and only work that fits before 07:00.
+  9700X run at a time, and only work that fits before 07:00, unless a manual
+  `mode: run` gives an `override` reason. The snapshot's comprehensive run is
+  required every cycle. States start at the epoch (the merge that added
+  `tools/ci/nightly.c`); earlier ones predate the worker and are reported as
+  out of scope.
 - `vars.BUSTER_NIGHTLY` set to `on` is the switch. Before it, the coordinator
   only harvests, plans and reports; pushes and the daily `23 7 * * *` run work
   as before. With it, pushes measure targeted, the coordinator dispatches, and

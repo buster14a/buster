@@ -168,8 +168,9 @@ jobs:
 
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
   # "Nightly main measurements"). A pull request: its draft state alone. A push: its pull request's newest run, when it
-  # qualified the identical tree natively, with the nightly mode, which then skips the 9700X job and leaves its
-  # measurements to the backlog unless that run's (on the identical first-parent tree) are reusable too. A nightly
+  # qualified the identical tree natively, with the nightly mode, which then skips the 9700X job once the host-identity
+  # job finds the host as that run recorded it, and leaves its measurements to the backlog unless that run's (on the
+  # identical first-parent tree) are reusable too. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
   # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
@@ -192,6 +193,13 @@ jobs:
       hardware: ${{ steps.decide.outputs.hardware }}
       hardware_reason: ${{ steps.decide.outputs.hardware_reason }}
       retired: ${{ steps.decide.outputs.retired }}
+      # The host identity the reused pull request's run recorded, for the host-identity job to confirm.
+      native_host: ${{ steps.decide.outputs.native_host }}
+      # A nightly dispatch's window as instants (the cycle's 04:00 and 07:00 Europe/Madrid), and whether an override
+      # admits it anyway: the 9700X job compares them with its clock before any setup.
+      window_start: ${{ steps.decide.outputs.window_start }}
+      window_deadline: ${{ steps.decide.outputs.window_deadline }}
+      window_override: ${{ steps.decide.outputs.window_override }}
     steps:
       - name: Check out the run's commit and its first parent
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -647,17 +655,52 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # A push's reuse of its pull request's native qualification holds only on the host that run had: this job takes the
+  # 9700X for seconds to read its identity now (the kernel, the microcode, the system GCC that some fixtures use as their
+  # oracle, glibc), with this workflow's own step, which tools/ci/nightly.c's self-test keeps identical to the 9700X
+  # job's. A different identity, or none, runs native correctness after all.
+  host-identity:
+    name: Confirm the 9700X host for a reused qualification
+    needs: evidence
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name == 'push' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware_reason == 'native-reused' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      host: ${{ steps.host.outputs.host }}
+    steps:
+      - name: Verify benchmark host
+        id: host
+        run: |
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          # The coverage record's host identity: what the repository doesn't pin (the kernel, the microcode, the
+          # system GCC that some fixtures use as their oracle, glibc).
+          microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
+          gcc_version=$(gcc -dumpfullversion 2> /dev/null || echo none)
+          glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || echo none)
+          host=$(printf '9700X/%s/%s/gcc-%s/%s' "$(uname -r)" "${microcode:-unknown}" "$gcc_version" "$glibc_version" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
+          printf 'Host identity: %s\n' "$host"
+          printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
+
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
-    needs: [changes, evidence, test, fuzz]
+    needs: [changes, evidence, host-identity, test, fuzz]
     # Both hosted variants must pass before any hardware work, including native
     # correctness. Drafts keep hosted feedback but cannot occupy the hardware.
     # This also covers scheduled/manual runs, whose selector is skipped. The
-    # `evidence` job must admit it: a push it qualified by reuse, a nightly run
-    # outside the window or deferred, and a draft are not admitted. A nightly
-    # run's plain rows (the `plain` scope, without fuzzing) gate it as a pull
-    # request's do, either run here or, by evidence, by its commit's earlier run.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
+    # `evidence` job must admit it: a nightly run outside the window or deferred,
+    # and a draft are not admitted, nor a push qualified by reuse once the
+    # host-identity job confirmed its host (unconfirmed, it runs after all). A
+    # nightly run's plain rows (the `plain` scope, without fuzzing) gate it as a
+    # pull request's do, either run here or, by evidence, by its commit's earlier run.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && (needs.evidence.outputs.hardware == 'admit' || (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host))) && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -690,12 +733,46 @@ jobs:
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
           # The coverage record's host identity: what the repository doesn't pin (the kernel, the microcode, the
-          # system GCC that some fixtures use as their oracle).
+          # system GCC that some fixtures use as their oracle, glibc).
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || echo none)
-          host=$(printf '9700X/%s/%s/gcc-%s' "$(uname -r)" "${microcode:-unknown}" "$gcc_version" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
+          glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || echo none)
+          host=$(printf '9700X/%s/%s/gcc-%s/%s' "$(uname -r)" "${microcode:-unknown}" "$gcc_version" "$glibc_version" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
           printf 'Host identity: %s\n' "$host"
           printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
+
+      - name: Admit nightly work inside the Europe/Madrid window, holding the lock
+        # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
+        # may have waited past its window for it: before any setup, the job's whole bound (its timeout and 5 minutes to
+        # clean up) must still end by 07:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch
+        # gave an override's reason. A refusal fails the job here, having done nothing else, which the record reads as a
+        # deferral, not a failure; the job's timeout bounds the rest.
+        id: window
+        if: github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')
+        env:
+          WINDOW_START: ${{ needs.evidence.outputs.window_start }}
+          WINDOW_DEADLINE: ${{ needs.evidence.outputs.window_deadline }}
+          WINDOW_OVERRIDE: ${{ needs.evidence.outputs.window_override }}
+          BOUND: ${{ inputs.purpose == 'backlog' && 25 || 30 }}
+        run: |
+          set -euo pipefail
+          now=$(date +%s)
+          open=false
+          if [ "$WINDOW_OVERRIDE" = true ]; then
+              open=true
+              printf 'Nightly window: overridden by the dispatch'"'"'s reason (reported in its evidence job)\n'
+          elif [[ "$WINDOW_START" =~ ^[0-9]+$ && "$WINDOW_DEADLINE" =~ ^[0-9]+$ ]] && [ "$now" -ge "$WINDOW_START" ] && [ "$((now + BOUND * 60))" -le "$WINDOW_DEADLINE" ]; then
+              open=true
+              printf 'Nightly window: %s seconds left after this job'"'"'s %s-minute bound\n' "$((WINDOW_DEADLINE - now - BOUND * 60))" "$BOUND"
+          fi
+          if [ "$open" = true ]; then
+              printf 'window=open\n' >> "$GITHUB_OUTPUT"
+          else
+              printf 'window=closed\n' >> "$GITHUB_OUTPUT"
+              printf 'Nightly window: closed at %s for a %s-minute bound (window %s to %s)\n' "$now" "$BOUND" "${WINDOW_START:-unknown}" "${WINDOW_DEADLINE:-unknown}"
+              printf '%s\n' '::notice title=Nightly window::The window closed while this job waited; deferred, not failed.'
+              exit 1
+          fi
 
       - name: Use the runner's private cache for verified inputs
         # The frozen corpus's archive, c-testsuite's commit and the pragma oracle, each kept under what identifies it and
@@ -712,30 +789,6 @@ jobs:
 
       - name: Stage official Clang 23.1.4 in the private runner cache
         run: bash tools/ci/setup-benchpress.sh
-
-      - name: Admit nightly work inside the Europe/Madrid window, holding the lock
-        # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
-        # may have waited past its window for it: from here, the job's whole bound (its timeout and 5 minutes to clean
-        # up) must still end by 07:00 Europe/Madrid, unless the dispatch gave an override's reason. A refusal fails the
-        # job before any work, which the record reads as a deferral, not a failure; the job's timeout bounds the rest.
-        id: window
-        if: github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')
-        env:
-          OVERRIDE: ${{ inputs.override }}
-          BOUND: ${{ inputs.purpose == 'backlog' && 25 || 30 }}
-        run: |
-          set -euo pipefail
-          clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/nightly.c -o "$RUNNER_TEMP/nightly"
-          status=0
-          verdict=$("$RUNNER_TEMP/nightly" window --now "$(date +%s)" --bound "$((BOUND * 60))" --override "$OVERRIDE") || status=$?
-          printf 'Nightly window: %s\n' "$verdict"
-          if [ "$status" -eq 0 ]; then
-              printf 'window=open\n' >> "$GITHUB_OUTPUT"
-          else
-              printf 'window=closed\n' >> "$GITHUB_OUTPUT"
-              printf '%s\n' '::notice title=Nightly window::The window closed while this job waited; deferred, not failed.'
-              exit 1
-          fi
 
       - name: Require the complete native vector feature set
         run: |
@@ -1803,7 +1856,7 @@ jobs:
     # reports through its coverage record instead, and a retired scheduled run
     # (the nightly mode's) runs nothing, so neither has this context.
     name: Build and execute on Ryzen 7 9700X
-    needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
+    needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, host-identity, benchmarks]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1822,6 +1875,7 @@ jobs:
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
+          HOST_MATCH: ${{ needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host }}
           NATIVE_SOURCE: ${{ needs.evidence.outputs.native_source }}
           TEST_RESULT: ${{ needs.test.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
@@ -1842,7 +1896,7 @@ jobs:
     # from its pull request's run. Hosted, after everything. It fails only a nightly run that correctness blocked or
     # a measurement failed, so that such a run shows red; every other run's status is the aggregate's.
     name: Coverage record
-    needs: [changes, evidence, test, fuzz, benchmarks, qualification]
+    needs: [changes, evidence, test, fuzz, host-identity, benchmarks, qualification]
     if: ${{ always() && github.repository_id == '1421805693' && needs.evidence.outputs.retired != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1881,14 +1935,15 @@ jobs:
           RECORD_NATIVE_SOURCE: ${{ needs.evidence.outputs.native_source }}
           RECORD_MEASUREMENT_EVIDENCE: ${{ needs.evidence.outputs.measurement }}
           RECORD_MEASUREMENT_SOURCE: ${{ needs.evidence.outputs.measurement_source }}
-          RECORD_HARDWARE: ${{ needs.evidence.outputs.hardware }}
-          RECORD_HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
+          # What happened to the 9700X job: a push's reuse that its host didn't confirm ran it after all.
+          RECORD_HARDWARE: ${{ (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host)) && 'admit' || needs.evidence.outputs.hardware }}
+          RECORD_HARDWARE_REASON: ${{ (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host)) && 'host-unconfirmed' || needs.evidence.outputs.hardware_reason }}
           RECORD_TEST_RESULT: ${{ needs.test.result }}
           RECORD_FUZZ_RESULT: ${{ needs.fuzz.result }}
           RECORD_BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
           RECORD_WINDOW: ${{ needs.benchmarks.outputs.window }}
           RECORD_NATIVE: ${{ needs.benchmarks.outputs.native }}
-          RECORD_HOST: ${{ needs.benchmarks.outputs.host }}
+          RECORD_HOST: ${{ needs.benchmarks.outputs.host || needs.host-identity.outputs.host }}
           RECORD_QUALIFICATION_RESULT: ${{ needs.qualification.result }}
           RECORD_OVERRIDE: ${{ inputs.override }}
         run: bash tools/ci/nightly.sh record "$RUNNER_TEMP/coverage-record"

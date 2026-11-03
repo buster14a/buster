@@ -251,14 +251,21 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   Tree identity carries everything the repository pins: the workflow, the
   inventory, the toolchain's and corpus's digests, and the harnesses'
   commits. The build and the inventory read no Git metadata; the self-test
-  fails if they start to. The day bounds what isn't pinned: the host's
-  kernel, microcode and GCC, which each record notes. The nightly snapshot
-  rechecks native correctness daily anyway.
+  fails if they start to.
 
-  In the nightly mode, such a push skips its 9700X job. Its measurements are
-  reused too only when the first-parent tree is also identical; otherwise
-  they are the backlog's. Missing, ambiguous, stale or mismatched evidence,
-  including an API failure, runs the work.
+  What the repository doesn't pin is the host: its kernel, microcode, system
+  GCC (an oracle for some fixtures) and glibc, which every 9700X job records
+  as its host identity. In the nightly mode, such a push runs a
+  `host-identity` job on the 9700X. It takes the lock for seconds and reads
+  the identity with the same step as the 9700X job; the self-test keeps the
+  two steps identical. The 9700X job is skipped only when that identity
+  equals the one the pull request's run recorded. A different identity, a
+  record without one, or a failed `host-identity` job runs native
+  correctness after all, and the record then says `host-unconfirmed`.
+
+  Measurements are reused too only when the first-parent tree is also
+  identical; otherwise they are the backlog's. Missing, ambiguous, stale or
+  mismatched evidence, including an API failure, runs the work.
 - **Nightly dispatch:** the commit must be a first-parent state of main at or
   before the pinned snapshot, or the job fails and nothing runs. The newest
   conclusive push or dispatch run of that commit decides its hosted rows: a
@@ -277,6 +284,14 @@ by reuse whose measurements weren't reusable), `blocked-hosted`,
 success, or a push's evidenced reuse, completes.
 
 ### The coordinator (`.github/workflows/nightly-backfill.yml`)
+
+**Scope.** The backlog's states start at the epoch: the first-parent commit of
+main that added the nightly worker (`tools/ci/nightly.c`). The worker is each
+state's own `9700x.yml`, dispatched with a `backlog` or `snapshot` purpose and
+checking its window after the lock. Earlier commits' workflows have neither, so
+the coordinator can't measure them within the window, and they are out of
+scope. Their coverage is what their pushes and the old daily run measured. The
+report counts the fortnight's first-parent states before the epoch.
 
 The coordinator is hosted, and only main's scheduled and dispatched runs write.
 They create and delete `nightly/SHA` branches, and dispatch and cancel
@@ -297,7 +312,10 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    snapshot's comprehensive run first, then the oldest ready state. While the
    snapshot's hosted rows are in flight, it keeps room for the snapshot. If
    the snapshot is ineligible, it measures the newest eligible earlier state
-   and says so.
+   and says so. The comprehensive run is a daily requirement: only one
+   completed in this cycle meets it. An unchanged main still gets its daily
+   full run and oracle audit, though an earlier cycle measured the same
+   commit.
 
 States move between `not-required`, `complete`, `in-flight`, `ready`,
 `preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and
@@ -311,7 +329,11 @@ duplicates. An admitted run older than two hours is cancelled.
 
 - at dispatch, by the coordinator's planner;
 - at admission, by the `evidence` job;
-- after the 9700X job's hook took the lock, by its first step after staging.
+- after the 9700X job's hook took the lock, by its first step after the host's
+  own check. That step compares the clock with the cycle's 04:00 and 07:00,
+  which the `evidence` job computed as instants. It runs before the checkout,
+  the cache and the toolchain's staging, so a job that took the lock too late
+  does nothing but refuse.
 
 If the database is unavailable, nothing is admitted. The self-test checks the
 database against the EU's rule every hour from 2026 to 2030. A run is admitted
@@ -330,8 +352,15 @@ waits for it when it opens within 5 hours 55 minutes of the job's start. Any
 other run waits in the concurrency group, or reports.
 
 **Override.** Both workflows' manual dispatches take an `override` reason for
-deliberate out-of-window work. The window check reports the reason; it never
-skips it silently.
+deliberate out-of-window work. The window checks report the reason and never
+pass it silently. Through the coordinator, `mode: run` with a reason
+behaves as follows:
+
+- the planner admits as if inside the window, and its report says why;
+- the prepare job starts the window job at once;
+- the loop ends when nothing more is admissible;
+- each dispatch passes the reason on, and the run's 9700X job honours it after
+  the lock.
 
 **The ledger** carries over through the coordinator's artifacts: this run's
 prepare job's, then the newest from main's previous runs. It is published to

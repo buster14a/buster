@@ -86,7 +86,7 @@ evidence()
 {
     local event=${GITHUB_EVENT_NAME:?} commit=${GITHUB_SHA:?} run=${GITHUB_RUN_ID:?}
     local scope=full hosted=run hosted_source='' native=run native_source='' measurement=run measurement_source=''
-    local hardware=admit reason=admitted retired=false notes=''
+    local hardware=admit reason=admitted retired=false notes='' native_host='' window_start='' window_deadline='' window_override=false
     case "$event" in
         pull_request)
             scope=plain
@@ -131,6 +131,7 @@ evidence()
                 notes=$(awk -F '\t' '$1 == "native" { print $4 }' <<< "$verdict")
                 if [ "$native" = reused ]; then
                     native_source=$(awk -F '\t' '$1 == "native" { print $3 }' <<< "$verdict")
+                    native_host=$(awk -F '\t' '$1 == "host" { print $2 }' <<< "$verdict")
                 fi
                 if [ "$measurement" = reused ]; then
                     measurement_source=$native_source
@@ -172,6 +173,11 @@ evidence()
                         exit 1
                     fi
                     scope=plain
+                    # The cycle's window as instants, which the 9700X job compares with its clock before any setup.
+                    local times
+                    times=$("$tool" window-times --now "$(now)")
+                    window_start=$(awk -F '\t' '$1 == "start" { print $2 }' <<< "$times")
+                    window_deadline=$(awk -F '\t' '$1 == "deadline" { print $2 }' <<< "$times")
                     if [ "${EVIDENCE_HARDWARE:-admit}" = defer ]; then
                         # The snapshot's deferred run is the day's diagnostic run: every hosted row and fuzzing.
                         if [ "$purpose" = snapshot ]; then
@@ -199,6 +205,10 @@ evidence()
                         local bound=30 window
                         if [ "$purpose" = backlog ]; then
                             bound=25
+                        fi
+                        # A person's reason holds after the lock too: the 9700X job then admits whatever the time.
+                        if [ -n "${EVIDENCE_OVERRIDE:-}" ]; then
+                            window_override=true
                         fi
                         if window=$("$tool" window --now "$(now)" --bound "$((bound * 60))" --override "${EVIDENCE_OVERRIDE:-}"); then
                             notes="window: $(cut -f 2 <<< "$window")"
@@ -230,6 +240,10 @@ evidence()
     output hardware "$hardware"
     output hardware_reason "$reason"
     output retired "$retired"
+    output native_host "$native_host"
+    output window_start "$window_start"
+    output window_deadline "$window_deadline"
+    output window_override "$window_override"
     {
         printf '### Reuse evidence and hardware admission\n\n| | |\n| --- | --- |\n'
         printf '| scope | %s |\n| hosted rows | %s %s |\n| native correctness | %s %s |\n| measurements | %s %s |\n| 9700X | %s (%s) |\n' \
@@ -321,6 +335,7 @@ load_ledger()
 # main's first-parent states from the epoch (the first-parent commit that added tools/ci/nightly.c, or NIGHTLY_EPOCH),
 # oldest first, each with its first-parent change's paths; main_head is main's head.
 main_head=''
+earlier_states=0
 load_states()
 {
     local history="$work/history.git" states=$1 epoch
@@ -348,6 +363,11 @@ load_states()
         fi
     done < <(git -C "$history" log --first-parent --reverse --format='%H %P %ct' main | awk '{ if (NF == 2) print $1, "-", $2; else print $1, $2, $NF }')
     main_head=$(git -C "$history" rev-parse main)
+    # Out of scope, reported: the fortnight's first-parent states before the epoch, whose workflow has no nightly worker.
+    earlier_states=0
+    if git -C "$history" rev-parse -q --verify "$epoch^1" > /dev/null; then
+        earlier_states=$(git -C "$history" rev-list --first-parent --count --since="$(( $(now) - 14 * 86400 ))" "$epoch^1")
+    fi
 }
 
 # The workflow's runs of the last DAYS days: pushes, the daily run and dispatches, every page, as facts. The first
@@ -470,7 +490,8 @@ coordinate()
         api --paginate "repos/$repository/git/matching-refs/heads/nightly/" --jq '.[].ref' 2> /dev/null |
             sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
         "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
-            --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" > "$work/plan.tsv"
+            --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" \
+            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" > "$work/plan.tsv"
         cat "$work/plan.tsv"
         verdict=''
         while IFS= read -r line; do
@@ -510,7 +531,8 @@ coordinate()
                     ;;
             esac
         done < "$work/plan.tsv"
-        if [ "$verdict" != wait ] || [ "$phase" = prepare ] || [ "$(now)" -ge "$deadline" ] || [ -n "${NIGHTLY_NOW:-}" ]; then
+        # An override (a manual run's reason) admits past 07:00: the loop then ends when nothing more is admissible.
+        if [ "$verdict" != wait ] || [ "$phase" = prepare ] || { [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -ge "$deadline" ]; } || [ -n "${NIGHTLY_NOW:-}" ]; then
             break
         fi
         sleep 90
@@ -523,7 +545,10 @@ coordinate()
         # its start, to leave the job a margin).
         local current
         current=$(now)
-        if [ "$mode" = run ] && [ "$current" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
+        if [ "$mode" = run ] && [ -n "${NIGHTLY_OVERRIDE:-}" ]; then
+            printf 'Override: %s; the window job admits hardware now.\n' "$NIGHTLY_OVERRIDE"
+            output window reachable
+        elif [ "$mode" = run ] && [ "$current" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
             printf 'Waiting %s seconds for the window to open.\n' "$((start - current))"
             if [ -z "${NIGHTLY_NOW:-}" ]; then
                 sleep "$((start - current))"

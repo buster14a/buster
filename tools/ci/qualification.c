@@ -8,7 +8,9 @@
 // The `evidence` job (tools/ci/nightly.c) must succeed in every run, and says
 // whether the 9700X job was admitted. Its one reuse that passes here is a
 // push's: native correctness of the identical tree from its pull request's
-// newest run, with the 9700X job skipped for it (`skip` and `native-reused`).
+// newest run, with the 9700X job skipped for it (`skip` and `native-reused`),
+// once the host-identity job found the host as that run recorded it
+// (HOST_MATCH); unconfirmed, the 9700X job runs, as if admitted.
 // A nightly dispatch (backlog, snapshot) reports through its coverage record,
 // not this context; one that reaches this predicate fails.
 
@@ -255,9 +257,12 @@ int main(int argc, char** argv)
         // The evidence job's hardware decision and its reason: a skip for a push's reuse is the one green skip.
         const char* hardware = getenv("HARDWARE");
         const char* reason = getenv("HARDWARE_REASON");
-        const bool admit = hardware != NULL && strcmp(hardware, "admit") == 0;
+        const char* host_match = getenv("HOST_MATCH");
+        const bool confirmed = host_match != NULL && strcmp(host_match, "true") == 0;
         const bool skip = hardware != NULL && strcmp(hardware, "skip") == 0;
-        const bool reused = skip && reason != NULL && strcmp(reason, "native-reused") == 0;
+        const bool native_reused = skip && reason != NULL && strcmp(reason, "native-reused") == 0;
+        const bool reused = native_reused && confirmed;
+        const bool admit = (hardware != NULL && strcmp(hardware, "admit") == 0) || (native_reused && !confirmed);
         const char* purpose = getenv("PURPOSE");
         const char* nightly = purpose != NULL && (strcmp(purpose, "backlog") == 0 || strcmp(purpose, "snapshot") == 0) ? "nightly" : purpose;
         Qualification input = {
@@ -283,7 +288,7 @@ int main(int argc, char** argv)
         else if (passed && input.hardware == HARDWARE_REUSED)
         {
             const char* source = getenv("NATIVE_SOURCE");
-            printf("Hosted correctness passed; native correctness reused from run %s, its pull request's newest run of this identical tree. Measurements go to the nightly backlog unless that run's were reusable too.\n", source != NULL ? source : "(unknown)");
+            printf("Hosted correctness passed; native correctness reused from run %s, its pull request's newest run of this identical tree, on the host it recorded (confirmed now). Measurements go to the nightly backlog unless that run's were reusable too.\n", source != NULL ? source : "(unknown)");
         }
         else if (passed)
         {

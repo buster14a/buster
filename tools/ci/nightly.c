@@ -1266,6 +1266,9 @@ struct NightlyReuse
     bool native;
     bool measurement;
     uint64_t source;
+    // The host identity the pull request's 9700X job recorded, which the push's own 9700X job must find unchanged
+    // before the reuse holds (9700x.yml's host-identity job): kernel, microcode, system GCC and glibc.
+    const char* host;
     const char* reason;
 };
 
@@ -1338,6 +1341,10 @@ static NightlyReuse nightly_reuse(const NightlyFacts* facts, const NightlyRecord
         {
             reuse.reason = "the pull request's record has no completed targeted measurement";
         }
+        else if (nightly_is(record, NIGHTLY_FIELD_HOST, "-"))
+        {
+            reuse.reason = "the pull request's record has no host identity to confirm";
+        }
         else if (!nightly_is(record, NIGHTLY_FIELD_TREE, tree))
         {
             reuse.reason = "the pull request's run tested another tree";
@@ -1346,6 +1353,7 @@ static NightlyReuse nightly_reuse(const NightlyFacts* facts, const NightlyRecord
         {
             reuse.native = true;
             reuse.source = newest->id;
+            reuse.host = nightly_value(record, NIGHTLY_FIELD_HOST);
             reuse.measurement = nightly_is(record, NIGHTLY_FIELD_PARENT_TREE, parent_tree);
             reuse.reason = reuse.measurement ? "identical tree and first-parent tree" : "identical tree; another first-parent tree, so the measurements run again";
         }
@@ -1672,6 +1680,9 @@ struct NightlyState
     // Folded from the ledger, the runs in flight and the pending dispatches.
     bool targeted;
     bool full;
+    // This cycle's comprehensive run completed for it: the snapshot's daily requirement, which an earlier cycle's full
+    // run doesn't meet (an unchanged main still gets its daily full run and oracle audit).
+    bool full_this_cycle;
     uint64_t complete_run;
     uint64_t source;
     NightlyPlain plain;
@@ -1804,6 +1815,10 @@ struct NightlyPlanInput
     int64_t lease;
     int64_t backlog_bound;
     int64_t snapshot_bound;
+    // A manual run's reason to admit hardware outside 04:00-07:00 Europe/Madrid (sanitized), or empty.
+    const char* override;
+    // First-parent states of the last fortnight before the epoch: out of scope, reported.
+    uint32_t earlier;
 };
 
 typedef struct NightlyCycleState NightlyCycleState;
@@ -1853,6 +1868,7 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
             const bool complete = row->outcome == NIGHTLY_OUTCOME_COMPLETE && (row->coverage == NIGHTLY_COVERAGE_TARGETED || row->coverage == NIGHTLY_COVERAGE_FULL);
             state->targeted |= complete;
             state->full |= complete && row->coverage == NIGHTLY_COVERAGE_FULL;
+            state->full_this_cycle |= complete && row->coverage == NIGHTLY_COVERAGE_FULL && this_cycle && admit && row->purpose == NIGHTLY_PURPOSE_SNAPSHOT;
             state->source = complete && row->source != 0 ? row->source : state->source;
             state->complete_run = complete && row->run > state->complete_run ? row->run : state->complete_run;
             if (row->plain != NIGHTLY_PLAIN_NONE && row->run > state->plain_run)
@@ -2061,7 +2077,12 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     const char* phase = input->now < cycle->window.start ? "before the window" : input->now < cycle->window.deadline ? "inside the window" : "after the window";
     fprintf(report, "## Nightly main measurements: cycle %s\n\n", cycle->date);
     fprintf(report, "Mode: **%s**. Europe/Madrid time %02d:%02d %s, %s (04:00 to 07:00).\n\n", input->run ? "run" : "dry run (nothing dispatched)", cycle->window.local.hour, cycle->window.local.minute, cycle->window.local.zone, phase);
-    fprintf(report, "Snapshot: `%s`%s, the newest of %lld first-parent states in scope, from `%.12s`.\n", states->items[scope].sha, cycle->pinned_now ? ", pinned now" : ", pinned earlier this cycle", (long long)scope + 1, states->items[0].sha);
+    if (input->run && input->override != NULL && input->override[0] != 0)
+    {
+        fprintf(report, "**Override**: hardware is admitted outside 04:00 to 07:00 Europe/Madrid, for: %s.\n\n", input->override);
+    }
+    fprintf(report, "Snapshot: `%s`%s, the newest of %lld first-parent states in scope, from `%.12s`, the epoch: the main commit that added the nightly worker.", states->items[scope].sha, cycle->pinned_now ? ", pinned now" : ", pinned earlier this cycle", (long long)scope + 1, states->items[0].sha);
+    fprintf(report, " The %u first-parent states of the last fortnight before it are out of scope: their workflow can't run as a nightly worker, and their coverage is what their pushes and the old daily run measured.\n", input->earlier);
     if (cycle->substitute >= 0)
     {
         fprintf(report, "The snapshot is ineligible (%s): its comprehensive run measures `%s` instead, the newest eligible earlier state.\n", cycle->substitute_reason, states->items[cycle->substitute].sha);
@@ -2121,9 +2142,11 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     fprintf(report, "%s", listed == 0 ? "- none\n" : pending > listed ? "- ...\n" : "");
 }
 
-static bool nightly_fits(const NightlyCycleState* cycle, int64_t now, int64_t bound)
+// Whether work of the bound fits the window from now; with an override (a person's reason, reported), always.
+static bool nightly_fits(const NightlyPlanInput* input, const NightlyCycleState* cycle, int64_t now, int64_t bound)
 {
-    return now >= cycle->window.start && now + bound <= cycle->window.deadline;
+    const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
+    return overridden || (now >= cycle->window.start && now + bound <= cycle->window.deadline);
 }
 
 // One step of the coordinator: the actions on stdout, one a line (pin, dispatch or would-dispatch, cancel or
@@ -2178,8 +2201,10 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
     {
         nightly_fold(input, &cycle);
         const int64_t now = input->now;
-        const bool before = now < cycle.window.start;
-        const bool inside = !before && now < cycle.window.deadline;
+        const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
+        // An override admits hardware as inside the window would, whatever the time; it is reported.
+        const bool before = !overridden && now < cycle.window.start;
+        const bool inside = overridden || (!before && now < cycle.window.deadline);
         NightlyState* snapshot = &states->items[cycle.snapshot];
         uint32_t sequence = input->sequence;
         const char* verdict = NULL;
@@ -2221,7 +2246,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
         }
         else if (inside)
         {
-            bool snapshot_pending = !snapshot->full && !cycle.snapshot_attempted;
+            bool snapshot_pending = !snapshot->full_this_cycle && !cycle.snapshot_attempted;
             int64_t target = -1;
             bool waiting = false;
             if (snapshot_pending)
@@ -2237,11 +2262,11 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                     for (int64_t i = cycle.snapshot - 1; i >= 0 && target < 0; i -= 1)
                     {
                         const NightlyState* state = &states->items[i];
-                        target = state->plain == NIGHTLY_PLAIN_OK && !state->blocked_native && !state->full && state->status != NIGHTLY_STATUS_FAILED ? i : -1;
+                        target = state->plain == NIGHTLY_PLAIN_OK && !state->blocked_native && state->status != NIGHTLY_STATUS_FAILED ? i : -1;
                     }
                     cycle.substitute = target;
                     snapshot_pending = target >= 0;
-                    cycle.substitute_reason = target >= 0 ? cycle.substitute_reason : "the snapshot and every earlier state are ineligible or already fully measured";
+                    cycle.substitute_reason = target >= 0 ? cycle.substitute_reason : "the snapshot and every earlier state are ineligible";
                 }
                 else
                 {
@@ -2250,7 +2275,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                     cycle.substitute_reason = waiting ? NULL : "the snapshot has no plain hosted rows, and none are in flight";
                 }
             }
-            if (target >= 0 && nightly_fits(&cycle, now, input->snapshot_bound))
+            if (target >= 0 && nightly_fits(input, &cycle, now, input->snapshot_bound))
             {
                 nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, true, states->items[target].sha);
                 cycle.selected += 1;
@@ -2276,17 +2301,17 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 {
                     preparing = preparing || states->items[i].status == NIGHTLY_STATUS_PREPARING;
                 }
-                if (next >= 0 && nightly_fits(&cycle, now, input->backlog_bound + reserve))
+                if (next >= 0 && nightly_fits(input, &cycle, now, input->backlog_bound + reserve))
                 {
                     nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, true, states->items[next].sha);
                     cycle.selected += 1;
                     verdict = "the oldest ready state is dispatched";
                 }
-                else if (waiting && nightly_fits(&cycle, now, input->snapshot_bound))
+                else if (waiting && nightly_fits(input, &cycle, now, input->snapshot_bound))
                 {
                     verdict = "the snapshot's hosted qualification is in flight";
                 }
-                else if (preparing && nightly_fits(&cycle, now, input->backlog_bound))
+                else if (preparing && nightly_fits(input, &cycle, now, input->backlog_bound))
                 {
                     verdict = "hosted qualifications are in flight";
                 }
@@ -2307,7 +2332,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             const int64_t index = nightly_state_index(states, input->refs[i]);
             const NightlyState* state = index >= 0 ? &states->items[index] : NULL;
             const bool idle = state == NULL || (!state->admit_in_flight && !state->defer_in_flight);
-            const bool finished = state == NULL || index > cycle.snapshot || (nightly_terminal(state->status) && (index != cycle.snapshot || snapshot->full || cycle.snapshot_attempted));
+            const bool finished = state == NULL || index > cycle.snapshot || (nightly_terminal(state->status) && (index != cycle.snapshot || snapshot->full_this_cycle || cycle.snapshot_attempted));
             if (idle && finished)
             {
                 fprintf(output, "%s\t%s\n", input->run ? "prune" : "would-prune", input->refs[i]);
@@ -2859,6 +2884,7 @@ struct NightlyReuseCase
     bool record_other_parent_tree;
     bool record_incomplete;
     bool record_plain_coverage;
+    bool record_no_host;
 };
 
 static void nightly_test_reuse(NightlyTest* test)
@@ -2880,6 +2906,7 @@ static void nightly_test_reuse(NightlyTest* test)
         { .what = "a record of another head reuses nothing", .record_other_head = true },
         { .what = "a record without a completed measurement reuses nothing", .record_incomplete = true },
         { .what = "a record of plain coverage reuses nothing", .record_plain_coverage = true },
+        { .what = "a record without a host identity reuses nothing", .record_no_host = true },
     };
     char merge[41];
     char head[41];
@@ -2920,10 +2947,14 @@ static void nightly_test_reuse(NightlyTest* test)
         {
             nightly_copy(record->values[NIGHTLY_FIELD_COVERAGE], BUSTER_NIGHTLY_VALUE, "plain");
         }
+        if (c->record_no_host)
+        {
+            nightly_copy(record->values[NIGHTLY_FIELD_HOST], BUSTER_NIGHTLY_VALUE, "-");
+        }
         NightlyFacts facts = nightly_facts_new();
         const bool parsed = nightly_facts_parse(&facts, nightly_buffer_text(buffer));
         const NightlyReuse reuse = nightly_reuse(&facts, c->no_record ? NULL : record, merge, tree, parent_tree, now);
-        nightly_expect(test, parsed && reuse.native == c->native && reuse.measurement == c->measurement && (!reuse.native || reuse.source == 500), c->what);
+        nightly_expect(test, parsed && reuse.native == c->native && reuse.measurement == c->measurement && (!reuse.native || (reuse.source == 500 && strcmp(reuse.host, "AMD_Ryzen_7_9700X/6.17.1-arch1/0xb404023") == 0)), c->what);
         nightly_facts_free(&facts);
     }
     free(buffer);
@@ -3058,6 +3089,7 @@ struct NightlyScenario
     char refs[8][41];
     uint32_t ref_count;
     bool dry_run;
+    const char* override;
     char output[1 << 15];
     char report[1 << 15];
 };
@@ -3155,6 +3187,7 @@ static void nightly_scenario_plan(NightlyScenario* scenario, int64_t now)
         .lease = 7200,
         .backlog_bound = 1500,
         .snapshot_bound = 1920,
+        .override = scenario->override,
     };
     // A fresh copy of the folded fields for each plan, as each coordinator step reads the inputs afresh.
     for (uint32_t i = 0; i < scenario->states.count; i += 1)
@@ -3287,6 +3320,27 @@ static void nightly_test_plan(NightlyTest* test)
     scenario->pending_count = 0;
     nightly_scenario_free(scenario);
 
+    // An unchanged main: yesterday's comprehensive run of the same snapshot doesn't meet today's daily requirement.
+    scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-03", 3);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 190, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261103.900.1.admit", NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
+    nightly_scenario_plan(scenario, opening);
+    snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[3].sha);
+    nightly_expect(test, nightly_has(scenario, line), "an unchanged main still gets today's comprehensive run");
+    // Outside the window, nothing is admitted; a manual run's override admits, and the report says why.
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 13, 0));
+    nightly_expect(test, nightly_count(scenario, "dispatch\tsnapshot\tadmit") == 0, "13:00 admits nothing");
+    scenario->override = "validating the coordinator";
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 13, 0));
+    nightly_expect(test, nightly_has(scenario, line) && strstr(scenario->report, "**Override**") != NULL && strstr(scenario->report, "validating the coordinator") != NULL, "an override admits outside the window, reported");
+    scenario->dry_run = true;
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 13, 0));
+    nightly_expect(test, nightly_count(scenario, "would-dispatch\tsnapshot\tadmit") == 0, "a dry run's override admits nothing");
+    nightly_scenario_free(scenario);
+
     // An ineligible snapshot: the newest eligible earlier state is measured instead, and said so.
     scenario = nightly_scenario(4, committed);
     nightly_scenario_pushes(scenario);
@@ -3359,6 +3413,45 @@ static void nightly_test_metadata(NightlyTest* test, const char* root)
     }
 }
 
+// The 9700X job's window step must come before any substantive setup (the checkout, the toolchain's staging), right
+// after the host's own check, so that a job that took the lock too late does nothing but refuse; and the host identity
+// that the push's host-identity job compares must be computed exactly as the 9700X job's is.
+static void nightly_test_workflow(NightlyTest* test, const char* root)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/%s", root, BUSTER_NIGHTLY_WORKFLOW);
+    FILE* file = fopen(path, "rb");
+    bool found = file != NULL;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    NightlyText text = found ? nightly_read(path) : (NightlyText){ 0 };
+    const char* job = found ? strstr(text.data, "\n  benchmarks:\n") : NULL;
+    const char* end = job != NULL ? strstr(job + 1, "\n  agent-guide-size:\n") : NULL;
+    const char* verify = job != NULL ? strstr(job, "      - name: Verify benchmark host\n") : NULL;
+    const char* window = job != NULL ? strstr(job, "      - name: Admit nightly work inside the Europe/Madrid window, holding the lock\n") : NULL;
+    const char* checkout = job != NULL ? strstr(job, "      - name: Check out triggering commit\n") : NULL;
+    const char* stage = job != NULL ? strstr(job, "      - name: Stage official Clang 23.1.4 in the private runner cache\n") : NULL;
+    nightly_expect(test, end != NULL && verify != NULL && window != NULL && checkout != NULL && stage != NULL && verify < window && window < checkout && window < stage && stage < end, "the 9700X job checks the window right after the host, before any setup");
+    // The window step reads no checked-out file: it compares the evidence job's epochs with the clock.
+    const char* window_end = window != NULL ? strstr(window + 8, "\n      - name: ") : NULL;
+    bool reads_checkout = window == NULL || window_end == NULL;
+    for (const char* at = window; !reads_checkout && at != NULL && at < window_end; at = strstr(at + 1, "tools/"))
+    {
+        reads_checkout = at != window && at < window_end;
+    }
+    nightly_expect(test, !reads_checkout, "the window step needs nothing checked out");
+    // The host identity: the host-identity job's and the 9700X job's steps, byte for byte.
+    const char* identity = found ? strstr(text.data, "\n  host-identity:\n") : NULL;
+    const char* identity_step = identity != NULL ? strstr(identity, "      - name: Verify benchmark host\n") : NULL;
+    const char* identity_end = identity_step != NULL ? strstr(identity_step + 8, "\n\n") : NULL;
+    const char* verify_end = verify != NULL ? strstr(verify + 8, "\n\n") : NULL;
+    const bool same = identity_end != NULL && verify_end != NULL && identity_end - identity_step == verify_end - verify && memcmp(identity_step, verify, (size_t)(verify_end - verify)) == 0;
+    nightly_expect(test, same, "the host-identity job computes the host identity as the 9700X job does");
+    free(text.data);
+}
+
 static int nightly_self_test(const char* root)
 {
     NightlyTest test = { 0 };
@@ -3371,6 +3464,7 @@ static int nightly_self_test(const char* root)
     nightly_test_states(&test);
     nightly_test_plan(&test);
     nightly_test_metadata(&test, root);
+    nightly_test_workflow(&test, root);
     printf("nightly --self-test: %u checks, %u failures\n", test.checks, test.failures);
     return test.failures != 0;
 }
@@ -3518,6 +3612,8 @@ static int nightly_command_plan(int argc, char** argv)
     {
         nightly_fatal("invalid pending dispatches or branches", NULL);
     }
+    char override[BUSTER_NIGHTLY_REASON];
+    nightly_sanitize(nightly_option(argc, argv, "--override"), override, sizeof(override));
     const NightlyPlanInput input = {
         .states = &states,
         .ledger = &ledger,
@@ -3537,6 +3633,8 @@ static int nightly_command_plan(int argc, char** argv)
         .lease = (int64_t)nightly_option_number(argc, argv, "--lease", 7200, 86400),
         .backlog_bound = (int64_t)nightly_option_number(argc, argv, "--backlog-bound", 1500, 86400),
         .snapshot_bound = (int64_t)nightly_option_number(argc, argv, "--snapshot-bound", 1920, 86400),
+        .override = override,
+        .earlier = (uint32_t)nightly_option_number(argc, argv, "--earlier", 0, UINT32_MAX),
     };
     FILE* report = fopen(nightly_required(argc, argv, "--report"), "wb");
     if (report == NULL)
@@ -3576,6 +3674,7 @@ static int nightly_command_reuse(int argc, char** argv)
     }
     const NightlyReuse reuse = nightly_reuse(&facts, recorded ? record : NULL, commit, tree, parent_tree, nightly_option_epoch(argc, argv, "--now"));
     printf("native\t%s\t%llu\t%s\n", reuse.native ? "reused" : "run", (unsigned long long)reuse.source, reuse.reason);
+    printf("host\t%s\n", reuse.native ? reuse.host : "-");
     printf("measurement\t%s\t%llu\t%s\n", reuse.measurement ? "reused" : "run", (unsigned long long)(reuse.measurement ? reuse.source : 0), reuse.reason);
     free(record);
     nightly_facts_free(&facts);
