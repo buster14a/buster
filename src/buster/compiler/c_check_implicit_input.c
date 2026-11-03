@@ -41,7 +41,8 @@ static bool check_input_library_enabled(const BuiltinIntrinsicInfo* info, const 
 
 // The only newly scanned list is the explicitly supplied disabling names, on a missing library name alone. Ordinary
 // operands reuse the intrinsic adapter's deduplicated name cache. Source-order binding itself cannot be reordered.
-static void check_input_implicit_function(CheckInputReader* reader, uint32_t token)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_resolve_range.
+static inline __attribute__((always_inline)) void check_input_implicit_function(CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
     const uint32_t name = parser->tokens.names[token];

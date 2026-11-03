@@ -526,7 +526,8 @@ static uint32_t check_init_union_slot(const CheckInitUnion* entries, uint32_t ca
     return slot;
 }
 
-static void check_init_used(CheckInitWalker* walker, const CheckInitFrame* frame, uint32_t token, bool clear_union)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_init_walk.
+static inline __attribute__((always_inline)) void check_init_used(CheckInitWalker* walker, const CheckInitFrame* frame, uint32_t token, bool clear_union)
 {
     const TypeId type = type_strip_aligned(walker->types, frame->type);
     if (!frame->wrapper && type == walker->incomplete && frame->offset == 0 && frame->next >= walker->extent)
@@ -1104,7 +1105,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
 
 // Both identities are already indexed by the reader. In particular, an ordinary nonstring initializer never
 // searches the unit's literal pool, and an array-valued parenthesized string resolves through its original object.
-static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint32_t node)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_init_walk.
+static inline __attribute__((always_inline)) const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint32_t node)
 {
     const CheckInitString* result = 0;
     uint32_t object = 0;

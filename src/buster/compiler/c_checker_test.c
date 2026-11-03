@@ -1656,18 +1656,26 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
         }
     }
     arena_pop_to(scratch, scratch_mark);
-    // Each batch size by both of the vector path's orders, in postorder and by level (CheckOptions.level_order).
-    for (uint32_t run = partitions ? 2 : 2 * BUSTER_CHECK_BATCH; scalar_valid && run < 2 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
+    // (CheckOptions.level_order), and its memoized transitions (#1050) in node order and in windows, every hit verified
+    // against its action.
+    for (uint32_t run = partitions ? 4 : 4 * BUSTER_CHECK_BATCH; scalar_valid && run < 4 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
-        const uint32_t batch = run / 2;
+        const uint32_t batch = run / 4;
+        const uint32_t order = run % 4;
         const CheckOptions vector_options = {
             .batch_size = batch,
-            .level_order = (run & 1) != 0,
+            .level_order = order == 1,
+            .transitions = order >= 2,
+            .transition_windows = order == 3,
+            .verify_transitions = true,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count),
-                          (run & 1) != 0 ? "graph paths or level-order batch partitions differ" : "graph paths or batch partitions differ");
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
+                          order == 1 ? "graph paths or level-order batch partitions differ" :
+                          order == 2 ? "graph paths or the transitions differ" :
+                          order == 3 ? "graph paths or the transitions' windows differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {
@@ -2440,7 +2448,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             {
                 const CheckOptions options = {
                     .scalar = p == 0,
-                    .verify = true
+                    .verify = true,
                 };
                 struct timespec start;
                 struct timespec stop;
@@ -2525,6 +2533,14 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         {
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
                                    check_test_stream_equal(&streams[0], &streams[1], input[0].graph.argument_count), "source paths produce different typed streams");
+            // The vector path by its memoized transitions too (#1050, CheckOptions.transitions), every hit verified.
+            const uint64_t mark = output_storage[1].length;
+            const CheckOptions memoized = { .verify = true, .transitions = true, .verify_transitions = true };
+            CheckStream stream;
+            const bool rechecked = check_graph_run(&types[1].table, &input[1].graph, &output_storage[1], &scratch[1], &memoized, &stream);
+            check_test_expect(test, rechecked && stream.statistics.transition_mismatches == 0 &&
+                                   check_test_stream_equal(&streams[0], &stream, input[0].graph.argument_count), "source paths' transitions produce another typed stream");
+            arena_pop_to(&output_storage[1], mark);
         }
     }
     for (uint32_t p = 0; p < 2; p += 1)
@@ -5985,6 +6001,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
 #include "c_check_sizeof_test.c"
+#include "c_check_transitions_test.c"
 #include "c_check_integer_policy_test.c"
 #include "c_check_fp_actions_test.c"
 #include "c_check_query_runtime_test.c"
@@ -6089,6 +6106,7 @@ static void check_test_lowering_inventory(CheckTest* test);
 static void check_test_lowering_templates(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
+static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
@@ -6115,7 +6133,9 @@ static int run_checker_tests(int argc, char** argv)
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
+    bool requests = false;
     bool sizeof_only = false;
+    bool transitions_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6175,6 +6195,14 @@ static int run_checker_tests(int argc, char** argv)
         {
             sizeof_only = true;
         }
+        else if (strcmp(argv[i], "--requests") == 0)
+        {
+            requests = true;
+        }
+        else if (strcmp(argv[i], "--transitions") == 0)
+        {
+            transitions_only = true;
+        }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
             clang = argv[++i];
@@ -6200,16 +6228,20 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || sizeof_only));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && sizeof_only)
+        if (initialized && transitions_only)
+        {
+            check_test_transitions(&test);
+        }
+        else if (initialized && sizeof_only)
         {
             check_test_sizeof_scaling(&test);
             check_test_integer_extensions(&test, clang);
@@ -6227,6 +6259,15 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && embed_initializers)
         {
             check_test_embed_initializers(&test, clang);
+        }
+        else if (initialized && requests)
+        {
+            // #1057: one request's configuration and the shared source preparation against the driver, then the source
+            // benchmarks' preparations, which share them.
+            check_test_requests(&test);
+            check_test_lowering_source_benchmark(&test);
+            check_test_backend_source_benchmark(&test);
+            check_test_check_lanes_benchmark(&test);
         }
         else if (initialized && program_initializers)
         {
@@ -6583,6 +6624,10 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_sizeof_scaling(&test);
             }
+            if (check_test_takes())
+            {
+                check_test_transitions(&test);
+            }
             if (check_test_shared())
             {
                 check_test_integer_policy(&test, &types.table, clang);
@@ -6720,6 +6765,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_check_lanes_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_requests(&test);
             }
             if (check_test_takes())
             {

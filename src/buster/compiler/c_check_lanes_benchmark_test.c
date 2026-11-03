@@ -6,7 +6,10 @@
 // profile refuses ("vector operations wider than the target's registers") and znver5 takes, must be measured with
 // -march=znver5 and fail at its emission for the baseline, as -c does; and a baseline unit whose function's target
 // attribute ("avx2") takes a 32-byte vector must be measured, which it is only when the program has the options'
-// predefines to resolve the attribute against. Each case's exit status and report line are checked.
+// predefines to resolve the attribute against. Then #1057's review: a unit whose always_inline callee's target -c's
+// target-feature check refuses is left out with its configuration's receipt, and the file after it measured; alone, it
+// leaves the run with no file measured, which fails; and a refused request (-fshort-enums) fails with the driver's
+// refusal. Each case's exit status and report lines are checked.
 // Include after c_check_lanes_benchmark.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_CHECK_LANES_BENCHMARK_TEST_INCLUDED
 #define BUSTER_CHECK_LANES_BENCHMARK_TEST_INCLUDED
@@ -59,21 +62,29 @@ static __attribute__((noinline)) void check_test_check_lanes_benchmark(CheckTest
         "typedef int V8 __attribute__((vector_size(32)));\n"
         "__attribute__((target(\"avx2\"))) static int wide(int x)\n{\n    V8 a = { 0 };\n    a[0] = x;\n    V8 b = a + a;\n    return b[0];\n}\n"
         "int main(void)\n{\n    return wide(3) - 6;\n}\n",
+        // An always_inline callee whose target attribute its baseline caller lacks: -c's target-feature check refuses it.
+        "__attribute__((target(\"avx2\"), always_inline)) static inline int twice(int x)\n{\n    return x * 2;\n}\n"
+        "int main(void)\n{\n    return twice(1) - 2;\n}\n",
     };
     enum { FIXTURES = BUSTER_ARRAY_LENGTH(fixtures) };
-    static const char* const names[FIXTURES] = { "vectors.c", "attribute.c" };
+    static const char* const names[FIXTURES] = { "vectors.c", "attribute.c", "mismatch.c" };
     static const struct
     {
         const char* label;
         uint32_t fixture;
+        // A second file after the first, or -1; and an option after -march, or null.
+        int32_t second;
+        const char* option;
         const char* march;
         int status;
-        // What its report must hold, once.
+        // What its report must hold, once, and a second line it must hold once (or null).
         const char* report;
+        const char* also;
     } cases[] = {
         {
             .label = "check-lanes: a unit of 512-bit vectors is measured for -march=znver5",
             .fixture = 0,
+            .second = -1,
             .march = "-march=znver5",
             .status = 0,
             .report = "/vectors.c functions=2 ",
@@ -81,6 +92,7 @@ static __attribute__((noinline)) void check_test_check_lanes_benchmark(CheckTest
         {
             .label = "check-lanes: a unit of 512-bit vectors fails for the baseline profile, as -c refuses it",
             .fixture = 0,
+            .second = -1,
             .march = "-march=x86-64",
             .status = 1,
             .report = "/vectors.c failed=\"it couldn't be emitted on one lane, or its object built\"\n",
@@ -88,9 +100,39 @@ static __attribute__((noinline)) void check_test_check_lanes_benchmark(CheckTest
         {
             .label = "check-lanes: a baseline unit's function with a target attribute takes its attribute's vectors",
             .fixture = 1,
+            .second = -1,
             .march = "-march=x86-64",
             .status = 0,
             .report = "/attribute.c functions=2 ",
+            .also = "/attribute.c configuration=",
+        },
+        {
+            // #1057's review: left out as the other source benchmarks leave it out, with its receipt, and the next file
+            // measured.
+            .label = "check-lanes: a unit whose target features -c refuses is left out, with its receipt, and the next one measured",
+            .fixture = 2,
+            .second = 1,
+            .march = "-march=x86-64",
+            .status = 0,
+            .report = "/mismatch.c rejected=\"code generation's target-feature check: ",
+            .also = "/mismatch.c configuration=",
+        },
+        {
+            .label = "check-lanes: a run that leaves out its only unit measures no file, and fails",
+            .fixture = 2,
+            .second = -1,
+            .march = "-march=x86-64",
+            .status = 1,
+            .report = "check-lanes: no file was measured\n",
+        },
+        {
+            .label = "check-lanes: a refused request fails the command with the driver's refusal, not a usage error",
+            .fixture = 1,
+            .second = -1,
+            .option = "-fshort-enums",
+            .march = "-march=x86-64",
+            .status = 1,
+            .report = "/attribute.c refused=\"unsupported option '-fshort-enums' (the checker does not implement its ABI layout)\"\n",
         },
     };
     char directory[] = "/tmp/buster-check-lanes-XXXXXX";
@@ -104,12 +146,24 @@ static __attribute__((noinline)) void check_test_check_lanes_benchmark(CheckTest
     check_test_expect(test, ready, "check-lanes benchmark fixtures are written");
     for (uint32_t c = 0; ready && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
-        char* arguments[] = { "--passes", "1", "--lanes", "1", "-nostdinc", (char*)cases[c].march, paths[cases[c].fixture] };
+        char* arguments[9] = { "--passes", "1", "--lanes", "1", "-nostdinc", (char*)cases[c].march };
+        uint32_t count = 6;
+        if (cases[c].option != 0)
+        {
+            arguments[count++] = (char*)cases[c].option;
+        }
+        arguments[count++] = paths[cases[c].fixture];
+        if (cases[c].second >= 0)
+        {
+            arguments[count++] = paths[cases[c].second];
+        }
         int status = 0;
         char* report = 0;
-        const bool ran = check_lanes_benchmark_test_run(arguments, BUSTER_ARRAY_LENGTH(arguments), &status, &report);
+        const bool ran = check_lanes_benchmark_test_run(arguments, count, &status, &report);
         const char* found = ran ? strstr(report, cases[c].report) : 0;
-        const bool expected = ran && status == cases[c].status && found != 0 && strstr(found + 1, cases[c].report) == 0;
+        const char* also = ran && cases[c].also != 0 ? strstr(report, cases[c].also) : 0;
+        const bool expected = ran && status == cases[c].status && found != 0 && strstr(found + 1, cases[c].report) == 0 &&
+                              (cases[c].also == 0 || (also != 0 && strstr(also + 1, cases[c].also) == 0));
         check_test_expect(test, expected, cases[c].label);
         if (!expected)
         {
