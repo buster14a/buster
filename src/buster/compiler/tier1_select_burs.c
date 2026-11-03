@@ -870,8 +870,9 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     else if (op == IR_LOAD && tier1_select_memory_width(type) != 0)
     {
         const uint32_t user = users[node];
+        // Past no barrier but itself, a barrier of its own (tier1_select_barrier: every load, #1059's audit).
         const bool foldable = function->flags[node] == 0 && forest->uses[node] == 1 && user < count && node < user && forest->blocks[user] == forest->blocks[node] &&
-                              forest->barriers[user] <= node;
+                              forest->barriers[user] <= node + 1;
         result = foldable ? TIER1_BURS_OP_LOAD_F : TIER1_BURS_OP_LOAD_N;
     }
     else if (op == IR_STORE && b < count && tier1_select_memory_width(function->type[b]) != 0)
@@ -1072,7 +1073,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, shl, _mm512_set1_epi32(TIER1_BURS_OP_SHL));
         result = _mm512_mask_mov_epi32(result, lshr, _mm512_set1_epi32(TIER1_BURS_OP_LSHR));
         result = _mm512_mask_mov_epi32(result, ashr, _mm512_set1_epi32(TIER1_BURS_OP_ASHR));
-        // Loads, foldable into their single user past no barrier; stores.
+        // Loads, foldable into their single user past no barrier but themselves (every load one: tier1_select_barrier);
+        // stores.
         const __mmask16 load = tier1_burs_types(active, type, memory) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD));
         if (load != 0)
         {
@@ -1080,7 +1082,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __m512i user_block = _mm512_mask_i32gather_epi32(none, placed, user, forest->blocks, 4);
             const __m512i barrier = _mm512_mask_i32gather_epi32(none, placed, user, forest->barriers, 4);
             const __mmask16 foldable = placed & _mm512_cmpeq_epi32_mask(flags, _mm512_setzero_si512()) & _mm512_cmpeq_epi32_mask(uses, _mm512_set1_epi32(1)) &
-                                       _mm512_cmpeq_epi32_mask(user_block, block) & _mm512_cmple_epu32_mask(barrier, node);
+                                       _mm512_cmpeq_epi32_mask(user_block, block) &
+                                       _mm512_cmple_epu32_mask(barrier, _mm512_add_epi32(node, _mm512_set1_epi32(1)));
             result = _mm512_mask_mov_epi32(result, load, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N));
             result = _mm512_mask_mov_epi32(result, foldable, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_F));
         }
