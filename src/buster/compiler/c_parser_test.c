@@ -892,6 +892,26 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x __attribute__((unused)) (3) = 4;\n", "1:34: expected ';' after top level declarator", 0 },
     { "int x __attribute__((unused)) (int);\n", "1:32: expected expression", 0 },
     { "struct S { int x __attribute__((unused)) (3); };\n", "1:41: expected ';' at end of declaration list", 0 },
+    // A declarator's group holds no initializer: clang closes it at the `=`.
+    { "int (*fp(int, ...) = 0;\n", "1:20: expected ')'", 0 },
+    { "void f(void) { int (*p = 0; }\n", "1:24: expected ')'", 0 },
+    // What can't continue a declarator ends it, and clang's Sema takes it, saying a missing type, before the parser
+    // looks at what follows: but after it asks for a function's body.
+    { "*p 1;\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "*p }\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(*p 1);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "static const char *name( (int c)\n{\n", "1:27: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void g(void) { const *p ); }\n", "1:23: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "struct S { const *p ) };\n", "1:19: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "*f() 1;\n", "1:6: expected function body after function declarator", 0 },
+    { "*f() int x;\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // At the end of the file: a function's body, a do-statement's while, a head's or a label's statement.
+    { "int f(void)\n", "1:12: expected function body after function declarator", 0 },
+    { "void f(int a) { do { { a -= 1; } while (a > 0); return; }\n", "1:58: expected 'while' in do/while loop", 0 },
+    { "void f(int a) { if (a) do a -= 1;\n", "1:34: expected 'while' in do/while loop", 0 },
+    { "void f(int a) { while (a)\n", "1:26: expected expression", 0 },
+    { "void f(int a) { switch (a) { case 1:\n", "1:37: expected expression", 0 },
+    { "void f(int a) { do { { a -= 1; }\n", "1:33: expected '}'", 0 },
 };
 
 // Writes `text` to `path`. Returns false if it can't.

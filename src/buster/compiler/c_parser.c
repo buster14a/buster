@@ -1619,6 +1619,24 @@ BUSTER_INLINE bool parse_scalar_starts_declaration(const ParseScalar* parser, ui
                       kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_CALLING_CONVENTION);
 }
 
+// Whether `i` is a keyword after a parameter's declarator that has no name, which clang takes for the name it would be,
+// as it parses the declarator.
+BUSTER_INLINE bool parse_scalar_keyword_parameter(const ParseScalar* parser, uint32_t i, const ParseFrame* frame)
+{
+    const uint8_t kind = parser->kinds[i];
+    return frame->role == PARSE_ROLE_OPEN_FUNCTION && frame->mode == PARSE_MODE_AFTER_DECLARATOR && frame->derivation == PARSE_DERIVATION_NONE &&
+           kind >= PARSE_KIND_TYPE && kind < PARSE_KIND_COUNT;
+}
+
+// Whether clang asks for a function's body at token `i`, which can't continue the declarator: where one is due, the end
+// of the file too, unless a declaration specifier there starts the next declaration after a missing `;`
+// (ParseDeclGroup).
+static bool parse_scalar_fn_body_due(const ParseScalar* parser, uint32_t i, const ParseFrame* frame)
+{
+    const uint8_t kind = parser->kinds[i];
+    return parse_scalar_body_expected(parser, i, frame) && (kind == PARSE_KIND_EXTENSION || !parse_scalar_starts_declaration(parser, i, false));
+}
+
 // Whether `[` at `token` starts a C23 attribute: `[[`, which C has nowhere else (a subscript or a designator can't
 // start with `[`).
 BUSTER_INLINE bool parse_scalar_standard_attribute(const ParseScalar* parser, uint32_t token)
@@ -1741,6 +1759,18 @@ BUSTER_INLINE bool parse_scalar_gnu_attribute_group(const ParseScalar* parser, c
     return list || arguments;
 }
 
+// The missing type of the declarator in declaration frame `frame`, if it has one, which clang's Sema reports as it takes
+// the declarator, so before any error at what follows it (#1127).
+static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
+{
+    if (frame->typeless_name != 0)
+    {
+        const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
+        parse_scalar_note(parser, frame->typeless_name - 1, message, BUSTER_PARSE_NONE, true);
+        frame->typeless_name = 0;
+    }
+}
+
 // The declarator in declaration frame `frame` is complete: its name is bound, as its scope begins there (C 6.2.1p7).
 // Without `definition` (no body follows), the parameters a declarator in a file or a block kept are dropped. A K&R
 // definition's parameter declaration must declare one of its parameters, once, as clang's ParseKNRParamDeclarations
@@ -1748,19 +1778,12 @@ BUSTER_INLINE bool parse_scalar_gnu_attribute_group(const ParseScalar* parser, c
 static void parse_scalar_complete_declarator(ParseScalar* parser, ParseFrame* frame, bool definition)
 {
     const bool kr = (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) != 0;
-    if (frame->typeless_name != 0)
+    if (frame->typeless_name != 0 && definition && (frame->flags & BUSTER_PARSE_FRAME_KR) != 0)
     {
-        if (definition && (frame->flags & BUSTER_PARSE_FRAME_KR) != 0)
-        {
-            parser->typeless_function = frame->typeless_name;
-        }
-        else
-        {
-            const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;
-            parse_scalar_note(parser, frame->typeless_name - 1, message, BUSTER_PARSE_NONE, true);
-        }
+        parser->typeless_function = frame->typeless_name;
         frame->typeless_name = 0;
     }
+    parse_scalar_typeless_note(parser, frame);
     if (frame->name != BUSTER_PARSE_NONE && kr)
     {
         const uint8_t meaning = parser->meanings[parser->names[frame->name]];
@@ -2300,7 +2323,7 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     // A `)` or `]` before the `;` that ends a declaration or an expression statement is extraneous (clang's
     // ExpectAndConsumeSemi), but not where a return statement's `;` is due, which clang expects as any other token.
     const bool extraneous = statements && !(parse_frame_is_block(frame) && frame->statement == PARSE_ITEM_RETURN && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0);
-    if (parse_scalar_body_expected(parser, i, frame) && kind != PARSE_KIND_END && (kind == PARSE_KIND_EXTENSION || !parse_scalar_starts_declaration(parser, i, false)))
+    if (parse_scalar_fn_body_due(parser, i, frame))
     {
         // After a function's declarator, what can't continue the declaration is taken for a missing body, but a
         // declaration specifier for the next declaration after a missing `;`; a `)` before a `;` among them, as clang asks
@@ -2377,10 +2400,8 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     {
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, BUSTER_PARSE_AFTER_PREVIOUS);
     }
-    else if (frame->role == PARSE_ROLE_OPEN_FUNCTION && frame->mode == PARSE_MODE_AFTER_DECLARATOR && frame->derivation == PARSE_DERIVATION_NONE &&
-             kind >= PARSE_KIND_TYPE && kind < PARSE_KIND_COUNT)
+    else if (parse_scalar_keyword_parameter(parser, i, frame))
     {
-        // A keyword after a parameter's declarator that has no name: clang takes it for the name it would be.
         parse_scalar_error_argument(parser, i, PARSE_MESSAGE_KEYWORD_AS_PARAMETER, BUSTER_PARSE_AT_TOKEN, i);
     }
     else
@@ -3734,6 +3755,11 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // consuming an initializer and reporting a later delimiter; vector validation already defers this case.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST, BUSTER_PARSE_AFTER_PREVIOUS);
     }
+    else if (kind == PARSE_KIND_EQUAL && group == PARSE_ROLE_OPEN_GROUP)
+    {
+        // A declarator's group holds no initializer: clang closes the group at the `=` (#1127).
+        parse_scalar_close_expected(parser, i, PARSE_KIND_L_PAREN, true);
+    }
     else if (kind == PARSE_KIND_EQUAL && !abstract)
     {
         // The name is in scope in its initializer.
@@ -3826,13 +3852,23 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         frame->mode = PARSE_MODE_KR_PARAMETERS;
         step->again = true;
     }
-    else if (parse_kind_is_closer(kind))
-    {
-        parse_scalar_close_item(parser, i, frame, step);
-    }
     else
     {
-        parse_scalar_unexpected(parser, i, frame);
+        // What can't continue a declarator ends it, a closer too, and clang's Sema takes it (saying a missing type)
+        // before the parser looks for the `,`, `;` or `)` due, but after it asks for a function's body, at the end of
+        // the file too (ParseDeclGroup), and after a keyword it takes for a parameter's name (#1127).
+        if (!parse_scalar_fn_body_due(parser, i, frame) && !parse_scalar_keyword_parameter(parser, i, frame))
+        {
+            parse_scalar_typeless_note(parser, declaration);
+        }
+        if (parse_kind_is_closer(kind))
+        {
+            parse_scalar_close_item(parser, i, frame, step);
+        }
+        else
+        {
+            parse_scalar_unexpected(parser, i, frame);
+        }
     }
 }
 
@@ -4617,7 +4653,18 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
         binding_argument = frame->argument;
         if (kind == PARSE_KIND_END && frame->mode == PARSE_MODE_ITEM && frame->opener != BUSTER_PARSE_NONE && parser->kinds[frame->opener] == PARSE_KIND_L_BRACE)
         {
-            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_BRACE, BUSTER_PARSE_AT_TOKEN);
+            // What the statement stack waits for comes first, at the end of the file too (#1127): a do-statement whose
+            // body ended asks for its while, and a head or a label for its statement, which clang reads as an
+            // expression.
+            const bool block = parse_frame_is_block(frame);
+            if (block)
+            {
+                parse_statement_flush(parser);
+            }
+            const ParseStatement* top = block ? parse_statement_top(parser) : 0;
+            const uint8_t message = top == 0 ? PARSE_MESSAGE_EXPECTED_R_BRACE : top->state == PARSE_STATEMENT_DO_DONE ? PARSE_MESSAGE_EXPECTED_WHILE :
+                                    top->state == PARSE_STATEMENT_WAITING ? PARSE_MESSAGE_EXPECTED_EXPRESSION : PARSE_MESSAGE_EXPECTED_R_BRACE;
+            parse_scalar_error(parser, i, message, BUSTER_PARSE_AT_TOKEN);
         }
         else
         {
