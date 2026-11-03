@@ -6182,7 +6182,8 @@ BUSTER_INLINE uint8_t pp_with_pending(uint8_t flags, uint8_t pending, bool file)
 // name passes that one's on; one that started a line (BUSTER_PP_START_OF_LINE, or BUSTER_PP_LINE_SPACE among a
 // macro's arguments) gets it when only the line's start is before it, where its lexer starts it (pp_lexed_start). Only
 // runs that keep expansion starts compute it: the others' tokens never have it.
-static uint8_t pp_name_line(const Preprocessor* pp, uint8_t flags, uint32_t location)
+// Always inlined (#880), as profile-guided builds do; hot caller: pp_invoke, once per macro invocation.
+static inline __attribute__((always_inline)) uint8_t pp_name_line(const Preprocessor* pp, uint8_t flags, uint32_t location)
 {
     uint8_t result = (uint8_t)(flags & BUSTER_PP_NAME_LINE);
     if (pp->options.expansion_starts && !(flags & BUSTER_PP_NAME_SPACE) && (flags & (BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)))
@@ -6570,7 +6571,8 @@ static bool pp_append_file_tokens(Preprocessor* pp, PPTokens* out, const PPFileD
 
 // Appends tokens [begin, end) of a stack to `out` as they are, 16 at a time with whole-vector stores. `tokens` may be
 // `out` if [begin, end) is below its count. Returns false, after a fatal error, if `out` has no room.
-static bool pp_append_stack_tokens(Preprocessor* pp, PPTokens* out, const PPTokens* tokens, uint32_t begin, uint32_t end)
+// Always inlined (#880), as profile-guided builds do; hot caller: pp_collect_arguments, once per argument.
+static inline __attribute__((always_inline)) bool pp_append_stack_tokens(Preprocessor* pp, PPTokens* out, const PPTokens* tokens, uint32_t begin, uint32_t end)
 {
     const bool result = pp_room(pp, out, end - begin);
     if (result)

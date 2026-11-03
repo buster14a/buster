@@ -4097,6 +4097,24 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "int caller(int x) { if (0) return h(x); return (0 && h(x)) + (1 ? x : h(x)); }\nint after(int x) { return x; return h(x); }\n",
           false, true },
+        // #1108: a function that only a constant if's dead arm reaches, called there, through a block-scope static's
+        // initializer there, or under a condition whose && leaves a call unevaluated (main.c's BUSTER_IN_UNIT branches),
+        // is never emitted, by clang and by -c's selection, and so never checked; the live arm's call is.
+        { "a function only constant ifs' dead arms reach", "-march=x86-64",
+          "#include <immintrin.h>\n"
+          "static int vec(const unsigned char* p)\n{\n    __m512i v = _mm512_maskz_cvtepu8_epi32(0xffff, _mm_loadu_si128((const __m128i*)p));\n"
+          "    return _mm512_reduce_add_epi32(v);\n}\nint strcmp(const char* a, const char* b);\n"
+          "int run(const unsigned char* p, int n)\n{\n    int r = p[0];\n    if (0)\n    {\n        r = vec(p);\n    }\n"
+          "    if (0 && n >= 2 && strcmp(\"a\", \"b\") == 0)\n    {\n        r += vec(p + 1);\n    }\n"
+          "    if (1)\n    {\n    }\n    else\n    {\n        static int (*pointer)(const unsigned char*) = vec;\n        r += pointer(p);\n    }\n"
+          "    return r;\n}\n",
+          false, true },
+        { "a function a constant if's live arm reaches", "-march=x86-64",
+          "#include <immintrin.h>\n"
+          "static int vec(const unsigned char* p)\n{\n    __m512i v = _mm512_maskz_cvtepu8_epi32(0xffff, _mm_loadu_si128((const __m128i*)p));\n"
+          "    return _mm512_reduce_add_epi32(v);\n}\n"
+          "int run(const unsigned char* p)\n{\n    int r = p[0];\n    if (1)\n    {\n        r = vec(p);\n    }\n    return r;\n}\n",
+          true, true },
         { "the first function to have an error", "-march=x86-64",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
           "int e1(int x) { return s(x) + h(x + 1); }\nint e2(int x) { return h(x + 2); }\n",

@@ -1102,6 +1102,97 @@ The later bitsets (`planned`, `initialized` and `locals`), counted the same way 
 | `check_program`, inclusive | 148.2 M | 145.1 M | -3.1 M |
 | `check_lower_prepare`, inclusive | 51.0 M | 49.0 M | -2.0 M |
 
+## The compiler's own code and a profile (#880)
+
+[#880](https://github.com/buster14a/buster/issues/880) found the 9700X's front end starved: op cache misses 2 to 2.6
+times Zen 4's per instruction, in hot functions tens of kilobytes long. A profile-guided build of the compiler
+(`-fprofile-instr-use`, trained on the frozen corpora) then took 2.4 to 3.6% off `-c`'s time, for the same objects, and
+ordering its functions without a profile took nothing
+([buster-performance#182](https://github.com/buster14a/buster-performance/pull/182)).
+The owner chose to do both of these:
+
+- **Bring the profile's gains to the source**, so that every build has them.
+- **Keep the profile as a build of its own:** `BUSTER_PGO=1 ./build.sh` ([the build guide](commands/build.md)), which
+  isn't the default and which no CI job builds.
+
+**What the profile changes.** These are user-mode counts of sqlite3.c's `-fsyntax-only` at `3ce71ec3` on the 9700X,
+where nearly all of the gain is (the backend's share of `-c` didn't move):
+
+| | without | with the profile |
+| --- | ---: | ---: |
+| instructions | 948.5 M | 873.1 M |
+| calls (`ex_ret_near_ret`) | 4.91 M | 1.96 M |
+| taken branches (`ex_ret_brn_tkn`) | 77.4 M | 43.7 M |
+| stores dispatched | 143.5 M | 122.0 M |
+
+Sampled attribution of the 75 M instructions didn't agree with itself. Fixed-period `instructions:u` samples land after
+stalls, and the savings are spread over hundreds of functions, a few million instructions each. Two exact methods split
+it instead:
+
+- **Profile subsets.** The checker's unit, which holds the whole compile path, was built with parts of the profile. The
+  full profile gave -7.4% of the instructions. The input reader's functions (`check_input_*`, literals, bindings and
+  constants) gave -3.7% alone, the graph's walk and actions -2.8%, the other `check_*` -1.6%, and the preprocessor,
+  parser and types -0.1%.
+- **The profile without its inlining.** Building with the inliner's thresholds for hot and cold calls set to the
+  default (`-mllvm -hot-callsite-threshold=225`, `-inline-cold-callsite-threshold=225`,
+  `-locally-hot-callsite-threshold=225`, `-inline-enable-cost-benefit-analysis=false`) gave -2.1% of the instructions,
+  -1.6% of the cycles and -33% of the taken branches. That part is the profile's block layout; its inlining gave the
+  rest, -5.3% of the instructions and -54% of the calls.
+
+**Inlining.** Clang's inliner keeps a callee of more than one call out of line once its cost passes the threshold,
+about 50 IR instructions, however often it runs. The profile raises the threshold at hot calls. Sampling returns with
+their branch records (`perf record -e ex_ret_near_ret:u -j any_ret,u`, the record's `from` the callee and its `to` the
+caller) named the hot calls, and 46 callees on the checker's paths are now always inlined, each with the caller it
+saves. Among them are the graph's per-node `check_graph_pure`, `check_graph_scalar_node` (with `check_graph_action`,
+`check_graph_store` and `check_graph_leaf`), `check_action_compute`, the reader's `check_input_add_node`, and the
+declarators' and literals' helpers. `check_graph_scalar_node`'s body, `check_graph_node_action` since #1050 gave the
+memoized transitions an out-of-line copy of it, calls `check_action_compute` itself, rather than through
+`check_action_scalar`, whose 15 other callers keep that call out of line. Out of the 4.91 M calls, 2.36 M are left; the
+profile left 1.96 M.
+
+**Layout.** One test is 6% of the taken branches: `type_strip_aligned`'s, inlined everywhere, which clang laid out with
+the rare aligned type on the path. It now says so (`__builtin_expect`). The rest of the profile's layout is a long tail
+of tests that run once a token or a node and are rarely true, such as `check_input_resolve_range`'s events and
+`check_input_expression_coded`'s operators. [#1175](https://github.com/buster14a/buster/issues/1175) tracks it. Marking
+the diagnostics' reporters `cold` (clang treats a path to a cold call as unlikely) took nothing: they are tiny and were
+inlined, and as calls they cost about 2 M instructions more.
+
+**The opt-in build.** Trained on the compiler's own translation units, `BUSTER_PGO=1` gave more than #182's profile of
+the frozen corpora. These are the builds' counts against the same source's plain build, the least of three runs each:
+
+| | instructions | cycles | taken branches |
+| --- | ---: | ---: | ---: |
+| `-fsyntax-only sqlite3.c`, the corpora's profile | -7.95% | -3.29% | -43.6% |
+| `-fsyntax-only sqlite3.c`, the compiler's own | -9.39% | -5.09% | -51.8% |
+| `-c sqlite3.c`, the corpora's profile | -5.90% | -2.18% | -39.8% |
+| `-c sqlite3.c`, the compiler's own | -7.15% | -2.79% | -46.1% |
+| `-c` of 139 musl units, the corpora's profile | -5.61% | -3.95% | -34.5% |
+| `-c` of 139 musl units, the compiler's own | -7.09% | -6.37% | -44.2% |
+
+The build takes 2.0 minutes on the 9700X with `BUSTER_DEBUG_INFO=0`: the instrumented compiles and the training take 78
+s before the usual 45 s of compiles.
+
+**Times.** `time-runs --runs 11 --warmups 1 --copies 2` on the 9700X (CPU 2), with `BUSTER_HOST_ARCH=znver5` and
+`BUSTER_DEBUG_INFO=0`, ran main (`3ce71ec3`), this change, and this change with `BUSTER_PGO=1`. Each build ran at four
+placements of `main.c`'s code (`build.sh shifts`, 0 to 768 bytes): 88 runs per build and list. Every object was byte for
+byte main's. The ranges are over placements and copies.
+
+| `-c sqlite3.c` | wall | user cycles | instructions |
+| --- | ---: | ---: | ---: |
+| main | 116.47 ms | 546.1 M | 1,257.1 M |
+| this change | -1.53% (-2.66% to -0.60%) | -1.73% | -3.64% |
+| this change, `BUSTER_PGO=1` | -3.76% (-4.75% to -3.06%) | -4.32% | -7.25% |
+
+| `-c` of 139 musl units | wall | user cycles | instructions |
+| --- | ---: | ---: | ---: |
+| main | 186.82 ms | 744.2 M | 2,239.5 M |
+| this change | -1.15% (-1.80% to -0.69%) | -1.58% | -3.27% |
+| this change, `BUSTER_PGO=1` | -5.15% (-5.93% to -4.51%) | -7.04% | -7.24% |
+
+The record ([buster-performance#222](https://github.com/buster14a/buster-performance/pull/222),
+[`pgo-port-880-2026-11-02`](https://github.com/buster14a/buster-performance/tree/ff44d0e6baf2231a30d454555abb4694ac06549b/docs/measurements/pgo-port-880-2026-11-02))
+has the scripts, every variant's counts, the call and taken-branch samples, and the executables' hashes.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the

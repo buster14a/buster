@@ -1264,7 +1264,8 @@ static void check_input_sparse_mark(const CheckInputReader* reader, uint32_t tok
 // block's first use. Rebuild that event only when a later semantic use or declaration needs it after a restore.
 // Existing local bindings win, and the original library declaration, rather than a closed block's later prototype,
 // supplies the visible type. The normal event stream still owns uses, scopes and scalar/vector replay.
-static uint32_t check_input_library_binding(CheckInputReader* reader, uint32_t name, uint32_t point)
+// Always inlined (#880), as profile-guided builds do; hot callers: check_input_implicit_function and check_input_bind.
+static inline __attribute__((always_inline)) uint32_t check_input_library_binding(CheckInputReader* reader, uint32_t name, uint32_t point)
 {
     uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
     const uint32_t library = reader->library_declarations != NULL ? reader->library_declarations[name] : 0;
@@ -1933,7 +1934,9 @@ static uint32_t check_input_scan_pointers(const void* const* column, uint32_t fi
 static const CheckInputAttribute* check_input_naked_attribute(const CheckInputAttributes* attributes);
 static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous);
 
-static TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin)
+// Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
+// check_input_declaration.
+static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin)
 {
     TypeId function = type;
     uint8_t kind = type_kind(reader->types, function);
@@ -2878,7 +2881,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     return valid ? type_qualify(reader->types, base, qualifiers) : 0;
 }
 
-static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_literal, once per literal.
+static inline __attribute__((always_inline)) bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length)
 {
     const uint32_t source = reader->parser->tokens.sources[token];
     PPTokens* output = &reader->pp->output;
@@ -3015,7 +3019,8 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
 
 // A literal token's type and value, into `result`, written into the caller's rather than returned (#510: see
 // check_literal_integer).
-static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckLiteral* result)
+// Always inlined (#880), as profile-guided builds do; hot caller: the expression reader, once per literal.
+static inline __attribute__((always_inline)) void check_input_literal(CheckInputReader* reader, uint32_t token, CheckLiteral* result)
 {
     const uint64_t mark = reader->scratch->length;
     const uint8_t* bytes = 0;
@@ -3196,7 +3201,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     return valid;
 }
 
-static CheckInputAttributes* check_input_merge_attributes(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* suffix)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_declaration.
+static inline __attribute__((always_inline)) CheckInputAttributes* check_input_merge_attributes(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* suffix)
 {
     CheckInputAttributes* result = suffix != 0 ? suffix : common;
     if (common != 0 && suffix != 0)
@@ -3318,7 +3324,9 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
 // The struct, union or enum keyword among the specifiers from `first`, before `end`, whose body follows it: a definition
 // that the reader hasn't read yet, which a declaration's, a member's or a parameter's reader reads before the specifiers
 // (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none.
-static uint32_t check_input_specifier_definition(const CheckInputReader* reader, uint32_t first, uint32_t end)
+// Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
+// check_input_declaration.
+static inline __attribute__((always_inline)) uint32_t check_input_specifier_definition(const CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const Parser* parser = reader->parser;
     uint32_t tag = first;
@@ -3391,7 +3399,8 @@ struct CheckDeclaratorRun
 // The run begins (check_input_declarator_begin) after the caller sets reader->specifier_abi_origin and
 // reader->declarator_overloadable for it, which it takes. Returns 0, with the output's resource set, when there's no
 // room for it in scratch.
-static CheckDeclaratorRun* check_input_declarator_begin(CheckInputReader* reader, TypeId base, uint32_t cursor, uint32_t end)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_declarator.
+static inline __attribute__((always_inline)) CheckDeclaratorRun* check_input_declarator_begin(CheckInputReader* reader, TypeId base, uint32_t cursor, uint32_t end)
 {
     const Parser* parser = reader->parser;
     uint32_t stop = cursor;
@@ -3979,7 +3988,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
 // parameters (`names`), its attributes, the tags and enumeration constants its parameter list declared and its ABI's
 // origin (reader->declarator_attributes, reader->declarator_declarations and reader->declarator_abi_origin). A run
 // that failed restores what it declared, and the run's memory is taken back.
-static TypeId check_input_declarator_end(CheckInputReader* reader, CheckDeclaratorRun* run, uint32_t* cursor, uint32_t* name, uint32_t* names)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_declaration.
+static inline __attribute__((always_inline)) TypeId check_input_declarator_end(CheckInputReader* reader, CheckDeclaratorRun* run, uint32_t* cursor, uint32_t* name, uint32_t* names)
 {
     const bool complete = run->valid && run->depth == 0;
     if (!complete && c_bindings_mark(&reader->bindings) != run->binding_mark && !c_bindings_restore(&reader->bindings, run->binding_mark, run->stop))
@@ -6560,7 +6570,10 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
 // floating-point environment. A full graph is a resource failure. It doesn't record the nodes before it, which
 // check_input_add does first; the coded walk leaves that to the next check_input_add or check_graph_record_finish, which
 // record them in node order from their final columns.
-static inline uint32_t check_input_add_columns(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c, bool clear)
+// Always inlined (#880), as profile-guided builds do; hot callers: the coded walk's actions and check_input_add_node,
+// once per node.
+static inline __attribute__((always_inline)) uint32_t check_input_add_columns(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c,
+                                                                              bool clear)
 {
     const uint32_t node = check_graph_add_node(&reader->output->graph, op, token, a, b, c, clear);
     if (node == BUSTER_CHECK_NONE)
@@ -6583,14 +6596,15 @@ static inline uint32_t check_input_add_columns(CheckInputReader* reader, CheckOp
     return node;
 }
 
-static uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_run, once per node.
+static inline __attribute__((always_inline)) uint32_t check_input_add_node(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
     return check_input_add_columns(reader, op, token, a, b, c, true);
 }
 
 // A VALUE node at `token` whose leaf its maker writes whole (check_graph_add_node without `clear`): the coded walk's
-// identifiers', literals' and strings' (#1038).
-static uint32_t check_input_add_leaf(CheckInputReader* reader, uint32_t token)
+// identifiers', literals' and strings' (#1038), inlined as check_input_add_node is.
+static inline __attribute__((always_inline)) uint32_t check_input_add_leaf(CheckInputReader* reader, uint32_t token)
 {
     return check_input_add_columns(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
 }
@@ -6603,7 +6617,8 @@ static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t t
     return check_input_add_node(reader, op, token, a, b, c);
 }
 
-static void check_input_vector_member(CheckInputReader* reader, uint32_t node, uint32_t token)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_run.
+static inline __attribute__((always_inline)) void check_input_vector_member(CheckInputReader* reader, uint32_t node, uint32_t token)
 {
     CheckGraph* graph = &reader->output->graph;
     const uint32_t name = reader->parser->tokens.names[token];
