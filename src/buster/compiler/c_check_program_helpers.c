@@ -25,8 +25,9 @@
 // never a list of this file's. A fence of a constant order lowers to the typed stream's FENCE
 // (check_program_direct_fence), and an aligned atomic load or store of an integer or a pointer, of a constant order, to
 // its LOAD or SET with an atomic marker (check_program_direct_access), an exchange and an addition to its ATOMIC_RMW
-// (check_program_direct_rmw), and a compare-exchange to its ATOMIC_CAS (check_program_direct_cas, and every plan's:
-// check_lower_atomic_direct_plan); none plans a helper. Every other use keeps its helper (CheckProgramHelpers.uses);
+// (check_program_direct_rmw), a compare-exchange to its ATOMIC_CAS (check_program_direct_cas, and every plan's:
+// check_lower_atomic_direct_plan), and a bitwise, minimum or maximum one to a loop of ATOMIC_CAS
+// (check_program_direct_fetch); none plans a helper. Every other use keeps its helper (CheckProgramHelpers.uses);
 // --helper-report counts both in the lowered code (check_helper_report_add).
 #ifndef BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
@@ -156,9 +157,11 @@ static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PRO
                   "aligned to its size, of a constant order (any: the locked access is a full barrier) evaluated for no effect: the typed stream's ATOMIC_RMW, "
                   "xchg or lock xadd; a compare-exchange, GNU's, __sync's or C11's, so admitted (of an integer's, an enumeration's or a pointer's object, its "
                   "orders both constant), and every plan's (a generic one's, an implicit _Atomic object's update loop, a C11 one's of a representation): the "
-                  "typed stream's ATOMIC_CAS, lock cmpxchg",
-        .helper = "every other read/modify/write of 1, 2, 4 or 8 bytes aligned to its size (the bitwise, minimum, maximum and floating operations, a "
-                  "C11 compare-exchange of a floating object, a dynamic order, a scoped family's), of integer, bool or GNU's float and double formats",
+                  "typed stream's ATOMIC_CAS, lock cmpxchg; and a bitwise, minimum or maximum one, GNU's, __sync's or C11's, so admitted (of an integer's or "
+                  "an enumeration's object, a bool's for and, or and xor): a loop of ATOMIC_CAS after a relaxed atomic load",
+        .helper = "every other read/modify/write of 1, 2, 4 or 8 bytes aligned to its size (the floating operations, clang's wrapping increment and "
+                  "decrement, a C11 compare-exchange of a floating object, a dynamic order, a scoped family's), of integer, bool or GNU's float and double "
+                  "formats",
     },
     [CHECK_PROGRAM_HELPER_FENCE] = {
         .name = "fence",
@@ -505,6 +508,48 @@ static uint32_t check_program_direct_cas(const CheckProgram* program, uint32_t n
             const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
             quiet = quiet && (check_stream_flags(program->stream, argument) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
         }
+        value = quiet ? rule->legacy ? BUSTER_TYPED_FENCE_SEQ_CST : effect->success_order : UINT32_MAX;
+    }
+    return value;
+}
+
+// An atomic bitwise, minimum or maximum read/modify/write that lowers to a compare-exchange loop of the typed stream's
+// ATOMIC_CAS rather than its helper's call (#1059, CHECK_PROGRAM_HELPER_ATOMIC_RMW's direct form): GNU's, __sync's (clang's
+// legacy minimum and maximum too) and C11's and, or, xor and nand (__atomic_fetch_and ... __atomic_nand_fetch, the
+// __sync_ ones, C11's fetch_and, fetch_or, fetch_xor and fetch_nand) and minimum and maximum (__atomic_fetch_min ...
+// __atomic_max_fetch, __sync_fetch_and_min, _max, _umin and _umax, C11's fetch_min and fetch_max), returning the old value
+// or the new one, unscoped, without a legacy builtin's protected variables, of an integer's or an enumeration's object (a
+// bool's of and, or and xor alone, whose bits stay 0 or 1) of 1, 2, 4 or 8 bytes, its value's size, known aligned to it (a
+// native one, for C11's), of an order the checker knows (any of C's: lock cmpxchg is a full barrier; a legacy builtin's,
+// which has none, is seq_cst) whose argument evaluates for no effect, its effect's shape its rule's, as a direct
+// read/modify/write's; `effect` is the node's. Returns its ATOMIC_CAS order, or UINT32_MAX for one its helper takes (a
+// floating object's, a pointer's, clang's wrapping increment and decrement). The planner and the lowering ask it alike.
+static uint32_t check_program_direct_fetch(const CheckProgram* program, uint32_t node, const CheckBuiltinAtomicEffect* effect)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool c11 = check_builtin_atomic_c11(id);
+    const bool matched = effect != NULL && effect->node == node && check_builtin_atomic_scope(id) == CHECK_BUILTIN_ATOMIC_SCOPE_NONE;
+    const CheckBuiltinAtomicRmwRule* rule = matched ? check_builtin_atomic_rmw_rule(effect->runtime_builtin) : NULL;
+    const CheckBuiltinAtomicRmwOperation operation = rule != NULL ? rule->operation : CHECK_BUILTIN_ATOMIC_RMW_NONE;
+    const bool bitwise = operation == CHECK_BUILTIN_ATOMIC_RMW_AND || operation == CHECK_BUILTIN_ATOMIC_RMW_OR || operation == CHECK_BUILTIN_ATOMIC_RMW_XOR;
+    const bool other = operation == CHECK_BUILTIN_ATOMIC_RMW_NAND || operation == CHECK_BUILTIN_ATOMIC_RMW_MIN || operation == CHECK_BUILTIN_ATOMIC_RMW_MAX;
+    const uint32_t arguments = graph->argument_counts != NULL ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
+    const uint64_t size = rule != NULL ? effect->object_size : 0;
+    const uint8_t kind = rule != NULL ? check_action_kind(program->types, effect->value_type) : BUSTER_TYPE_KIND_NONE;
+    const bool boolean = rule != NULL && type_unqualified(effect->value_type) == BUSTER_TYPE_BOOL;
+    const bool typed = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM) && (bitwise || !boolean);
+    const bool sized = (size == 1 || size == 2 || size == 4 || size == 8) && type_size(program->types, effect->value_type) == size;
+    const bool known = rule != NULL && (rule->legacy || ((effect->known_orders & BUSTER_CHECK_BUILTIN_ATOMIC_KNOWN_SUCCESS_ORDER) != 0 &&
+                                                         effect->success_order <= BUSTER_TYPED_FENCE_SEQ_CST));
+    const bool shaped = rule != NULL && effect->rmw && arguments == rule->fixed_count && rule->fixed_count < 32 &&
+                        effect->evaluated_operands == (UINT32_C(1) << rule->fixed_count) - 1;
+    uint32_t value = UINT32_MAX;
+    if ((bitwise || other) && shaped && typed && sized && effect->alignment_known && effect->minimum_alignment >= size && effect->unsupported == 0 && known &&
+        (!c11 || check_builtin_atomic_c11_native(program->types, id, effect->value_type, size, true)))
+    {
+        const uint32_t order = rule->legacy ? BUSTER_CHECK_NONE : graph->argument_nodes[graph->argument_offsets[node] + arguments - 1];
+        const bool quiet = rule->legacy || (check_stream_flags(program->stream, order) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
         value = quiet ? rule->legacy ? BUSTER_TYPED_FENCE_SEQ_CST : effect->success_order : UINT32_MAX;
     }
     return value;
@@ -1037,9 +1082,10 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                             // The typed stream's ATOMIC_RMW: no helper.
                             folded = true;
                         }
-                        else if (check_program_direct_cas(program, node, stream->atomics + atomic) != UINT32_MAX)
+                        else if (check_program_direct_cas(program, node, stream->atomics + atomic) != UINT32_MAX ||
+                                 check_program_direct_fetch(program, node, stream->atomics + atomic) != UINT32_MAX)
                         {
-                            // The typed stream's ATOMIC_CAS: no helper.
+                            // The typed stream's ATOMIC_CAS, or a loop of it: no helper.
                             folded = true;
                         }
                         else if (base == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || base == CBUILTIN_ATOMIC_IS_LOCK_FREE || check_builtin_atomic_generic(base))

@@ -235,7 +235,9 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
 // __sync_ one, an implicit _Atomic object's increment, C11's fetch_sub of a short and GNU's add_fetch of a byte, which
 // wrap) and by compare-exchange loops of each direct form (GNU's weak compare-exchange of a long, __sync's val form of a
 // short and bool form of a byte, which wrap, C11's weak one of an int, and an implicit _Atomic double's +=, its plan's
-// loop), and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
+// loop), set and clear a bit of their own in a shared word by GNU's fetch_or and fetch_and, compare-exchange loops, each
+// old value showing the bit as it left it (another thread's update lost would change it), and raise a shared peak by
+// fetch_max, and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
 // increment a volatile counter ten times as often, the control, which may lose updates. Every atomic count must be
 // exact. Each run's threads start together, past a barrier of an add_fetch and an acquire load, so that they overlap
 // where they have CPUs of their own.
@@ -258,6 +260,9 @@ static const char check_test_counter_litmus_source[] =
     "static unsigned char flagged;\n"
     "static _Atomic int c11;\n"
     "static _Atomic double floating;\n"
+    "static unsigned long bits;\n"
+    "static long peak;\n"
+    "static int mismatches;\n"
     "static int lock;\n"
     "static long guarded;\n"
     "static volatile long plain;\n"
@@ -271,11 +276,16 @@ static const char check_test_counter_litmus_source[] =
     "        if (spins > 64) sched_yield();\n"
     "    }\n"
     "}\n"
-    "void* worker(void* unused)\n"
+    "void* worker(void* argument)\n"
     "{\n"
+    "    const long self = (long)argument;\n"
+    "    const unsigned long mine = 1ul << self;\n"
     "    start();\n"
     "    for (int i = 0; i < ITERATIONS; i++)\n"
     "    {\n"
+    "        if ((__atomic_fetch_or(&bits, mine, __ATOMIC_ACQ_REL) & mine) != 0) __atomic_fetch_add(&mismatches, 1, __ATOMIC_RELAXED);\n"
+    "        if ((__atomic_fetch_and(&bits, ~mine, __ATOMIC_ACQ_REL) & mine) == 0) __atomic_fetch_add(&mismatches, 1, __ATOMIC_RELAXED);\n"
+    "        __atomic_fetch_max(&peak, (long)i * THREADS + self, __ATOMIC_RELAXED);\n"
     "        __atomic_fetch_add(&gnu, 1, __ATOMIC_RELAXED);\n"
     "        __sync_fetch_and_add(&legacy, 2);\n"
     "        implicit++;\n"
@@ -297,7 +307,7 @@ static const char check_test_counter_litmus_source[] =
     "        guarded++;\n"
     "        __atomic_store_n(&lock, 0, __ATOMIC_RELEASE);\n"
     "    }\n"
-    "    return unused;\n"
+    "    return argument;\n"
     "}\n"
     "void* control(void* unused)\n"
     "{\n"
@@ -310,7 +320,7 @@ static const char check_test_counter_litmus_source[] =
     "    pthread_t threads[THREADS];\n"
     "    int created = 0;\n"
     "    ready = 0;\n"
-    "    while (created < THREADS && pthread_create(&threads[created], 0, body, 0) == 0) created++;\n"
+    "    while (created < THREADS && pthread_create(&threads[created], 0, body, (void*)(long)created) == 0) created++;\n"
     "    for (int t = 0; t < created; t++) pthread_join(threads[t], 0);\n"
     "    return created == THREADS;\n"
     "}\n"
@@ -320,8 +330,9 @@ static const char check_test_counter_litmus_source[] =
     "    alarm(120);\n"
     "    if (sched_getaffinity(0, sizeof(set), &set) != 0 || CPU_COUNT(&set) < 2) { printf(\"skipped\\n\"); return 0; }\n"
     "    if (!run(worker) || !run(control)) return 1;\n"
-    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld\\n\", gnu, legacy,\n"
-    "           (long)implicit, (int)down, (int)bytes, guarded, (long)plain, swapped, (int)valued, (int)flagged, (int)c11, (long)floating);\n"
+    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld bits=%lu peak=%ld mismatches=%d\\n\", gnu,\n"
+    "           legacy, (long)implicit, (int)down, (int)bytes, guarded, (long)plain, swapped, (int)valued, (int)flagged, (int)c11, (long)floating, bits, peak,\n"
+    "           mismatches);\n"
     "    return 0;\n"
     "}\n";
 
@@ -360,12 +371,13 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         arguments[count] = NULL;
         char* text = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        // The worker's six read/modify/writes and five compare-exchanges and the barrier's addition, and eleven atomic
-        // accesses (the lock's release, the barrier's load, the compare-exchange loops' first loads, and main's loads of the
-        // four _Atomic counters), are the typed stream's, none a helper's call.
-        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=12\thelper=0\tplanned=0\n") != NULL &&
-                              strstr(text, "helpers.atomic-access\tdirect=11\thelper=0\tplanned=0\n") != NULL &&
-                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=23\thelper=0\tplanned=0\n") != NULL;
+        // The worker's eight read/modify/writes (two of them the mismatches' additions) and eight compare-exchanges (three
+        // of them the bitwise and maximum loops') and the barrier's addition, and fourteen atomic accesses (the lock's
+        // release, the barrier's load, the compare-exchange loops' first loads, and main's loads of the four _Atomic
+        // counters), are the typed stream's, none a helper's call.
+        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=17\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers.atomic-access\tdirect=14\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=31\thelper=0\tplanned=0\n") != NULL;
         const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
         if ((status != 0 || !reported) && text != NULL)
         {
@@ -373,7 +385,7 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         }
         free(text);
         const bool built = status == 0 && reported && taken;
-        char message[256];
+        char message[512];
         snprintf(message, sizeof(message), "counters (%s): the litmus builds, its read/modify/writes taken directly%s", way, tier1 ? " and its threads Tier 1's" : "");
         check_test_expect(test, built, message);
         char captured[256] = { 0 };
@@ -390,15 +402,23 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         int flagged = -1;
         int c11 = -1;
         long floating = -1;
+        unsigned long bits = 1;
+        long peak = -1;
+        int mismatches = -1;
         const bool skipped = ran && strcmp(captured, "skipped\n") == 0;
-        const bool read = ran && sscanf(captured, "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld", &gnu,
-                                        &legacy, &implicit, &down, &bytes, &guarded, &plain, &swapped, &valued, &flagged, &c11, &floating) == 12;
+        const bool read = ran && sscanf(captured,
+                                        "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld bits=%lu "
+                                        "peak=%ld mismatches=%d",
+                                        &gnu, &legacy, &implicit, &down, &bytes, &guarded, &plain, &swapped, &valued, &flagged, &c11, &floating, &bits, &peak, &mismatches) == 15;
+        // Each thread's bit clear at the end, every old value its owner's, and the peak the last iteration's of the last
+        // thread.
         const bool exact = read && gnu == total && legacy == 2 * total && implicit == total && down == (int16_t)-total && bytes == (uint8_t)(3 * total) && guarded == total &&
                            plain >= 1 && plain <= control && swapped == total && valued == (int16_t)-total && flagged == (uint8_t)(5 * total) && c11 == 2 * total &&
-                           floating == total;
-        char message_counts[200];
-        snprintf(message_counts, sizeof(message_counts), "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld", gnu,
-                 legacy, implicit, down, bytes, guarded, swapped, valued, flagged, c11, floating);
+                           floating == total && bits == 0 && mismatches == 0 && peak == total - 1;
+        char message_counts[256];
+        snprintf(message_counts, sizeof(message_counts),
+                 "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld bits=%lu peak=%ld mismatches=%d", gnu, legacy,
+                 implicit, down, bytes, guarded, swapped, valued, flagged, c11, floating, bits, peak, mismatches);
         snprintf(message, sizeof(message), "counters (%s): every atomic count is exact (%s)", way, message_counts);
         check_test_expect(test, skipped || exact, message);
         if (read)

@@ -8,7 +8,9 @@
 // the new one, GNU's, __sync's and C11's, a test-and-set, a pointer's exchange, and an implicit _Atomic object's
 // increments, decrements and compound additions (the typed stream's ATOMIC_RMW; the IR's rmw); and compare-exchanges
 // that succeed and that fail, GNU's, __sync's (bool and val), C11's, the generic one, and an implicit _Atomic object's
-// compound multiplication, exclusive or and shift, their loops' (the typed stream's ATOMIC_CAS; the IR's rmw cas).
+// compound multiplication, exclusive or and shift, their loops' (the typed stream's ATOMIC_CAS; the IR's rmw cas); and
+// bitwise, minimum and maximum read/modify/writes, GNU's, __sync's and C11's, signed and unsigned, returning the old
+// value and the new one, each a loop of compare-exchanges after a relaxed atomic load.
 // Promotion leaves every atomic access in memory. test-ir-source lowers them by both
 // paths, promotes them and reads their text back; test-ssa-source runs the program in the IR's three forms against
 // clang -O0's build's output.
@@ -80,6 +82,25 @@ static long exchanged(int value)
     return sum + wide + narrow + byte + counter + flag;
 }
 
+static long fetched(int value)
+{
+    signed char low = (signed char)(value - 60);
+    unsigned short half = (unsigned short)(value * 7000);
+    long sum = __atomic_fetch_and(&wide, ~(long)value, __ATOMIC_SEQ_CST);
+    sum = sum * 3 + __atomic_or_fetch(&narrow, (short)0x4001, __ATOMIC_RELAXED);
+    sum = sum * 3 + __atomic_fetch_xor(&byte, (unsigned char)0xa5, __ATOMIC_ACQ_REL);
+    sum = sum * 3 + __atomic_nand_fetch(&half, (unsigned short)0x0ff0, __ATOMIC_SEQ_CST);
+    sum = sum * 3 + __atomic_fetch_min(&low, (signed char)100, __ATOMIC_SEQ_CST);
+    sum = sum * 3 + __atomic_max_fetch(&low, (signed char)-100, __ATOMIC_ACQUIRE);
+    sum = sum * 3 + __atomic_min_fetch(&half, (unsigned short)40000, __ATOMIC_RELEASE);
+    sum = sum * 3 + __sync_fetch_and_xor(&wide, (long)value << 20);
+    sum = sum * 3 + __sync_and_and_fetch(&narrow, (short)~value);
+    sum = sum * 3 + __c11_atomic_fetch_or(&counter, 0x50, __ATOMIC_SEQ_CST);
+    sum = sum * 3 + __c11_atomic_fetch_max(&counter, value * 3, __ATOMIC_ACQ_REL);
+    sum = sum * 3 + __c11_atomic_fetch_min(&flag, (char)-7, __ATOMIC_SEQ_CST);
+    return sum + wide + narrow + byte + half + low + counter + flag;
+}
+
 int main(void)
 {
     int local = 0;
@@ -98,6 +119,7 @@ int main(void)
     total += published(total);
     total += (int)updated(total, &local);
     total += (int)exchanged(total);
+    total += (int)fetched(total);
     printf("%d\n", total);
     return 0;
 }
