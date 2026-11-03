@@ -211,12 +211,14 @@ static void check_test_program_atomic_rmws(CheckTest* test, const char* clang)
     // width (its multiplication's loop, and a byte's and a bool's, compare-exchanges'), compare-exchanges of every width
     // and form, GNU's, __sync's, C11's and the generic one, that succeed and that fail (their results, the expected
     // objects and the objects), bitwise, minimum and maximum loops of every width, signed and unsigned on both sides of
-    // the sign (a bool's bitwise ones too), and the helpers' among them (dynamic orders).
+    // the sign (a bool's bitwise ones too), and the helpers' among them (dynamic orders). Defined for every input the
+    // harness gives (n from -3 to 19, which UBSan's build of clang's code runs clean): an unsigned checksum, and wide
+    // signed values multiplied, not shifted.
     check_test_program_source(test,
                               "_Atomic int ai;_Atomic long al;_Atomic char ac;_Atomic short as;int* gp;"
                               "int tested(int n){char c=1;short s=2;int i=3;long l=4;unsigned char t=0;int o=n&3?__ATOMIC_ACQUIRE:__ATOMIC_SEQ_CST;"
-                              "long r=__atomic_exchange_n(&c,(char)n,__ATOMIC_RELAXED)+__atomic_fetch_add(&s,(short)(n*3),__ATOMIC_RELEASE);"
-                              "r+=__atomic_add_fetch(&i,n*5,__ATOMIC_SEQ_CST)+__atomic_sub_fetch(&l,(long)n<<40,__ATOMIC_ACQ_REL)+__atomic_fetch_sub(&c,(char)7,__ATOMIC_CONSUME);"
+                              "unsigned long r=__atomic_exchange_n(&c,(char)n,__ATOMIC_RELAXED)+__atomic_fetch_add(&s,(short)(n*3),__ATOMIC_RELEASE);"
+                              "r+=__atomic_add_fetch(&i,n*5,__ATOMIC_SEQ_CST)+__atomic_sub_fetch(&l,(long)n*1099511627776l,__ATOMIC_ACQ_REL)+__atomic_fetch_sub(&c,(char)7,__ATOMIC_CONSUME);"
                               "r+=__sync_fetch_and_add(&i,2)+__sync_sub_and_fetch(&s,(short)9)+__sync_lock_test_and_set(&l,(long)n)+__sync_swap(&i,n+1);"
                               "r+=__atomic_test_and_set(&t,__ATOMIC_ACQUIRE)+__atomic_test_and_set(&t,__ATOMIC_SEQ_CST)+t;"
                               "gp=&i;r+=*__atomic_exchange_n(&gp,&i,__ATOMIC_SEQ_CST)+(gp==&i);"
@@ -245,14 +247,14 @@ static void check_test_program_atomic_rmws(CheckTest* test, const char* clang)
                               "r=r*3+__atomic_fetch_max(&ss,(short)-5,__ATOMIC_ACQUIRE);r+=ss;r=r*3+__atomic_min_fetch(&us,(unsigned short)40000,__ATOMIC_RELEASE);r+=us;"
                               "unsigned uu=(unsigned)n*0x9e3779b9u;r=r*3+__sync_fetch_and_umin(&uu,0x80000000u);r+=uu;r=r*3+__sync_fetch_and_umax(&uu,7u);r+=uu;"
                               "int ii=n-3;r=r*3+__sync_fetch_and_max(&ii,0);r+=ii;r=r*3+__sync_fetch_and_min(&ii,-1);r+=ii;"
-                              "long ll=-(long)n<<40;r=r*3+__atomic_fetch_min(&ll,(long)n,__ATOMIC_SEQ_CST);r+=ll;r=r*3+__atomic_max_fetch(&ll,(long)n<<50,__ATOMIC_SEQ_CST);r+=ll;"
+                              "long ll=-(long)n*1099511627776l;r=r*3+__atomic_fetch_min(&ll,(long)n,__ATOMIC_SEQ_CST);r+=ll;r=r*3+__atomic_max_fetch(&ll,(long)n*1125899906842624l,__ATOMIC_SEQ_CST);r+=ll;"
                               "unsigned long ul=(unsigned long)n<<60;r=r*3+__atomic_nand_fetch(&ul,~0ul,__ATOMIC_SEQ_CST);r+=ul;r=r*3+__atomic_fetch_or(&ul,(unsigned long)n<<62,__ATOMIC_SEQ_CST);r+=ul;"
                               "r=r*3+__atomic_fetch_xor(&uc,(unsigned char)0xa5,__ATOMIC_SEQ_CST);r+=uc;r=r*3+__atomic_and_fetch(&us,(unsigned short)0x0ff0,__ATOMIC_SEQ_CST);r+=us;"
                               "r=r*3+__sync_fetch_and_nand(&sc,(signed char)0x3c);r+=sc;r=r*3+__sync_or_and_fetch(&ss,(short)0x4001);r+=ss;"
                               "_Bool bb=n&1;r=r*3+__atomic_xor_fetch(&bb,1,__ATOMIC_SEQ_CST);r+=bb;r=r*3+__atomic_fetch_or(&bb,n&2,__ATOMIC_SEQ_CST);r+=bb;"
                               "r=r*3+__atomic_fetch_and(&bb,0,__ATOMIC_SEQ_CST);r+=bb;"
                               "r=r*3+__c11_atomic_fetch_or(&ac,(char)0x40,__ATOMIC_SEQ_CST);r+=ac;r=r*3+__c11_atomic_fetch_nand(&as,(short)n,__ATOMIC_SEQ_CST);r+=as;"
-                              "r=r*3+__c11_atomic_fetch_min(&ai,-n,__ATOMIC_SEQ_CST);r+=ai;r=r*3+__c11_atomic_fetch_max(&al,(long)n<<45,__ATOMIC_ACQ_REL);r+=al;"
+                              "r=r*3+__c11_atomic_fetch_min(&ai,-n,__ATOMIC_SEQ_CST);r+=ai;r=r*3+__c11_atomic_fetch_max(&al,(long)n*35184372088832l,__ATOMIC_ACQ_REL);r+=al;"
                               "r=r*3+__c11_atomic_fetch_xor(&ai,0x5a5a,__ATOMIC_RELAXED);r+=ai;"
                               "return (int)(r+i+l+c+s+ai+al+ac+as);}",
                               "atomic-rmws-direct-and-helper-widths-orders-and-implicit", clang);
