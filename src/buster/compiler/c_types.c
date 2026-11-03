@@ -566,6 +566,8 @@ typedef enum TypeTransparentUnionStatus
     TYPE_TRANSPARENT_UNION_FIRST_VECTOR,
     TYPE_TRANSPARENT_UNION_SIZE,
     TYPE_TRANSPARENT_UNION_ALIGNMENT,
+    // A field of incomplete type (a GNU flexible array member), which clang's handler leaves without a word.
+    TYPE_TRANSPARENT_UNION_INCOMPLETE_FIELD,
 } TypeTransparentUnionStatus;
 
 typedef struct TypeTransparentUnionResult TypeTransparentUnionResult;
@@ -3542,12 +3544,16 @@ static TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, 
                 }
                 const uint64_t size = type_size(table, first);
                 const uint32_t alignment = type_alignment_log2(table, first);
-                for (uint32_t member = 1; result.status == TYPE_TRANSPARENT_UNION_APPLIED && member < count; member += 1)
+                // clang's handleTransparentUnionAttr: every field has the first's size and no greater alignment (a smaller
+                // one is fine), and an incomplete field's type (the first's included) ends the check without the attribute.
+                for (uint32_t member = 0; result.status == TYPE_TRANSPARENT_UNION_APPLIED && member < count; member += 1)
                 {
                     const TypeId type = table->members.type[begin + member];
-                    if (type_size(table, type) != size || type_alignment_log2(table, type) != alignment)
+                    const bool incomplete = !type_is_complete(table, type);
+                    if (incomplete || type_size(table, type) != size || type_alignment_log2(table, type) > alignment)
                     {
-                        result.status = type_size(table, type) != size ? TYPE_TRANSPARENT_UNION_SIZE : TYPE_TRANSPARENT_UNION_ALIGNMENT;
+                        result.status = incomplete ? TYPE_TRANSPARENT_UNION_INCOMPLETE_FIELD :
+                                        type_size(table, type) != size ? TYPE_TRANSPARENT_UNION_SIZE : TYPE_TRANSPARENT_UNION_ALIGNMENT;
                         result.member = member;
                     }
                 }

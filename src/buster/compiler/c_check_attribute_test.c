@@ -433,6 +433,73 @@ static void check_test_attribute_vocabulary(CheckTest* test)
         check_test_expect(test, (count > 256 || (standard == 3 && count == 9)) && unordered == 0 && found == count,
                           "attribute vocabulary: ordered, bounded and each name found");
     }
+    // The subject rows (c_check_attribute_subjects.inc): each list in its spellings' byte order, without repeats.
+    for (uint32_t standard = 0; standard < 2; standard += 1)
+    {
+        const CheckInputSubjectRow* list = standard != 0 ? check_input_subject_c23 : check_input_subject_gnu;
+        const uint32_t count = standard != 0 ? BUSTER_ARRAY_LENGTH(check_input_subject_c23) : BUSTER_ARRAY_LENGTH(check_input_subject_gnu);
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t shorter = i != 0 && list[i - 1].length < list[i].length ? list[i - 1].length : list[i].length;
+            const int order = i != 0 ? memcmp(list[i - 1].spelling, list[i].spelling, shorter) : -1;
+            unordered += order > 0 || (order == 0 && list[i - 1].length >= list[i].length) ? 1u : 0u;
+            found += check_input_subject_find(list, count, (String8){ (char*)list[i].spelling, list[i].length }) == list + i ? 1u : 0u;
+        }
+        check_test_expect(test, count > 200 && unordered == 0 && found == count, "attribute subjects: rows ordered and each found");
+    }
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_subject_gnu) == 304 && BUSTER_ARRAY_LENGTH(check_input_subject_c23) == 225,
+                      "attribute subjects: clang 23.1.5's 304 GNU spellings and 225 C23 ones with subjects");
+    const CheckInputSubjectRow* cold = check_input_subject_row((String8){ "", 0 }, (String8){ "cold", 4 }, false, false);
+    const CheckInputSubjectRow* scoped = check_input_subject_row((String8){ "_Clang", 6 }, (String8){ "nomerge", 7 }, true, true);
+    check_test_expect(test, cold != NULL && cold->subjects == BUSTER_CHECK_SUBJECT_FUNCTION && !cold->error && scoped != NULL && scoped->error &&
+                          check_input_subject_row((String8){ "", 0 }, (String8){ "aligned", 7 }, false, false) == NULL,
+                      "attribute subjects: cold's, clang::nomerge's under _Clang, and none for aligned, whose handler checks it");
+    // The handlers' own rows: GNU's spelling and gnu::'s (__gnu__ too), and none under another scope or none.
+    const CheckInputSubjectRow* sentinel = check_input_subject_row((String8){ "", 0 }, (String8){ "sentinel", 8 }, false, false);
+    const CheckInputSubjectRow* transparent = check_input_subject_row((String8){ "__gnu__", 7 }, (String8){ "transparent_union", 17 }, true, true);
+    check_test_expect(test, sentinel != NULL && (sentinel->subjects & BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE) != 0 && transparent != NULL &&
+                          (transparent->subjects & BUSTER_CHECK_SUBJECT_UNION_TYPEDEF) != 0 &&
+                          check_input_subject_row((String8){ "clang", 5 }, (String8){ "transparent_union", 17 }, true, true) == NULL &&
+                          check_input_subject_row((String8){ "", 0 }, (String8){ "transparent_union", 17 }, false, true) == NULL,
+                      "attribute subjects: sentinel's and transparent_union's rows, which their handlers check, by their spellings alone");
+    TypeTestTable storage;
+    const bool ready = type_test_table_open(&storage, 4096);
+    check_test_expect(test, ready, "attribute subjects: nonstring's type table opens");
+    if (ready)
+    {
+        // nonstring's types (handleNonStringAttr): a pointer to a character type or an array of one through arrays, qualified
+        // or not, and nothing else.
+        TypeTable* table = &storage.table;
+        const TypeId char_array = type_array(table, BUSTER_TYPE_CHAR, 4);
+        const TypeId fits[] = {
+            char_array,
+            type_array(table, type_array(table, BUSTER_TYPE_SCHAR, 2), 3),
+            type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)),
+            type_pointer(table, BUSTER_TYPE_UCHAR),
+            type_incomplete_array(table, BUSTER_TYPE_CHAR),
+        };
+        const TypeId misfits[] = {
+            BUSTER_TYPE_CHAR,
+            BUSTER_TYPE_INT,
+            type_array(table, BUSTER_TYPE_INT, 2),
+            type_array(table, BUSTER_TYPE_BOOL, 2),
+            type_pointer(table, type_pointer(table, BUSTER_TYPE_CHAR)),
+            type_pointer(table, char_array),
+        };
+        bool all = true;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fits); i += 1)
+        {
+            all &= check_input_nonstring_type(table, fits[i]);
+        }
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(misfits); i += 1)
+        {
+            all &= !check_input_nonstring_type(table, misfits[i]);
+        }
+        check_test_expect(test, all, "attribute subjects: nonstring takes character arrays and pointers to characters alone");
+        type_test_table_close(&storage);
+    }
     check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes) == 366 && BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) == 283 &&
                           BUSTER_ARRAY_LENGTH(check_input_clang_spellings) == 539 && BUSTER_ARRAY_LENGTH(check_input_clang_scopes) == 9,
                       "attribute vocabulary: clang 23.1.5's 366 GNU names, 283 C23 spellings, and its list's 539 spellings and 9 scopes");

@@ -65,8 +65,24 @@ typedef enum CheckWarningEventKind
     // `__clang__`'s expansion where a C23 attribute's scope or name goes, which clang reads as `_Clang` (#147, c_parser.c's
     // parse_clang_scope_numbers): -Wignored-attributes' warning at it.
     CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE,
+    // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
+    // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
+    CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
+    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_function_types):
+    // payload.name the attribute's name, payload.first_type the declarator's type, payload.data its typedef spelling.
+    CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
+    CHECK_WARNING_EVENT_NONSTRING_TYPE,
+    CHECK_WARNING_EVENT_TRANSPARENT_UNION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
+#define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
+#define BUSTER_CHECK_TRANSPARENT_EMPTY 2u
+#define BUSTER_CHECK_TRANSPARENT_FLOAT 3u
+#define BUSTER_CHECK_TRANSPARENT_VECTOR 4u
+#define BUSTER_CHECK_TRANSPARENT_SIZE 5u
+#define BUSTER_CHECK_TRANSPARENT_ALIGNMENT 6u
 
 typedef enum CheckWarningNoteKind
 {
@@ -74,6 +90,7 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_INLINE_LINKAGE,
     CHECK_WARNING_NOTE_USED_HERE,
     CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+    CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

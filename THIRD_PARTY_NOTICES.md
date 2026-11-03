@@ -209,6 +209,8 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_types.c`, `src/buster/compiler/c_types_test.c`, `src/buster/compiler/c_types_benchmark.c`, `docs/c-types.md` | Original type table, hash-consing, record layout, conversion kernels, compatibility, composite types and printer, and their tests, benchmark and documentation; Default, with the public-domain SplitMix64 reference below. They follow clang 23's behaviour: clang's source (`ASTContext`, `ItaniumRecordLayoutBuilder`, `SemaExpr`'s conversions, `mergeTypes`, `TypePrinter`) was read for its rules and none of it is copied. clang runs externally as the tests' oracle on C the tests generate, and is not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `src/buster/compiler/c_check_*.c`, `src/buster/compiler/c_checker*.c`, `docs/c-checker.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/) | Original semantic actions, scalar/vector expression checker, source/declaration and binding-event adapters, literal decoder, static-data producer, command, tests, benchmarks and documentation; Default. Existing project type, parser, binding, arena, Link and ELF-writer interfaces are reused. Fixtures and deterministic generated source/expressions are authored for this module; Clang runs externally as an acceptance/diagnostic, numeric-conversion and object-byte/relocation oracle, with no Clang implementation or external corpus imported. C conversion and constant-expression rules and ELF layouts are specification facts; the documentation records the supported subset and oracle configuration. The benchmark's generators, timing, counter and sample-selection helpers are original. |
 | `src/buster/compiler/c_check_attribute_clang.inc` | Derived LLVM data, not first-party: the attribute spellings clang 23.1.5 knows in C for x86-64 Linux; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's attribute vocabulary (#147)" below has its inputs and procedure. |
+| `src/buster/compiler/c_check_attribute_subjects.inc` | Derived LLVM data, not first-party: the subjects of clang 23.1.5's attributes in C, generated from `clang-tblgen`'s output for `Attr.td`; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's attribute subjects (#147)" below has its inputs and procedure. |
+| `tools/generate_attribute_subjects.c` | Original generator of `c_check_attribute_subjects.inc`, with its map of clang's subject predicates to C declarations; Default. It reads `clang-tblgen`'s generated output at run time and copies no clang code. |
 | `src/buster/compiler/c_parser.c`, `src/buster/compiler/c_parser_test.c`, `docs/c-parser.md` | Original parser (the vector path's kernels and their scalar twins, the checks, the scalar parser, the postorder and the driver), its tests and documentation; Default, with the public-domain SplitMix64 reference below. The kernels are ported from this project's own spike, #186 (branch `claude/spike-186-k2-spills` at `e896031`), under Default too. The tree's construction follows Bar-On and Vishkin's published algorithm (1985), referenced, not copied. The diagnostics follow clang 23's behaviour: their messages are clang's texts for the same errors and their places are where clang reports them, as clang's output shows, and the tokens allowed after a tag's body follow clang's `Parser::isValidAfterTypeSpecifier`, read for its rule; no clang code is copied. The predeclared typedef names are clang's (names only). clang runs externally as the tests' oracle on the tests' snippets, generated inputs and corpora, which are read at run time and not vendored. |
 | `docs/c-parser-fragments.md` | Original record of the expression-fragment experiment (#104–#107), its measurements and its decision; Default. The experiment's code, removed by that decision, was original under Default too. Salter's operator-fragment discussion and Carbon's postorder bracketing are design references recorded in the document; no historical Zig implementation or external test fixture was copied. External corpora were runtime test inputs. |
 | `src/buster/compiler/c_parser_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c`, by way of #186's spike benchmark, retain MIT. |
@@ -624,6 +626,42 @@ LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
   (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
   every row's test against clang's code over every bit and value of the
   model. Its use as an oracle copies none of its code.
+
+### Clang's attribute subjects (#147)
+
+`src/buster/compiler/c_check_attribute_subjects.inc` is derived LLVM data, not
+first-party material: for each GNU and C23 spelling of an attribute clang checks
+the subject of, the C declarations it takes, whether another is an error, and
+the subjects clang's message names, by which the checker warns and ignores an
+attribute on another declaration (`check_input_attribute_subjects`,
+`c_check_attribute.c`). It keeps the LLVM Project's
+`Apache-2.0 WITH LLVM-exception` terms ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)),
+and its header says so.
+
+- **Input:** `clang-tblgen --gen-clang-attr-parsed-attr-impl` of
+  `clang/include/clang/Basic/Attr.td` at `llvmorg-23.1.5` (sha256
+  `6014bff340878cf3c656bf3d1ccae64cfd33615d8245c4c5472d10ffd4dc6a1d`, with the
+  files it includes), by apt.llvm.org's `clang-tools-23`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92`: clang's
+  `AttrParsedAttrImpl.inc`. Its `diagAppertainsToDecl` functions and their
+  spellings were read; nothing else was taken.
+- **Generator:** `tools/generate_attribute_subjects.c` (original, Default)
+  maps each subject predicate to the C declarations it takes. Its term table is
+  written from the predicates' definitions in `Attr.td` (`GlobalVar`,
+  `SharedVar`, `NonParmVar`, `FunctionPointer`, `HasFunctionProto` and the
+  others), read for their rules. It writes 304 GNU rows and 225 C23 rows, each
+  list in byte order, and fails on a predicate it doesn't know. The file's
+  sha256 is `d1a8e05f1875adbc2c4db2a20d6b230696e7fb9f91b7066f166ec8fd9076af6f`.
+- **Not from the table:** `sentinel`'s and `transparent_union`'s subjects,
+  which clang's handlers check themselves, and `nonstring`'s type check and
+  `transparent_union`'s field checks, are rows and code of `c_check_attribute.c`
+  and `c_check_input.c`, written from `SemaDeclAttr.cpp`'s
+  `handleSentinelAttr`, `handleTransparentUnionAttr` and `handleNonStringAttr`
+  at `llvmorg-23.1.5`, read for their rules. The vector description in
+  messages follows `ASTDiagnostic.cpp`'s `ConvertTypeToDiagnosticString`, read
+  the same way. None of that code is copied.
+- **Procedure:** [the checker guide](docs/c-checker.md)'s "Attributes on
+  declarations they don't apply to (#147)".
 
 ### Clang's attribute vocabulary (#147)
 

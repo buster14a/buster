@@ -12,7 +12,8 @@ static TypeId check_test_transparent_record(CheckTest* test, TypeTable* table, c
     const TypeError error = table->last_error;
     const TypeTransparentUnionResult marked = type_mark_transparent_union(table, record);
     const uint32_t member = expected == TYPE_TRANSPARENT_UNION_FIRST_FLOAT || expected == TYPE_TRANSPARENT_UNION_FIRST_VECTOR ? 0 :
-                            expected == TYPE_TRANSPARENT_UNION_SIZE || expected == TYPE_TRANSPARENT_UNION_ALIGNMENT ? 1 : UINT32_MAX;
+                            expected == TYPE_TRANSPARENT_UNION_SIZE || expected == TYPE_TRANSPARENT_UNION_ALIGNMENT ||
+                            expected == TYPE_TRANSPARENT_UNION_INCOMPLETE_FIELD ? 1 : UINT32_MAX;
     check_test_expect(test, complete && marked.status == expected && marked.member == member && table->last_error == error,
                       "transparent validator reports the exact subject constraint without setting a type-construction error");
     check_test_expect(test, type_is_transparent_union(table, record) == (expected == TYPE_TRANSPARENT_UNION_APPLIED),
@@ -99,6 +100,10 @@ static __attribute__((noinline)) void check_test_transparent_types(CheckTest* te
         check_test_transparent_record(test, table, members, 2, TYPE_TRANSPARENT_UNION_SIZE);
         members[1].type = type_aligned(table, BUSTER_TYPE_INT, 3);
         check_test_transparent_record(test, table, members, 2, TYPE_TRANSPARENT_UNION_ALIGNMENT);
+        members[1].type = type_array(table, BUSTER_TYPE_CHAR, 4);
+        check_test_transparent_record(test, table, members, 2, TYPE_TRANSPARENT_UNION_APPLIED);
+        members[1].type = type_incomplete_array(table, BUSTER_TYPE_INT);
+        check_test_transparent_record(test, table, members, 2, TYPE_TRANSPARENT_UNION_INCOMPLETE_FIELD);
         members[1].type = BUSTER_TYPE_INT;
         members[1].alignment_log2 = 3;
         check_test_transparent_record(test, table, members, 2, TYPE_TRANSPARENT_UNION_APPLIED);

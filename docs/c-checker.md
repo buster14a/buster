@@ -5097,6 +5097,119 @@ Its `ATTR_NAME` and `ATTR_SCOPE_NAME` lines, in order, are the file's
 THIRD_PARTY_NOTICES.md's record, the counts `test-checker` checks, and
 compare the lists with `Attr.td` before taking them.
 
+## Attributes on declarations they don't apply to (#147)
+
+Clang checks each attribute's subject before its handler runs: on a
+declaration of none of its subjects, it warns "'X' attribute only applies to
+SUBJECTS" (`-Wignored-attributes`) and keeps nothing of the attribute, or, for
+some attributes, gives an error of the same words. The checker used to refuse
+such a declaration, or keep the attribute where clang drops it. It now does as
+clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
+
+- **The table.** `c_check_attribute_subjects.inc` is clang's
+  `diagAppertainsToDecl` for C, one row per GNU and C23 spelling: the C
+  declarations the attribute takes (`BUSTER_CHECK_SUBJECT_*`), whether
+  another is clang's error, and the subjects its message names. It is derived
+  LLVM data: `tools/generate_attribute_subjects.c` generates it from
+  `clang-tblgen --gen-clang-attr-parsed-attr-impl` of `Attr.td`. The
+  generator maps each of clang's subject predicates to the C declarations it
+  takes, and a predicate it doesn't know fails it. For example,
+  `GlobalVar` takes a variable of global storage and `FunctionPointer` a
+  declaration of a function pointer's type. A predicate of no C declaration
+  (Objective-C's, C++'s, HLSL's) takes none. The lookup is a binary search by
+  spelling: a GNU name without its underscores, or a C23 spelling with its
+  scope normalized.
+- **Declarations' subjects.** Each place that reads attributes says what its
+  declaration is:
+  - a function, inline or not;
+  - a variable of global storage (thread-local or shared, external at file
+    scope) or local storage;
+  - a parameter;
+  - a member, a bit-field or not;
+  - a typedef, a struct, union or enum, an enumerator, or a label.
+
+  Each of these is also function-like, prototyped, or a function pointer, by
+  its type: a parameter by its adjusted type.
+- **The handlers' own subjects.** Two attributes are checked by their
+  handlers, not by the generated code, and rows of
+  `check_input_subject_handlers` give them:
+  - `sentinel` takes functions and variables (parameters too) of a function
+    pointer's type: "functions, methods and blocks".
+  - `transparent_union` takes unions and typedefs of a union's type:
+    "unions".
+- **Each declarator.** The specifiers' attributes are shared by the
+  declarators of their declaration, and each declarator checks them again.
+  `int __attribute__((cold)) a, b, f(void);` warns at `a` and at `b`, and
+  `f` keeps `cold`. The record a declarator ignored is marked so
+  (`subject_ignored`), and the next declarator decides afresh.
+- **Function types' attributes.** A calling convention, `regparm` or GNU's
+  `noreturn` on a declarator whose type isn't a function's, or a pointer's,
+  array's or aligned typedef's to one, gets clang's "'X' only applies to
+  function types; type here is 'T'" (`check_input_attribute_function_types`).
+  The warning is at the attribute's first token, a C23 one's scope; the name
+  is written without its scope, and the type is as clang spells it, its
+  typedef first ('T' (aka 'int')). This covers the specifiers' attributes too,
+  for each declarator.
+- **`nonstring`.** On a variable, parameter or field whose type is no pointer
+  to a character type or array of one (through arrays of arrays), clang's
+  handler warns "'X' attribute only applies to fields or variables of
+  character array type; type is 'T'". The warning is at the declaration's
+  first token, past `__extension__` and C23 attributes, as
+  `Decl::getBeginLoc` places it (`check_input_attribute_begin`).
+- **`transparent_union`'s own warnings.** These follow
+  `handleTransparentUnionAttr` (`check_input_transparent_union_warning`):
+  - an incomplete union, or one of no fields: a warning at the attribute;
+  - a first field of a floating or vector type: a warning at that field;
+  - a field of another size than the first's, or of a greater alignment: a
+    warning at that field, with a note of the first field's size or
+    alignment at it.
+
+  Each union's member tokens are kept from its completion
+  (`CheckInputUnionTokens`), for a typedef that applies the attribute later.
+  A field of incomplete type (a flexible array member) leaves the attribute
+  ignored without a word, as clang's does. A field less aligned than the
+  first is fine (`type_mark_transparent_union`). It used to make the union no
+  transparent one, which refused calls through it that clang takes.
+- **Vector types in messages.** A vector type printed without an a.k.a. is
+  described as clang's `ConvertTypeToDiagnosticString` describes it:
+  "'T' (vector of N 'E' values)" (`check_driver_warning_type`).
+- **Differences left.**
+  - An attribute clang knows that the checker has no rule for is refused by
+    name before its subject is checked: `int v __attribute__((optnone));`
+    is refused, where clang warns. The attribute's argument count isn't
+    checked either.
+  - The checker stops at a declaration's first error. So a later
+    declaration's warnings, which clang gives too, are missing after an error
+    row's error (`int e __attribute__((error("x")));`), as after any other
+    error.
+- **Tests.** `test-checker` checks the table's order and lookups
+  (`c_check_attribute_test.c`): the counts, a row of each kind, `_Clang`'s
+  scope, and an attribute whose handler checks itself. It also checks
+  `type_mark_transparent_union`'s statuses
+  (`c_check_transparent_type_test.c`). `test-checker-driver` compares the
+  whole output with clang's on both paths (`check_test_driver_unknown_attributes`'s
+  statements) for:
+  - variables, functions, parameters, members, bit-fields, typedefs, tags,
+    enumerators and labels, by GNU's and C23's spellings;
+  - error rows, each in a unit of its own;
+  - function types' attributes on other types, and shared specifiers;
+  - `sentinel`, `transparent_union` and `nonstring`;
+  - `transparent_union`'s own warnings, and a call through a union with a
+    less aligned field.
+
+The table is regenerated from the installed clang's tag, in the directory of
+`Attr.td` and the files it includes (the spelling list's, above):
+
+```sh
+clang-tblgen --gen-clang-attr-parsed-attr-impl -I . clang/Basic/Attr.td -o parsed.inc
+cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_attribute_subjects.c -o build/generate_attribute_subjects
+build/generate_attribute_subjects --self-test
+build/generate_attribute_subjects parsed.inc "clang/include/clang/Basic/Attr.td at llvmorg-X (sha256 ...), by clang-tblgen VERSION" > src/buster/compiler/c_check_attribute_subjects.inc
+```
+
+Then update THIRD_PARTY_NOTICES.md's record and the counts `test-checker`
+checks.
+
 ## Ignorable and unsupported pragmas
 
 The checker consumes retained pragmas after their existing semantic handlers. An

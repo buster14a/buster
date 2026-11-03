@@ -163,6 +163,8 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
     uint32_t cursor = first;
     CheckInputAttributes* attributes = 0;
     bool valid = refused == BUSTER_CHECK_NONE && after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
+    // A label's subject as clang's attributes name it (#147): the warning for those that apply elsewhere.
+    valid = valid && check_input_attribute_subjects(reader, attributes, BUSTER_CHECK_SUBJECT_LABEL, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;

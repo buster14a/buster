@@ -187,6 +187,9 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
+    // Ignored by the subject check (check_input_attribute_subjects) of the declarator that read it last: a record that
+    // declaration specifiers' attributes share among their declarators is checked again by each.
+    bool subject_ignored;
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
     // cleanup's function declaration plus one, bound before later declarators can shadow its parsed argument.
@@ -1007,6 +1010,144 @@ static const CheckInputClangAttribute check_input_clang_scopes[] =
 #undef BUSTER_CHECK_CLANG_NONE
 #undef BUSTER_CHECK_CLANG_ENTRY
 
+// The C declarations clang's attribute subjects name (#147, c_check_attribute_subjects.inc, which
+// tools/generate_attribute_subjects.c makes from clang's Attr.td): a declaration is one or more of them, an attribute applies
+// to any of its row's. A function is FUNCTION_LIKE too, and PROTOTYPED with a prototype; a variable, a parameter, a member
+// or a typedef of a function's type or a pointer to one is FUNCTION_LIKE (and FUNCTION_POINTER of the pointer), PROTOTYPED
+// with its prototype (clang's getFunctionType). A variable of static or thread storage is GLOBAL (and SHARED without a
+// thread's, EXTERNAL_GLOBAL at file scope without static), one of automatic storage LOCAL.
+#define BUSTER_CHECK_SUBJECT_FUNCTION 0x1u
+#define BUSTER_CHECK_SUBJECT_VARIABLE 0x2u
+#define BUSTER_CHECK_SUBJECT_PARAMETER 0x4u
+#define BUSTER_CHECK_SUBJECT_FIELD 0x8u
+#define BUSTER_CHECK_SUBJECT_STRUCT 0x10u
+#define BUSTER_CHECK_SUBJECT_UNION 0x20u
+#define BUSTER_CHECK_SUBJECT_ENUM 0x40u
+#define BUSTER_CHECK_SUBJECT_TYPEDEF 0x80u
+#define BUSTER_CHECK_SUBJECT_ENUMERATOR 0x100u
+#define BUSTER_CHECK_SUBJECT_LABEL 0x200u
+#define BUSTER_CHECK_SUBJECT_PROTOTYPED 0x400u
+#define BUSTER_CHECK_SUBJECT_FUNCTION_LIKE 0x800u
+#define BUSTER_CHECK_SUBJECT_FUNCTION_POINTER 0x1000u
+#define BUSTER_CHECK_SUBJECT_GLOBAL 0x2000u
+#define BUSTER_CHECK_SUBJECT_SHARED 0x4000u
+#define BUSTER_CHECK_SUBJECT_EXTERNAL_GLOBAL 0x8000u
+#define BUSTER_CHECK_SUBJECT_LOCAL 0x10000u
+#define BUSTER_CHECK_SUBJECT_NON_PARAMETER_VARIABLE 0x20000u
+#define BUSTER_CHECK_SUBJECT_THREAD_LOCAL 0x40000u
+#define BUSTER_CHECK_SUBJECT_INLINE 0x80000u
+#define BUSTER_CHECK_SUBJECT_BIT_FIELD 0x100000u
+#define BUSTER_CHECK_SUBJECT_NON_BIT_FIELD 0x200000u
+// Of no generated row, for the handlers' own subjects (check_input_subject_handlers): a typedef of a union's type, which
+// transparent_union takes beside a union, and a variable or parameter of a function pointer's type, which sentinel takes.
+#define BUSTER_CHECK_SUBJECT_UNION_TYPEDEF 0x400000u
+#define BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE 0x800000u
+
+typedef struct CheckInputSubjectRow CheckInputSubjectRow;
+struct CheckInputSubjectRow
+{
+    const char* spelling;
+    uint32_t length;
+    uint32_t subjects;
+    bool error;
+    const char* message;
+};
+
+// The subjects of GNU attributes that clang's handlers check themselves, rather than its generated diagAppertainsToDecl,
+// as rows, in byte order (check_input_subject_row): handleSentinelAttr's and handleTransparentUnionAttr's.
+static const CheckInputSubjectRow check_input_subject_handlers[] =
+{
+    { "sentinel", 8, BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE, false, "functions, methods and blocks" },
+    { "transparent_union", 17, BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_UNION_TYPEDEF, false, "unions" },
+};
+
+static const CheckInputSubjectRow check_input_subject_gnu[] =
+{
+#define BUSTER_CHECK_SUBJECT_GNU(spelling, subjects, error, message) { spelling, sizeof(spelling) - 1, subjects, error, message },
+#define BUSTER_CHECK_SUBJECT_C23(spelling, subjects, error, message)
+#include "c_check_attribute_subjects.inc"
+#undef BUSTER_CHECK_SUBJECT_C23
+#undef BUSTER_CHECK_SUBJECT_GNU
+};
+
+static const CheckInputSubjectRow check_input_subject_c23[] =
+{
+#define BUSTER_CHECK_SUBJECT_GNU(spelling, subjects, error, message)
+#define BUSTER_CHECK_SUBJECT_C23(spelling, subjects, error, message) { spelling, sizeof(spelling) - 1, subjects, error, message },
+#include "c_check_attribute_subjects.inc"
+#undef BUSTER_CHECK_SUBJECT_C23
+#undef BUSTER_CHECK_SUBJECT_GNU
+};
+
+// The row of `count` in `list` (in byte order) whose spelling is `text`, or null: a binary search.
+static const CheckInputSubjectRow* check_input_subject_find(const CheckInputSubjectRow* list, uint32_t count, String8 text)
+{
+    const CheckInputSubjectRow* result = NULL;
+    uint32_t lower = 0;
+    uint32_t upper = count;
+    while (lower < upper)
+    {
+        const uint32_t middle = lower + (upper - lower) / 2;
+        const uint32_t length = list[middle].length;
+        const uint64_t common = text.length < length ? text.length : length;
+        int order = common != 0 ? memcmp(text.pointer, list[middle].spelling, common) : 0;
+        order = order != 0 ? order : (text.length > length) - (text.length < length);
+        result = order == 0 ? list + middle : result;
+        upper = order <= 0 ? middle : upper;
+        lower = order > 0 ? middle + 1 : lower;
+    }
+    return result;
+}
+
+// The subject row of an attribute: a GNU spelling's `name` (its surrounding underscores gone) or a C23 one's, its scope
+// normalized as clang's (gnu, clang for clang and _Clang), or null for none (an attribute whose subjects clang's own
+// handler checks, a type's among them).
+static const CheckInputSubjectRow* check_input_subject_row(String8 scope, String8 name, bool scoped, bool standard)
+{
+    const CheckInputSubjectRow* result = NULL;
+    if (!standard)
+    {
+        result = check_input_subject_find(check_input_subject_gnu, BUSTER_ARRAY_LENGTH(check_input_subject_gnu), name);
+    }
+    else
+    {
+        char spelling[64];
+        const bool gnu = (scope.length == 3 && memcmp(scope.pointer, "gnu", 3) == 0) || (scope.length == 7 && memcmp(scope.pointer, "__gnu__", 7) == 0);
+        const bool clang = (scope.length == 5 && memcmp(scope.pointer, "clang", 5) == 0) || (scope.length == 6 && memcmp(scope.pointer, "_Clang", 6) == 0);
+        const String8 normalized = gnu ? (String8){ "gnu", 3 } : clang ? (String8){ "clang", 5 } : scope;
+        const uint64_t length = scoped ? normalized.length + 2 + name.length : name.length;
+        if (length < sizeof(spelling))
+        {
+            uint64_t at = 0;
+            if (scoped)
+            {
+                memcpy(spelling, normalized.pointer, normalized.length);
+                memcpy(spelling + normalized.length, "::", 2);
+                at = normalized.length + 2;
+            }
+            memcpy(spelling + at, name.pointer, name.length);
+            result = check_input_subject_find(check_input_subject_c23, BUSTER_ARRAY_LENGTH(check_input_subject_c23), (String8){ spelling, length });
+        }
+    }
+    const bool gnu_scope = !standard || (scoped && ((scope.length == 3 && memcmp(scope.pointer, "gnu", 3) == 0) || (scope.length == 7 && memcmp(scope.pointer, "__gnu__", 7) == 0)));
+    const CheckInputSubjectRow* handler = gnu_scope ? check_input_subject_find(check_input_subject_handlers, BUSTER_ARRAY_LENGTH(check_input_subject_handlers), name) : NULL;
+    result = result != NULL ? result : handler;
+    return result;
+}
+
+// The subjects a declaration of `type` takes as a function-like one: FUNCTION_LIKE (with PROTOTYPED for a prototype) of a
+// function's type or a pointer to one, FUNCTION_POINTER of the latter, as clang's getFunctionType reads a declaration's type.
+static uint32_t check_input_type_subjects(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type_strip_aligned(types, type);
+    const bool pointer = type_is_valid(types, bare) && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId function = pointer ? type_strip_aligned(types, types->types.base[type_index(bare)]) : bare;
+    const bool like = type_is_valid(types, function) && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool prototyped = like && (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    return (like ? BUSTER_CHECK_SUBJECT_FUNCTION_LIKE : 0) | (prototyped ? BUSTER_CHECK_SUBJECT_PROTOTYPED : 0) |
+           (like && pointer ? BUSTER_CHECK_SUBJECT_FUNCTION_POINTER : 0);
+}
+
 // Whether `text` is one of the `count` names of `list`, in byte order: a binary search.
 static bool check_input_attribute_listed(const CheckInputClangAttribute* list, uint32_t count, String8 text)
 {
@@ -1414,7 +1555,11 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
     {
         CheckInputAttribute* attribute = &attributes->records[i];
         CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
-        if (attribute->kind == CHECK_ATTRIBUTE_MODE)
+        if (attribute->kind == CHECK_ATTRIBUTE_MODE && type_kind(reader->types, type_strip_aligned(reader->types, result)) == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            // A function's, which clang's subject check refuses before the mode is read (check_input_attribute_subjects).
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_MODE)
         {
             result = check_input_attribute_mode(reader, attribute, result);
             valid = result != 0;
@@ -1989,6 +2134,112 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
     arena_pop_to(reader->scratch, mark);
 }
 
+// clang's check of each attribute's subject (#147, its generated diagAppertainsToDecl, c_check_attribute_subjects.inc):
+// a declaration that is none of `subjects`' kinds an attribute's row names gets clang's warning that the attribute only
+// applies to those, which then keeps nothing of it, or clang's error of the same words, at the attribute's first token (a
+// C23 one's scope). An attribute of no row (a type's, one whose own handler clang checks) is left as it is. A variable's,
+// parameter's or field's nonstring on a `type` that is no character array or pointer warns at `begin`, as clang's handler
+// does, its type spelled through the declarator `name`'s typedef. Whether no error was reported.
+// Whether a variable, parameter or field of `type` may have nonstring, as clang's handleNonStringAttr asks: a pointer to
+// a character type (char, signed char or unsigned char, qualified or not) or an array of one, through arrays of arrays.
+static bool check_input_nonstring_type(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type_strip_aligned(types, type);
+    const uint8_t kind = type_is_valid(types, bare) ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+    const bool array = type_kind_is_array(kind);
+    TypeId element = array || kind == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, types->types.base[type_index(bare)]) : 0;
+    while (array && element != 0 && type_is_valid(types, element) && type_kind_is_array(type_kind(types, element)))
+    {
+        element = type_strip_aligned(types, types->types.base[type_index(element)]);
+    }
+    const TypeId plain = type_unqualified(element);
+    return element != 0 && (plain == BUSTER_TYPE_CHAR || plain == BUSTER_TYPE_SCHAR || plain == BUSTER_TYPE_UCHAR);
+}
+
+// A declaration's first token as clang's Decl::getBeginLoc gives it, from its first token `token`: past leading
+// __extension__ markers and C23 attribute specifiers (GNU attributes and _Alignas begin it).
+static uint32_t check_input_attribute_begin(const Parser* parser, uint32_t token, uint32_t end)
+{
+    uint32_t begin = token;
+    bool more = true;
+    while (more && begin < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[begin];
+        const bool standard = kind == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, begin, end);
+        const uint32_t close = standard ? parser->tree.parents[begin] : begin;
+        const bool skipped = standard && close > begin && close < end;
+        more = kind == PARSE_KIND_EXTENSION || skipped;
+        begin = kind == PARSE_KIND_EXTENSION ? begin + 1 : skipped ? close + 1 : begin;
+    }
+    return begin < end ? begin : token;
+}
+
+static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t declaration, TypeId type, uint32_t begin,
+                                           uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t pointer_variable = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER;
+    const uint32_t subjects = declaration | ((declaration & pointer_variable) == pointer_variable ? BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE : 0);
+    bool valid = true;
+    for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
+    {
+        CheckInputAttribute* attribute = attributes->records + i;
+        const bool scoped = attribute->standard && attribute->first != attribute->name_token;
+        const uint32_t scope_name = scoped ? parser->tokens.names[attribute->first] : 0;
+        const String8 scope = scoped ? check_input_attribute_name(reader, scope_name) : (String8){ "", 0 };
+        // transparent_union's handler ignores it off a union earlier (check_input_attribute_type), which still warns here.
+        const bool transparent = attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION;
+        const CheckInputSubjectRow* row = attribute->keyword || (attribute->ignored && !attribute->subject_ignored && !transparent) ? NULL :
+                                          check_input_subject_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+        // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
+        attribute->ignored &= !(attribute->subject_ignored && !transparent);
+        attribute->subject_ignored = false;
+        if (row != NULL && (row->subjects & subjects) == 0 && row->error)
+        {
+            check_input_report(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_SUBJECT);
+            valid = false;
+        }
+        else if (row != NULL && (row->subjects & subjects) == 0)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                .kind = CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
+                .token = attribute->first,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = attribute->first + 1,
+                .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        else if (row != NULL && attribute->kind == CHECK_ATTRIBUTE_NONSTRING && type != 0 && begin < parser->tokens.count &&
+                 !check_input_nonstring_type(reader->types, type))
+        {
+            // clang's handler's own warning, at the declaration's first token, after its subjects pass: the attribute named
+            // as above (its scope's token, when it has one, in the payload's) and the type as clang spells it.
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                .kind = CHECK_WARNING_EVENT_NONSTRING_TYPE,
+                .token = begin,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = begin + 1,
+                .payload = { .first_type = type, .name = attribute->name, .token = scoped ? attribute->first : BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = name < parser->tokens.count ? check_input_typedef_spelling(reader->output, parser, name) : 0 },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+    }
+    return valid;
+}
+
 // One pass over a declaration's attributes, for those whose place on a definition matters. clang's no_builtin is
 // permitted on a function's definition alone: on another function's declaration it is an error at its name, and on
 // anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as written, as an
@@ -2183,9 +2434,20 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
     const bool variadic = is_function && (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
     const TypeId* parameters = is_function ? type_parameters(reader->types, function, &count) : 0;
     const TypeId result = is_function ? type_return(reader->types, function) : 0;
+    const bool prototyped = is_function && (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
     for (uint32_t i = 0; valid && is_function && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
+        // One whose subjects are prototyped functions alone (format and the like) on a K&R function's type, which clang
+        // ignores with its subject's warning before reading its arguments (check_input_attribute_subjects).
+        const bool scoped = attribute->standard && attribute->first != attribute->name_token;
+        const CheckInputSubjectRow* row = attribute->keyword || prototyped ? NULL :
+            check_input_subject_row(scoped ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]) : (String8){ "", 0 },
+                                    check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
+        if (row != NULL && (row->subjects & (BUSTER_CHECK_SUBJECT_PROTOTYPED | BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_LIKE)) == BUSTER_CHECK_SUBJECT_PROTOTYPED)
+        {
+            continue;
+        }
         if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
         {
             check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);

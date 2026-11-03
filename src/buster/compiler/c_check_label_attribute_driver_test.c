@@ -649,6 +649,60 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "int f(int x) {\n    [[invented]] a: x++;\n    [[invented]] a: return x;\n}\n",
         "int f(int x) {\n    a: x++;\n    a: return x;\n}\n",
         "int f(int x) {\n    {\n        __label__ a;\n    a: x++;\n    a: x--;\n    }\n    return x;\n}\n",
+        // Attributes on declarations of none of their subjects (check_input_attribute_subjects): clang's warning, which
+        // keeps nothing of them, on variables, functions, parameters, members, bit-fields, typedefs, tags, enumerators and
+        // labels, by GNU's spellings and C23's; and its errors, one a unit.
+        "int a __attribute__((__cold__));\n[[gnu::cold]] int b;\n[[__gnu__::__cold__]] int c;\nint d __attribute__((cold, hot));\n"
+        "void f(int p __attribute__((cold)));\nstruct S { int m __attribute__((cold)); int bf : 3 __attribute__((cold)); };\n"
+        "typedef int T __attribute__((cold));\n"
+        "void g(void) { int l __attribute__((cold)); static int s __attribute__((used)); int u __attribute__((used)); }\n"
+        "void (*fp)(const char *, ...) __attribute__((format(printf, 1, 2)));\nint q __attribute__((nothrow));\n"
+        "void (*r)(void) __attribute__((nothrow));\nstruct __attribute__((cold)) U { int x; };\nenum __attribute__((flag_enum)) E { E0 = 1 };\n"
+        "struct __attribute__((flag_enum)) V { int x; };\nint w __attribute__((cleanup(g)));\n"
+        "void h(void) { static int sv __attribute__((cleanup(g))); }\nint nn __attribute__((nonnull));\nvoid pn(int *p __attribute__((nonnull)));\n"
+        "int ar __attribute__((artificial));\ninline void ia(void) __attribute__((artificial));\nvoid ni(void) __attribute__((artificial));\n",
+        "void f(int a __attribute__((used)), int *b __attribute__((nonnull)), void (*c)(void) __attribute__((nothrow)), int d __attribute__((nothrow)));\n"
+        "typedef void (*FP)(const char *, ...) __attribute__((format(printf, 1, 2)));\n"
+        "struct W { void (*fn)(void) __attribute__((nothrow)); int z __attribute__((nothrow)); };\n"
+        "int __thread tl __attribute__((tls_model(\"local-exec\")));\nvoid lab(void) { l: __attribute__((cold)); }\n"
+        "void lab2(void) { [[gnu::cold]] l2: ; }\nenum F { F0 __attribute__((cold)), F1 };\nint g1 __attribute__((weak));\n"
+        "void g3(void) __attribute__((weak));\nint g4 __attribute__((no_instrument_function));\nint g5 __attribute__((unused));\n"
+        "void g6(void) { int l __attribute__((unused)); }\nstruct __attribute__((unused)) X { int a; };\nint g7 __attribute__((mode(SI)));\n"
+        "void g8(void) __attribute__((nodebug));\nvoid g9(int p __attribute__((nodebug)));\n",
+        "int e __attribute__((error(\"x\")));\n",
+        "int __attribute__((tls_model(\"initial-exec\"))) tm;\n",
+        "void f(void) { int l __attribute__((section(\".l\"))); }\n",
+        "void f(void) __attribute__((mode(SI)));\n",
+        "enum G { G0 __attribute__((mode(SI))) };\n",
+        // Function types' attributes on other types, at each declarator a specifier's reaches; the handlers' own subjects
+        // (sentinel's, transparent_union's) and nonstring's types, at the declaration's start.
+        "int a __attribute__((stdcall));\nint *b __attribute__((ms_abi));\nint c __attribute__((noreturn));\nint d __attribute__((regparm(2)));\n"
+        "typedef int T; T e __attribute__((sysv_abi));\nstruct S { int m __attribute__((preserve_most)); };\nvoid f(int p __attribute__((vectorcall)));\n"
+        "int __attribute__((cdecl)) i;\n[[gnu::stdcall]] int j;\n[[gnu::__stdcall__]] int j2;\nint __attribute__((stdcall)) e1, e2;\n"
+        "int __attribute__((cold)) a1, a2, f1(void);\n[[gnu::cold]] int c1, c2;\n",
+        "void (*sp)(int, ...) __attribute__((sentinel));\nstruct SS { void (*sf)(int, ...) __attribute__((sentinel)); };\n"
+        "typedef void (*ST)(int, ...) __attribute__((sentinel));\nvoid sv(int a, ...) __attribute__((sentinel));\n"
+        "void sq(void (*p)(int, ...) __attribute__((sentinel)));\nint g17 __attribute__((sentinel));\n"
+        "int g __attribute__((transparent_union));\ntypedef int TI __attribute__((transparent_union));\n[[gnu::transparent_union]] int tj;\n"
+        "__attribute__((transparent_union)) int t1, t2;\n",
+        "struct T2 { int m __attribute__((nonstring)); [[gnu::nonstring]] int n; __attribute__((nonstring)) int o; int b : 3 __attribute__((nonstring)); };\n"
+        "char g33[2] __attribute__((nonstring));\nstatic int g34 __attribute__((nonstring));\n"
+        "void f(int p __attribute__((nonstring)), char q[2] __attribute__((nonstring)), int r[2] __attribute__((nonstring)), [[gnu::nonstring]] int s);\n"
+        "const char *g35 __attribute__((nonstring));\nchar **g36 __attribute__((nonstring));\nsigned char g37[3][2] __attribute__((nonstring));\n"
+        "typedef char TC[4]; TC g38 __attribute__((nonstring));\ntypedef int TN; TN g39 __attribute__((nonstring));\n"
+        "int __attribute__((nonstring)) g40, g41;\n__extension__ int g42 __attribute__((nonstring));\n[[gnu::nonstring]] [[gnu::unused]] static int g43;\n"
+        "int __attribute__((__nonstring__)) g44;\n[[__gnu__::__nonstring__]] int g45;\n_Bool g46[2] __attribute__((nonstring));\n"
+        "void g(void) { register int l __attribute__((nonstring)); extern int x __attribute__((nonstring)); char c[2] __attribute__((nonstring)); }\n",
+        // transparent_union's own warnings: an empty union, a floating or vector first field, a field of another size or a
+        // greater alignment (a smaller one is fine, and so is a call through it), a flexible array member, an incomplete union.
+        "union __attribute__((transparent_union)) E { };\nunion __attribute__((transparent_union)) F { float x; int y; };\n"
+        "union __attribute__((transparent_union)) G { int x; long y; };\nunion I;\ntypedef union I TI __attribute__((transparent_union));\n"
+        "union J { char c[4]; int y; } __attribute__((transparent_union));\ntypedef union { int a; double d; } TK __attribute__((transparent_union));\n"
+        "typedef float FL;\nunion __attribute__((transparent_union)) L { FL x; int y; };\n"
+        "union __attribute__((transparent_union)) M { int __attribute__((vector_size(16))) v; int y; };\n"
+        "union __attribute__((transparent_union)) N { int x; char c[]; };\nunion P { int a; long b; };\n"
+        "typedef union P TP __attribute__((transparent_union));\nunion [[gnu::transparent_union]] Q { };\n"
+        "typedef union { int *a; char b[8]; } U __attribute__((transparent_union));\nvoid take(U u);\nvoid give(int *p) { take(p); }\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

@@ -115,6 +115,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
         case CHECK_INPUT_LABEL_ATTRIBUTE: result = "attribute cannot be applied to a label"; break;
         case CHECK_INPUT_STATEMENT_ATTRIBUTE: result = "attribute cannot be applied to a statement"; break;
+        case CHECK_INPUT_ATTRIBUTE_SUBJECT: result = "attribute only applies to other declarations"; break;
         case CHECK_INPUT_FALLTHROUGH_STATEMENT: result = "'fallthrough' attribute only applies to empty statements"; break;
         case CHECK_INPUT_FALLTHROUGH_SWITCH: result = "fallthrough annotation is outside switch statement"; break;
         case CHECK_INPUT_FALLTHROUGH_PLACEMENT: result = "fallthrough annotation does not directly precede switch label"; break;
@@ -1235,7 +1236,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
                         }
-                        else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT) && named)
+                        else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ||
+                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT) && named)
                         {
                             // An attribute on a label or a statement that clang refuses there (#147), from its first token
                             // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
@@ -1260,8 +1262,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                             : (String8){ "", 0 };
                             scope_text = check_input_attribute_equal(scope_text, "_Clang") ? (String8){ "clang", 5 } : scope_text;
                             const char* refusal = kind == CHECK_INPUT_LABEL_ATTRIBUTE ? check_input_label_refusal(bare) : NULL;
+                            // A declaration's subject error names the subjects of its row (check_input_attribute_subjects).
+                            const CheckInputSubjectRow* row = kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? check_input_subject_row(scope_text, bare, scope != 0, standard) : NULL;
+                            char subjects[224];
+                            snprintf(subjects, sizeof(subjects), "only applies to %s", row != NULL ? row->message : "other declarations");
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? subjects :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
                                                  scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);

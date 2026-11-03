@@ -233,7 +233,17 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
             }
             else if (sugared.length != 0)
             {
-                const char* quoted = check_warning_text(scratch, "'%.*s'", (int)sugared.length, sugared.pointer);
+                // Without an a.k.a., clang describes a vector type: "'T' (vector of N 'E' values)" (ConvertTypeToDiagnosticString).
+                const TypeId vector = type_strip_aligned(types, type);
+                const uint8_t kind = type_kind(types, vector);
+                const bool described = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+                const uint64_t count = described ? types->types.extent[type_index(vector)] : 0;
+                TypeNames plain = names;
+                plain.alias_count = 0;
+                const String8 element = described ? type_print(types, scratch, types->types.base[type_index(vector)], (String8){ 0 }, &plain, options) : (String8){ 0 };
+                const char* quoted = described ? check_warning_text(scratch, "'%.*s' (vector of %llu '%.*s' %s)", (int)sugared.length, sugared.pointer,
+                                                                    (unsigned long long)count, (int)element.length, element.pointer, count > 1 ? "values" : "value") :
+                                                 check_warning_text(scratch, "'%.*s'", (int)sugared.length, sugared.pointer);
                 result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
             }
         }
@@ -433,6 +443,68 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         (int)attribute.length, attribute.pointer, suggestion);
             break;
         }
+        case CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT:
+        {
+            // clang's "'X' attribute only applies to SUBJECTS", the attribute named as the unknown one's warning names it and
+            // its subjects its row's (check_input_attribute_subjects).
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const CheckInputSubjectRow* row = check_input_subject_row(scope, check_warning_attribute_normalized(name), scope_name != 0, standard);
+            result = row != NULL ? check_warning_text(scratch, "'%.*s%s%.*s' attribute only applies to %s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                                      (int)attribute.length, attribute.pointer, row->message) :
+                                   NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to function types; type here is %.*s", (int)name.length, name.pointer,
+                                                           (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_NONSTRING_TYPE:
+        {
+            // clang's handleNonStringAttr's warning: the attribute named as the subject warning names it (its scope's token
+            // in the payload's, when it has one) and the declaration's type as clang spells it.
+            const bool standard = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE && payload->token < parser->tokens.count;
+            const String8 scope = standard ? check_warning_attribute_scope(check_driver_warning_name(pp, parser->tokens.names[payload->token])) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "'%.*s%s%.*s' attribute only applies to fields or variables of character array type; type is %.*s",
+                                                           (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer,
+                                                           (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_TRANSPARENT_UNION:
+        {
+            // handleTransparentUnionAttr's warnings (check_input_transparent_union_warning).
+            const uint32_t which = payload->data & 0xffu;
+            const uint32_t bits = payload->data >> 8;
+            const bool size = which == BUSTER_CHECK_TRANSPARENT_SIZE;
+            if (which == BUSTER_CHECK_TRANSPARENT_INCOMPLETE)
+            {
+                result = "transparent_union attribute can only be applied to a union definition; attribute ignored";
+            }
+            else if (which == BUSTER_CHECK_TRANSPARENT_EMPTY)
+            {
+                result = "transparent union definition must contain at least one field; transparent_union attribute ignored";
+            }
+            else if (which == BUSTER_CHECK_TRANSPARENT_FLOAT || which == BUSTER_CHECK_TRANSPARENT_VECTOR)
+            {
+                const uint32_t spelling = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE ? payload->token : 0;
+                const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, spelling);
+                result = type.length != 0 ? check_warning_text(scratch, "first field of a transparent union cannot have %s type %.*s; transparent_union attribute ignored",
+                                                               which == BUSTER_CHECK_TRANSPARENT_FLOAT ? "floating point" : "vector", (int)type.length, type.pointer) : NULL;
+            }
+            else if (size || which == BUSTER_CHECK_TRANSPARENT_ALIGNMENT)
+            {
+                result = check_warning_text(scratch, "%s of field '%.*s' (%u bits) does not match the %s of the first field in transparent union; transparent_union attribute ignored",
+                                            size ? "size" : "alignment", (int)name.length, name.pointer, bits, size ? "size" : "alignment");
+            }
+            break;
+        }
         case CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE:
             result = "'__clang__' is a predefined macro name, not an attribute scope specifier; did you mean '_Clang' instead?";
             break;
@@ -469,6 +541,10 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
+        case CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD:
+            result = check_warning_text(scratch, "%s of first field is %u bits", (note->payload.data & 0xffu) == BUSTER_CHECK_TRANSPARENT_SIZE ? "size" : "alignment",
+                                        note->payload.data >> 8);
+            break;
         default: break;
     }
     return result;
@@ -484,8 +560,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     {
         return valid;
     }
-    // Only these three facts render a type (#992); a pass of typeless messages, pragmas or notes needs no
-    // spelling rows at all.
+    // Only these facts render a type (#992, and #147's function-type attributes); a pass of typeless messages, pragmas or
+    // notes needs no spelling rows at all.
     bool renders = false;
     for (uint32_t i = 0; !renders && i < view->count; i += 1)
     {
@@ -494,7 +570,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                   (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                   (repair == NULL || check_repair_warning_token(repair, event->token)) &&
                   (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
-                   event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER);
+                   event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
+                   event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION);
     }
     // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks when some
     // event renders a type: every event's mark then sits above them, so per-event release keeps them, and each
