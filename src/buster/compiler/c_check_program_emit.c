@@ -2064,16 +2064,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(retained, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find the tokens with attributes first, 16 at a time, then keep the declaring tokens. This avoids reading every
-        // declaration's attributes and keeps parameters' retain obligations as well as static declarations'.
+        // declaration's attributes and keeps parameters' retain obligations as well as static declarations'. The input's
+        // columns are complete here, after the bodies' lanes, and the scan writes `declared` alone.
         uint32_t attributed = 0;
-        const uint32_t tokens = program->input->token_count;
-        for (uint32_t first = check_input_attributed_next(program->input, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(program->input, first + 16, tokens, scalar))
+        const CheckInput* input = program->input;
+        const uint32_t tokens = input->token_count;
+        const uint32_t* declarations = input->declarations;
+        const CheckSparseWide attributes = input->attributes;
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
         {
-            const uint32_t lanes = check_input_attributed_group(program->input, first, tokens, scalar);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                if (program->input->declarations[token] == token && check_input_attributes_at(program->input, token) != NULL)
+                if (declarations[token] == token)
                 {
                     declared[attributed++] = token;
                 }

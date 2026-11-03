@@ -147,7 +147,7 @@ static void check_warning_undefined_use(CheckInputReader* reader, CheckWarningUn
 static uint64_t check_warning_undefined_declaring(const CheckInput* input, uint32_t first, uint32_t count, bool scalar)
 {
     return scalar ? check_input_scan_all(first, count) :
-                    check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_linkage(input->declaration_bits, first, count, 1);
+                    check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_internal(input->declaration_bits, first, count);
 }
 
 static bool check_warning_undefined_internal(CheckWarningBuffer* output, const CheckInput* input, const Parser* parser,

@@ -1874,9 +1874,10 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         {
             memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
             const bool scalar = reader->parser->options.scalar;
-            for (uint32_t first = check_input_attributed_next(reader->output, 0, token, scalar); first < token; first = check_input_attributed_next(reader->output, first + 16, token, scalar))
+            const CheckSparseWide attributes = reader->output->attributes;
+            for (uint32_t first = check_input_attributed_next(attributes, 0, token, scalar); first < token; first = check_input_attributed_next(attributes, first + 16, token, scalar))
             {
-                const uint32_t lanes = check_input_attributed_group(reader->output, first, token, scalar);
+                const uint32_t lanes = check_input_attributed_group(attributes, first, token, scalar);
                 for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);

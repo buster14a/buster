@@ -744,7 +744,7 @@ static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint3
 {
     (void)scalar;
 
-    return check_sparse_wide_entries(input->attributes, 0, limit, !BUSTER_SCALAR_PATH(scalar), tokens);
+    return check_sparse_wide_entries(input->attributes, limit, !BUSTER_SCALAR_PATH(scalar), tokens);
 }
 
 // Whether bit `index` of `bits` is set: words of 32 bits, as the kernels below gather them.

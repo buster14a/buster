@@ -527,8 +527,9 @@ static void check_test_sparse_columns(CheckTest* test)
 
 // The sparse pool's wide columns (#1167) against columns of a 64-bit value a token, for every count to 200, beside a
 // column of the same pool: random writes, NONE among them and overwrites, then every token's value, every 16 tokens'
-// group and the next group with a block from every start, and the entries' lists, by both paths. The wide directory
-// ends at a PROT_NONE page; the pool is a dirty arena's, and every other count's is shared. Then the blocks a write takes.
+// group and the next group with a block from every start, and the entries' lists below every end, by both paths. The
+// wide directory ends at a PROT_NONE page; the pool is a dirty arena's, and every other count's is shared. Then the
+// blocks a write takes.
 static void check_test_sparse_wide(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -600,21 +601,18 @@ static void check_test_sparse_wide(CheckTest* test)
                 exact &= next >= end || wide.directory[next / BUSTER_CHECK_SPARSE_TOKENS] != 0;
             }
         }
-        for (uint32_t begin = 0; exact && begin <= count; begin += 3)
+        for (uint32_t end = 0; exact && end <= count + 1; end += 1)
         {
-            for (uint32_t end = begin; end <= count + 1; end += 7)
+            uint32_t positions[2][202];
+            const uint32_t found = check_sparse_wide_entries(wide, end, true, positions[0]);
+            exact &= check_sparse_wide_entries(wide, end, false, positions[1]) == found;
+            uint32_t expected = 0;
+            for (uint32_t token = 0; token < end; token += 1)
             {
-                uint32_t positions[2][202];
-                const uint32_t found = check_sparse_wide_entries(wide, begin, end, true, positions[0]);
-                exact &= check_sparse_wide_entries(wide, begin, end, false, positions[1]) == found;
-                uint32_t expected = 0;
-                for (uint32_t token = begin; token < end; token += 1)
-                {
-                    exact &= values[token] == BUSTER_CHECK_SPARSE_WIDE_NONE || (expected < found && positions[0][expected] == token && positions[1][expected] == token);
-                    expected += values[token] != BUSTER_CHECK_SPARSE_WIDE_NONE;
-                }
-                exact &= expected == found;
+                exact &= values[token] == BUSTER_CHECK_SPARSE_WIDE_NONE || (expected < found && positions[0][expected] == token && positions[1][expected] == token);
+                expected += values[token] != BUSTER_CHECK_SPARSE_WIDE_NONE;
             }
+            exact &= expected == found;
         }
         exact &= pool != NULL && pool->count <= pool->capacity && !pool->exhausted;
         for (uint32_t region = 0; exact && pool->shared && region * BUSTER_ARENA_HUGE_PAGE_BYTES < (uint64_t)pool->capacity * 64; region += 1)

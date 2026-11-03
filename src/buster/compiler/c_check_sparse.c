@@ -300,21 +300,6 @@ static __attribute__((unused)) CheckSparseColumn check_sparse_from_values(Arena*
     return column;
 }
 
-// A wide column of `count` tokens with `values`' entries, as check_sparse_from_values.
-static __attribute__((unused)) CheckSparseWide check_sparse_wide_from_values(Arena* arena, const uint64_t* values, uint32_t count)
-{
-    CheckSparsePool* pool = NULL;
-    CheckSparseWide column = { 0 };
-    if (values != NULL && check_sparse_reserve_wide(arena, &pool, NULL, 0, &column, 1, count, false, false))
-    {
-        for (uint32_t token = 0; token < count; token += 1)
-        {
-            check_sparse_wide_set(pool, column, token, values[token]);
-        }
-    }
-    return column;
-}
-
 // The tokens from `begin` to `end` - 1 whose values in `column` aren't NONE, in order into `positions`, which has room
 // for `end` - `begin`: how many. The vector path skips each 16 tokens without a block with one load, and tests the
 // others' values 16 at a time; the scalar path reads every token's value.
@@ -402,16 +387,14 @@ static __attribute__((unused)) uint32_t check_sparse_wide_group(CheckSparseWide 
     return set;
 }
 
-// The tokens from `begin` to `end` - 1 whose values in the wide `column` aren't NONE, in order into `positions`, which
-// has room for `end` - `begin`: how many, by check_sparse_wide_next's and check_sparse_wide_group's paths.
-static __attribute__((unused)) uint32_t check_sparse_wide_entries(CheckSparseWide column, uint32_t begin, uint32_t end, bool vector, uint32_t* positions)
+// The tokens below `end` whose values in the wide `column` aren't NONE, in order into `positions`, which has room for
+// `end`: how many, by check_sparse_wide_next's and check_sparse_wide_group's paths.
+static __attribute__((unused)) uint32_t check_sparse_wide_entries(CheckSparseWide column, uint32_t end, bool vector, uint32_t* positions)
 {
     uint32_t total = 0;
-    const uint32_t start = begin & ~(BUSTER_CHECK_SPARSE_TOKENS - 1);
-    for (uint32_t first = check_sparse_wide_next(column, start, end, vector); first < end; first = check_sparse_wide_next(column, first + BUSTER_CHECK_SPARSE_TOKENS, end, vector))
+    for (uint32_t first = check_sparse_wide_next(column, 0, end, vector); first < end; first = check_sparse_wide_next(column, first + BUSTER_CHECK_SPARSE_TOKENS, end, vector))
     {
-        const uint32_t below = begin > first ? begin - first : 0;
-        for (uint32_t set = check_sparse_wide_group(column, first, end, vector) & ~((1u << below) - 1); set != 0; set &= set - 1)
+        for (uint32_t set = check_sparse_wide_group(column, first, end, vector); set != 0; set &= set - 1)
         {
             positions[total] = first + (uint32_t)__builtin_ctz(set);
             total += 1;

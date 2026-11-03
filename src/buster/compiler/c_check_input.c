@@ -590,38 +590,23 @@ static __attribute__((unused)) void check_input_set_attributes_at(CheckInput* in
     check_sparse_wide_set(input->sparse_pool, input->attributes, token, ~(uint64_t)(uintptr_t)attributes);
 }
 
-// A column of `count` tokens with `attributes`' entries, for tokens 0 to `count` - 1, in its own pool in `arena`: for the
-// tests that build a CheckInput's attributes from a pointer a token. Returns a null column where the arena has no room.
-static __attribute__((unused)) CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttributes* const* attributes, uint32_t count)
-{
-    CheckSparsePool* pool = NULL;
-    CheckSparseWide column = { 0 };
-    if (attributes != NULL && check_sparse_reserve_wide(arena, &pool, NULL, 0, &column, 1, count, false, false))
-    {
-        for (uint32_t token = 0; token < count; token += 1)
-        {
-            check_sparse_wide_set(pool, column, token, ~(uint64_t)(uintptr_t)attributes[token]);
-        }
-    }
-    return column;
-}
-
-// The scans of the tokens with attributes, in groups of 16 below `end`: the first group from `first`, a multiple of 16,
-// whose tokens may have attributes, or a token at or past `end` (check_sparse_wide_next); and of a group's tokens, those
-// that have attributes, a bit each (check_sparse_wide_group). The vector path skips 256 tokens without attributes with a
-// load; the scalar path, its twin, visits every group and reads each token's attributes.
-static __attribute__((unused)) uint32_t check_input_attributed_next(const CheckInput* input, uint32_t first, uint32_t end, bool scalar)
+// The scans of the tokens with attributes (CheckInput.attributes, which a scan caches), in groups of 16 below `end`: the
+// first group from `first`, a multiple of 16, whose tokens may have attributes, or a token at or past `end`
+// (check_sparse_wide_next); and of a group's tokens, those that have attributes, a bit each (check_sparse_wide_group).
+// The vector path skips 256 tokens without attributes with a load; the scalar path, its twin, visits every group and
+// reads each token's attributes.
+static __attribute__((unused)) uint32_t check_input_attributed_next(CheckSparseWide attributes, uint32_t first, uint32_t end, bool scalar)
 {
     (void)scalar;
 
-    return check_sparse_wide_next(input->attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
+    return check_sparse_wide_next(attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
 }
 
-static __attribute__((unused)) uint32_t check_input_attributed_group(const CheckInput* input, uint32_t first, uint32_t end, bool scalar)
+static __attribute__((unused)) uint32_t check_input_attributed_group(CheckSparseWide attributes, uint32_t first, uint32_t end, bool scalar)
 {
     (void)scalar;
 
-    return check_sparse_wide_group(input->attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
+    return check_sparse_wide_group(attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
 }
 
 static uint32_t check_input_diagnostic_limit(const CheckInput* input, uint32_t token)
@@ -1916,12 +1901,12 @@ static uint64_t check_input_scan_bit(const uint8_t* bits, uint32_t first, uint32
     return _mm512_mask_test_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, bits + first), _mm512_set1_epi8((char)bit));
 }
 
-// Of the next 64, the tokens whose linkage in `bits` is `linkage` (check_input_linkage).
-static uint64_t check_input_scan_linkage(const uint8_t* bits, uint32_t first, uint32_t count, uint32_t linkage)
+// Of the next 64, the tokens whose linkage in `bits` is internal, 1 (check_input_linkage).
+static uint64_t check_input_scan_internal(const uint8_t* bits, uint32_t first, uint32_t count)
 {
     const __mmask64 lanes = check_input_scan_all(first, count);
     const __m512i values = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, bits + first), _mm512_set1_epi8((char)(3u << BUSTER_CHECK_BITS_LINKAGE_SHIFT)));
-    return _mm512_mask_cmpeq_epi8_mask(lanes, values, _mm512_set1_epi8((char)(linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT)));
+    return _mm512_mask_cmpeq_epi8_mask(lanes, values, _mm512_set1_epi8((char)(1u << BUSTER_CHECK_BITS_LINKAGE_SHIFT)));
 }
 
 // The tokens whose byte in `column` isn't 0.
