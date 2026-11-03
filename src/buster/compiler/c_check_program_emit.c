@@ -1164,7 +1164,7 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
     growth->rest[parts] = 0;
     for (uint64_t place = parts; place > 0; place -= 1)
     {
-        const uint32_t part = growth->order[place - 1];
+        const uint32_t part = order[place - 1];
         const uint64_t first = run->boundaries[part];
         const uint64_t end = run->boundaries[part + 1];
         rest += end > first ? run->costs[end - 1] - (first != 0 ? run->costs[first - 1] : 0) : 0;
@@ -1180,24 +1180,25 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
     }
     CheckEmitLane* lane = run->lane_states;
     uint32_t supply = run->lanes->grow_supply;
+    uint32_t count = *lease_count;
     uint64_t polled = 0;
     uint64_t taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED);
     for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
     {
-        check_program_emit_take(run, lane, 0, growth->order[taken]);
+        check_program_emit_take(run, lane, 0, order[taken]);
         if (supply != 0)
         {
             check_program_emit_supply(budget->write_fd, supply);
             supply = 0;
         }
-        const bool open = admitted < lanes && *lease_count < BUSTER_CHECK_EMIT_GROW_LEASES;
+        const bool open = admitted < lanes && count < BUSTER_CHECK_EMIT_GROW_LEASES;
         const uint64_t now = open ? check_program_lanes_now() : polled;
         if (now - polled >= BUSTER_CHECK_EMIT_GROW_NANOSECONDS)
         {
             polled = now;
-            WorkerBudgetLease* lease = leases + *lease_count;
+            WorkerBudgetLease* lease = leases + count;
             const uint32_t more = check_program_emit_grow(run, growth, admitted, lanes, budget, lease);
-            *lease_count += lease->child > 0 ? 1 : 0;
+            count += lease->child > 0 ? 1 : 0;
             admitted += more;
             if (more != 0 && round)
             {
@@ -1211,6 +1212,7 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
             }
         }
     }
+    *lease_count = count;
     if (round)
     {
         lane_publish(&growth->admission, (admitted << 2) | 2u);
@@ -1231,11 +1233,12 @@ static void check_program_emit_admitted(CheckEmitRun* run)
         admission = lane_sleep(&growth->admission, admission);
     }
     const uint64_t parts = growth->parts;
+    const uint32_t* const order = growth->order;
     CheckEmitLane* lane = run->lane_states + index;
     uint64_t taken = admission >> 2 > index ? __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED) : parts;
     for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
     {
-        check_program_emit_take(run, lane, index, growth->order[taken]);
+        check_program_emit_take(run, lane, index, order[taken]);
     }
 }
 
