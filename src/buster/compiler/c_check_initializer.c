@@ -891,8 +891,10 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     const bool replay = repeat != 0;
     CheckInitRange* range = replay ? repeat->first : 0;
     bool more = true;
+    uint32_t designators = 0;
     while (more && token < end && walker->result->status == CHECK_INIT_OK)
     {
+        designators += 1;
         CheckInitFrame* frame = &walker->frames[walker->depth - 1];
         const TypeId type = type_strip_aligned(walker->types, frame->type);
         const uint8_t kind = type_kind(walker->types, type);
@@ -1087,13 +1089,17 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     }
     if (walker->result->status == CHECK_INIT_OK)
     {
-        if (token >= end || parser->tokens.kinds[token] != PARSE_KIND_EQUAL)
+        // GNU's obsolete `[index] value` (and `[first ... last] value`): a designation of one array designator may
+        // leave out its `=`, as clang (ext_gnu_missing_equal_designator) and GCC take it; the parser refused the rest.
+        const bool equal = token < end && parser->tokens.kinds[token] == PARSE_KIND_EQUAL;
+        const bool gnu = token < end && designators == 1 && parser->tokens.kinds[*position] == PARSE_KIND_L_SQUARE;
+        if (!equal && !gnu)
         {
             check_init_fail(walker, CHECK_INIT_INVALID, token);
         }
         else
         {
-            token += 1;
+            token += equal;
             if (repeat != 0 && !replay)
             {
                 repeat->target_depth = walker->depth;

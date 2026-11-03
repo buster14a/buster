@@ -648,6 +648,11 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct S { int a; } s = { .a 1 };\n", "1:30: expected '=' or another designator", 0 },
     { "int a[1][2] = { [0][1] 1 };\n", "1:24: expected '=' or another designator", 0 },
     { "struct S { int a[1]; } s = { .a[0] 1 };\n", "1:36: expected '=' or another designator", 0 },
+    // After a single one, clang reads the value GNU lets follow it: what can't begin one is a missing expression.
+    { "int a[2] = { [0] };\n", "1:18: expected expression", 0 },
+    { "int a[2] = { [0 ... 1], 1 };\n", "1:23: expected expression", 0 },
+    { "int a[2] = { [0] / 2 };\n", "1:18: expected expression", 0 },
+    { "void f(int *p) { int a[2] = { [1] -1, [0] (int)2.5 }, b[2] = { [1] sizeof a, [0] *p }; }\n", "", 0 },
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
@@ -973,13 +978,15 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
 // cast of `*p` where T names a type and a product where it doesn't; an if-statement with an else (c_parser.c's
 // example); and the declarator `(*a[3])(double)`, whose spine from the name out is array, pointer, function. Then
 // #431's review's computed gotos: each `*` the goto's child and the whole expression after it the `*`'s (the `:` of
-// `p ? p : p`, the `+` of `p + 0` and the comma of `p, p`), which the vector path builds without its fallback.
+// `p ? p : p`, the `+` of `p + 0` and the comma of `p, p`), which the vector path builds without its fallback. Then
+// #1127's GNU array designators without their `=`: the `]` and the value siblings where an `=` would have been their
+// parent, the value's tree whole (`-f(1)`'s `-` the root of its own, not the `]`'s parent), through the fallback.
 typedef struct ParseTestFixture ParseTestFixture;
 struct ParseTestFixture
 {
     const char* source;
     uint32_t count;
-    int32_t parents[40];
+    int32_t parents[64];
     // Whether the vector path must keep every top-level declaration (none for the scalar parser's fallback).
     bool vector;
 };
@@ -995,6 +1002,9 @@ static const ParseTestFixture parse_test_fixtures[] =
     { "int (*a[3])(double);\n", 12, { 11, 7, 7, 6, 6, 6, 2, 10, 10, 10, 0, -1 } },
     { "void f(void *p) { goto *p ? p : p; goto *p + 0; goto *p, p; }\n", 29,
       { 28, 6, 6, 6, 3, 4, 0, 28, 15, 8, 13, 13, 13, 9, 13, 28, 21, 16, 19, 17, 19, 28, 27, 22, 25, 23, 25, 28, -1 }, true },
+    { "int a[2] = { [1] -f(1), 2 };\nint b[2] = { [1] = -f(1), 2 };\nint c[2] = { [1] g(1) + 1 };\n", 57,
+      { 18, 4, 4, 4, 5, 0, 17, 9, 9, 15, 15, 14, 14, 14, 10, 17, 15, 5, -1, 38, 23, 23, 23, 24, 19, 37, 28, 28, 29, 35, 29, 34, 34, 34, 30, 37, 35, 24, -1,
+        56, 43, 43, 43, 44, 39, 55, 48, 48, 55, 52, 52, 52, 53, 55, 53, 44, -1 } },
 };
 
 // Each fixture through both paths, against its parents.

@@ -4221,14 +4221,28 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     }
     else if (array_designator && parse_kind_starts_initializer_value(kind))
     {
-        // GNU omits '=' after one `[index]`. Chained `[index].member` and `[index][index]` still require it.
+        // GNU omits '=' after one `[index]`. Chained `[index].member` and `[index][index]` still require it. The
+        // value's tree is then its own and the item's shape an `=`'s (#1127): the designator's `]`, the last token
+        // emitted, searches its R past the value, as the left operand of an assignment would, where a prefix operator or
+        // a cast would end a postfix `]`'s search and take it; and it leaves the candidates, where it would be the
+        // value's first operand's L. Its threshold is still above every one waiting below it, all of the list's or
+        // outside it. The vector path flags what follows the `]`, so every such declaration is the scalar parser's.
+        const uint32_t waiting = parser->waiting_count - 1;
+        const uint32_t candidate = parser->candidate_count - 1;
+        if (parser->waiting[waiting].position == i - 1 && parser->candidates[candidate].position == i - 1)
+        {
+            parser->waiting[waiting].threshold += (uint32_t)PARSE_LEVEL_ASSIGN - parse_role_right_thresholds[PARSE_ROLE_CLOSE_SUBSCRIPT];
+            parser->candidate_count = candidate;
+        }
         frame->mode = PARSE_MODE_INITIALIZER;
         frame->statement = PARSE_ITEM_EXPRESSION;
         step->again = true;
     }
     else if (designator && kind != PARSE_KIND_EQUAL && kind != PARSE_KIND_PERIOD && kind != PARSE_KIND_L_SQUARE)
     {
-        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_DESIGNATOR, BUSTER_PARSE_AT_TOKEN);
+        // After one `[index]`, clang reads the value GNU lets follow it, so what can't begin one is a missing
+        // expression (#1127).
+        parse_scalar_error(parser, i, array_designator ? PARSE_MESSAGE_EXPECTED_EXPRESSION : PARSE_MESSAGE_EXPECTED_DESIGNATOR, BUSTER_PARSE_AT_TOKEN);
     }
     else if (binary == PARSE_ROLE_ASSIGN && conditional)
     {
