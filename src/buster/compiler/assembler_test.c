@@ -1298,6 +1298,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 
 #include "assembler_compat_test.c"
 #include "assembler_corpus_test.c"
+#include "assembler_programs_test.c"
 #include "assembler_round_trip_test.c"
 
 static int run_assembler_tests(int count, char** arguments)
@@ -1575,6 +1576,7 @@ static int run_assembler_tests(int count, char** arguments)
             asm_test_reader(&test, directory);
             asm_test_preprocessed(&test, directory);
             asm_test_compatibility(&test, directory, cross_check);
+            asm_test_issue_fixtures(&test, directory, cross_check);
             if (cross_check)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
@@ -1680,6 +1682,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_preprocessing(&test, directory);
                 asm_test_preprocessed_spacing(&test, directory);
                 asm_test_compiler_corpus(&test, directory, keep);
+                asm_test_program_corpus(&test, directory, keep);
             }
             const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)

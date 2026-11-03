@@ -100,6 +100,27 @@ names are taken too: `stosl`, `insl` and the other dword string instructions,
 doubleword source is `movsxd`, as GNU as reads it (`movsx r8, r8d`), and a shift
 or rotate of one operand shifts by 1 (`shrl %ecx`, `shr ecx`), the D1 form.
 
+#1115 added what GCC's and Clang's ordinary `-S` output needs beyond that:
+
+- The x87's stack registers' two GNU as spellings that #1126's review left to
+  #1223 (#147's forms, below): `ffreep %st(i)` and the commutative pops'
+  reversed operands. LLVM's `fucompi` and `fcompi` are `fucomip` and `fcomip`
+  (clang's long double code writes them).
+- The compare-predicate names, each the instruction without the predicate and
+  the predicate's number as its immediate:
+  - SSE's `cmpPss`, `cmpPsd`, `cmpPps` and `cmpPpd`, with eight predicates
+    (`cmpltsd` is `cmpsd $1`, which clang writes for a comparison's mask);
+  - AVX's `vcmpP...`, with 32 predicates and the aliases of the first eight;
+  - AVX-512's `vpcmpP{b,w,d,q}` and `vpcmpPu{b,w,d,q}`, with eight predicates.
+    `vpcmpeq{b,w,d,q}` remain PCMPEQ's own forms.
+- GNU as's `data16` and `rex64` written as instructions of their own, alone or
+  before an instruction on their line. Each is its byte (66 and 48), as GNU as
+  writes it: the general-dynamic TLS sequence is so written (clang's `data16` /
+  `leaq x@TLSGD(%rip), %rdi` / `data16` / `data16` / `rex64` / `callq
+  __tls_get_addr@PLT`, GCC's `data16 leaq ...` / `.value 0x6666` / `rex64` /
+  `call`). C's inline assembly assembles a template with one whole. They are
+  lowercase, as every mnemonic is here (GNU as takes either case).
+
 ### The admitted forms (#1134)
 
 The syntax admits the form table's forms of 64-bit mode itself, not a list of
@@ -119,8 +140,9 @@ families (`x86_match_supported`): a form is admitted when
 - its mnemonic is one the parser spells, with the catalogue's prefixes composed
   from their tokens: `lock` before any instruction, `notrack` and `bnd` before a
   near call or jmp, `rep`, `repe` and `repne` before the string instructions and
-  `ret`. The other prefixed spellings (`data16`, `rex.w`, the branch hints `cs`
-  and `ds`, `xacquire`, `xrelease`) aren't;
+  `ret`. The other prefixed spellings (`rex.w`, the branch hints `cs` and `ds`,
+  `xacquire`, `xrelease`) aren't, nor is the form table's `data16` prefix: a
+  `data16` statement is its byte (above);
 - and it has no EVEX feature the parser has no syntax for: suppressed exceptions
   (`{sae}`), APX's new data destination and no flags, and source conditions.
   Embedded rounding (`{rn-sae}`) has no syntax either, so its forms never match.
@@ -139,10 +161,12 @@ and clang assemble it (the System V assembler's convention: `fsub %st, %st(1)`
 is Intel's `fsubr st(1), st`); Intel syntax takes them as Intel's manual has
 them. An x87 memory operand without a width (`fstp (%rax)`), which GNU as takes
 with a warning as its default width, is refused, as clang refuses it. Two GNU
-as spellings are refused too (#1126's review; #1223 has them): `ffreep %st(i)`,
-which no form row has, and the reversed operands of the commutative popping
-forms (`faddp %st(1), %st`, `fmulp`'s), which GNU as warns it translates to
-`faddp %st, %st(1)`.
+as spellings that #1126's review left are taken since #1223 (#1115):
+`ffreep %st(i)` (DF C0+i, baseline in the target table, below), and the
+reversed operands of the commutative popping forms (`faddp %st(1), %st` and
+Intel's `faddp st, st(1)`, `fmulp`'s), which GNU as warns it translates to
+`faddp %st, %st(1)`. GNU as refuses the other pops so (`fsubp %st(1), %st`),
+and so does this assembler.
 
 About 6,100 forms pass, of about 1,900 mnemonics (the index has 4,096
 buckets). The target intersection then keeps out every form the target's
@@ -157,10 +181,13 @@ feature for (AVX512-FP16, AVX10.2, AMX, XOP, FMA4, TBM, LWP, Key Locker, APX's
 EVEX promotions and the others) stay out on every target. Other unsupported
 syntax is diagnosed: rounding/SAE, explicit pseudo-prefixes (`{vex}`, `{load}`),
 far branches, 16/32-bit execution modes and 32-bit addresses, other segment
-registers, VSIB, section groups, GOT/TLS relocation modifiers other than
-`@PLT`, `@GOTPCREL` and `@GOTPCRELX`, debug directives other than the
-compiler's `.file`, `.loc`, `.uleb128` and `.sleb128` data, and macro-assembler
-directives. An unsupported form never reaches the trusted encoder.
+registers, VSIB, section groups, relocation modifiers other than `@PLT`,
+`@GOTPCREL`, `@GOTPCRELX` and the TLS models' (below), debug directives other
+than the compiler's `.file`, `.loc`, `.uleb128` and `.sleb128` data, and
+macro-assembler directives. An unsupported form never reaches the trusted
+encoder. FFREEP (`ffreep %st(i)`, DF C0+i), which every x86-64 processor runs,
+is baseline in the target table with the x87's other stack-register forms
+(#1115).
 
 An AT&T size suffix is the matcher's to check, by each form's suffix width
 (`x86_match_suffix_width`), when the full mnemonic isn't a name of the index:
@@ -188,7 +215,10 @@ before an EVEX one, as GNU as does, though EVEX's compressed displacement
 needs, and the C lowering's index has every feature. A VEX form whose features a
 processor with its EVEX sibling's may lack (AVX-VNNI's `vpdpbusd` and the
 others, which Zen 4 lacks beside AVX512-VNNI) comes after the EVEX one, as GNU as
-picks it without `{vex}`. Then it takes the shortest. An exchange of two general
+picks it without `{vex}`. Then it takes the shortest, and of two as short, an
+immediate's sign-extended imm8 form before the accumulator's, as GNU as picks
+them (#1115: `cmpw $120, %ax` is `66 83 f8 78`, not `66 3d 78 00`): AX's 16-bit
+forms, whose imm16 makes them as long. An exchange of two general
 registers with the accumulator first swaps its operands, so that `xchg rax, rcx`
 takes the accumulator's one-byte form (`48 91`), as GNU as encodes it; `xchg
 eax, eax` takes 87's form, since 90 is NOP, which keeps RAX's upper half, and
@@ -224,10 +254,10 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes; `.pushsection`/`.popsection` and `.previous` switch and return |
-| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size` |
-| Constants | `.equ`/`.set` (absolute and defined before use; either may reassign), `.equiv` (rejects redefinition) |
-| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.zero`, `.skip`/`.space` (with an optional fill byte) |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
+| Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
+| Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
+| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (with an optional fill byte) |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
 | Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file`, `.loc`, and LLVM's `.prefalign` are accepted but add no debug or alignment information |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
@@ -235,9 +265,52 @@ Directives:
 Each section keeps its own name, properties, alignment, layout and atom, including
 `.text.*`, `.data.*`, `.rodata.*`, `.bss.*` and mergeable string sections.
 Redeclarations must preserve its properties; zero-fill sections accept only zero
-fill. Section groups, subsections, non-byte string characters and additional ELF
-section types are diagnosed. Exported absolute symbols and forward constants are
+fill. Section groups, subsections, strings of characters wider than 4 bytes and
+additional ELF section types are diagnosed. Strings of 2- and 4-byte characters
+(GCC's wide literals, `.rodata.str4.4,"aMS",@progbits,4`) are read-only data
+atoms, as the importer classes them, whose sections keep their merge flags and
+entry sizes (#1115). Exported absolute symbols and forward constants are
 diagnosed; the shared object writer currently lacks the former's unit ownership.
+
+`.set name, symbol + constant` (#1115: GCC's constant pools write one entry
+within another, `.set .LC4,.LC11+4`) is an alias, which may come before its
+target. Once the source has defined every symbol, the alias of a label it defines
+is a symbol at the label's place plus the constant, as GNU as makes it (its
+relocations in a merged section refer to it: `.LC4 - 4`); a reference to the
+alias of an undefined symbol is one to that symbol plus the constant, and that
+alias, which can't be exported, is in no table. An alias of an alias is its
+target's target. As GNU as's `copy_symbol_attributes` does, an alias takes its
+target's type and size where it has none of its own. It takes them at `.set`
+when the target is defined by then (a later `.type` or `.size` of the target
+isn't copied), or once a target defined later is. GCC writes `.weak alias` and
+`.set alias,original` for a weak function alias, which is then FUNC with the
+function's size. An `.lcomm` object's alias is OBJECT, and the alias's own
+`.type` and `.size` replace them. GNU as writes a size that reaches past the
+symbol's section end (`.size` beyond it, or an alias of `object+2`, which takes
+the object's size). A `Link` symbol lies within its atom, so it holds the bytes
+that remain, and `ObjectOptions.symbol_sizes` gives the object GNU as's
+`st_size`. The C checker's merge of a whole-unit inline-assembly Link into a
+program (`c_check_program_emit.c`) doesn't read that table, so such a symbol
+keeps the clipped size there.
+
+`.comm name, size[, alignment]` and `.lcomm name, size` (#1115) are GNU as's
+for ELF. A global's `.comm` (C's tentative definitions under `-fcommon`) is a
+common symbol: an `SHN_COMMON` OBJECT of its size whose value is its alignment,
+the third operand or the size's power of two up to 16. In the `Link` it is an
+undefined OBJECT, and the result's `object_options` declares it common to the
+writer (`ObjectOptions.declared_symbols` and `common_alignments`), which lists
+it though no relocation refers to it; `AsmResult.common_count` counts them, and
+the C checker refuses a template's. A local's `.comm` (GCC's statics at `-O0`:
+`.local x` / `.comm x,4,4`) and every `.lcomm` are objects of `.bss`, placed
+after its other contents (GNU as's subsection 1) in directive order, aligned to
+the third operand, or for `.lcomm`, whose ELF form takes none, to the size's
+power of two up to 8. A global's repeated `.comm` keeps the first size, as GNU
+as does (it warns of another), and takes the last directive's alignment, or
+without one (or 0) the kept size's power of two: `.comm x,4,4` then `.comm
+x,4,16` is aligned to 16. A local's repeated `.comm` or `.lcomm` and a defined
+name are duplicate definitions, as in GNU as; a weak name is refused, and so is
+a common symbol made local and declared again, which GNU as places in `.bss` at
+its common size past its alignment's place.
 The writer automatically emits a non-executable-stack note. Both GCC's
 `.section .note.GNU-stack,"",@progbits` and Clang's quoted section name are
 accepted; the note must remain empty and non-executable.
@@ -280,7 +353,26 @@ Relocations are PC32/PLT32, ABS32/ABS32S and ABS64 with explicit signed 64-bit
 addends. A symbol's `@PLT` makes a call or jump a PLT32 reference;
 `@GOTPCREL` and `@GOTPCRELX` on a RIP-relative memory operand read the GOT
 slot, in the relaxable form where the shared linker may rewrite the
-instruction. Symbolic byte/word data, nonrepresentable expressions and oversized
+instruction. The TLS models' modifiers (#1115), in either case (clang writes
+`@TPOFF`, GCC `@tpoff`), take the `Link`'s TLS kinds:
+
+- `@TPOFF` (local-exec) and `@DTPOFF` (local-dynamic's offset) in a signed
+  32-bit field: a displacement without RIP or an immediate the form
+  sign-extends (`movl %fs:x@tpoff, %eax`, `leaq x@dtpoff(%rax), %rdx`,
+  `addq $x@tpoff, %rax`), as TPOFF32 and DTPOFF32. `.long` takes them too
+  (DWARF's `.long x@dtpoff`); the 64-bit ones (`.quad`'s, `movabs`'s) are
+  TPOFF64 and DTPOFF64, which the `Link` doesn't have.
+- `@GOTTPOFF` (initial-exec), `@TLSGD` (general-dynamic) and `@TLSLD`
+  (local-dynamic) on a RIP-relative displacement, as GOTTPOFF, TLSGD and TLSLD.
+
+As GNU as does, a TLS modifier makes its symbol `STT_TLS`, an undefined one too,
+through an alias as well (`.set alias,target` then `alias@TPOFF` makes `target`
+one)
+(and a symbol of a TLS section is one, `.type x, @object` in `.tbss` as the
+compilers write it), and every modifier but `@PLT` declares
+`_GLOBAL_OFFSET_TABLE_`, an undefined global no relocation refers to. A TLS
+modifier on another section's symbol is refused. Symbolic byte/word data,
+nonrepresentable expressions and oversized
 fields fail instead of truncating. Absolute memory uses signed disp32; 16/32-bit
 LEA destinations use ABS32 because those instructions truncate the address.
 
@@ -319,7 +411,8 @@ It returns `AsmCode`:
 It takes instructions, labels and the syntax directives, and refuses:
 
 - every other directive: the code has no sections, data or symbols of its own (the C checker assembles such a template
-  whole instead, `asm_assemble`'s unit, c-inline-assembly.md's "Templates that take directives");
+  whole instead, `asm_assemble`'s unit, c-inline-assembly.md's "Templates that take directives"), and so does a
+  `data16` or `rex64` statement, which is a byte of its own (#1115);
 - its numeric labels and `.` but as a `jmp`'s or `jcc`'s target without an
   addend, and `loop` and `jrcxz` to its labels;
 - undefined numeric labels.
@@ -358,7 +451,7 @@ The writer checks table counts, section types and merge entry sizes before
 emitting bytes, then compacts temporary locals only after seeing every fixup.
 
 `assembler_cfi.c` retains ordered directives as events attached to fragment IDs.
-`asm_cfi_emit` consumes final fragment positions after monotone branch relaxation,
+`asm_cfi_emit` consumes final fragment positions after branch relaxation,
 deduplicates identical initial CIE programs and emits FDEs in procedure order.
 Layout and emission share stable per-section fragment ranges. The single
 post-layout CFI fragment is inserted into their reserved extra slot, preserving
@@ -431,12 +524,39 @@ latencies of three cycles from operand 2 and two from operand 3 to the result.
 These guide the algorithm; the complete
 assembler measurements decide whether its extra token pass and temporaries pay.
 
-Relaxation starts short and only promotes a branch once. It recomputes all
-alignment padding each round, stopping within `branch_count + 1` rounds.
-Alignment can absorb growth, so this scheme guarantees a correct stable layout,
-not the globally shortest encoding for every alignment arrangement. Rel8-only
-branches are range-checked against the final layout. There is no implicit
-expansion that changes flags or registers.
+Relaxation starts short and only promotes a branch once. Assembly of only
+labels and instructions in one section takes the branch sizer's columnar
+layout, whose least fixed point is GNU as's there. Otherwise layout is GNU as's
+`relax_segment` (#1115), because compilers' output is compared with GNU as's
+objects byte for byte. A pass visits a section in order, and growth moves the
+rest at once. A branch measures backward targets where this pass put them. A
+forward target is where the last pass put it, moved by the stretch so far when
+the stretch is negative or no alignment lies between them. Otherwise the
+alignment may absorb it, and a branch whose target then lies behind it waits for
+the next pass. Alignment pads to where it now starts, and `.uleb128` and
+`.sleb128` take their value's size. Passes repeat until one grows nothing.
+Max-skip alignment (`.p2align 4,,10`) lets a distance shrink as earlier code
+grows. Which branches grow therefore depends on this order, not only on the
+final layout, and the order matters to the bytes. GCC 16's `-O2` floating
+program had a backward `jmp` that an earlier round-based layout grew and GNU as
+keeps short. On GCC 13's `-O2` output of 1,500 generated branchy functions
+(11 MB), that layout grew branches worth 80 bytes that GNU as keeps short.
+
+The passes are as many as GNU as's (179 on those functions, as growth reaches
+each later function a pass later), so a pass reads little. Only alignments,
+LEB128s and short branches that may grow change size. A pass reads those
+events' 32-byte records alone, as GNU as's frags hold the bytes between two
+variable parts. A label is its anchor event's end plus a fixed distance.
+Fragment offsets are written once, after the passes, by a prefix sum (sixteen
+at a time on the vector path). On a cloud host, not the 9700X, layout of those
+functions took 0.29 s against the round-based layout's 0.13 s; GNU as took
+1.1 s for the whole file. The `mixed` workload of `benchmark-assembler`, where
+no branch grows, lays out in the same time as before. A version that skipped
+events whose distances a pass doesn't change visited 15 times fewer events but
+took as long there, so it isn't kept. A LEB128 that bounces across an alignment,
+which GNU as pads to break, is refused once the passes exceed one per branch and
+nine per LEB128. Rel8-only branches are range-checked against the final layout.
+There is no implicit expansion that changes flags or registers.
 
 ## Tests and measurements
 
@@ -479,7 +599,11 @@ must be the matcher's, but where GNU as would choose another encoding of the
 same instruction (`x86_assembler_prefers_another_form`), which is counted. The
 sources enable MPX (`.arch .mpx`), whose `bnd` prefix binutils 2.46 and 2.47 take
 only so. On binutils 2.42 that was 16,314 of 16,316 lines the same and 2 counted
-(GNU as's accumulator form of `add $49,%ax`, in each syntax). The
+(GNU as's imm8 form of `add $49,%ax`, in each syntax), which the matcher takes
+since #1115. With #1115's x87 forms, 4,119 forms round-trip, and on binutils
+2.42 16,474 of 16,476 lines were the same and 2 counted: GNU as's two-byte VEX
+form of `vmovss` between registers (`asm_round_trip_gnu_prefers`, #147's: the
+round trip's lines have no `{load}`), in each syntax; the report names them. The
 issue's 47 inline-assembly instructions and #1115's are fixtures of their own,
 compared with GNU as too, beside each diagnostic's message and name and the
 encoding choices above.
@@ -861,7 +985,7 @@ must remain in the shared-interface inventory.
 | Counted assembly bytes → `asm_lex` → statements/operands | `AsmToken` is four u32 fields: start/end/kind/reserved. Vector register classification caches its bounded result in reserved; source spans remain for diagnostics. |
 | `.S` preprocessing → printed assembly bytes → assembly lexer | Uses the PP assembly mode and spacing rules. This materialized text handoff is real; it is not C parser token conversion. |
 | Statements/expressions → shared `x86_match` → fragments/records | Symbols and relative expressions retain identity/addends. Public input rejects unsupported forms and validates records before trusted encoding. |
-| Fragments/labels/alignment → monotone layout → encoding/Link | Variable fragment counts and final offsets; branches promote, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
+| Fragments/labels/alignment → GNU-order layout → encoding/Link | Variable fragment counts and final offsets; branches promote in GNU as's pass order, alignment is recalculated. `asm_object` passes the shared Link to object preparation/building. |
 
 The public source is bounded (64 MiB limit); the driver can read streams and
 keeps its own terminator, while reusable `asm_assemble` takes a counted slice.
@@ -873,7 +997,8 @@ rather than sending an invalid record to the unchecked encoder.
 
 A logical assembly unit/section contains ordered directives, labels and
 alignment, so sorting instructions or independently sizing arbitrary fragments
-is invalid. Layout terminates by monotone promotion and checks rel8-only
+is invalid. Layout terminates because branches only grow (LEB128s are bounded)
+and checks rel8-only
 instructions after final placement. This differs from C `size_branches`, whose
 record order is fixed and has no assembly alignment fragments; replacing one
 with the other would lose a real dependency.
@@ -915,6 +1040,60 @@ CFI cases exercise common/different CIEs, simple/signal frames, saved-state
 transitions, signed/extended offsets/registers and all advance-location widths,
 including a relaxed branch and alignment before a rule. A native command check
 links and executes a 32-bit LEA against an address at `0x80000000`.
+
+## Whole-program corpus (#1115)
+
+`test-assembler --cross-check` also assembles GCC's and Clang's `-S` output of
+ordinary C programs, as #1115 suggested, so that a gap of their output is a
+named failure here rather than one a user meets. The programs are original
+(`examples/assembler/program-*.c`, `assembler_programs_test.c`):
+
+- `program-floating.c`: float, double and long double arithmetic, conversions
+  and comparisons (scalar SSE, its compare predicates, the x87's stack
+  registers) and the shifts by one;
+- `program-storage.c`: thread-local variables of every TLS model, with threads
+  (local-exec by default, initial-exec and general-dynamic by `tls_model`,
+  which GCC follows, general- and local-dynamic with `-fPIC`), tentative
+  definitions (`.comm` under `-fcommon`) and static zero-initialized storage
+  (GCC's `.local` and `.comm`);
+- `program-strings.c`: narrow and wide string literals (merged strings of 1-, 2-
+  and 4-byte characters) and stdio.
+
+GCC and Clang (Clang with `-fno-integrated-as`, as in the corpus above) compile
+each at `-O0`, `-O2`, `-O2 -fPIC` and `-O3 -march=x86-64-v4`, in AT&T and Intel
+syntax, with `-fcf-protection=none` and `-fcommon`: 48 sources. Every variant
+names its `-march` (`x86-64` for the first three) and `-fPIE` or `-fPIC`: a
+compiler's defaults may be others (Ubuntu 26.04's GCC 15 writes AVX's
+instructions at `-O2` without one). Each source must
+assemble by both paths into the same object, by the `assemble` command too (with
+the variant's `-march`), and that object must have GNU as's sections, symbols
+and relocations (the comparator above). The program linked from it (by the
+compiler that wrote it, with `-pthread`) must then print what the program
+linked from GNU as's object prints, and succeed. The programs check their own
+exactly representable results too. The x86-64-v4 programs run where the host
+has every feature of x86-64-v4 (its whole parsed target, not only AVX-512 F, BW,
+DQ and VL: clang's code for it takes FMA); elsewhere their objects are still
+compared.
+
+Where GNU as pads code unlike binutils 2.47 (2.42 orders its long NOPs
+otherwise; `asm_test_gas_pads_like_2_47`), GNU as's code padding is taken as
+ours before the comparison. The source is assembled again with its code
+sections' alignment filled with `int3`, and the bytes where that object has
+`0xcc` and ours doesn't are padding. Only those are copied into GNU as's object,
+and every other byte, section, symbol and relocation is compared as on 2.47.
+The programs' runs are compared on either.
+
+The first corpus runs found three gaps beyond the issue's, which are fixed:
+
+- GCC's `.set .LC4,.LC11+4`, a constant pool's alias (above);
+- the 16-bit accumulator forms, which GNU as doesn't take where the imm8 form is
+  as long (above);
+- GCC 15's `.base64` (above), which it writes where GNU as takes it.
+
+`-g` output isn't in the corpus. Its `.loc`s give no `.debug_line` here, its
+TLS variables' DWARF uses `.quad x@dtpoff` (DTPOFF64), and GCC's view numbers
+(`.byte .LVU27`) are numbers GNU as assigns, where this assembler makes them
+labels. Those are separate work.
 
 Syntax and encoding rules are checked against the
 [GNU assembler manual](https://sourceware.org/binutils/docs/as/), including its
