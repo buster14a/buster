@@ -541,6 +541,20 @@ The decoding:
   slots. The prologue may write none of them; a narrow parameter's extension
   into its canonical form is the parameter, and a stack parameter's load must
   be its type's form.
+- **The frame protocol.** The prologue and each epilogue are decoded record by
+  record by rsp's offset from its value at entry, each record exactly its form's
+  (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),
+  nothing else in them. The prologue must build the frame the layout's offsets
+  are of: its saved registers pushed, its frame pointer set where it has one,
+  its allocation exactly; and with calls, rsp a multiple of 16 at them (the ABI's
+  alignment, rsp 8 past one at entry). A push is a store of its register into
+  its slot, a pop the load back, the frame pointer's set a kill of rbp. Each
+  callee-saved register's value at entry and the return address are values of
+  the certificate: entry facts, asserted at every other block's entry (in the
+  push's slot, or in the register where the prologue doesn't push it), and read
+  by each return's `ret`, where they were at entry, with rsp back at the return
+  address. A register the function doesn't give back, a slot something
+  overwrote, an epilogue that pops the wrong slot or leaves rsp elsewhere fails.
 - **Control.** Each block's tail, its jumps and edges' moves, is walked for each
   successor, by its condition's value for a conditional branch's: the path must
   reach the successor's first record through that edge's moves alone, or reach
@@ -548,13 +562,15 @@ The decoding:
   edge's moves. Every branch target is a block's or a stub's start, or the
   prologue's own probes'.
 - **Frame.** No record but the prologue and the epilogues writes the frame base
-  register, nor rsp but a call's and a `ret`'s own push and pop. A store through
+  register or the frame pointer, nor rsp but a call's and a `ret`'s own push and
+  pop. A store through
   any pointer but the frame base register's is the program's own, assumed not to
   reach the frame's rows, as C's object model says.
 
 **Not decoded yet**, so not certified, each counted by its reason: by-value
 aggregates (#789's copies, parts and hidden pointers), dynamic and realigned
-frames (`alloca`, a stack restore), a variadic definition's register save area,
+frames (`alloca`, a stack restore), a prologue's stack probes, a variadic
+definition's register save area,
 an indirect jump to several labels, a call's stack arguments or a stack
 parameter where the frame base register isn't rsp's (or the incoming area's),
 and an entry block that is a loop's. The allocation's certificate still covers
@@ -564,11 +580,13 @@ selection's contract and isn't checked: a 4-byte value is its low 4 bytes.
 
 **Tests.** The emitter's tests, the mask tests and the pipeline test run it on
 every CFG function they emit. `test-tier1-pipeline` also corrupts each
-certified function's records (another register in a move's or a node's record,
-a frame access 8 bytes off, two adjacent moves swapped): a mutant the
+certified function's records: every prologue and epilogue record, and a sample
+of its moves and nodes' (another register, a frame access 8 bytes off, an
+immediate 8 off, two adjacent records of one origin swapped). A mutant the
 certificate refuses counts, and one it accepts runs natively and must still
-return the interpreter's results. At this change, 693 of 704 mutants are
-refused and the 11 accepted are harmless. With `--tier1 --verify`, the
+return the interpreter's results. At this change, 879 of 890 mutants are
+refused, all 76 of the prologues' and 72 of the epilogues' among them, and the
+11 accepted (independent moves swapped, and the like) are harmless. With `--tier1 --verify`, the
 compiler's `main.c` certifies 562 of its 813 CFG functions' code and the
 c-testsuite subset 231 of 288, none refused; most of the rest are aggregates'.
 

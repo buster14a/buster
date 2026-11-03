@@ -27,17 +27,26 @@
 //   it is (its target, al, the result's extension into its register), its arguments read in their ABI registers.
 // - Control: each block's tail (its jumps and its edges' moves) is walked for each successor; every path must reach the
 //   successor's first record through that edge's moves alone, or reach a successor whose only predecessor it is, whose
-//   first records are that edge's moves. Every branch target is a block's or a stub's start, or the prologue's own.
+//   first records are that edge's moves. Every branch target is a block's or a stub's start.
+// - The frame protocol: the prologue and each epilogue are decoded by rsp's offset from its value at entry, record by
+//   record, each exactly its form's (push, the frame pointer's set, sub; add, the reset from rbp, pop), and must build
+//   the frame the layout's offsets are of (its saved registers pushed, its frame pointer, its allocation exactly) with
+//   rsp at a call a multiple of 16. A push is a store of its register's value into its slot, a pop the load back. Each
+//   callee-saved register's value at entry and the return address are values of the certificate, asserted at every
+//   block's entry, and each return's ret reads them where they were at entry, with rsp back at the return address: a
+//   register the function doesn't give back, a slot something overwrote, an epilogue that pops the wrong slot or leaves
+//   rsp elsewhere fails.
 // - Frame storage: the frame base register's displacements over the spill, save and temporary rows are byte units, so a
 //   slot that two values share over their lifetimes is the same bytes, and a node's store into a frame object over
 //   them kills what it overwrites. A store through any other pointer is the program's own: it is assumed not to reach
 //   the frame's rows, as C's object model says.
-// - The prologue may not write any parameter's register, and no record but the prologue and the epilogues may write the
-//   frame base register; a call's push and pop of the return address balance rsp.
+// - The prologue may not write any parameter's register, and no record but the prologue and the epilogues may write rsp
+//   (but a call's and a ret's own push and pop), the frame base register or the frame pointer.
 //
 // Not decoded yet, so not certified, each counted by its reason (Tier1CertEmittedReason): by-value aggregates, stack
-// parameters and arguments, dynamic and realigned frames, a variadic definition's register save area, indirect jumps to
-// several labels, and an entry block that is a loop's. The allocation's own certificate (tier1_certificate_cfg.c) still
+// parameters and arguments where the frame base register doesn't reach them, dynamic and realigned frames, a probe's
+// prologue, a variadic definition's register save area, indirect jumps to several labels, and an entry block that is a
+// loop's. The allocation's own certificate (tier1_certificate_cfg.c) still
 // covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
 // checked: a 4-byte value is its low 4 bytes.
 //
@@ -57,6 +66,7 @@ typedef enum Tier1CertEmittedReason
     TIER1_CERT_EMITTED_VARIADIC,
     TIER1_CERT_EMITTED_INDIRECT,
     TIER1_CERT_EMITTED_ENTRY_LOOP,
+    TIER1_CERT_EMITTED_PROBE,
     // The code doesn't decode to its own certificate: a refusal.
     TIER1_CERT_EMITTED_ORIGIN,
     TIER1_CERT_EMITTED_DECODE,
@@ -84,6 +94,7 @@ static __attribute__((unused)) const char* tier1_cert_emitted_reason_name(Tier1C
         "variadic",
         "indirect",
         "entry-loop",
+        "probe",
         "origin",
         "decode",
         "kernel",
@@ -154,7 +165,24 @@ struct Tier1CertEmittedBuild
     // Each record's branch, or UINT32_MAX.
     uint32_t* branch_of;
     uint32_t base_position;
+    // The frame protocol (tier1_cert_emitted_prologue), in the stack pointer's offsets from its value at entry, where
+    // the return address is: its value after the prologue, the frame base register's, the frame pointer's (rbp's, where
+    // the prologue sets it, else INT64_MIN), and each register's push (INT64_MIN for one it doesn't push); and the stack
+    // pointer as the stream's decoding has it.
+    int64_t stack;
+    int64_t frame_base;
+    int64_t frame_pointer;
+    int64_t saves[16];
+    int64_t sp;
+    // The first of the protocol's values past the function's: each callee-saved register's value at entry, then the
+    // return address.
+    uint32_t pseudo;
 };
+
+// The callee-saved registers, whose values at entry every return must give back, and the return address's value after
+// them (Tier1CertEmittedBuild.pseudo).
+static const uint8_t tier1_cert_emitted_callee[6] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
+#define BUSTER_CERT_EMITTED_PSEUDO 7u
 
 static bool tier1_cert_emitted_refuse(Tier1CertEmittedBuild* build, Tier1CertEmittedReason reason, uint32_t record)
 {
@@ -318,7 +346,9 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
             }
         }
     }
-    bool valid = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE;
+    // A move's fields but its registers, its mode and a memory operand's displacement are zero.
+    const bool exact = record.immediate == 0 && record.index == 0 && record.vvvv == 0 && record.decorations == 0 && (!direct || record.displacement == 0);
+    bool valid = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE && exact;
     if (valid)
     {
         *edit = (Tier1CertInstruction){
@@ -360,6 +390,10 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
             tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_DECODE, r);
         }
     }
+    // No move writes rsp, nor rbp while it is the frame pointer: the frame protocol's decoding follows them.
+    const Tier1CertLocation written = valid ? build->locations[edit->a] : (Tier1CertLocation){ 0 };
+    const bool protocol = valid && written.class == TIER1_CERT_GPR && (written.reg == X86_REGISTER_RSP || (written.reg == X86_REGISTER_RBP && build->frame_pointer != INT64_MIN));
+    valid = valid && (!protocol || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
     return valid;
 }
 
@@ -641,6 +675,7 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         // own push and pop.
         const bool control = (written & (BUSTER_X86_RESOURCE_CALL | BUSTER_X86_RESOURCE_CONTROL)) != 0;
         valid = ((written & BUSTER_X86_RESOURCE_GPR(build->base)) == 0 || (build->base == X86_REGISTER_RSP && control)) && ((written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP)) == 0 || control);
+        valid = valid && (build->frame_pointer == INT64_MIN || (written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP)) == 0);
         valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
         // A store into the frame kills the bytes it writes that are the frame's storage; a write the semantics doesn't
         // bound kills them all.
@@ -805,6 +840,12 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     {
         reason = TIER1_CERT_EMITTED_ENTRY_LOOP;
     }
+    // A probe's loop in the prologue isn't decoded.
+    for (uint32_t k = 0; reason == TIER1_CERT_EMITTED_OK && k < emitted->frame.prologue_count && k < BUSTER_TIER1_FRAME_STEP_CAPACITY; k += 1)
+    {
+        const Tier1FrameStepKind kind = emitted->frame.prologue[k].kind;
+        reason = kind == TIER1_FRAME_PROBE_ALLOCATE || kind == TIER1_FRAME_PROBE_ALIGN ? TIER1_CERT_EMITTED_PROBE : reason;
+    }
     for (uint32_t node = 0; reason == TIER1_CERT_EMITTED_OK && node < function->instruction_count; node += 1)
     {
         const uint32_t op = function->op[node];
@@ -896,6 +937,184 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
     return (valid && arrived) || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_CONTROL, pc);
 }
 
+// Whether `record` is exactly `expected`: a frame record's every field its decoding's, the rest zero.
+static bool tier1_cert_emitted_exactly(X86Instruction record, X86Instruction expected)
+{
+    return memcmp(&record, &expected, sizeof(record)) == 0;
+}
+
+// An immediate's form for the frame's add and sub: its imm8 one where the value fits it, else its imm32 one.
+static bool tier1_cert_emitted_immediate_form(uint16_t form, uint16_t imm8, uint16_t imm32, int32_t value)
+{
+    return (form == imm8 && value >= INT8_MIN && value <= INT8_MAX) || form == imm32;
+}
+
+// The prologue, its records from the first (origin FRAME 0), decoded by the stack pointer's offset from its value at
+// entry: a push of a general register (each register once), the frame pointer's set from rsp (once), an allocation by
+// sub. Nothing else may be in it: a probe's loop or a realignment is a shape left uncertified before this. It gives the
+// frame base register's offset, rsp's after it, and where each push put its register. `end` is the record after it.
+static bool tier1_cert_emitted_prologue(Tier1CertEmittedBuild* build, uint32_t* end)
+{
+    const Tier1EmitResult* emitted = build->emitted;
+    const uint32_t prologue = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    int64_t sp = 0;
+    bool valid = true;
+    build->frame_pointer = INT64_MIN;
+    for (uint32_t reg = 0; reg < 16; reg += 1)
+    {
+        build->saves[reg] = INT64_MIN;
+    }
+    uint32_t r = 0;
+    while (valid && r < emitted->code.count && emitted->origins[r] == prologue)
+    {
+        const X86Instruction record = emitted->code.records[r];
+        if (record.form == X86_FORM_PUSH_R64 && record.rm < 16 && record.rm != X86_REGISTER_RSP && build->saves[record.rm] == INT64_MIN &&
+            tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_PUSH_R64, .rm = record.rm }))
+        {
+            sp -= 8;
+            build->saves[record.rm] = sp;
+        }
+        else if (build->frame_pointer == INT64_MIN && tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RSP, .rm = X86_REGISTER_RBP }))
+        {
+            build->frame_pointer = sp;
+        }
+        else if (tier1_cert_emitted_immediate_form(record.form, X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, record.immediate) && record.immediate > 0 &&
+                 tier1_cert_emitted_exactly(record, (X86Instruction){ .form = record.form, .rm = X86_REGISTER_RSP, .immediate = record.immediate }))
+        {
+            sp -= record.immediate;
+        }
+        else
+        {
+            valid = tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r);
+        }
+        r += 1;
+    }
+    build->stack = sp;
+    // The frame base register is rsp after the prologue, or the frame pointer it set.
+    build->frame_base = build->base == X86_REGISTER_RSP ? sp : build->base == X86_REGISTER_RBP ? build->frame_pointer : INT64_MIN;
+    valid = valid && (build->frame_base != INT64_MIN || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
+    // The frame the layout's offsets are of: the pushes exactly its saved registers (and rbp with its frame pointer), the
+    // frame pointer set exactly where it has one, its allocation exactly. And the ABI's alignment: rsp at entry is 8 past
+    // a multiple of 16, and at a call a multiple of 16, the body's rsp the prologue's (a dynamic frame is left
+    // uncertified).
+    const Tier1Frame* frame = &emitted->frame;
+    uint32_t pushed = 0;
+    for (uint32_t reg = 0; reg < 16; reg += 1)
+    {
+        pushed |= build->saves[reg] != INT64_MIN ? 1u << reg : 0;
+    }
+    const uint32_t expected = frame->saved_registers | (frame->frame_pointer ? 1u << X86_REGISTER_RBP : 0);
+    valid = valid && ((pushed == expected && (build->frame_pointer != INT64_MIN) == frame->frame_pointer && sp == -8 * (int64_t)__builtin_popcount(expected) - (int64_t)frame->stack_adjust_bytes) ||
+                      tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
+    const bool calls = emitted->prepared.call_count != 0;
+    valid = valid && (!calls || ((sp % 16) + 16) % 16 == 8 || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
+    *end = r;
+    return valid;
+}
+
+// A prologue's record `r` in the stream: a push's store of its register into its slot, the frame pointer's set killing
+// rbp's value at entry, an allocation moving rsp alone (the stream's decoding follows rsp in Tier1CertEmittedBuild.sp).
+static bool tier1_cert_emitted_prologue_record(Tier1CertEmittedBuild* build, uint32_t r)
+{
+    const X86Instruction record = build->emitted->code.records[r];
+    bool valid = build->code_count < build->code_capacity && tier1_cert_emitted_take_reference(build, r, 0);
+    if (valid && record.form == X86_FORM_PUSH_R64)
+    {
+        build->sp -= 8;
+        const uint32_t slot = tier1_cert_emitted_frame(build, build->sp - build->frame_base, 8);
+        valid = slot != BUSTER_CERT_NONE;
+        build->code[build->code_count] = (Tier1CertInstruction){
+            .a = slot,
+            .b = tier1_cert_emitted_gpr(record.rm, 8),
+            .op = TIER1_CERT_MOVE,
+        };
+        build->code_count += valid;
+    }
+    else if (valid && record.form == X86_FORM_MOV_RM64_R64)
+    {
+        Tier1CertSource* source = 0;
+        Tier1CertInstruction* instruction = 0;
+        valid = tier1_cert_emitted_original(build, build->plan->function->instruction_count, 5, r, &source, &instruction);
+        if (valid)
+        {
+            source->after[source->after_count++] = tier1_cert_emitted_gpr(X86_REGISTER_RBP, 8);
+        }
+    }
+    else if (valid)
+    {
+        build->sp -= record.immediate;
+    }
+    return valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_CAPACITY, r);
+}
+
+// An epilogue's records [first, end) in the stream, from rsp after the prologue (the body moves it only by a call's own
+// balanced push and pop): each pop's load of its register from the slot at rsp, the release's add, the reset of rsp from
+// the frame pointer. Nothing else may be in it.
+static bool tier1_cert_emitted_epilogue(Tier1CertEmittedBuild* build, uint32_t first, uint32_t end)
+{
+    const Tier1EmitResult* emitted = build->emitted;
+    int64_t frame_pointer = build->frame_pointer;
+    build->sp = build->stack;
+    bool valid = true;
+    for (uint32_t r = first; valid && r < end; r += 1)
+    {
+        const X86Instruction record = emitted->code.records[r];
+        valid = tier1_cert_emitted_take_reference(build, r, 0);
+        if (valid && tier1_cert_emitted_immediate_form(record.form, X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, record.immediate) && record.immediate > 0 &&
+            tier1_cert_emitted_exactly(record, (X86Instruction){ .form = record.form, .rm = X86_REGISTER_RSP, .immediate = record.immediate }))
+        {
+            build->sp += record.immediate;
+        }
+        else if (valid && frame_pointer != INT64_MIN &&
+                 tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RSP, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = record.displacement }))
+        {
+            build->sp = frame_pointer + record.displacement;
+        }
+        else if (valid && frame_pointer != INT64_MIN && tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RBP, .rm = X86_REGISTER_RSP }))
+        {
+            build->sp = frame_pointer;
+        }
+        else if (valid && record.form == X86_FORM_POP_R64 && record.rm < 16 && record.rm != X86_REGISTER_RSP && tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_POP_R64, .rm = record.rm }))
+        {
+            const uint32_t slot = tier1_cert_emitted_frame(build, build->sp - build->frame_base, 8);
+            valid = slot != BUSTER_CERT_NONE && build->code_count < build->code_capacity;
+            if (valid)
+            {
+                build->code[build->code_count++] = (Tier1CertInstruction){
+                    .a = tier1_cert_emitted_gpr(record.rm, 8),
+                    .b = slot,
+                    .op = TIER1_CERT_MOVE,
+                };
+            }
+            build->sp += 8;
+            frame_pointer = record.rm == X86_REGISTER_RBP ? INT64_MIN : frame_pointer;
+        }
+        else
+        {
+            valid = false;
+        }
+        valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r);
+    }
+    return valid;
+}
+
+// A return's ret: rsp back at the return address, and an instruction that reads every callee-saved register's value at
+// entry in its register and the return address in its slot.
+static bool tier1_cert_emitted_return(Tier1CertEmittedBuild* build, uint32_t node, const X86Instruction* ret, uint32_t r)
+{
+    Tier1CertEmittedKernel kernel = {
+        .definition = BUSTER_TIER1_CFG_NONE,
+        .definition_location = BUSTER_CERT_NONE,
+    };
+    bool valid = build->sp == 0 || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r);
+    for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(tier1_cert_emitted_callee); k += 1)
+    {
+        valid = tier1_cert_emitted_add_use(&kernel, build->pseudo + k, tier1_cert_emitted_gpr(tier1_cert_emitted_callee[k], 8));
+    }
+    valid = valid && tier1_cert_emitted_add_use(&kernel, build->pseudo + 6, tier1_cert_emitted_frame(build, -build->frame_base, 8));
+    return valid && tier1_cert_emitted_originals(build, node, &kernel, ret, 1);
+}
+
 // Node `node`'s run from record `r` before block tail `tail`: its records (their origin `origin`), a return's epilogue
 // (which may have none) before its ret among them, as its kernel says; then its ORIGINALs. `next` is the record after
 // the run.
@@ -911,6 +1130,10 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
     uint32_t found_count = 0;
     uint32_t at = r;
     bool epilogue = false;
+    // The epilogue's records, and the records before it.
+    uint32_t epilogue_first = UINT32_MAX;
+    uint32_t epilogue_end = UINT32_MAX;
+    uint32_t before = 0;
     bool more = valid;
     while (more && at < tail && found_count < BUSTER_CERT_EMITTED_KERNEL)
     {
@@ -927,10 +1150,13 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         else if (here == epilogue_origin && returns && !epilogue && found_count + 1 == kernel.count)
         {
             epilogue = true;
+            epilogue_first = at;
+            before = found_count;
             while (at < tail && emitted->origins[at] == epilogue_origin)
             {
                 at += 1;
             }
+            epilogue_end = at;
         }
         else
         {
@@ -939,7 +1165,20 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
     }
     valid = valid && found_count == kernel.count && memcmp(found, kernel.records, (uint64_t)found_count * sizeof(X86Instruction)) == 0;
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
-    valid = valid && tier1_cert_emitted_originals(build, node, &kernel, found, found_count);
+    if (returns)
+    {
+        // A return: its records before its ret, then its epilogue (none where the frame has none), then the ret, which
+        // gives back the callee-saved registers and returns.
+        before = epilogue ? before : found_count - (found_count != 0);
+        valid = valid && found_count != 0 && tier1_cert_emitted_originals(build, node, &kernel, found, before);
+        valid = valid && (!epilogue || tier1_cert_emitted_epilogue(build, epilogue_first, epilogue_end));
+        build->sp = epilogue ? build->sp : build->stack;
+        valid = valid && tier1_cert_emitted_return(build, node, &found[found_count - 1], at - 1);
+    }
+    else
+    {
+        valid = valid && tier1_cert_emitted_originals(build, node, &kernel, found, found_count);
+    }
     *condition = function->op[node] == IR_CBR ? kernel.condition : *condition;
     *next = at;
     return valid;
@@ -1100,6 +1339,10 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     }
     valid = valid && emitted->block_records[blocks] == records;
     valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_ORIGIN, UINT32_MAX);
+    // The prologue's frame: rsp after it, the frame base register's offset, the pushes' slots.
+    uint32_t prologue_end = 0;
+    valid = valid && tier1_cert_emitted_prologue(&build, &prologue_end);
+    build.pseudo = values;
     // The frame's storage rows, the spills', the saves' and the temporary slots', each 16 bytes at most: the frame base
     // register's displacements the stream's moves may name.
     const Tier1EmitPrepared* prepared = &emitted->prepared;
@@ -1132,6 +1375,19 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             high = (int64_t)offset + BUSTER_ABI_SLOT_BYTES > high ? (int64_t)offset + BUSTER_ABI_SLOT_BYTES : high;
         }
     }
+    // And the pushes' slots and the return address's, by their offsets from the frame base register.
+    for (uint32_t reg = 0; valid && reg < 16; reg += 1)
+    {
+        const int64_t displacement = build.saves[reg] != INT64_MIN ? build.saves[reg] - build.frame_base : INT64_MAX;
+        low = displacement != INT64_MAX && displacement < low ? displacement : low;
+        high = displacement != INT64_MAX && displacement + 8 > high ? displacement + 8 : high;
+    }
+    if (valid)
+    {
+        low = -build.frame_base < low ? -build.frame_base : low;
+        high = 8 - build.frame_base > high ? 8 - build.frame_base : high;
+    }
+    valid = valid && (low >= INT32_MIN && high <= INT32_MAX);
     build.low = low <= high ? (int32_t)low : 0;
     build.high = low <= high && high <= INT32_MAX ? (int32_t)high : 0;
     valid = valid && ((uint64_t)((int64_t)build.high - build.low) <= BUSTER_CERT_MAX_TOTAL - BUSTER_CERT_EMITTED_FRAME_UNIT || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
@@ -1146,12 +1402,12 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     }
     // The arrays: the locations (the registers', then a frame range per record and per kernel's store at most), the
     // values, the facts, the source and code, the blocks, edges and renames; and the scratch maps.
-    build.location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * records + 64;
+    build.location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * records + 8 * blocks + 64;
     build.source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * count + 16;
     build.code_capacity = records + build.source_capacity;
     build.locations = valid ? arena_push_array(output, build.location_capacity, sizeof(Tier1CertLocation), _Alignof(Tier1CertLocation)) : 0;
-    Tier1CertValue* cert_values = valid ? arena_push_array(output, (uint64_t)values + 1, sizeof(Tier1CertValue), _Alignof(Tier1CertValue)) : 0;
-    Tier1CertFact* facts = valid ? arena_push_array(output, fact_capacity + count + 1, sizeof(Tier1CertFact), _Alignof(Tier1CertFact)) : 0;
+    Tier1CertValue* cert_values = valid ? arena_push_array(output, (uint64_t)values + BUSTER_CERT_EMITTED_PSEUDO + 1, sizeof(Tier1CertValue), _Alignof(Tier1CertValue)) : 0;
+    Tier1CertFact* facts = valid ? arena_push_array(output, fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + 1, sizeof(Tier1CertFact), _Alignof(Tier1CertFact)) : 0;
     build.source = valid ? arena_push_array(output, build.source_capacity, sizeof(Tier1CertSource), _Alignof(Tier1CertSource)) : 0;
     build.code = valid ? arena_push_array(output, build.code_capacity, sizeof(Tier1CertInstruction), _Alignof(Tier1CertInstruction)) : 0;
     Tier1CertBlock* cert_blocks = valid ? arena_push_array(output, (uint64_t)blocks + 1, sizeof(Tier1CertBlock), _Alignof(Tier1CertBlock)) : 0;
@@ -1197,6 +1453,14 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
                 .width = tier1_cert_emitted_width(emitted, v),
                 .class = class == BUSTER_TIER1_ALLOCATE_GPR ? TIER1_CERT_GPR : class == BUSTER_TIER1_ALLOCATE_VECTOR ? TIER1_CERT_VECTOR : TIER1_CERT_MASK,
                 .recipe = recipe ? TIER1_CERT_INTEGER_RECIPE : TIER1_CERT_NO_RECIPE,
+            };
+        }
+        // The callee-saved registers' values at entry and the return address.
+        for (uint32_t k = 0; k < BUSTER_CERT_EMITTED_PSEUDO; k += 1)
+        {
+            cert_values[values + k] = (Tier1CertValue){
+                .width = 8,
+                .class = TIER1_CERT_GPR,
             };
         }
         memset(build.references, 0xff, ((uint64_t)records + 1) * 4);
@@ -1313,8 +1577,20 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             entry_count += 1;
         }
     }
+    // The callee-saved registers' values at entry in their registers, and the return address at rsp.
+    for (uint32_t k = 0; valid && k < BUSTER_CERT_EMITTED_PSEUDO; k += 1)
+    {
+        facts[entry_count] = (Tier1CertFact){
+            .value = values + k,
+            .location = k < 6 ? tier1_cert_emitted_gpr(tier1_cert_emitted_callee[k], 8) : tier1_cert_emitted_frame(&build, -build.frame_base, 8),
+        };
+        valid = facts[entry_count].location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX);
+        entry_count += 1;
+    }
     // Every other reachable block's facts: the values its start's intervals carry in, where the allocation has them there
-    // (a phi of the block's among them, not a value its start defines), counted then filled.
+    // (a phi of the block's among them, not a value its start defines), counted then filled; then the protocol's values,
+    // each callee-saved register's in its push's slot, or in itself where the prologue doesn't push it, and the return
+    // address.
     for (uint32_t pass = 0; valid && pass < 2; pass += 1)
     {
         if (pass == 0)
@@ -1326,8 +1602,22 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             fact_offsets[0] = entry_count;
             for (uint32_t b = 0; b < blocks; b += 1)
             {
-                fact_offsets[b + 1] += fact_offsets[b];
+                fact_offsets[b + 1] += fact_offsets[b] + (b != 0 && numbers[b] != BUSTER_CERT_NONE ? BUSTER_CERT_EMITTED_PSEUDO : 0);
                 fill[b] = fact_offsets[b];
+            }
+            for (uint32_t b = 1; valid && b < blocks; b += 1)
+            {
+                for (uint32_t k = 0; numbers[b] != BUSTER_CERT_NONE && k < BUSTER_CERT_EMITTED_PSEUDO; k += 1)
+                {
+                    const uint32_t reg = k < 6 ? tier1_cert_emitted_callee[k] : 0;
+                    const int64_t at = k == 6 ? 0 : build.saves[reg];
+                    facts[fill[b]] = (Tier1CertFact){
+                        .value = values + k,
+                        .location = k < 6 && at == INT64_MIN ? tier1_cert_emitted_gpr(reg, 8) : tier1_cert_emitted_frame(&build, at - build.frame_base, 8),
+                    };
+                    valid = facts[fill[b]].location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX);
+                    fill[b] += 1;
+                }
             }
         }
         for (uint32_t i = 0; valid && i < cfg->intervals.count; i += 1)
@@ -1408,11 +1698,12 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             const uint32_t payload = origin & BUSTER_TIER1_ORIGIN_PAYLOAD;
             if (kind == TIER1_ORIGIN_FRAME && payload == 0)
             {
-                // The prologue: first in the entry block, and writing no parameter's register.
+                // The prologue: first in the entry block (tier1_cert_emitted_prologue), writing no parameter's register.
                 uint64_t read = 0;
                 uint64_t written = 0;
                 x86_instruction_effects_scalar(&code->records[r], &read, &written);
-                valid = (b == 0 && !body && (written & entry_registers) == 0 && tier1_cert_emitted_take_reference(&build, r, 0)) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, r);
+                valid = (b == 0 && !body && r < prologue_end && (written & entry_registers) == 0) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, r);
+                valid = valid && tier1_cert_emitted_prologue_record(&build, r);
             }
             else if (kind == TIER1_ORIGIN_ENTRY)
             {
@@ -1543,7 +1834,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             .entry = facts,
             .unit_count = units,
             .location_count = build.location_count,
-            .value_count = values,
+            .value_count = values + BUSTER_CERT_EMITTED_PSEUDO,
             .block_count = reachable,
             .entry_count = entry_count,
             .flags_location = BUSTER_CERT_NONE,
@@ -1551,7 +1842,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
         };
         tally.locations = build.location_count;
         tally.units = units;
-        tally.bytes = (uint64_t)build.location_count * sizeof(Tier1CertLocation) + (uint64_t)values * sizeof(Tier1CertValue) + tally.facts * sizeof(Tier1CertFact) + (uint64_t)build.source_count * sizeof(Tier1CertSource) +
+        tally.bytes = (uint64_t)build.location_count * sizeof(Tier1CertLocation) + ((uint64_t)values + BUSTER_CERT_EMITTED_PSEUDO) * sizeof(Tier1CertValue) + tally.facts * sizeof(Tier1CertFact) + (uint64_t)build.source_count * sizeof(Tier1CertSource) +
                       (uint64_t)build.code_count * sizeof(Tier1CertInstruction) + (uint64_t)reachable * sizeof(Tier1CertBlock) + (uint64_t)edge_count * sizeof(Tier1CertEdge) + (uint64_t)rename_count * sizeof(Tier1CertRename);
     }
     else
