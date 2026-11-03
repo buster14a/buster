@@ -522,6 +522,9 @@ The decoding:
   slots are byte units, so slots that values share over their lifetimes are the
   same bytes. Values have their own widths: a general one 8 bytes or 4 (every
   narrower one is in its canonical 32-bit form), a float 4 or 8, a mask its own.
+  The rows must be bytes no callee writes, at or above rsp after the prologue,
+  or in a function without calls in the red zone's 128 bytes below it: the
+  certificate models no write below rsp.
 - **Moves.** `mov` (32- and 64-bit), `movss`, `movsd`, `movaps` and `kmov`
   between registers and frame bytes are the edits their forms say, at their
   forms' widths: a 32-bit store of an 8-byte value truncates it, and its later
@@ -541,7 +544,10 @@ The decoding:
   say) and the outgoing area too (its callee owns it), before its result. A copy that vanishes in its own register
   is its operand's value. A return's epilogue may come before its `ret`.
 - **Entry.** The parameters are entry facts in their ABI registers and incoming
-  slots. The prologue may write none of them; a narrow parameter's extension
+  slots. An incoming slot is placed by the ABI from the decoded prologue (8 bytes
+  past the return address per slot), and the layout's offset, which the
+  parameter's load uses, must be that. The prologue may write none of them; a
+  narrow parameter's extension
   into its canonical form is the parameter, and a stack parameter's load must
   be its type's form.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
@@ -550,7 +556,10 @@ The decoding:
   nothing else in them. The prologue must build the frame the layout's offsets
   are of: its saved registers pushed, its frame pointer set where it has one,
   its allocation exactly; and with calls, rsp a multiple of 16 at them (the ABI's
-  alignment, rsp 8 past one at entry). A push is a store of its register into
+  alignment, rsp 8 past one at entry). A frame pointer is the ABI's frame
+  record: rbp pushed first and set right after, the caller's rbp at it and the
+  return address above it, as the layout's offsets from rbp and an unwinder by
+  frame pointers take it. A push is a store of its register into
   its slot, a pop the load back, the frame pointer's set a kill of rbp. Each
   callee-saved register's value at entry and the return address are values of
   the certificate: entry facts, asserted at every other block's entry (in the
@@ -588,7 +597,12 @@ them, the caller-saved registers alone allocatable) corrupts its calls: each
 argument move made a move of its source into itself, refused even for the
 second placement of the value passed twice, and each save or restore, and each
 store before a call with its load after it, left out, refused: the callee may
-change the register. `test-tier1-pipeline` also corrupts each
+change the register. It compiles the fixture with and without a frame pointer
+and moves the frame: its rows below rsp, every access with them, are refused;
+and rbp set after the allocation instead of right after its push, each
+epilogue's reset from it moved to match, is refused (every register and the
+return address still come back, but rbp is no longer the frame record).
+`test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an
 immediate 8 off, two adjacent records of one origin swapped). A mutant the

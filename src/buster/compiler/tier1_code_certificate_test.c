@@ -12,6 +12,11 @@
 // made a register's move into itself (left out), and each store before the call with its load after it together, of a
 // register nothing between them writes but the callee, is refused, one at a time: that value is lost unless the call
 // kills every caller-saved register.
+//
+// The frame, compiled with and without a frame pointer: the frame's rows moved below rsp, every access to them with
+// them, are refused, a callee being free to write there; and with a frame pointer, rbp set after the allocation instead
+// of right after its push, each epilogue's reset from it moved to match, is refused, rbp no longer being the frame
+// record's (the caller's rbp at it, the return address above it) that the layout's offsets are computed for.
 
 typedef struct Tier1CodeCertificateCounts Tier1CodeCertificateCounts;
 struct Tier1CodeCertificateCounts
@@ -29,6 +34,11 @@ struct Tier1CodeCertificateCounts
     // callee; and those refused.
     uint32_t untouched;
     uint32_t untouched_refused;
+    // The frames whose rows were moved below rsp, the frame pointers set after the allocation; and of each, those refused.
+    uint32_t lowered;
+    uint32_t lowered_refused;
+    uint32_t pointers;
+    uint32_t pointers_refused;
 };
 
 static bool tier1_code_certificate_function(Arena* input, IrFunction* function, uint32_t* call)
@@ -118,7 +128,88 @@ static bool tier1_code_certificate_refuses(Tier1EmitTest* test, const Tier1Selec
     return reason >= TIER1_CERT_EMITTED_REFUSED;
 }
 
-static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, bool rematerialize, Tier1CodeCertificateCounts* counts)
+// Whether the code's certificate refuses the code as it is now.
+static bool tier1_code_certificate_refused(Tier1EmitTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+{
+    Tier1CertEmittedStats stats = { 0 };
+    return tier1_certificate_emitted_check(plan, emitted, &test->output, &test->scratch, 0, &stats) >= TIER1_CERT_EMITTED_REFUSED;
+}
+
+// The frame's rows moved `delta` bytes down, with every access of the body to them through rsp: whether the code's
+// certificate refuses it, everything put back after.
+static bool tier1_code_certificate_lowered(Tier1EmitTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted, int32_t low, int32_t high, int32_t delta)
+{
+    const uint32_t prologue = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    const uint32_t epilogue = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+    bool moved[512] = { 0 };
+    const uint32_t count = emitted->code.count < BUSTER_ARRAY_LENGTH(moved) ? emitted->code.count : (uint32_t)BUSTER_ARRAY_LENGTH(moved);
+    for (uint32_t row = 0; row < emitted->frame.count; row += 1)
+    {
+        emitted->frame.offset[row] -= delta;
+    }
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        X86Instruction* record = &emitted->code.records[r];
+        moved[r] = record->mode == BUSTER_X86_MEMORY_BASE && record->rm == X86_REGISTER_RSP && record->displacement >= low && record->displacement < high && emitted->origins[r] != prologue &&
+                   emitted->origins[r] != epilogue;
+        record->displacement -= moved[r] ? delta : 0;
+    }
+    const bool refused = count == emitted->code.count && tier1_code_certificate_refused(test, plan, emitted);
+    for (uint32_t row = 0; row < emitted->frame.count; row += 1)
+    {
+        emitted->frame.offset[row] += delta;
+    }
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        emitted->code.records[r].displacement += moved[r] ? delta : 0;
+    }
+    return refused;
+}
+
+// The prologue's `mov rbp, rsp`, record `m` of its [0, end), moved to its end, after the pushes and the allocation that
+// followed it, which leave rsp `delta` below where it was; and each epilogue's reset of rsp from rbp moved up by as
+// much, so that every register and the return address still come back. Whether the code's certificate refuses it,
+// everything put back after.
+static bool tier1_code_certificate_pointer_moved(Tier1EmitTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t m, uint32_t end, int32_t delta)
+{
+    const uint32_t epilogue = tier1_origin(TIER1_ORIGIN_FRAME, 1);
+    X86Instruction* records = emitted->code.records;
+    const X86Instruction pointer = records[m];
+    for (uint32_t r = m; r + 1 < end; r += 1)
+    {
+        records[r] = records[r + 1];
+    }
+    records[end - 1] = pointer;
+    uint32_t resets = 0;
+    X86Instruction saved[8];
+    uint32_t at[8];
+    for (uint32_t r = end; r < emitted->code.count && resets < 8; r += 1)
+    {
+        const X86Instruction record = records[r];
+        const bool moved = emitted->origins[r] == epilogue && record.form == X86_FORM_MOV_RM64_R64 && record.mode == BUSTER_X86_REGISTER_DIRECT && record.reg == X86_REGISTER_RBP && record.rm == X86_REGISTER_RSP;
+        const bool loaded = emitted->origins[r] == epilogue && record.form == X86_FORM_LEA_R64_M && record.reg == X86_REGISTER_RSP && record.rm == X86_REGISTER_RBP;
+        if (moved || loaded)
+        {
+            saved[resets] = record;
+            at[resets] = r;
+            resets += 1;
+            records[r] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RSP, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (moved ? 0 : record.displacement) + delta };
+        }
+    }
+    const bool refused = tier1_code_certificate_refused(test, plan, emitted);
+    for (uint32_t k = 0; k < resets; k += 1)
+    {
+        records[at[k]] = saved[k];
+    }
+    for (uint32_t r = end - 1; r > m; r -= 1)
+    {
+        records[r] = records[r - 1];
+    }
+    records[m] = pointer;
+    return refused;
+}
+
+static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, bool rematerialize, bool pointer, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
     uint32_t call = BUSTER_IR_NONE;
@@ -133,10 +224,16 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     tier1_emit_test_expect(test, planned, "the code certificate's call fixture selects");
     // The caller-saved registers alone: p0 lives across the call in one, saved and restored around it.
     const uint32_t caller_saved = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI);
-    const Tier1EmitOptions options = { .register_mask = caller_saved, .vector = vector, .rematerialize = rematerialize, .certify = true };
+    const Tier1EmitOptions options = {
+        .register_mask = caller_saved,
+        .vector = vector,
+        .rematerialize = rematerialize,
+        .certify = true,
+        .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+    };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
-    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.frame_pointer == pointer;
     tier1_emit_test_expect(test, certified, "the call fixture's code, through the CFG consumer, passes its certificate");
     counts->certified += certified;
     // The call's own moves are marked at its definition phase: its arguments' moves, its saves and its restores.
@@ -167,9 +264,6 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
             tier1_emit_test_expect(test, refused, "a save or restore around a call left out fails the code's certificate");
         }
     }
-    // A store before the call and the load of its register back from its slot after it, the register written by
-    // nothing between them but the callee (the allocation's spill around the call, or a save and its restore): both
-    // left out, the value is lost unless the call kills every caller-saved register.
     // A store into a slot and the load of its register back from it, with a call between them and nothing else writing
     // the register (the allocation's spill around a call, or a save and its restore): both left out, the value is lost
     // unless the call kills every caller-saved register.
@@ -198,6 +292,43 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
             tier1_emit_test_expect(test, refused, "a value's store before a call and its load after it left out fail the code's certificate: the callee may change its register");
         }
     }
+    // The frame's rows, [low, high) from rsp, moved below rsp, where the call's callee may write them.
+    int32_t low = INT32_MAX;
+    int32_t high = INT32_MIN;
+    for (uint32_t row = 0; certified && row < emitted.frame.count; row += 1)
+    {
+        low = emitted.frame.offset[row] < low ? emitted.frame.offset[row] : low;
+        high = emitted.frame.offset[row] + 16 > high ? emitted.frame.offset[row] + 16 : high;
+    }
+    if (certified && low < high)
+    {
+        const bool refused = tier1_code_certificate_lowered(test, &plan, &emitted, low, high, (high + 15) & ~15);
+        counts->lowered += 1;
+        counts->lowered_refused += refused;
+        tier1_emit_test_expect(test, refused, "a frame whose rows are below rsp fails the code's certificate: the callee may write them");
+    }
+    // The frame pointer set after the allocation: the prologue's records, its `mov rbp, rsp` among them, and how far rsp
+    // moves after it.
+    const uint32_t prologue = tier1_origin(TIER1_ORIGIN_FRAME, 0);
+    uint32_t end = 0;
+    uint32_t m = UINT32_MAX;
+    int32_t delta = 0;
+    while (certified && end < emitted.code.count && emitted.origins[end] == prologue)
+    {
+        const X86Instruction record = emitted.code.records[end];
+        const bool set = record.form == X86_FORM_MOV_RM64_R64 && record.mode == BUSTER_X86_REGISTER_DIRECT && record.reg == X86_REGISTER_RSP && record.rm == X86_REGISTER_RBP;
+        m = set ? end : m;
+        delta += m != UINT32_MAX && !set ? (record.form == X86_FORM_PUSH_R64 ? 8 : record.immediate) : 0;
+        end += 1;
+    }
+    if (pointer && certified)
+    {
+        const bool movable = m != UINT32_MAX && delta != 0;
+        const bool refused = movable && tier1_code_certificate_pointer_moved(test, &plan, &emitted, m, end, delta);
+        counts->pointers += movable;
+        counts->pointers_refused += refused;
+        tier1_emit_test_expect(test, refused, "a frame pointer set after the allocation fails the code's certificate: rbp isn't the frame record's");
+    }
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->scratch, 0);
     arena_pop_to(&test->input, 0);
@@ -206,12 +337,14 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
-    for (uint32_t variant = 0; variant < 4; variant += 1)
+    for (uint32_t variant = 0; variant < 8; variant += 1)
     {
-        tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, &counts);
+        tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0, &counts);
     }
-    tier1_emit_test_expect(test, counts.certified == 4 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0,
-                           "the call fixture's compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change");
-    printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused\n",
-           counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched);
+    tier1_emit_test_expect(test, counts.certified == 8 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0 && counts.lowered == 8 && counts.pointers == 4,
+                           "the call fixture's compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
+    printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
+           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused\n",
+           counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
+           counts.lowered, counts.pointers_refused, counts.pointers);
 }

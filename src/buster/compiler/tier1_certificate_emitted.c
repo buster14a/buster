@@ -1020,6 +1020,10 @@ static bool tier1_cert_emitted_prologue(Tier1CertEmittedBuild* build, uint32_t* 
     const uint32_t expected = frame->saved_registers | (frame->frame_pointer ? 1u << X86_REGISTER_RBP : 0);
     valid = valid && ((pushed == expected && (build->frame_pointer != INT64_MIN) == frame->frame_pointer && sp == -8 * (int64_t)__builtin_popcount(expected) - (int64_t)frame->stack_adjust_bytes) ||
                       tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
+    // A frame pointer is the ABI's frame record: rbp pushed first and set right after, so that the caller's rbp is at it
+    // and the return address above it, which the layout's offsets from rbp (tier1_emit_cfg_incoming's) and an unwinder
+    // by frame pointers take.
+    valid = valid && (build->frame_pointer == INT64_MIN || (build->frame_pointer == -8 && build->saves[X86_REGISTER_RBP] == -8) || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
     const bool calls = emitted->prepared.call_count != 0;
     valid = valid && (!calls || ((sp % 16) + 16) % 16 == 8 || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, r));
     *end = r;
@@ -1369,6 +1373,10 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
         low = emitted->frame.offset[row] < low ? emitted->frame.offset[row] : low;
         high = (int64_t)emitted->frame.offset[row] + 16 > high ? (int64_t)emitted->frame.offset[row] + 16 : high;
     }
+    // Rows are bytes no callee writes: at or above rsp after the prologue, or in a function without calls in the red
+    // zone, the ABI's 128 bytes below it. The certificate models no write below rsp.
+    const int64_t lowest = build.stack - build.frame_base - (prepared->call_count != 0 ? 0 : BUSTER_ABI_RED_ZONE_BYTES);
+    valid = valid && (low >= lowest || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX));
     // And the calls' outgoing areas from rsp, and the stack parameters' incoming slots: the frame base register's too
     // (tier1_cert_emitted_supported).
     for (uint32_t node = 0; valid && node < count; node += 1)
@@ -1579,14 +1587,17 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             const uint32_t reg = general ? tier1_select_parameter_registers[place.index] : place.index;
             uint8_t base = 0;
             int32_t offset = 0;
-            // A stack parameter is its incoming slot's bytes.
-            const bool incoming = stacked && tier1_emit_cfg_incoming(emitted, (uint64_t)BUSTER_ABI_SLOT_BYTES * place.index, &base, &offset);
+            // A stack parameter is its incoming slot's bytes: by the ABI 8 past the return address's, from the frame base
+            // register where the decoded prologue left it. The layout's offset, which its load uses, must be that.
+            const int64_t slot = 8 + (int64_t)BUSTER_ABI_SLOT_BYTES * place.index - build.frame_base;
+            const bool incoming = stacked && tier1_emit_cfg_incoming(emitted, (uint64_t)BUSTER_ABI_SLOT_BYTES * place.index, &base, &offset) && base == build.base && offset == slot;
+            valid = !stacked || incoming || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
             facts[entry_count] = (Tier1CertFact){
                 .value = v,
-                .location = stacked ? (incoming ? tier1_cert_emitted_frame(&build, offset, tier1_cert_emitted_width(emitted, v)) : BUSTER_CERT_NONE)
+                .location = stacked ? (incoming ? tier1_cert_emitted_frame(&build, slot, tier1_cert_emitted_width(emitted, v)) : BUSTER_CERT_NONE)
                                     : tier1_cert_emitted_register(emitted, v, 32 * (general ? BUSTER_TIER1_ALLOCATE_GPR : BUSTER_TIER1_ALLOCATE_VECTOR) + reg),
             };
-            valid = facts[entry_count].location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
+            valid = valid && (facts[entry_count].location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX));
             entry_registers |= stacked ? 0 : general ? BUSTER_X86_RESOURCE_GPR(reg) : BUSTER_X86_RESOURCE_VECTOR(reg);
             entry_count += 1;
         }
