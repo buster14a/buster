@@ -1307,6 +1307,11 @@ The largest remainders, at this change:
 Each of these is a dispatch or a test without a bias. What's left needs a restructure, such as a vector scan of
 `check_graph_constant_contexts`' marks, rather than a hint.
 
+The record ([buster-performance#237](https://github.com/buster14a/buster-performance/pull/237),
+[`layout-hints-1175-2026-11-03`](https://github.com/buster14a/buster-performance/tree/ebf2cd0ea2f5c4f95c95bd6d98dd54e0f3624b75/docs/measurements/layout-hints-1175-2026-11-03))
+has the harness, BOLT's raw counts of main and of this change, the variants' patches, the coverage counts, the hint probe
+and the receipts.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
