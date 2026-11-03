@@ -3199,10 +3199,11 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
 // bounds and division checks all stay silent there. The entries whose `node` names a source expression's
 // value — evaluates, returns, branch and switch conditions, indirect jumps, variable bounds and statement
 // results — clear their root here, which keeps the node's whole operand chain unevaluated.
-static void check_common_unreachable(const CheckProgram* program, const CheckGraph* graph,
+static bool check_common_unreachable(const CheckProgram* program, const CheckGraph* graph,
                                      uint8_t* evaluated, Arena* scratch)
 {
-    for (uint32_t b = 0; b < program->body_count; b += 1)
+    bool valid = true;
+    for (uint32_t b = 0; valid && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
         if (body->count == 0 || body->count != body->entry_count)
@@ -3213,7 +3214,8 @@ static void check_common_unreachable(const CheckProgram* program, const CheckGra
         uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, body->count);
         if (seen == NULL || queue == NULL)
         {
-            continue;
+            valid = false;
+            break;
         }
         check_common_body_reached(program, body, seen, queue);
         const CheckControl* entries = program->controls + body->first;
@@ -3229,6 +3231,7 @@ static void check_common_unreachable(const CheckProgram* program, const CheckGra
             }
         }
     }
+    return valid;
 }
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
@@ -3267,9 +3270,9 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
         {
             evaluated[node] = referenced[node] == 0;
         }
-        if (program != NULL && program->controls != NULL)
+        if (program != NULL && program->controls != NULL && !check_common_unreachable(program, graph, evaluated, scratch))
         {
-            check_common_unreachable(program, graph, evaluated, scratch);
+            result = NULL;
         }
         // A static selection checks every arm but evaluates only the chosen one; its other arms are otherwise
         // unreferenced roots. The controlling expression is not evaluated either.
