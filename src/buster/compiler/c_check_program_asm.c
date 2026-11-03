@@ -124,6 +124,8 @@ struct CheckAsmPlace
     uint8_t size;
     bool written;
     bool read;
+    // A flag output's _Atomic object, which its value is exchanged into (check_asm_helper_code).
+    bool atomic;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -854,11 +856,12 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
     // At the call, rsp is 8 past a multiple of 16; the pushes and the reservation (the block's address's slot) leave it
     // at one at the template, as clang -O0's functions have it in their bodies.
     const uint32_t frame = pushes % 2 == 0 ? 8 : 16;
-    // A flag output's store takes 4 records at most: its address, the object zeroed (in two for 16 bytes) and the setcc.
+    // A flag output's store takes 6 records at most: the setcc, its zero extension, the object's address, its store (and
+    // the high half's zero for 16 bytes) and the block's address again.
     // An asm goto's exits: a move and a jump each, the last one's falling into the tail, and the tail's move into eax.
     const uint64_t exits = labels != 0 ? 2 * ((uint64_t)labels + 1) - 1 + 1 : 0;
     const uint64_t records = 2 * (uint64_t)pushes + (block ? 1 : 0) + loads + code->count + exits +
-                             (stored + flags != 0 ? 1 + 2 * (uint64_t)stored + 4 * (uint64_t)flags : 0) + pops + 3;
+                             (stored + flags != 0 ? 1 + 2 * (uint64_t)stored + 6 * (uint64_t)flags : 0) + pops + 3;
     const uint32_t branch_count = code->branch_count + goto_count + labels;
     const uint32_t reference_count = code->reference_count - goto_count;
     X86Instruction* written = records <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records) : 0;
@@ -992,22 +995,30 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
         {
             written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
         }
-        // The flag outputs first, while the flags are the template's (no record before them sets any): each object zeroed
-        // through its address, then its first byte the condition's setcc, the whole object the value 0 or 1 as clang's
-        // code writes it.
+        // The flag outputs first, while the flags are the template's (no record before them sets any, and none of these
+        // does): each condition's setcc into a register, zero-extended, then stored once over its whole object at its
+        // width, as clang's code writes the value 0 or 1 (#1126's review: a volatile object takes one store, and an
+        // _Atomic one an exchange, clang's sequentially consistent store). The object's address takes the block's
+        // register, whose address the reservation keeps, and which is loaded again after each.
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
             if (check_asm_flag_stores(place))
             {
-                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE,
+                written[at++] = (X86Instruction){ .form = tier0_setcc[place->reg & 15], .rm = stores[1], .mode = BUSTER_X86_REGISTER_DIRECT };
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOVZX_R32_RM8, .reg = stores[1], .rm = stores[1], .mode = BUSTER_X86_REGISTER_DIRECT };
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE,
                                                   .displacement = (int32_t)place->slot };
-                const uint32_t zero = place->size == 2 ? X86_FORM_MOV_RM16_IMM16 : place->size == 4 ? X86_FORM_MOV_RM32_IMM32 : X86_FORM_MOV_RM64_IMM32;
-                for (uint32_t offset = 0; place->size > 1 && offset < place->size; offset += 8)
+                const uint32_t form = place->size == 1 ? (place->atomic ? X86_FORM_XCHG_RM8_R8 : X86_FORM_MOV_RM8_R8) :
+                                      place->size == 2 ? (place->atomic ? X86_FORM_XCHG_RM16_R16 : X86_FORM_MOV_RM16_R16) :
+                                      place->size == 4 ? (place->atomic ? X86_FORM_XCHG_RM32_R32 : X86_FORM_MOV_RM32_R32) :
+                                                         (place->atomic ? X86_FORM_XCHG_RM64_R64 : X86_FORM_MOV_RM64_R64);
+                written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE };
+                if (place->size == 16)
                 {
-                    written[at++] = (X86Instruction){ .form = (uint16_t)zero, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)offset };
+                    written[at++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_IMM32, .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 };
                 }
-                written[at++] = (X86Instruction){ .form = tier0_setcc[place->reg & 15], .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
             }
         }
         for (uint32_t k = 0; k < count; k += 1)
@@ -1451,12 +1462,16 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             // A flag output: the whole object written, of a size an integer store covers.
             const bool alone = constraint->general == 0 && !constraint->memory && !constraint->vector && constraint->x87 == 0 && !constraint->immediate;
+            // An _Atomic object takes its value by an exchange, clang's sequentially consistent store, of 8 bytes at most:
+            // clang's code stores a 16-byte one by a library call.
             place->kind = BUSTER_CHECK_ASM_FLAG;
             place->reg = (uint8_t)(constraint->flag - 1);
             place->size = size == 1 || size == 2 || size == 4 || size == 8 || size == 16 ? (uint8_t)size : 0;
+            place->atomic = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC;
             place->read = false;
             place->tied = BUSTER_CHECK_NONE;
-            reason = !alone ? "inline assembly flag outputs with other alternatives" : place->size == 0 ? "inline assembly flag outputs of this size" : NULL;
+            reason = !alone ? "inline assembly flag outputs with other alternatives" :
+                     place->size == 0 || (place->atomic && place->size > 8) ? "inline assembly flag outputs of this size" : NULL;
         }
         else if (variable == -2)
         {

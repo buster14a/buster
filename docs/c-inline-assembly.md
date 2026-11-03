@@ -388,8 +388,10 @@ bytes of a prefix written alone before a 16-bit instruction.
 4. the template's records;
 5. an asm goto's exits (below);
 6. the flag outputs' stores, while the flags are the template's (no record
-   before them sets any): each object zeroed through its address and its first
-   byte the condition's `setcc`;
+   before them sets any, nor do these): each condition's `setcc` into a
+   register, zero-extended, then one store over its object at its width, an
+   `_Atomic` object's an exchange, through its address in the block's register,
+   which is loaded again after it;
 7. the register outputs' stores through their addresses, from two registers no
    output holds, then the x87's from st(0) down, and the pops of the x87 inputs
    the template left;
@@ -419,7 +421,11 @@ A flag output, `"=@ccz"(r)` (clang's 28 conditions: `a`, `ae`, `b`, `be`, `c`,
 `po`, which clang refuses), is a place of its own (`BUSTER_CHECK_ASM_FLAG`) with
 no register: after the template, the helper writes the condition's value, 0 or
 1, over the whole object, as clang's code stores `setcc`'s byte converted to the
-output's type. The object may be of any type of 1, 2, 4, 8 or 16 bytes (a
+output's type: one store of the object's width (two 8-byte ones for 16 bytes,
+as clang's are), so that a volatile object takes one, and an `_Atomic` one an
+exchange, clang's sequentially consistent store (#1126's review; a 16-byte
+`_Atomic` one, which clang stores by a library call, is refused by name). The
+object may be of any type of 1, 2, 4, 8 or 16 bytes (a
 `bool`, an `int`, an `__int128`, a `float`'s bits, a struct of 4 bytes), as
 clang's code stores the value's integer bits into it; clang's Sema takes any
 type but `_BitInt`, which it refuses as every asm operand, and its code

@@ -129,6 +129,39 @@ static void check_test_program_asm_flags(CheckTest* test, const char* clang)
         "int w=0x12345678;__asm__(\"\" : \"=@ccz\"(w));int u=0x12345678;__asm__(\"\" : \"=@ccnz\"(u));"
         "return z+r*3+(int)q*5+(int)(x*16)+e*7+k*11+r*13+(w==0||w==1)*17+(u==0||u==1)*19+(w+u==1)*23;}",
         "asm-flag-mixed", clang);
+    // Each flag output stored once over its object (#1126's review), counted where it lands: the objects lie on a page
+    // the program makes read-only, whose write fault each store takes, and which the fault's handler opens for that store
+    // alone (a single step, whose trap closes it again). A volatile object of each width takes one store, two outputs of a
+    // statement one each, an _Atomic one its exchange, an asm goto's output one on either way out; then their values.
+    check_test_program_includes = true;
+    check_test_program_source(test,
+        "#define _GNU_SOURCE\n#include <signal.h>\n#include <sys/mman.h>\n#include <ucontext.h>\n"
+        "static volatile int faults;static unsigned char* page;\n"
+        "static void on_write(int signal,siginfo_t* info,void* context){(void)signal;(void)info;faults+=1;mprotect(page,4096,PROT_READ|PROT_WRITE);"
+        "((ucontext_t*)context)->uc_mcontext.gregs[REG_EFL]|=0x100;}\n"
+        "static void on_step(int signal,siginfo_t* info,void* context){(void)signal;(void)info;mprotect(page,4096,PROT_READ);"
+        "((ucontext_t*)context)->uc_mcontext.gregs[REG_EFL]&=~0x100;}\n"
+        "int tested(int n){struct sigaction write_action={0},step_action={0},old_write,old_step;\n"
+        "write_action.sa_sigaction=on_write;write_action.sa_flags=SA_SIGINFO;step_action.sa_sigaction=on_step;step_action.sa_flags=SA_SIGINFO;\n"
+        "page=mmap(0,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);if(page==MAP_FAILED)return -1;\n"
+        "sigaction(SIGSEGV,&write_action,&old_write);sigaction(SIGTRAP,&step_action,&old_step);\n"
+        "volatile unsigned* v=(volatile unsigned*)page;_Atomic unsigned* a=(_Atomic unsigned*)(page+64);volatile unsigned short* s=(volatile unsigned short*)(page+128);\n"
+        "volatile unsigned long* l=(volatile unsigned long*)(page+192);volatile unsigned char* c=(volatile unsigned char*)(page+256);"
+        "_Atomic unsigned long* al=(_Atomic unsigned long*)(page+320);\n"
+        "unsigned h=(unsigned)n;\n"
+        "for(int i=-2;i<3;i++){int x=i+n;*v=7;*a=7;*s=7;*l=7;*c=7;*al=7;mprotect(page,4096,PROT_READ);faults=0;\n"
+        "__asm__ volatile(\"testl %1,%1\" : \"=@ccz\"(*v) : \"r\"(x) : \"cc\");h=h*31+(unsigned)faults;faults=0;\n"
+        "__asm__ volatile(\"testl %1,%1\" : \"=@ccnz\"(*a) : \"r\"(x) : \"cc\");h=h*31+(unsigned)faults;faults=0;\n"
+        "__asm__ volatile(\"cmpl $1,%2\" : \"=@ccl\"(*s), \"=@ccg\"(*l) : \"r\"(x) : \"cc\");h=h*31+(unsigned)faults;faults=0;\n"
+        "__asm__ volatile(\"cmpl $0,%1\" : \"=@ccs\"(*al) : \"r\"(x) : \"cc\");h=h*31+(unsigned)faults;faults=0;\n"
+        "__asm__ goto(\"testl %1,%1\\n\\tjs %l[negative]\" : \"=@ccz\"(*c) : \"r\"(x) : \"cc\" : negative);h=h*31+(unsigned)faults*7;goto done;\n"
+        "negative:h=h*31+(unsigned)faults*11;\n"
+        "done:mprotect(page,4096,PROT_READ|PROT_WRITE);h=h*31+*v+*a*2+*s*4+(unsigned)*l*8+*c*16+(unsigned)*al*32;}\n"
+        "sigaction(SIGSEGV,&old_write,0);sigaction(SIGTRAP,&old_step,0);munmap(page,4096);return (int)h;}\n",
+        "asm-flag-single-stores", clang);
+    check_test_program_includes = false;
+    check_test_program_boundary_reason(test, "int tested(int n){_Atomic __int128 z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return (int)z;}",
+                                       "asm-flag-output-atomic-size", true, false, 0, 0, "inline assembly flag outputs of this size");
 }
 
 // asm goto (#147): a label by name and by number (after the operands and a `+` operand's input), a jcc's and a jmp's,
