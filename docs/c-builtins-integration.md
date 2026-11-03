@@ -1468,11 +1468,15 @@ takes, code, static initializers, enumerators and `_Static_assert` alike.
   one. Each is a private string object of its keyword's token, as `__func__`'s
   array is, which the emission names `.Lbuster_string_N`.
 - `__builtin_vectorelements(T)`, of a vector type or of an expression of one,
-  which isn't evaluated, is its elements' count, and
-  `__builtin_omp_required_simd_align(T)` the unit's target's SIMD alignment in
-  bytes whatever the type (16, 32 with AVX, 64 with AVX-512F, as clang's
-  `getOpenMPDefaultSimdAlign` gives it), each an `unsigned long`. A vector
-  operand that isn't one is an error, as clang's is.
+  which isn't evaluated, is its elements' count. Its parentheses are read as
+  `sizeof`'s, so a comma expression is an operand, of its last operand's type.
+- `__builtin_omp_required_simd_align(T)` is the unit's target's SIMD alignment
+  in bytes whatever the type (16, 32 with AVX, 64 with AVX-512F, as clang's
+  `getOpenMPDefaultSimdAlign` gives it). Its operand is `alignof`'s: an array's
+  base element type, which must be a complete object type, not `void`, an
+  incomplete record or a function type.
+- Each is an `unsigned long`. An operand that isn't what clang takes is an
+  error, as clang's is.
 
 A deferred body's lane refuses a body that uses one of the first five (the
 preprocessor's places change as they are read), which source order then reads.

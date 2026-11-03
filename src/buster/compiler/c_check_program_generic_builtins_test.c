@@ -120,6 +120,27 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: clear_cache of one", .source = "void f(char* x)\n{\n__builtin___clear_cache(x);\n}\n", .rejected = true },
         { .name = "generic: vectorelements of an integer", .source = "unsigned long f(int n)\n{\nreturn __builtin_vectorelements(n);\n}\n", .rejected = true },
         { .name = "generic: vectorelements of an integer type", .source = "unsigned long f(void)\n{\nreturn __builtin_vectorelements(int);\n}\n", .rejected = true },
+        // #1126's review: a comma expression's operand, its last operand's type (both orders of two widths), and a type
+        // before a comma, which clang's parser refuses.
+        { .name = "generic: vectorelements of a comma expression", .source =
+          "typedef int A __attribute__((ext_vector_type(2)));typedef int B __attribute__((ext_vector_type(4)));\n"
+          "_Static_assert(__builtin_vectorelements((A){0}, (B){0}) == 4 && __builtin_vectorelements((B){0}, (A){0}) == 2, \"\");\n"
+          "unsigned long f(A a, B b)\n{\nreturn __builtin_vectorelements(a, b) * 10 + __builtin_vectorelements(b, a, a);\n}\n" },
+        { .name = "generic: vectorelements of a type and an expression", .source =
+          "typedef int A __attribute__((ext_vector_type(2)));\nunsigned long f(A a)\n{\nreturn __builtin_vectorelements(int, a);\n}\n", .rejected = true },
+        // #1126's review: omp_required_simd_align's operand is alignof's, an array's base element type, which must be a
+        // complete object type.
+        { .name = "generic: omp_required_simd_align of void", .source = "int f(void)\n{\nreturn __builtin_omp_required_simd_align(void);\n}\n", .rejected = true },
+        { .name = "generic: omp_required_simd_align of an incomplete struct", .source =
+          "struct S;\nint f(void)\n{\nreturn __builtin_omp_required_simd_align(struct S);\n}\n", .rejected = true },
+        { .name = "generic: omp_required_simd_align of a function type", .source = "int f(void)\n{\nreturn __builtin_omp_required_simd_align(int(void));\n}\n",
+          .rejected = true },
+        { .name = "generic: omp_required_simd_align of an incomplete struct's array", .source =
+          "struct S;\nint f(void)\n{\nreturn __builtin_omp_required_simd_align(struct S[]);\n}\n", .rejected = true },
+        { .name = "generic: omp_required_simd_align of complete types", .source =
+          "struct S;struct T{int x;};\nint f(void)\n{\nreturn __builtin_omp_required_simd_align(int[]) + __builtin_omp_required_simd_align(int[3]) +\n"
+          "__builtin_omp_required_simd_align(struct S*) + __builtin_omp_required_simd_align(double[2][3]) + __builtin_omp_required_simd_align(struct T) +\n"
+          "__builtin_omp_required_simd_align(int(*)(void));\n}\n" },
         { .name = "generic: LINE of an argument", .source = "unsigned f(void)\n{\nreturn __builtin_LINE(1);\n}\n", .rejected = true },
         { .name = "generic: complex of an int", .source = "_Complex double f(void)\n{\nreturn __builtin_complex(1, 2.0);\n}\n", .rejected = true },
         { .name = "generic: complex of an int second", .source = "_Complex double f(double x)\n{\nreturn __builtin_complex(x, 2);\n}\n", .rejected = true },
@@ -305,6 +326,14 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix(__builtin_omp_required_simd_align(double));mix(sizeof(__builtin_FILE()));mix(_Generic(__builtin_LINE(),unsigned:1,default:2));\n"
         "mix(_Generic(__builtin_FILE(),char*:3,default:4));mix(_Generic(__builtin_vectorelements(v),unsigned long:5,default:6));return (int)(h^(h>>32));}\n",
         "generic-source-places-and-type-queries", clang);
+    // __builtin_vectorelements of a comma expression (#1126's review), its last operand's type, none of its operands
+    // evaluated (a call among them).
+    check_test_program_source(test,
+        "typedef int A __attribute__((ext_vector_type(2)));typedef int B __attribute__((ext_vector_type(4)));typedef double C __attribute__((vector_size(32)));\n"
+        "static int calls;static A side(void){calls++;A a={0};return a;}\n"
+        "int tested(int n){A a={n};B b={n};C c={0};unsigned long r=__builtin_vectorelements(a,b)*1000+__builtin_vectorelements(b,a)*100+\n"
+        "__builtin_vectorelements(side(),b,c)*10+__builtin_vectorelements(B);return (int)r+calls*100000+n;}\n",
+        "generic-vectorelements-of-comma-expressions", clang);
     // A place through macros (#1126's review): clang's SourceLocExpr reads getExpansionRange(...).getEnd(), the outermost
     // expansion's end: a function-like invocation's closing parenthesis (on a later line too), an object-like macro's
     // name, a nested one's outer invocation, an argument's invocation (of a builtin and of another macro), in constant

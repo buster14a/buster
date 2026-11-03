@@ -1878,7 +1878,8 @@ static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t to
     const uint32_t keyword = reader->first_child[token];
     const uint32_t name = parser->tokens.names[keyword];
     const uint32_t type_first = input->type_begin[token - input->first];
-    const TypeId queried = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : count == 1 ? operands[0].type : 0;
+    // An expression's type, a comma expression's (__builtin_vectorelements(a, b), #1126's review) its last operand's.
+    const TypeId queried = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : count != 0 ? operands[count - 1].type : 0;
     bool valid = false;
     bool address = false;
     uint64_t number = 0;
@@ -1903,8 +1904,16 @@ static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t to
     }
     else if (name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN)
     {
+        // Its operand as clang's CheckUnaryExprOrTypeTraitOperand takes it (#1126's review): an array's base element type,
+        // as alignof's, which must be a complete object type, not void, an incomplete record or a function's.
+        TypeId element = queried != 0 ? type_strip_aligned(reader->types, queried) : 0;
+        while (element != 0 && type_kind_is_array(type_kind(reader->types, element)))
+        {
+            element = type_strip_aligned(reader->types, type_element(reader->types, element));
+        }
+        const uint8_t kind = element != 0 ? type_kind(reader->types, element) : BUSTER_TYPE_KIND_VOID;
         const uint64_t features = reader->pp->options.target.features;
-        valid = queried != 0;
+        valid = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(reader->types, element);
         number = (features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
     }
     else if (name == C_NAME_BUILTIN_VECTORELEMENTS)
