@@ -1229,8 +1229,8 @@ same compile gave each test's bias before it was hinted.
 - **Selects.** Clang makes a branch of a select whose arm is a load, or a field rewritten with itself. So the
   branch-free forms load first, and mask a field rather than select it.
 
-**The sites,** as sqlite3.c's `-fsyntax-only` counted them. The before is main at `96b6cbcd`; the after is this
-change.
+**The sites,** as sqlite3.c's `-fsyntax-only` counted them. The before is main at `96b6cbcd`; the after is `a84d9823`,
+this change before it merged main (below for main `8c9c5bf0`).
 
 | site | taken before | after | change |
 | --- | ---: | ---: | ---: |
@@ -1255,8 +1255,10 @@ These sites changed:
 - **`check_input_system_tokens`.** Its tokens read a sentinel level past the output's, so no token tests whether it
   has a source.
 - **`check_graph_has_arguments`.** It tests one bit of a 64-bit mask instead of eight compares.
-- **`check_input_expression_coded`.** Its visit of a token its class didn't act on (2%) is out of the path. The jump
-  table's jump stays, one a token: no class is more than a fifth of the tokens (identifiers: 21%).
+- **`check_input_expression_coded`.** At `a84d9823`, a hint put its visit of a token its class didn't act on (2%) out
+  of the path. Main `8c9c5bf0` then moved the walk's counters and clock into the visit's branch, after which the hint
+  cost 18,938 taken branches, so it is gone. The jump table's jump stays, one a token: no class is more than a fifth
+  of the tokens (identifiers: 21%).
 - **`check_input_expression_values`.** Its children have values 57% of the time, and 29% of those follow another's. It
   is unchanged: neither form tried helped.
   - Branch-free selects: clang made a branch of the conditional store again, which took the same 1,013,291 branches.
@@ -1276,7 +1278,7 @@ The graph walk's other per-node tests, from the same counts, are hinted too:
 loop's back edge took the jump the test had taken: a loop takes one taken branch an iteration, whichever its layout. But
 its iterations ran 2.76 M fewer instructions in both modes below, a run of the head without the hint showed.
 
-**The whole run.**
+**The whole run,** first as the change was made, main `96b6cbcd` against `a84d9823`:
 
 | sqlite3.c | | main | this change | change |
 | --- | --- | ---: | ---: | ---: |
@@ -1285,7 +1287,18 @@ its iterations ran 2.76 M fewer instructions in both modes below, a run of the h
 | `-c --lanes 1` | taken branches | 80.01 M | 63.74 M | -20.3% |
 | | instructions | 1,174.4 M | 1,162.2 M | -1.04% |
 
-`-c`'s objects of sqlite3.c and main.c were byte for byte main's. The 9700X's cycles over placements (`time-runs
+Then after it merged main `8c9c5bf0` (`d9d9d32f`, measured as `a6405c80`, which differs in a comment's words only):
+
+| sqlite3.c | | main `8c9c5bf0` | this change | change |
+| --- | --- | ---: | ---: | ---: |
+| `-fsyntax-only` | taken branches | 59.99 M | 45.04 M | -24.9% |
+| | instructions | 884.0 M | 871.5 M | -1.41% |
+| `-c --lanes 1` | taken branches | 78.53 M | 62.28 M | -20.7% |
+| | instructions | 1,169.6 M | 1,156.8 M | -1.10% |
+
+In both, `-c`'s objects of sqlite3.c and main.c were byte for byte main's. Against `8c9c5bf0`, the sites' own lines
+counted as above but for `check_input_expression_coded`'s. Its visit's test took 98 thousand more jumps, as the
+layout around it changed, while the compiled function, with what it inlines, fell 18% (4.36 M to 3.57 M). The 9700X's cycles over placements (`time-runs
 --copies`, #509) aren't measured yet, so whether a change pays in time is still open.
 
 **The gap that remains.** By #880's counts, `ex_ret_brn_tkn` (calls and returns included) fell 33% with the profile's
@@ -1310,7 +1323,7 @@ Each of these is a dispatch or a test without a bias. What's left needs a restru
 `check_graph_constant_contexts`' marks, rather than a hint.
 
 The record ([buster-performance#237](https://github.com/buster14a/buster-performance/pull/237),
-[`layout-hints-1175-2026-11-03`](https://github.com/buster14a/buster-performance/tree/3c266c52c7379d1950a019c39508c51fb1c55206/docs/measurements/layout-hints-1175-2026-11-03))
+[`layout-hints-1175-2026-11-03`](https://github.com/buster14a/buster-performance/tree/ebcaea833c1f42e4ba3dc72f5a6729dbc784d5f1/docs/measurements/layout-hints-1175-2026-11-03))
 has the harness, BOLT's raw counts of main and of this change, the variants' patches, the coverage counts, the hint probe
 and the receipts.
 
