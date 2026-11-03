@@ -935,10 +935,28 @@ static void check_experiments(void)
     BUILD("build");
     pass("shifts link padded executables, each shift once");
 
-    // A lexer variant, in a tree of its own, and the published executable back.
+    // A lexer variant, in a tree of its own, published as build/compiler, and the published executable back. The
+    // variant's unit defines it, and the executable has it where c_lexer_benchmark.c refers to it: on a host with the
+    // vector path (host_isa.h). Elsewhere nothing does, and a linker that drops what nothing refers to, as wild does,
+    // leaves it out.
     const char* const quick[] = { "BUSTER_DEBUG_INFO=0", 0 };
     BUILD_ENV(quick, "lexer-variant", "regression=src/buster/compiler/c_lexer.c");
-    if (!has_symbol("build/compiler", " T c_lexer_variant_regression"))
+    char* quick_output[] = { "env", "BUSTER_DEBUG_INFO=0", "./build.sh", "print-output", 0 };
+    char lexer[PATH_MAX];
+    capture_line(quick_output, lexer, sizeof(lexer));
+    *strrchr(lexer, '/') = 0;
+    *strrchr(lexer, '/') = 0;
+    char lexer_compiler[PATH_MAX + 32];
+    char variant[PATH_MAX + 128];
+    char benchmark[PATH_MAX + 128];
+    snprintf(lexer_compiler, sizeof(lexer_compiler), "%s-lexer/Release/compiler", lexer);
+    snprintf(variant, sizeof(variant), "%s-lexer/CMakeFiles/buster_lexer_variant_regression.dir/Release/src/buster/compiler/c_lexer_variant.c.o", lexer);
+    snprintf(benchmark, sizeof(benchmark), "%s-lexer/CMakeFiles/buster_c_lexer_benchmark.dir/Release/src/buster/compiler/c_lexer_benchmark.c.o", lexer);
+    if (!same_file("build/compiler", lexer_compiler) || !has_symbol(variant, " T c_lexer_variant_regression"))
+    {
+        fail("lexer-variant didn't compile the variant or publish its tree's executable");
+    }
+    if (has_symbol(benchmark, " U c_lexer_variant_regression") && !has_symbol("build/compiler", " T c_lexer_variant_regression"))
     {
         fail("the lexer variant isn't in build/compiler");
     }
