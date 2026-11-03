@@ -1657,25 +1657,22 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     }
     arena_pop_to(scratch, scratch_mark);
     // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
-    // (CheckOptions.level_order), and its memoized transitions (#1050) in node order and in windows, every hit verified
-    // against its action.
-    for (uint32_t run = partitions ? 4 : 4 * BUSTER_CHECK_BATCH; scalar_valid && run < 4 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    // (CheckOptions.level_order), and its memoized transitions (#1050), every hit verified against its action.
+    for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
-        const uint32_t batch = run / 4;
-        const uint32_t order = run % 4;
+        const uint32_t batch = run / 3;
+        const uint32_t order = run % 3;
         const CheckOptions vector_options = {
             .batch_size = batch,
             .level_order = order == 1,
-            .transitions = order >= 2,
-            .transition_windows = order == 3,
+            .transitions = order == 2,
             .verify_transitions = true,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
         check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
                           order == 1 ? "graph paths or level-order batch partitions differ" :
-                          order == 2 ? "graph paths or the transitions differ" :
-                          order == 3 ? "graph paths or the transitions' windows differ" : "graph paths or batch partitions differ");
+                          order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {

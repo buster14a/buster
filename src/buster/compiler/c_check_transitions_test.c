@@ -2,19 +2,20 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The memoized transitions' checks (#1050, c_check_transitions.c). Each source runs through the scalar reader and path,
-// the oracle, and through the vector reader with its transitions in node order and in windows, each verifying every hit
-// against its action, and without them: every stream must be the oracle's, with no mismatch. A fixture states the hits,
-// misses, folds and entries node order must count. Then the windows' keys and hashes against check_transition_key's and
-// check_transition_hash's, node by node, and the table's limit: scratch arenas from too small for the table to room enough,
-// where the run falls back to the regions, stops inserting, or runs whole, its stream the oracle's each time.
+// the oracle, and through the vector reader with its transitions in node order, in batches of 32, 3 and 1, verifying every
+// hit against its action, and without them: every stream must be the oracle's, with no mismatch. A fixture states the hits,
+// misses, folds and entries node order must count. Then each node's class against its value, and the table's limit:
+// scratch arenas from too small for the table to room enough, where the run falls back to the regions, stops inserting, or
+// runs whole, its stream the oracle's each time.
 
 typedef struct CheckTransitionFixture CheckTransitionFixture;
 struct CheckTransitionFixture
 {
     const char* name;
     const char* source;
-    // The counts node order must give for the reader's graph of the source: hits, misses, folds and the table's entries, which
-    // a miss whose entry's guards failed writes over rather than adds.
+    // The counts node order must give for the reader's graph of the source: hits, misses, folds (nodes with an operand of no
+    // class) and the table's entries, which a miss whose entry's guards failed, or whose twin waited in the same batch, writes
+    // over rather than adds.
     uint32_t hits;
     uint32_t misses;
     uint32_t folds;
@@ -23,82 +24,91 @@ struct CheckTransitionFixture
     bool reported;
 };
 
-// Every eligible node's key and hash by the windows' batches against check_transition_key's and check_transition_hash's,
-// on a stream that is complete: an empty table, so that no lane hits.
-static void check_test_transition_keys(CheckTest* test, const char* name, const CheckGraph* graph, CheckStream* stream, Arena* scratch)
+// Every node's class against its value: two nodes of a complete stream share a class exactly when their values but their
+// objects are the same (check_transition_template_equal), a value with a fault or an overload set has none, and the classes
+// pass a table's first slots, so that they rehash.
+static void check_test_transition_classes(CheckTest* test, const char* name, const CheckGraph* graph, const CheckStream* stream, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
-    uint32_t* shapes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
-    CheckTransitionWindow* window = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTransitionWindow, 1);
-    uint32_t* words = arena_push_array(scratch, (uint64_t)BUSTER_CHECK_TRANSITION_HORIZON * BUSTER_CHECK_TRANSITION_ARGUMENTS * BUSTER_CHECK_TRANSITION_ARGUMENT_WORDS,
-                                       sizeof(uint32_t), 64);
-    uint32_t* twin_words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_TRANSITION_ARGUMENTS * BUSTER_CHECK_TRANSITION_ARGUMENT_WORDS);
+    uint32_t* classes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
+    CheckValue* values = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, graph->count + 1);
     CheckTransitions table;
-    bool valid = shapes != NULL && window != NULL && words != NULL && twin_words != NULL && check_transitions_initialize(&table, scratch, graph->count);
+    bool valid = classes != NULL && values != NULL && check_transitions_initialize(&table, scratch, 0);
     uint32_t keyed = 0;
-    uint32_t folds = 0;
-    uint32_t vector_member = 0;
     for (uint32_t node = 0; valid && node < graph->count; node += 1)
     {
-        shapes[node] = check_transition_shape(stream, node);
+        uint32_t template = 0;
+        classes[node] = check_transitions_intern(&table, stream, node, &template);
+        values[node] = check_stream_value(stream, node);
+        const bool unkeyed = values[node].fault != CHECK_FAULT_NONE || values[node].fault_node != 0 || values[node].overload_head != 0;
+        const bool payload = stream->payload_rows[node] != 0;
+        valid &= (classes[node] == BUSTER_CHECK_CLASS_UNKEYED) == unkeyed && classes[node] != 0 && (template != 0) == (payload && !unkeyed);
+        valid &= template == 0 || check_transition_template_equal(table.templates + template - 1, values + node);
+        keyed += !unkeyed;
     }
-    for (uint32_t first = 0; valid && first < graph->count; first += BUSTER_CHECK_TRANSITION_HORIZON)
+    for (uint32_t a = 0; valid && a < graph->count; a += 1)
     {
-        const uint32_t span = graph->count - first < BUSTER_CHECK_TRANSITION_HORIZON ? graph->count - first : BUSTER_CHECK_TRANSITION_HORIZON;
-        *window = (CheckTransitionWindow){ .argument_words = words, .first = first };
-        uint64_t members = 0;
-        uint64_t eligible = 0;
-        while (vector_member < graph->vector_member_count && graph->vector_members[vector_member].node < first + span)
+        for (uint32_t b = a + 1; valid && b < graph->count; b += 1)
         {
-            const uint32_t node = graph->vector_members[vector_member].node;
-            members |= node >= first ? UINT64_C(1) << (node - first) : 0;
-            vector_member += 1;
-        }
-        for (uint32_t position = 0; position < span; position += 1)
-        {
-            const uint32_t node = first + position;
-            eligible |= (uint64_t)(!check_graph_is_leaf(graph, node) && check_transition_node(graph, stream, node, (members >> position & 1) != 0)) << position;
-        }
-        for (uint64_t remaining = eligible; remaining != 0;)
-        {
-            uint32_t positions[BUSTER_CHECK_TRANSITION_LANES];
-            uint32_t lanes = 0;
-            for (; remaining != 0 && lanes < BUSTER_CHECK_TRANSITION_LANES; remaining &= remaining - 1)
-            {
-                positions[lanes++] = (uint32_t)__builtin_ctzll(remaining);
-            }
-            const uint64_t hits = check_transition_batch(NULL, graph, stream, &table, window, positions, lanes, shapes, NULL, scratch, false);
-            valid &= hits == 0;
-            for (uint32_t lane = 0; lane < lanes; lane += 1)
-            {
-                const uint32_t position = positions[lane];
-                const uint32_t node = first + position;
-                _Alignas(64) uint32_t key[BUSTER_CHECK_TRANSITION_WORDS];
-                uint32_t objects[3];
-                const CheckTransitionClass class = check_transition_key(graph, stream, NULL, node, true, key, objects, twin_words);
-                const CheckTransitionMiss* miss = window->misses + position;
-                const bool fold = (window->folds >> position & 1) != 0;
-                bool same = (class == CHECK_TRANSITION_FOLD) == fold && (class == CHECK_TRANSITION_KEYED) == miss->keyed;
-                if (same && miss->keyed)
-                {
-                    same = memcmp(key, miss->key, sizeof(key)) == 0 && check_transition_hash(key) == miss->hash && memcmp(objects, miss->objects, sizeof(objects)) == 0;
-                    const uint32_t count = key[BUSTER_CHECK_KEY_HEADER] >> 18;
-                    same &= memcmp(twin_words, check_transition_words(window, position), (uint64_t)count * BUSTER_CHECK_TRANSITION_ARGUMENT_WORDS * sizeof(uint32_t)) == 0;
-                }
-                keyed += miss->keyed;
-                folds += fold;
-                valid &= same;
-            }
+            const bool both = classes[a] != BUSTER_CHECK_CLASS_UNKEYED && classes[b] != BUSTER_CHECK_CLASS_UNKEYED;
+            valid &= !both || (classes[a] == classes[b]) == check_transition_template_equal(values + a, values + b);
         }
     }
     char description[256];
-    snprintf(description, sizeof(description), "%s: the windows' keys, hashes and folds are check_transition_key's (%u keyed, %u folds)", name, keyed, folds);
+    snprintf(description, sizeof(description), "%s: classes are the values but their objects (%u keyed values, %u classes, %u class slots)", name, keyed,
+             valid ? table.class_count : 0, valid ? table.class_mask + 1 : 0);
     check_test_expect(test, valid, description);
     arena_pop_to(scratch, mark);
 }
 
-// A source through the scalar oracle and every vector variant (CheckOptions' transitions in node order and in windows,
-// verified, and none), each stream the oracle's; node order's counts as the fixture states, the windows' keys checked.
+// The static words by the vector path, 16 nodes at a time, against the scalar path's, node by node: for the graph as read,
+// and with system-header marks of every third token, in arrays from the tokens' whole count down to fewer than a gather's
+// 4 bytes, so that the gather's lanes past the array's end go one at a time.
+static void check_test_transition_statics(CheckTest* test, const char* name, const CheckGraph* graph, const CheckStream* stream, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t* vector = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
+    uint32_t* scalar = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
+    uint32_t tokens = 0;
+    for (uint32_t node = 0; graph->tokens != NULL && node < graph->count; node += 1)
+    {
+        tokens = graph->tokens[node] != BUSTER_CHECK_NONE && graph->tokens[node] + 1 > tokens ? graph->tokens[node] + 1 : tokens;
+    }
+    uint8_t* marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)tokens + 1);
+    bool valid = vector != NULL && scalar != NULL && marks != NULL;
+    for (uint32_t token = 0; valid && token < tokens; token += 1)
+    {
+        marks[token] = token % 3 == 1;
+    }
+    const uint32_t counts[] = { 0, tokens, tokens > 0 ? tokens - 1 : 0, tokens > 2 ? tokens - 2 : 0, 3, 1 };
+    uint32_t keyed = 0;
+    uint32_t system = 0;
+    for (uint32_t variant = 0; valid && variant < BUSTER_ARRAY_LENGTH(counts); variant += 1)
+    {
+        CheckGraph marked = *graph;
+        if (variant != 0)
+        {
+            marked.system_tokens = marks;
+            marked.system_token_count = counts[variant] < tokens ? counts[variant] : tokens;
+        }
+        check_transition_statics(&marked, stream, vector, false);
+        check_transition_statics(&marked, stream, scalar, true);
+        valid = memcmp(vector, scalar, (uint64_t)graph->count * sizeof(uint32_t)) == 0;
+        for (uint32_t node = 0; valid && node < graph->count; node += 1)
+        {
+            keyed += variant == 0 && scalar[node] > BUSTER_CHECK_TRANSITION_LEAF;
+            system += scalar[node] > BUSTER_CHECK_TRANSITION_LEAF && (scalar[node] >> 8 & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0;
+        }
+    }
+    char description[256];
+    snprintf(description, sizeof(description), "%s: the static words 16 nodes at a time are the scalar path's (%u nodes, %u keyed, %u system-header words)", name,
+             graph->count, keyed, system);
+    check_test_expect(test, valid, description);
+    arena_pop_to(scratch, mark);
+}
+
+// A source through the scalar oracle and every vector variant (CheckOptions' transitions in node order by batches of 32, 3
+// and 1, and none), each stream the oracle's; node order's counts as the fixture states, its classes checked.
 static void check_test_transition_source(CheckTest* test, const CheckTransitionFixture* fixture)
 {
     static InternTable identifiers;
@@ -138,11 +148,11 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
     const CheckOptions variants[4] =
     {
         { .verify = true, .transitions = true, .verify_transitions = true },
-        { .verify = true, .transitions = true, .verify_transitions = true, .transition_windows = true },
         { .verify = true },
-        { .transitions = true, .transition_windows = true, .batch_size = 3 },
+        { .transitions = true, .verify_transitions = true, .batch_size = 3 },
+        { .transitions = true, .batch_size = 1 },
     };
-    const char* const names[4] = { "node order", "windows", "regions", "windows of 3-node batches" };
+    const char* const names[4] = { "node order", "regions", "node order in 3-node batches", "node order a node at a time" };
     for (uint32_t v = 0; ready && v < 4; v += 1)
     {
         const uint64_t mark = output[1].length;
@@ -163,9 +173,10 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
                                    statistics->transition_folds == fixture->folds && statistics->transition_entries == fixture->entries &&
                                    statistics->transition_inserts <= statistics->transition_misses && statistics->transition_entries <= statistics->transition_inserts,
                               description);
-            check_test_transition_keys(test, fixture->name, &input[1].graph, &stream, &scratch[1]);
+            check_test_transition_classes(test, fixture->name, &input[1].graph, &stream, &scratch[1]);
+            check_test_transition_statics(test, fixture->name, &input[1].graph, &stream, &scratch[1]);
         }
-        if (checked && v == 2)
+        if (checked && v == 1)
         {
             check_test_expect(test, statistics->transition_hits == 0 && statistics->transition_entries == 0, "the regions take no transitions");
         }
@@ -332,7 +343,7 @@ static void check_test_transitions(CheckTest* test)
             .hits = 5,
             .misses = 9,
             .folds = 0,
-            .entries = 9,
+            .entries = 7,
         },
         {
             // Pointers' comparisons: the same operand twice and two operands, whose objects' patterns differ.
@@ -351,10 +362,10 @@ static void check_test_transitions(CheckTest* test)
                       "long f(void) { return s.b + t.b + s.a + t.a + s.c[0] + t.c[0]; }\n"
                       "int g(void) { return &s.b == &t.b; }\n"
                       "int h(void) { return &s.b == &s.b; }\n",
-            .hits = 2,
-            .misses = 4,
-            .folds = 12,
-            .entries = 4,
+            .hits = 7,
+            .misses = 11,
+            .folds = 0,
+            .entries = 11,
         },
         {
             // A tag read before and after its completion: the guard sends the second read to its action, and the third hits.
@@ -372,14 +383,14 @@ static void check_test_transitions(CheckTest* test)
             .reported = true,
         },
         {
-            // Calls: repeated, with constant arguments (folds) and zero ones (keyed), and of several prototypes.
+            // Calls: repeated, with constant arguments (each value its own class) and zero ones, and of several prototypes.
             .name = "calls",
             .source = "int k(int, long); double d(double, ...);\n"
                       "int m(int a) { return k(a, a) + k(a, a) + k(1, 2) + k(0, 0) + k(0, 0) + (int)d(a, a, a) + (int)d(a, a, a); }\n",
             .hits = 9,
-            .misses = 6,
-            .folds = 1,
-            .entries = 6,
+            .misses = 7,
+            .folds = 0,
+            .entries = 7,
         },
         {
             // A transparent union's activation, which no guard holds: its calls' answers aren't memoized.
@@ -393,17 +404,18 @@ static void check_test_transitions(CheckTest* test)
             .entries = 1,
         },
         {
-            // Constants to fold, pure, in batches of check_actions, and floating, complex and conditional ones.
+            // Constants to fold, pure, in batches of check_actions, and floating, complex and conditional ones: each constant
+            // its own class, so that most of their keys are new.
             .name = "folds",
             .source = "int f(int a) { return 1 + 2 + 3 + a * 4 + (a ? 5 : 6) + (int)(1.5 * a) + (int)__real__ (2.0i + a); }\n"
                       "unsigned g(unsigned a) { return (a << 3) + (a >> 1) + ~a + -a + !a; }\n",
             .hits = 5,
-            .misses = 10,
-            .folds = 9,
-            .entries = 10,
+            .misses = 19,
+            .folds = 0,
+            .entries = 19,
         },
         {
-            // Statements past several 64-node windows, each a chain through its expression's operators.
+            // Repeated statements, each a chain through its expression's operators.
             .name = "chains",
             .source = "struct L { struct L *next; int v; };\n"
                       "int f(struct L *l) {\n"
@@ -416,10 +428,10 @@ static void check_test_transitions(CheckTest* test)
                       "  s += l->next->next->v; s += l->next->next->v; s += l->next->v * 2; s += l->v - l->next->v;\n"
                       "  return s;\n"
                       "}\n",
-            .hits = 112,
-            .misses = 11,
-            .folds = 6,
-            .entries = 11,
+            .hits = 117,
+            .misses = 12,
+            .folds = 0,
+            .entries = 12,
         },
         {
             // Errors: an operand that isn't one, whose answer's diagnostic the hits repeat.
@@ -427,15 +439,24 @@ static void check_test_transitions(CheckTest* test)
             .source = "struct A { int x; };\n"
                       "int f(struct A a, struct A b) { return a + 1; }\n"
                       "int g(struct A a) { return a + 1; }\n",
-            .hits = 1,
-            .misses = 1,
-            .folds = 2,
-            .entries = 1,
+            .hits = 2,
+            .misses = 2,
+            .folds = 0,
+            .entries = 2,
             .reported = true,
         },
         {
-            // Vector members (CheckGraph.vector_members): swizzles the table doesn't take, around the sums it does, and in
-            // windows past the first, past members before them.
+            // Faults: a constant division by zero, whose value has no class, so that the nodes reading it are folds.
+            .name = "faults",
+            .source = "int f(int a) { return (1 / 0) + a + (1 / 0) + a; }\n"
+                      "int g(int a) { return (1 / 0) + a; }\n",
+            .hits = 0,
+            .misses = 3,
+            .folds = 6,
+            .entries = 0,
+        },
+        {
+            // Vector members (CheckGraph.vector_members): swizzles the table doesn't take, around the sums it does.
             .name = "vector members",
             .source = "typedef float float4 __attribute__((ext_vector_type(4)));\n"
                       "float f(float4 v) { return v.x + v.y + v.x * v.w; }\n"

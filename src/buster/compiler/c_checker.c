@@ -586,13 +586,9 @@ struct CheckOptions
     // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
     bool level_order;
     // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than its regions in postorder
-    // batches: opt in (the driver's --check-transitions), since on the 9700X they saved 4% of sqlite3.c's graph run, about
-    // 0.5% of its compile, and the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes
-    // none.
+    // batches: opt in (the driver's --check-transitions), since they don't save a large fraction of check-expressions, and
+    // the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
     bool transitions;
-    // With transitions, their alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
-    // (check_graph_transition_windows), rather than node by node, which the benchmark compares.
-    bool transition_windows;
     // Each transition hit's action run as well, its result stored and compared with the transition's
     // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
     bool verify_transitions;
@@ -3105,9 +3101,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
         const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
-                                 (options->transition_windows ?
-                                  check_graph_transition_windows(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions) :
-                                  check_graph_transitions(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions));
+                                 check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
         if (transitions && stream->statistics.transition_mismatches != 0)
         {
