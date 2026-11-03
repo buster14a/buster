@@ -303,7 +303,9 @@ weights only balance them. A part fails if its pass that runs the checks meets
 another sequence of them than the pass that weighed them (a check at another
 place or past them), so that a check whose guard came to depend on another
 check's work can't move between the parts unseen. The first line names the part
-and its checks (`test-preprocessor: part K of N: C of T checks`).
+and its checks (`test-preprocessor: part K of N: C of T checks`). K and N are
+digits alone, 1 ≤ K ≤ N ≤ 128; anything else, a missing value or a second
+`--part` prints the usage before any check runs, which the list's part 1 checks.
 
 The fuzz batch's options: `--fuzz N` cases per mode (0 for none), `--first N`
 the first case's id, `--seed N` (1 by default), `--std c17|c23` one mode,

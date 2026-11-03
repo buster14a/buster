@@ -121,6 +121,13 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # parts together run each check once. A part's fuzz workers and clang processes run on its CPU (--jobs, and
 # test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs.
 ./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4
+# --part's refusals, each before any check runs: no value, a part outside 1 to N, N past the checks' 128, other than
+# digits on either side of one '/', and a second --part.
+if ./build/compiler test-preprocessor --part; then exit 1; fi
+for part in '' 4 0/4 5/4 1/0 1/129 x/4 1/ /4 1/4/4 '1/ 4' 1/+4 +1/4 ' 1/4'; do
+    if ./build/compiler test-preprocessor --part "$part"; then exit 1; fi
+done
+if ./build/compiler test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 == Test the preprocessor's cases against clang (part 2 of 4)
 ./build/compiler test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 2/4
 == Test the preprocessor's cases against clang (part 3 of 4)

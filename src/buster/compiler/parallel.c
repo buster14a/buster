@@ -373,15 +373,18 @@ static uint64_t parallel_cost_seconds(String8 line, uint64_t* milliseconds)
 // list doesn't have is left out (a command since removed); a command without a line costs its CPUs times 10 s.
 static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list, String8 text)
 {
-    ParallelCosts result = { .milliseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1) };
-    bool* given = BUSTER_ARENA_PUSH_ARRAY(arena, bool, list->count + 1);
+    // The list stays as it is while the costs are stored.
+    const uint64_t count = list->count;
+    const ParallelCommand* const commands = list->commands;
+    ParallelCosts result = { .milliseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1) };
+    bool* given = BUSTER_ARENA_PUSH_ARRAY(arena, bool, count + 1);
     if (result.milliseconds == 0 || given == 0)
     {
         result.error = "out of memory for the costs";
     }
-    for (uint64_t i = 0; result.error == 0 && i < list->count; i += 1)
+    for (uint64_t i = 0; result.error == 0 && i < count; i += 1)
     {
-        result.milliseconds[i] = list->commands[i].cpus * BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS;
+        result.milliseconds[i] = commands[i].cpus * BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS;
         given[i] = false;
     }
     uint64_t position = 0;
@@ -423,22 +426,22 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
                 end -= 1;
             }
             const String8 title = { .pointer = line.pointer + start, .length = end - start };
-            uint64_t found = list->count;
-            for (uint64_t i = 0; i < list->count; i += 1)
+            uint64_t found = count;
+            for (uint64_t i = 0; i < count; i += 1)
             {
-                found = found == list->count && parallel_equal(list->commands[i].title, title) ? i : found;
+                found = found == count && parallel_equal(commands[i].title, title) ? i : found;
             }
             if (length == 0 || start == length || title.length == 0)
             {
                 result.error = "a cost that isn't SECONDS TITLE";
                 result.error_line = line_number;
             }
-            else if (found != list->count && given[found])
+            else if (found != count && given[found])
             {
                 result.error = "a title that an earlier cost has";
                 result.error_line = line_number;
             }
-            else if (found != list->count)
+            else if (found != count)
             {
                 result.milliseconds[found] = milliseconds;
                 given[found] = true;
@@ -453,12 +456,13 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
 // than commands, however many --shard asks for.
 static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shards, uint64_t* assigned)
 {
-    uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1);
-    uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (shards < list->count ? shards : list->count) + 1);
+    const uint64_t count = list->count;
+    uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
+    uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (shards < count ? shards : count) + 1);
     const bool valid = order != 0 && loads != 0;
     if (valid)
     {
-        test_deal(costs, list->count, shards, order, loads, assigned);
+        test_deal(costs, count, shards, order, loads, assigned);
     }
     return valid;
 }
@@ -466,20 +470,26 @@ static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64
 // The list's commands that the deal gives shard `shard` (from 0), in the list's order, as a list of their own.
 static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shard, uint64_t shards)
 {
-    ParallelList result = { .commands = BUSTER_ARENA_PUSH_ARRAY(arena, ParallelCommand, list->count + 1) };
-    uint64_t* assigned = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1);
+    // The list stays as it is while the shard's commands are copied.
+    const uint64_t count = list->count;
+    const ParallelCommand* const commands = list->commands;
+    ParallelList result = { .commands = BUSTER_ARENA_PUSH_ARRAY(arena, ParallelCommand, count + 1) };
+    uint64_t* assigned = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
     if (result.commands == 0 || assigned == 0 || !parallel_shards(arena, list, costs, shards, assigned))
     {
         result.error = "out of memory for the shard";
     }
-    for (uint64_t i = 0; result.error == 0 && i < list->count; i += 1)
+    ParallelCommand* const kept = result.commands;
+    uint64_t kept_count = 0;
+    for (uint64_t i = 0; result.error == 0 && i < count; i += 1)
     {
         if (assigned[i] == shard)
         {
-            result.commands[result.count] = list->commands[i];
-            result.count += 1;
+            kept[kept_count] = commands[i];
+            kept_count += 1;
         }
     }
+    result.count = kept_count;
     return result;
 }
 

@@ -8269,7 +8269,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             const char* slash = next != 0 ? strchr(next, '/') : 0;
             char first_text[24] = { 0 };
             const size_t first_length = slash != 0 ? (size_t)(slash - next) : 0;
-            if (first_length < sizeof(first_text))
+            // Without a value or its '/', there is nothing to copy, and `next` may be null.
+            if (slash != 0 && first_length < sizeof(first_text))
             {
                 memcpy(first_text, next, first_length);
             }
