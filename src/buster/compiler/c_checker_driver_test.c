@@ -482,6 +482,44 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
     unlink(object);
 }
 
+// Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
+// BPF's preserve_access_index and HLSL's resource pointer.
+static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        const char* message;
+    } cases[] = {
+        { "struct S { int a; };\nint f(struct S* s) { return __builtin_preserve_access_index(s->a); }\n",
+          "unsupported: __builtin_preserve_access_index, which clang compiles for BPF alone (an error without -g)" },
+        { "void f(int x) { __builtin_hlsl_resource_getpointer_typed(x); }\n",
+          "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
+    };
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/codegen_refusal.c", directory);
+    snprintf(object, sizeof(object), "%s/codegen_refusal.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const bool written = parse_test_write(source, cases[c].source, strlen(cases[c].source));
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            char description[256];
+            snprintf(description, sizeof(description), "code generation refusal %u, %s: '%s'", c, path == 0 ? "vector" : "scalar", cases[c].message);
+            check_test_expect(test, status == 1 && text != NULL && strstr(text, cases[c].message) != NULL, description);
+            free(text);
+        }
+        check_test_expect(test, written, "a code generation refusal's source written");
+    }
+    unlink(source);
+    unlink(object);
+}
+
 static void check_test_driver_asm_symbols(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] =
@@ -7192,6 +7230,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_asm_symbols(&test, executable, directory);
                 check_test_driver_setjmp_held(&test, executable, directory);
+                check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

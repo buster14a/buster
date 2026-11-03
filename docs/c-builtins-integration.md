@@ -1579,6 +1579,21 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
   authentication"), the latter's after their arity. `__has_builtin` answers 1
   for them, as clang's does, and `__has_constexpr_builtin` as clang's.
 
+`__builtin_preserve_access_index` and `__builtin_hlsl_resource_getpointer_typed`
+(0x452 and 0x453, #148) are checked as clang's Sema checks them in C, and `-c`
+refuses each by name, as clang's code generation does for x86:
+
+- `__builtin_preserve_access_index(x)`, BPF's relocation marker, is x's value,
+  converted, of its type: an rvalue and never a constant. Clang's code
+  generation refuses it without `-g`, and with `-g` its member accesses fail
+  to select for x86. With `-g`, clang compiles a plain value as itself, which
+  the refusal here doesn't follow.
+- `__builtin_hlsl_resource_getpointer_typed(...)` is `void(...)` in C. Its
+  arguments are a variadic call's, any but void ones ("argument type 'void' is
+  incomplete"), and its code is "cannot compile this builtin function yet".
+
+`__has_builtin` answers 1 for both, as clang's does.
+
 `__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;

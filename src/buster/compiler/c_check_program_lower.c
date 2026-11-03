@@ -7503,6 +7503,14 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         // Nothing, as clang's code has them without -fxray-instrument: their arguments never run.
     }
+    else if (runtime == CBUILTIN_PRESERVE_ACCESS_INDEX)
+    {
+        check_lower_unsupported(writer, "__builtin_preserve_access_index, which clang compiles for BPF alone (an error without -g)");
+    }
+    else if (runtime == CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED)
+    {
+        check_lower_unsupported(writer, "__builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either");
+    }
     else if (runtime == CBUILTIN_CPU_INIT)
     {
         // libgcc's call, which fills the model (it is also its constructor, of priority 101).

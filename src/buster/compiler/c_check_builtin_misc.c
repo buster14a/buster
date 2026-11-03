@@ -1058,6 +1058,33 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     {
         output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
     }
+    else if (id == CBUILTIN_PRESERVE_ACCESS_INDEX)
+    {
+        // BPF's relocation marker (#148): its operand's value, converted, of its type (clang's custom check), never a
+        // constant; clang's code generation refuses it without -g, and selects its member accesses for BPF alone.
+        // A value of the operand's type alone, whatever constant the operand is (the operands' effects inherited).
+        const uint32_t flags = output->action.value.flags & ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL |
+                                                             BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
+        output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
+    }
+    else if (id == CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED)
+    {
+        // HLSL's, which C sees as void(...) (#148): any arguments but void ones, as a variadic call's ("argument type 'void'
+        // is incomplete"), and no value; clang's code generation refuses every call.
+        for (uint32_t i = 0; i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+        {
+            const CheckValue argument = input->arguments[i];
+            const bool usable = type_is_valid(table, argument.type) && argument.category <= CHECK_FUNCTION;
+            if (!usable || check_action_kind(table, argument.type) == BUSTER_TYPE_KIND_VOID)
+            {
+                check_action_diagnose(&output->action, usable ? CHECK_DIAG_INCOMPLETE : CHECK_DIAG_INVALID_TYPE, i);
+            }
+            check_action_inherit(&output->action.value, &argument);
+        }
+        output->action.value.type = BUSTER_TYPE_VOID;
+        output->action.value.category = CHECK_RVALUE;
+        output->action.value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+    }
     else if (id == CBUILTIN_CPU_INIT)
     {
         output->action.value = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT };
@@ -1162,7 +1189,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_WARN_MEMSET_ZERO_LEN:
         case CBUILTIN_CPU_INIT: minimum = maximum = 0; break;
         case CBUILTIN_CPU_IS:
-        case CBUILTIN_CPU_SUPPORTS: minimum = maximum = 1; break;
+        case CBUILTIN_CPU_SUPPORTS:
+        case CBUILTIN_PRESERVE_ACCESS_INDEX: minimum = maximum = 1; break;
+        // void(...), which clang checks as a prototype's variadic arguments outside HLSL: as many as the operands' mask holds.
+        case CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED: minimum = 0; maximum = 31; break;
         case CBUILTIN_OPERATOR_NEW:
         case CBUILTIN_OPERATOR_DELETE:
             // C++'s alone, refused with any arguments, before their count can reach the operands' 32-bit mask.
@@ -1214,7 +1244,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
         }
-        const uint32_t converted = input->id == CBUILTIN_ANNOTATION ? 1 : input->argument_count;
+        // hlsl_resource_getpointer_typed's arguments are a variadic call's, each of a complete type (check_builtin_misc_last).
+        const uint32_t converted = input->id == CBUILTIN_ANNOTATION ? 1 : input->id == CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED ? 0 : input->argument_count;
         for (uint32_t i = 0; !classify && i < converted && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
         {
             values[i] = check_builtin_misc_argument(table, input, output, i);

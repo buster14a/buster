@@ -231,6 +231,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: fence in constant contexts", .source = "static const double c = 2.0;\nstatic double e = __arithmetic_fence(c);\n_Static_assert(__arithmetic_fence(1.0) == 1.0, \"\");\n" },
         { .name = "generic: fence of float vectors and complex values", .source = "typedef float V __attribute__((vector_size(16)));\nV f(V v, _Complex float z)\n{\nreturn __arithmetic_fence(v) + __real__ __arithmetic_fence(z);\n}\n" },
         { .name = "generic: xray of an integer for its string", .source = "void f(void)\n{\n__xray_customevent(1, 2);\n}\n", .rejected = true },
+        // BPF's preserve_access_index (#148): its operand's value of its type, which clang's Sema takes of any expression, an
+        // rvalue and never a constant; and HLSL's resource pointer, void(...) in C, of any arguments but void ones.
+        { .name = "generic: preserve_access_index", .source =
+          "struct S { int a[4]; short b; };\nvoid g(void);\nint* f(struct S* s, int x)\n{\n__builtin_preserve_access_index(g());\n"
+          "_Static_assert(_Generic(__builtin_preserve_access_index(s->b), short: 1, default: 0), \"\");\n"
+          "return __builtin_preserve_access_index(s->a) + *__builtin_preserve_access_index(&x);\n}\n" },
+        { .name = "generic: preserve_access_index of none", .source = "int f(void)\n{\nreturn __builtin_preserve_access_index();\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index of two", .source = "int f(int x)\n{\nreturn __builtin_preserve_access_index(x, x);\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index's address", .source = "int* f(int x)\n{\nreturn &__builtin_preserve_access_index(x);\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index assigned", .source = "void f(int x)\n{\n__builtin_preserve_access_index(x) = 3;\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index in a constant", .source = "enum { E = __builtin_preserve_access_index(3) };\n", .rejected = true },
+        { .name = "generic: hlsl resource pointer", .source =
+          "struct S { int a; };\nvoid f(struct S s, int x)\n{\n__builtin_hlsl_resource_getpointer_typed();\n"
+          "__builtin_hlsl_resource_getpointer_typed(s, 1.0f, \"x\", x++, f);\n(void)sizeof(__builtin_hlsl_resource_getpointer_typed(1));\n}\n" },
+        { .name = "generic: hlsl resource pointer of void", .source = "void g(void);\nvoid f(void)\n{\n__builtin_hlsl_resource_getpointer_typed(g());\n}\n", .rejected = true },
+        { .name = "generic: hlsl resource pointer's value", .source = "int* f(void)\n{\nreturn __builtin_hlsl_resource_getpointer_typed();\n}\n", .rejected = true },
         { .name = "generic: xray typed event of two", .source = "void f(void)\n{\n__xray_typedevent(1, \"x\");\n}\n", .rejected = true },
         { .name = "generic: warn_memset_zero_len of one", .source = "void f(void)\n{\n__warn_memset_zero_len(1);\n}\n", .rejected = true },
         { .name = "generic: relocate of const", .source = "void f(const int* a, const int* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },

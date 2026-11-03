@@ -461,7 +461,9 @@
     X(PTRAUTH_STRIP, 0x44eu, "__builtin_ptrauth_strip", BUSTER_CBUILTIN_SOURCE) \
     X(CPU_INIT, 0x44fu, "__builtin_cpu_init", BUSTER_CBUILTIN_SOURCE) \
     X(CPU_IS, 0x450u, "__builtin_cpu_is", BUSTER_CBUILTIN_SOURCE) \
-    X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE)
+    X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE) \
+    X(PRESERVE_ACCESS_INDEX, 0x452u, "__builtin_preserve_access_index", BUSTER_CBUILTIN_SOURCE) \
+    X(HLSL_RESOURCE_GETPOINTER_TYPED, 0x453u, "__builtin_hlsl_resource_getpointer_typed", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -745,7 +747,7 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 // around the scoped atomics' (0x400 to 0x43c), which a range of ids from the first to the last would take in.
 static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
-    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CPU_SUPPORTS);
+    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED);
 }
 
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
