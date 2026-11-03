@@ -43,7 +43,7 @@ jobs:
           sh .githooks/enable-sign-off.sh --maintainer-session
           git add docs/commands/tier0.md docs/tier0.md src/buster/compiler/c_check_deep_driver_test.c src/buster/compiler/c_check_lanes_test.c src/buster/compiler/c_check_program_emit.c src/buster/compiler/c_checker_driver_test.c src/buster/compiler/tier0.c src/buster/compiler/tier0_int128_test.c src/buster/compiler/tier0_mask_test.c src/buster/compiler/tier0_test.c
           git commit -m 'tier0: retain full-width depths for deep values and nested calls' -m 'Reconstruct 32-bit integer and floating depth columns only on the cold spill path, with a vector prefix scan and scalar twin. Rebase memory-only entries by their true depth and recompute ordinary call saves after byte wrap. Keep the normal byte path, mask limit, and ABI argument bound unchanged.' -m 'Add typed-stream boundary, native memory-class, and public-driver compile/link/run regressions through depth 1000. Replace lane failure fixtures that depended on the retired refusal with a genuine frame-size failure.' -m 'Fixes #1106' -m 'Agent model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
-          test "$(git log -1 --format=%B | tail -n 1)" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          test "$(git log -1 --format=%B | sed '/^$/d' | tail -n 1)" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
           git push origin HEAD:refs/heads/agent/1106-deep-values
           printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git show --stat --oneline HEAD
