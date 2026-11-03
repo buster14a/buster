@@ -806,7 +806,8 @@ static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t ob
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
 // its object's references read where an array's take LOCAL_ADDRESS; and allocated, once its CHECK_CONTROL_ALLOCATE
-// came, which every declared array's must have.
+// came, which every read of it must follow (check_lower_address). An array whose declaration no code reaches, in an
+// operand that a constant condition never evaluates, is declared and never allocated, nor read.
 #define BUSTER_CHECK_LOWER_VLA_NONE 0
 #define BUSTER_CHECK_LOWER_VLA_DECLARED 1
 #define BUSTER_CHECK_LOWER_VLA_ALLOCATED 2
@@ -2361,7 +2362,12 @@ static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64
         const SymbolId symbol = writer->program->object_symbols[object];
         if (local != BUSTER_CHECK_NONE && writer->indirect[local] != BUSTER_CHECK_LOWER_VLA_NONE)
         {
-            // A variable-length array's address, which its local holds.
+            // A variable-length array's address, which its local holds once its allocation came: the control stream
+            // allocates an array at its declaration, before any code in its scope, which no jump enters.
+            if (writer->indirect[local] != BUSTER_CHECK_LOWER_VLA_ALLOCATED)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
         }
         else if (local != BUSTER_CHECK_NONE)
@@ -11124,10 +11130,14 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
 
 // Whether `token` declares a body's own object, which its body's locals' list holds (CheckLowerShared.local_first): the
 // list's links and the clearing of its heads before them test the same tokens.
-static bool check_lower_local_declaration(const CheckInput* input, uint32_t token)
+static bool check_lower_local_declaration(const CheckProgram* program, uint32_t token)
 {
+    const CheckInput* input = program->input;
+    // A local that code the writer left out declares (CheckProgram.dropped_ranges, #1108) gets no place: nothing reads it,
+    // and a variable-length array's allocation went with its declaration.
     return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count &&
-           input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
+           input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token] &&
+           (program->dropped_range_count == 0 || !check_program_token_dropped(program, token));
 }
 
 // Keeps `object`'s local_map entry (CheckLowerShared.locals): marked, and none until a body writes it.
@@ -11407,7 +11417,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
-            if (check_lower_local_declaration(input, declaring[d]))
+            if (check_lower_local_declaration(program, declaring[d]))
             {
                 shared->local_first[check_sparse_get(input->declaration_bodies, declaring[d])] = BUSTER_CHECK_NONE;
             }
@@ -11421,7 +11431,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
             }
             const uint32_t body = check_sparse_get(input->declaration_bodies, token);
-            if (check_lower_local_declaration(input, token))
+            if (check_lower_local_declaration(program, token))
             {
                 shared->local_next[token] = shared->local_first[body];
                 shared->local_first[body] = token;
@@ -12111,14 +12121,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // function's one entry its first statement's `asm`, where its code starts, as clang's row is.
         const bool first_asm = bare && body.count != 0 && program->controls[body.first].kind == CHECK_CONTROL_ASM;
         check_lower_source(writer, first_asm ? input->asm_statements[program->controls[body.first].target].token : program->parser->tree.parents[body.opening]);
-        for (uint32_t local = 0; local < writer->local_count; local += 1)
-        {
-            if (writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_DECLARED)
-            {
-                // A variable-length array the control stream never allocated: its address would be garbage.
-                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-            }
-        }
         // C specifies zero for main's implicit return. Other non-void fallthrough remains undefined behavior, but a
         // struct or union result's return there must still give Tier 0 an address (or the hidden pointer) to return.
         if (result == BUSTER_TYPE_VOID)

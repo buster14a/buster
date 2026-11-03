@@ -1083,23 +1083,20 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 //   that a constant condition never evaluates count too (CheckProgramOptions.unselected_operands). clang -O0 leaves a
 //   constant condition's dead arm in a branch's condition (CodeGenFunction::EmitBranchOnBoolExpr); the selection
 //   counts only what may run.
-// - dropped: a definition only ours has, which the selection of clang's model doesn't reach: the program with
-//   unselected operands counted and a constant if's dead arm left out (CheckProgramOptions.folded_ifs). clang -O0
-//   doesn't emit the arm an integer constant condition never runs (CodeGenFunction::EmitIfStmt), and so leaves out
-//   what only it calls, as of musl's FORCE_EVAL; Tier 0 lowers it, and the selection counts it.
 // - inlined: a local function only ours has, whose definition has always_inline: clang -O0 inlines it at its calls
 //   (its always-inliner) and emits none of a local one it inlined everywhere, as of SQLite's SQLITE_INLINE
 //   allocateSpace; Tier 0 calls it.
+// The arm of an if that an integer constant condition never runs, which clang -O0 doesn't emit
+// (CodeGenFunction::EmitIfStmt), -c leaves out too, with what only it refers to (CheckProgram.dropped_ranges, #1108).
 typedef enum CheckCorpusSymbolReason
 {
     CHECK_CORPUS_SYMBOL_FOLDED,
     CHECK_CORPUS_SYMBOL_UNSELECTED,
-    CHECK_CORPUS_SYMBOL_DROPPED,
     CHECK_CORPUS_SYMBOL_INLINED,
     CHECK_CORPUS_SYMBOL_REASONS,
 } CheckCorpusSymbolReason;
 
-static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped", "inlined" };
+static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "inlined" };
 
 typedef struct CheckCorpusSymbols CheckCorpusSymbols;
 struct CheckCorpusSymbols
@@ -1224,14 +1221,11 @@ static bool check_corpus_symbol_emitted(const CheckProgram* program, const Check
 }
 
 // What check_corpus_symbol_reason reads of an object (CheckCorpusSymbolIndex.facts): -c's selection initializes its
-// data and one of its bodies refers to it; -c's selection lowers its body, or emits its data; clang's model keeps its
-// body, or its data.
+// data and one of its bodies refers to it; -c's selection lowers its body, or emits its data.
 #define BUSTER_CHECK_CORPUS_OBJECT_INITIALIZED UINT8_C(1)
 #define BUSTER_CHECK_CORPUS_OBJECT_READ UINT8_C(2)
 #define BUSTER_CHECK_CORPUS_OBJECT_OUR_BODY UINT8_C(4)
 #define BUSTER_CHECK_CORPUS_OBJECT_OUR_DATA UINT8_C(8)
-#define BUSTER_CHECK_CORPUS_OBJECT_KEPT_BODY UINT8_C(16)
-#define BUSTER_CHECK_CORPUS_OBJECT_KEPT_DATA UINT8_C(32)
 
 // A definition that may explain a difference: `key`, the name it is compared by; its object; and `item`, its place in
 // the order a reason takes the candidates in (a SymbolId, a data entry or a body).
@@ -1250,8 +1244,8 @@ struct CheckCorpusSymbolCandidates
     uint32_t count;
 };
 
-// check_corpus_symbol_reason's candidates, found once per file: the definitions of -c's selection, of the selection that
-// counts unselected operands and of clang's model, sorted by the name each is compared by and then in the order the
+// check_corpus_symbol_reason's candidates, found once per file: the definitions of -c's selection and of the selection
+// that counts unselected operands (clang's model), sorted by the name each is compared by and then in the order the
 // reasons take them in, and what the reasons read of each object. A difference then finds its candidates by binary
 // searches, and takes them in the order a pass over the whole selection would: main.c's 12,016 differences took 15 s
 // with a pass each over its 135,000 symbols, and its data and bodies.
@@ -1259,7 +1253,7 @@ typedef struct CheckCorpusSymbolIndex CheckCorpusSymbolIndex;
 struct CheckCorpusSymbolIndex
 {
     const CheckProgramSelection* selected;
-    // BUSTER_CHECK_CORPUS_OBJECT_* per object, for the largest of the three programs' object counts.
+    // BUSTER_CHECK_CORPUS_OBJECT_* per object, for the larger of the two programs' object counts.
     uint8_t* facts;
     uint32_t object_count;
     // By emitted symbol (check_corpus_symbol_emitted): -c's symbols of declared objects, in SymbolId order, and its data
@@ -1309,16 +1303,15 @@ static uint32_t check_corpus_symbol_bound(const CheckCorpusSymbolCandidates* can
     return low;
 }
 
-// check_corpus_symbol_reason's candidates for -c's selection `selected`, whose code is `code`, the selection `reached`
-// that counts unselected operands, and clang's model `kept`, compared with `names`, into `index`, in `arena`: whether
-// there was room. The parser and the identifiers spell the bodies' names.
+// check_corpus_symbol_reason's candidates for -c's selection `selected`, whose code is `code`, and the selection
+// `reached` that counts unselected operands, compared with `names`, into `index`, in `arena`: whether there was room.
+// The parser and the identifiers spell the bodies' names.
 static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const CheckInput* input, const Parser* parser, const InternTable* identifiers,
                                       const CheckProgramSelection* selected, const CheckProgramCode* code, const CheckProgramSelection* reached,
-                                      const CheckProgramSelection* kept, const LoweringNames* names, Arena* arena)
+                                      const LoweringNames* names, Arena* arena)
 {
     uint32_t object_count = selected->program.object_count;
     object_count = reached->program.object_count > object_count ? reached->program.object_count : object_count;
-    object_count = kept->program.object_count > object_count ? kept->program.object_count : object_count;
     *index = (CheckCorpusSymbolIndex){
         .selected = selected,
         .facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, object_count),
@@ -1358,22 +1351,6 @@ static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const Check
             if (object < object_count)
             {
                 facts[object] |= BUSTER_CHECK_CORPUS_OBJECT_OUR_BODY;
-            }
-        }
-        for (uint32_t body = 0; body < kept->program.body_count; body += 1)
-        {
-            const uint32_t object = kept->program.bodies[body].object;
-            if (object < object_count)
-            {
-                facts[object] |= BUSTER_CHECK_CORPUS_OBJECT_KEPT_BODY;
-            }
-        }
-        for (uint32_t i = 0; i < kept->data.count; i += 1)
-        {
-            const uint32_t object = kept->data.objects[i].object;
-            if (object < object_count)
-            {
-                facts[object] |= BUSTER_CHECK_CORPUS_OBJECT_KEPT_DATA;
             }
         }
         for (SymbolId symbol = 1; symbol <= selected->program.symbol_count; symbol += 1)
@@ -1432,29 +1409,10 @@ static bool check_corpus_symbol_index(CheckCorpusSymbolIndex* index, const Check
     return valid;
 }
 
-// Whether a data object that -c emits and clang's model drops explains the difference `name`: the first candidate of
-// its emitted symbol, in data order, that explains no other difference. Each source object can justify at most one
-// extra symbol, including when several shadowed statics normalize to the same name. Kept data is compared by object
-// ID, never by its renumbered SymbolId or by its owner's presence alone.
-static bool check_corpus_symbol_dropped_data(const CheckCorpusSymbolIndex* index, const LoweringSymbol* name, uint8_t* explained_objects)
-{
-    bool dropped = false;
-    const uint32_t end = check_corpus_symbol_bound(&index->data, name, true);
-    for (uint32_t i = check_corpus_symbol_bound(&index->data, name, false); !dropped && i < end; i += 1)
-    {
-        const uint32_t object = index->data.items[i].object;
-        if (!explained_objects[object])
-        {
-            dropped = (index->facts[object] & BUSTER_CHECK_CORPUS_OBJECT_KEPT_DATA) == 0;
-            explained_objects[object] = dropped ? 1 : explained_objects[object];
-        }
-    }
-    return dropped;
-}
-
 // The reason a difference of an accepted file's comparison has, or CHECK_CORPUS_SYMBOL_REASONS for none, from `index`
-// (check_corpus_symbol_index's), whose `selected` is what -c emitted, `reached` what the selection reaches with
-// unselected operands counted, and `kept` what it reaches in clang's model, with them and folded ifs.
+// (check_corpus_symbol_index's), whose `selected` is what -c emitted and `reached` what the selection reaches with
+// unselected operands counted: clang's model, whose constant ifs leave their dead arms out as -c's do
+// (CheckProgram.dropped_ranges).
 static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifference* difference, const CheckCorpusPath* path, const CheckCorpusSymbolIndex* index,
                                                           uint8_t* explained_objects)
 {
@@ -1486,17 +1444,6 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
                 reason = read ? CHECK_CORPUS_SYMBOL_FOLDED : reason;
                 explained_objects[object] = read ? 1 : explained_objects[object];
             }
-        }
-        // Dropped: a body that clang's model doesn't keep, or data.
-        for (uint32_t i = bodies_first; reason == CHECK_CORPUS_SYMBOL_REASONS && i < bodies_end; i += 1)
-        {
-            const uint32_t object = bodies->items[i].object;
-            const bool theirs = object < index->object_count && (index->facts[object] & BUSTER_CHECK_CORPUS_OBJECT_KEPT_BODY) != 0;
-            reason = !theirs ? CHECK_CORPUS_SYMBOL_DROPPED : reason;
-        }
-        if (reason == CHECK_CORPUS_SYMBOL_REASONS && check_corpus_symbol_dropped_data(index, name, explained_objects))
-        {
-            reason = CHECK_CORPUS_SYMBOL_DROPPED;
         }
         // Inlined: a local always_inline function, which clang inlines at every call.
         const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
@@ -1543,10 +1490,8 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
     CheckProgram unselected = { 0 };
-    CheckProgram model = { 0 };
     CheckProgramSelection selected = { 0 };
     CheckProgramSelection reached = { 0 };
-    CheckProgramSelection kept = { 0 };
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
@@ -1565,9 +1510,6 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     options.unselected_operands = true;
     valid = valid && check_program(&unselected, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&reached, &unselected, &data, false, &path->output_arena, &path->scratch);
-    options.folded_ifs = true;
-    valid = valid && check_program(&model, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
-            check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
                                                      &path->scratch, NULL, NULL, true, true);
     const bool emitted = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
@@ -1626,7 +1568,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         }
         CheckCorpusSymbolIndex index = { 0 };
         const bool indexed = !compared || count == 0 ||
-                             check_corpus_symbol_index(&index, &path->input, parser, pp->table, &selected, &code, &reached, &kept, &names, &path->scratch);
+                             check_corpus_symbol_index(&index, &path->input, parser, pp->table, &selected, &code, &reached, &names, &path->scratch);
         failure = !indexed ? "out of memory for its explanation candidates" : failure;
         compared &= indexed;
         for (uint32_t i = 0; compared && i < count; i += 1)
@@ -1776,7 +1718,12 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
                  a->control_count == b->control_count && a->body_count == b->body_count &&
                  a->case_count == b->case_count && a->region_count == b->region_count && a->reference_count == b->reference_count &&
                  a->object_count == b->object_count && a->symbol_count == b->symbol_count && a->builtin_count == b->builtin_count &&
-                 a->asm_target_count == b->asm_target_count && a->output_bytes == b->output_bytes && (a->asm_offsets == NULL) == (b->asm_offsets == NULL);
+                 a->asm_target_count == b->asm_target_count && a->output_bytes == b->output_bytes && (a->asm_offsets == NULL) == (b->asm_offsets == NULL) &&
+                 a->dropped_range_count == b->dropped_range_count;
+    for (uint32_t i = 0; equal && i < a->dropped_range_count; i += 1)
+    {
+        equal = a->dropped_ranges[i] == b->dropped_ranges[i];
+    }
     for (uint32_t i = 0; equal && i < a->control_count; i += 1)
     {
         const CheckControl* x = a->controls + i;
@@ -1805,7 +1752,8 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
     {
         const CheckProgramRegion* x = a->regions + i;
         const CheckProgramRegion* y = b->regions + i;
-        equal = x->first == y->first && x->count == y->count && x->body == y->body && x->node == y->node && x->result == y->result;
+        equal = x->first == y->first && x->count == y->count && x->body == y->body && x->node == y->node && x->result == y->result &&
+                a->region_reached[i] == b->region_reached[i];
     }
     for (uint32_t i = 0; equal && i < a->object_count; i += 1)
     {
@@ -3592,10 +3540,9 @@ static int run_checker_corpus(int count, char** arguments)
     if (symbols_requested)
     {
         printf("checker-corpus: symbols compared=%" PRIu64 " minimum=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64
-               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
+               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
                symbols.different, symbols.unexplained, check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED],
-               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_INLINED], symbols.documented[CHECK_CORPUS_SYMBOL_INLINED], symbols.unsupported, symbols.failures);
         for (uint32_t i = 0; i < symbols.feature_count; i += 1)
         {
