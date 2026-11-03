@@ -330,10 +330,12 @@ frame is open: its FDE has the prologue's transitions, the body's rules hold to
 its end, and each of its returns is a bracketed teardown. A frameless function
 has no events: its rules are the CIE's throughout. `check_tier1_compile` checks
 the brackets against the recorded exits (each a `ret`, each restoring right
-after one, in order); a disagreement sends the function to Tier 0
-(`TIER1_EMIT_FRAME`) rather than fail the compile. A frame with probes is
-described too (its CFA in r11 through the loop), though the C driver never asks
-for one. `--tier1-report` counts the shapes: `open_frames` (open frames with
+after one, in order). A disagreement is the emitter's own inconsistency: an
+internal publication failure (`CHECK_TIER1_PUBLICATION`,
+`BUSTER_CHECK_TIER1_FRAME_PUBLICATION`), for which the policy forbids the Tier 0
+fallback, so the compile fails ([the outcomes guide](tier1-outcomes.md)). A
+frame with probes is described too (its CFA in r11 through the loop), though
+the C driver never asks for one. `--tier1-report` counts the shapes: `open_frames` (open frames with
 transitions), `return_tails` (returns published as tails) and `red_zones`
 (frames whose objects are in the red zone).
 

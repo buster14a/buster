@@ -535,6 +535,10 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
         x86_instruction_resolve(record, &reads, &writes, &opmasks);
         const X86Effects* effects = x86_effects(record->form);
         state->unproven |= effects->operation == X86_OPERATION_NONE;
+        const bool frame_store = (writes & BUSTER_X86_RESOURCE_MEMORY) != 0 && !direct && record->mode == BUSTER_X86_MEMORY_BASE && record->rm < 16;
+        // A store's address is its base register's value as the record reads it, before its own writes: `xchg [rbp],
+        // rbp` overwrites the slot rbp pointed at, whatever rbp holds after it.
+        const int32_t address = frame_store ? emitted_add(state->value[record->rm], record->displacement) : BUSTER_EMITTED_UNKNOWN;
         for (uint32_t g = 0; g < 16; g += 1)
         {
             if (((writes >> g) & 1) != 0)
@@ -544,11 +548,10 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
         }
         if ((writes & BUSTER_X86_RESOURCE_MEMORY) != 0)
         {
-            const bool frame_store = !direct && (record->mode == BUSTER_X86_MEMORY_BASE) && record->rm < 16;
             if (frame_store)
             {
                 const uint32_t bytes = effects->width != 0 ? effects->width : 64;
-                emitted_clobber_slots(state, emitted_add(state->value[record->rm], record->displacement), bytes);
+                emitted_clobber_slots(state, address, bytes);
             }
             else if (effects->operation == X86_OPERATION_NONE)
             {
@@ -565,12 +568,14 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
 
 // The equality a compare and the conditional jump right after it establish on one of the jump's edges: `cmp a, b`
 // (registers) then jne falls through, or je jumps, where a equals b, the probe loop's exit (#1056). Returns false for an
-// edge no path takes: both values known and apart (the loop's first pass, before the back edge's meet).
-static bool emitted_refine(const X86Instruction* records, uint32_t jump, bool taken, EmittedState* state)
+// edge no path takes: both values known and apart (the loop's first pass, before the back edge's meet). `follows` says
+// the compare is in the jump's block, so that it ran on every path to the jump: a jump that starts its block (a branch's
+// target or a label) may be reached with flags the compare never set, and isn't refined.
+static bool emitted_refine(const X86Instruction* records, uint32_t jump, bool follows, bool taken, EmittedState* state)
 {
     const uint32_t form = records[jump].form & ~BUSTER_X86_FORM_FIXUP;
     const bool equal = taken ? form == X86_FORM_JE_REL8 || form == X86_FORM_JE_REL32 : form == X86_FORM_JNE_REL8 || form == X86_FORM_JNE_REL32;
-    const X86Instruction* compare = jump > 0 ? &records[jump - 1] : 0;
+    const X86Instruction* compare = follows && jump > 0 ? &records[jump - 1] : 0;
     bool feasible = true;
     if (equal && compare != 0 && compare->form == X86_FORM_CMP_RM64_R64 && emitted_direct(compare))
     {
@@ -777,11 +782,13 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
             bool stop = emitted_exit(record, branch);
             if (branch)
             {
+                // The record before this one ran on this path only if it is in this block.
+                const bool follows = i > starts[leader];
                 edges[successor_count] = state;
-                const bool taken = emitted_refine(code->records, i, true, &edges[successor_count]);
+                const bool taken = emitted_refine(code->records, i, follows, true, &edges[successor_count]);
                 successors[successor_count] = leaders[targets[i]];
                 successor_count += taken ? 1 : 0;
-                stop = emitted_jump(record->form) || !emitted_refine(code->records, i, false, &state);
+                stop = emitted_jump(record->form) || !emitted_refine(code->records, i, follows, false, &state);
             }
             if (!stop && emitted_indirect(record))
             {
@@ -857,7 +864,8 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
             emitted_transfer(&code->records[i], &state);
             if (targets[i] != UINT32_MAX)
             {
-                (void)emitted_refine(code->records, i, false, &state);
+                // A leader's state is its paths' meet, so the record before it didn't run on all of them.
+                (void)emitted_refine(code->records, i, leaders[i] == UINT32_MAX, false, &state);
             }
         }
     }

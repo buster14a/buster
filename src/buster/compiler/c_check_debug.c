@@ -100,18 +100,11 @@ static uint32_t check_debug_rows_scalar(const uint32_t* entry_records, const uin
     return count;
 }
 
-// The same, 16 entries at a time: check_debug_rows_scalar's twin. An origin column (Tier 1's few events) takes the
-// exact path.
-static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* origins, const uint32_t* entry_tokens, uint32_t entry_count,
-                                 const uint32_t* offsets, uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
+#if BUSTER_HOST_VECTOR
+// The same, 16 entries at a time, for events without an origin column (Tier 0's): check_debug_rows_scalar's twin.
+static uint32_t check_debug_rows_vector(const uint32_t* entry_records, const uint32_t* entry_tokens, uint32_t entry_count, const uint32_t* offsets,
+                                        uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
 {
-#if !BUSTER_HOST_VECTOR
-    return check_debug_rows_scalar(entry_records, origins, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
-#else
-    if (origins != 0)
-    {
-        return check_debug_rows_scalar(entry_records, origins, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
-    }
     row_offsets[0] = 0;
     row_tokens[0] = declaration;
     uint32_t count = offsets[entry_records[0]] != 0 ? 1 : 0;
@@ -136,6 +129,19 @@ static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* 
     row_tokens[count] = closing;
     count += epilogue < length ? 1 : 0;
     return count;
+}
+#endif
+
+// A function's raw rows, as check_debug_rows_scalar says: on vector hosts 16 entries at a time, but for an origin
+// column (Tier 1's few events), which takes the exact path.
+static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* origins, const uint32_t* entry_tokens, uint32_t entry_count,
+                                 const uint32_t* offsets, uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
+{
+#if !BUSTER_HOST_VECTOR
+    return check_debug_rows_scalar(entry_records, origins, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
+#else
+    return origins != 0 ? check_debug_rows_scalar(entry_records, origins, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens) :
+                          check_debug_rows_vector(entry_records, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
 #endif
 }
 

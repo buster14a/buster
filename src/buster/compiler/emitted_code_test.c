@@ -551,6 +551,75 @@ static void emitted_test_uncovered_case(EmittedTest* test, X86Instruction* recor
     emitted_test_expect(test, verdict.error == expected && (expected == EMITTED_VERIFY_OK || verdict.record == record), check, id);
 }
 
+// The verifier on `count` records, with `branch_count` branches (ascending by record) and `frame_count` events, whose
+// verdict must be `expected` at `record`.
+static void emitted_test_verify_case(EmittedTest* test, X86Instruction* records, uint32_t count, uint32_t* branches, uint32_t* targets, uint32_t branch_count,
+                                     EmissionFrameEvent* frames, uint32_t frame_count, EmittedVerifyError expected, uint32_t record, const char* check, uint64_t id)
+{
+    const EmittedCode code = {
+        .records = records,
+        .count = count,
+        .branches = branches,
+        .targets = targets,
+        .branch_count = branch_count,
+        .frames = frames,
+        .frame_count = frame_count,
+        .frame_status = EMITTED_FRAME_DESCRIBED,
+    };
+    const EmittedVerdict verdict = emitted_verify_frames(&code, &test->arena);
+    emitted_test_expect(test, verdict.error == expected && (expected == EMITTED_VERIFY_OK || verdict.record == record), check, id);
+}
+
+// Two programs the verifier once accepted (#1145's review), and their controls:
+// - `push rbp; mov rbp, rsp; xchg [rbp], rbp; pop rbp; ret` with the push's and the pop's ordinary events: the xchg
+//   overwrites the slot rbp pointed at, its address rbp's before the xchg's own write, so rbp's saved rule fails at the
+//   pop, which no longer reloads rbp's entry value.
+// - `mov r11, rsp; sub r11, 8; xor eax, eax; jmp J; cmp rsp, r11; J: jne R; push rbx; R: ret` without events: J's jne
+//   follows the xor's flags, not the skipped cmp's, so it falls through to the push, whose ret the CIE's rules don't
+//   describe. With the cmp right before the jne, which then always jumps, the push is unreachable, and the code proved.
+static void emitted_test_counterexamples(EmittedTest* test)
+{
+    const X86Instruction push_rbp = { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_RBP };
+    const X86Instruction pointer = tier1_frame_emit_register(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_RBP);
+    const X86Instruction exchange = tier1_frame_emit_memory(X86_FORM_XCHG_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RBP, 0);
+    const X86Instruction pop_rbp = { .form = X86_FORM_POP_R64, .rm = X86_REGISTER_RBP };
+    const X86Instruction ret = { .form = X86_FORM_RET };
+    X86Instruction swapped[] = { push_rbp, pointer, exchange, pop_rbp, ret };
+    // The push's and the pop's events alone: the CFA stays rsp's, so only rbp's saved slot can refute the frame.
+    EmissionFrameEvent swapped_events[] = {
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_OFFSET, .reg = BUSTER_EMISSION_X86_RBP, .value = -16 },
+        { .at = { .boundary = 4 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 },
+        { .at = { .boundary = 4 }, .kind = EMISSION_FRAME_RESTORE, .reg = BUSTER_EMISSION_X86_RBP },
+    };
+    emitted_test_verify_case(test, swapped, 5, 0, 0, 0, swapped_events, 4, EMITTED_VERIFY_REFUTED, 3, "an xchg through rbp of rbp's saved slot refutes its rule", 1);
+    X86Instruction kept[] = { push_rbp, pointer, pop_rbp, ret };
+    EmissionFrameEvent kept_events[] = {
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
+        { .at = { .boundary = 1 }, .kind = EMISSION_FRAME_OFFSET, .reg = BUSTER_EMISSION_X86_RBP, .value = -16 },
+        { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 },
+        { .at = { .boundary = 3 }, .kind = EMISSION_FRAME_RESTORE, .reg = BUSTER_EMISSION_X86_RBP },
+    };
+    emitted_test_verify_case(test, kept, 4, 0, 0, 0, kept_events, 4, EMITTED_VERIFY_OK, 0, "the frame without the xchg is proved", 2);
+    const X86Instruction bound = tier1_frame_emit_register(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R11);
+    const X86Instruction lower = { .form = X86_FORM_SUB_RM64_IMM8, .rm = X86_REGISTER_R11, .immediate = 8 };
+    const X86Instruction zero = tier1_frame_emit_register(X86_FORM_XOR_RM32_R32, X86_REGISTER_RAX, X86_REGISTER_RAX);
+    const X86Instruction skip = { .form = X86_FORM_JMP_REL8 };
+    const X86Instruction compare = tier1_frame_emit_register(X86_FORM_CMP_RM64_R64, X86_REGISTER_R11, X86_REGISTER_RSP);
+    const X86Instruction jne = { .form = X86_FORM_JNE_REL8 };
+    const X86Instruction push_rbx = { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_RBX };
+    X86Instruction skipped[] = { bound, lower, zero, skip, compare, jne, push_rbx, ret };
+    uint32_t skipped_branches[] = { 3, 5 };
+    uint32_t skipped_targets[] = { 5, 7 };
+    emitted_test_verify_case(test, skipped, 8, skipped_branches, skipped_targets, 2, 0, 0, EMITTED_VERIFY_REFUTED, 7,
+                             "a jne its block starts doesn't take a skipped compare's equality", 3);
+    X86Instruction compared[] = { bound, lower, zero, compare, jne, push_rbx, ret };
+    uint32_t compared_branches[] = { 4 };
+    uint32_t compared_targets[] = { 6 };
+    emitted_test_verify_case(test, compared, 7, compared_branches, compared_targets, 1, 0, 0, EMITTED_VERIFY_OK, 0,
+                             "a compare right before its jne still decides the jne's edges", 4);
+}
+
 // Code through a form x86_semantics.c doesn't cover, whose conservative record may write rsp (monitorx's, an x86
 // builtin's per-unit leaf, which main.c's --verify compile emits): a rule it leaves unknown is unproven, not refuted, on
 // every path through it, and the driver keeps such a frame; a rule that fails before it, or on a path that doesn't go
@@ -901,6 +970,43 @@ static void emitted_test_native(EmittedTest* test, bool keep)
     }
 }
 
+// The tests, with their options: 0 when every check passes.
+static int emitted_test_run(bool cross, bool keep, uint64_t seed, uint32_t rounds)
+{
+    EmittedTest test = { .arena = arena_reserve(UINT64_C(1) << 32), .scratch = arena_reserve(UINT64_C(1) << 32) };
+    const bool valid = test.arena.base != 0 && test.scratch.base != 0 && x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
+    emitted_test_expect(&test, valid, "the tables initialize", 0);
+    if (valid)
+    {
+        emitted_test_rows(&test);
+        emitted_test_tier0(&test, seed, rounds);
+        emitted_test_tier1(&test);
+        emitted_test_limits(&test);
+        emitted_test_counterexamples(&test);
+        char directory[PATH_MAX];
+        const bool made = emitted_test_directory(directory, sizeof(directory), "buster-emitted-leaves");
+        emitted_test_expect(&test, made, "make a directory for the leaves' compile", 0);
+        if (made)
+        {
+            emitted_test_uncovered(&test, directory);
+            rmdir(directory);
+        }
+        if (cross)
+        {
+            emitted_test_native(&test, keep);
+        }
+    }
+    emitted_test_expect(&test, test.tier0_functions != 0 && test.tier1_frames != 0 && test.probe_frames != 0 && test.mutants != 0 && test.refuted == test.mutants,
+                        "coverage: Tier 0 functions, Tier 1 frames, probe frames and refuted mutants", 0);
+    printf("emitted code: %" PRIu64 " fixed descriptors as row programs, %" PRIu64 " Tier 0 programs' %" PRIu64 " functions, %" PRIu64 " Tier 1 frames (%" PRIu64
+           " probe loops without a frame pointer), %" PRIu64 " row programs, %" PRIu64 " of %" PRIu64 " mutants refuted; %" PRIu64 " checks, %" PRIu64 " failed\n",
+           test.descriptors, test.programs, test.tier0_functions, test.tier1_frames, test.probe_frames, test.row_programs, test.refuted, test.mutants, test.checks,
+           test.failures);
+    arena_release(&test.arena);
+    arena_release(&test.scratch);
+    return test.failures == 0 ? 0 : 1;
+}
+
 static int run_emitted_code_tests(int argc, char** argv)
 {
     bool cross = false;
@@ -931,40 +1037,14 @@ static int run_emitted_code_tests(int argc, char** argv)
             valid = false;
         }
     }
+    int status = 1;
     if (!valid)
     {
         fprintf(stderr, "usage: test-emitted-code [--seed N] [--count N] [--cross-check] [--keep]\n");
-        return 1;
     }
-    EmittedTest test = { .arena = arena_reserve(UINT64_C(1) << 32), .scratch = arena_reserve(UINT64_C(1) << 32) };
-    valid = test.arena.base != 0 && test.scratch.base != 0 && x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
-    emitted_test_expect(&test, valid, "the tables initialize", 0);
-    if (valid)
+    else
     {
-        emitted_test_rows(&test);
-        emitted_test_tier0(&test, seed, rounds);
-        emitted_test_tier1(&test);
-        emitted_test_limits(&test);
-        char directory[PATH_MAX];
-        const bool made = emitted_test_directory(directory, sizeof(directory), "buster-emitted-leaves");
-        emitted_test_expect(&test, made, "make a directory for the leaves' compile", 0);
-        if (made)
-        {
-            emitted_test_uncovered(&test, directory);
-            rmdir(directory);
-        }
-        if (cross)
-        {
-            emitted_test_native(&test, keep);
-        }
+        status = emitted_test_run(cross, keep, seed, rounds);
     }
-    emitted_test_expect(&test, test.tier0_functions != 0 && test.tier1_frames != 0 && test.probe_frames != 0 && test.mutants != 0 && test.refuted == test.mutants,
-                        "coverage: Tier 0 functions, Tier 1 frames, probe frames and refuted mutants", 0);
-    printf("emitted code: %" PRIu64 " fixed descriptors as row programs, %" PRIu64 " Tier 0 programs' %" PRIu64 " functions, %" PRIu64 " Tier 1 frames (%" PRIu64
-           " probe loops without a frame pointer), %" PRIu64 " row programs, %" PRIu64 " of %" PRIu64 " mutants refuted; %" PRIu64 " checks, %" PRIu64 " failed\n",
-           test.descriptors, test.programs, test.tier0_functions, test.tier1_frames, test.probe_frames, test.row_programs, test.refuted, test.mutants, test.checks,
-           test.failures);
-    arena_release(&test.arena);
-    arena_release(&test.scratch);
-    return test.failures == 0 ? 0 : 1;
+    return status;
 }

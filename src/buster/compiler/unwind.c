@@ -266,19 +266,21 @@ static uint32_t unwind_uleb_size(uint32_t value)
 // function with tail calls, each of which adds its remembered state, its teardown's transitions as the epilogue's and its
 // jump's restored state (unwind_tails_scalar), and for an open one, which has no epilogue's transitions at its end: with
 // a frame pointer each pop's 6 bytes and rbp's 9, and without one each pop's 8 and the release's 7.
-static uint64_t unwind_rows_bytes(const UnwindFunction* function);
-static uint64_t unwind_fde_bytes(const UnwindFunction* function)
+static uint64_t unwind_fixed_bytes(const UnwindFunction* function)
 {
-    if (function->open == BUSTER_UNWIND_ROWS)
-    {
-        return unwind_rows_bytes(function);
-    }
     const uint32_t saved = (uint32_t)__builtin_popcount(function->saved);
     const uint32_t cfa = 8 + 8 * saved + function->frame_size;
     const uint64_t bytes = function->pointer != 0 ? 42 + 13 * saved : 17 + 17 * saved + (function->frame_size != 0 ? 13 + unwind_uleb_size(cfa) : 0);
     const uint64_t epilogue = function->open == 0 ? 0 : function->pointer != 0 ? 9 + 6 * saved : 8 * saved + (function->frame_size != 0 ? 7 : 0);
     const uint64_t tail = function->pointer != 0 ? 16 + 6 * saved : 7 + 8 * saved + (function->frame_size != 0 ? 7 : 0);
     return (bytes - epilogue + tail * function->tail_count + 7) & ~UINT64_C(7);
+}
+
+// A row program's bytes (unwind_rows_scalar's), or a fixed descriptor's.
+static uint64_t unwind_rows_bytes(const UnwindFunction* function);
+static uint64_t unwind_fde_bytes(const UnwindFunction* function)
+{
+    return function->open == BUSTER_UNWIND_ROWS ? unwind_rows_bytes(function) : unwind_fixed_bytes(function);
 }
 
 static void unwind_advance(UnwindWriter* writer, uint32_t offset, uint32_t* previous)
@@ -368,15 +370,9 @@ static void unwind_tails_scalar(UnwindWriter* writer, const UnwindFunction* func
     }
 }
 
-static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* function, uint64_t cie);
-// A function's FDE, pointing back to the CIE at `cie`.
-static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* function, uint64_t cie)
+// A fixed descriptor's FDE, pointing back to the CIE at `cie`.
+static void unwind_fixed_scalar(UnwindWriter* writer, const UnwindFunction* function, uint64_t cie)
 {
-    if (function->open == BUSTER_UNWIND_ROWS)
-    {
-        unwind_rows_scalar(writer, function, cie);
-        return;
-    }
     const uint64_t fde = writer->size;
     unwind_integer(writer, 0, 4); // patched record length
     unwind_integer(writer, (uint32_t)(fde + 4 - cie), 4); // backward CIE pointer, from this field
@@ -483,6 +479,20 @@ static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* functi
     memcpy(writer->bytes + fde, &length, 4);
 }
 
+// A function's FDE, pointing back to the CIE at `cie`: a row program's or a fixed descriptor's.
+static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* function, uint64_t cie);
+static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* function, uint64_t cie)
+{
+    if (function->open == BUSTER_UNWIND_ROWS)
+    {
+        unwind_rows_scalar(writer, function, cie);
+    }
+    else
+    {
+        unwind_fixed_scalar(writer, function, cie);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Row programs (#1056): resolved frame rows as call-frame instructions
 
@@ -497,9 +507,11 @@ static UnwindError unwind_rows_check(const UnwindFunction* function)
     result = result == UNWIND_OK && function->size > INT32_MAX ? UNWIND_ERROR_LIMIT : result;
     uint32_t previous = 0;
     uint32_t depth = 0;
-    for (uint32_t i = 0; result == UNWIND_OK && i < function->row_count; i += 1)
+    const EmissionFrameRow* rows = function->rows;
+    const uint32_t row_count = function->row_count;
+    for (uint32_t i = 0; result == UNWIND_OK && i < row_count; i += 1)
     {
-        const EmissionFrameRow row = function->rows[i];
+        const EmissionFrameRow row = rows[i];
         result = row.offset >= previous && row.offset < function->size && row.reserved == 0 ? UNWIND_OK : UNWIND_ERROR_INVALID;
         const bool rule = row.reg < BUSTER_EMISSION_X86_REGISTERS && row.reg != BUSTER_EMISSION_X86_RSP && row.reg != BUSTER_EMISSION_X86_RETURN;
         switch (row.kind)
@@ -565,9 +577,12 @@ static void unwind_rows_scalar(UnwindWriter* writer, const UnwindFunction* funct
     uint32_t saved_registers[BUSTER_UNWIND_ROW_STATES];
     int32_t saved_offsets[BUSTER_UNWIND_ROW_STATES];
     uint32_t depth = 0;
-    for (uint32_t i = 0; i < function->row_count; i += 1)
+    // The rows are the writer's input, apart from its output (unwind_write's contract): read once, not after each store.
+    const EmissionFrameRow* rows = function->rows;
+    const uint32_t row_count = function->row_count;
+    for (uint32_t i = 0; i < row_count; i += 1)
     {
-        const EmissionFrameRow row = function->rows[i];
+        const EmissionFrameRow row = rows[i];
         if (row.kind != EMISSION_FRAME_REMEMBER_STATE && row.offset != previous)
         {
             unwind_advance(writer, row.offset, &previous);

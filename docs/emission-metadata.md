@@ -231,14 +231,18 @@ register's entry value each holds, and where in the frame each entry value is
 saved, to its fixpoint, the paths' meet at each block. Pushes, pops, register
 moves, `lea`, additions and subtractions of immediates, realignments (an
 unknown value), calls (rsp and the callee-saved registers kept, the others
-unknown) and stores into the frame (which overwrite the slots they reach) have
-their effects; any other register write (by `x86_semantics.c`'s resolved
-effects) leaves the register unknown. A compare of two registers and the
-`jne`/`je` after it give their equality on the equal edge: the probe loop's
-exit. Then each reached record's state is checked against the rules: the CFA
-register's value must be the CFA less the rule's offset, a callee-saved register
-whose rule keeps it must hold its entry value, a saved one must be at its slot
-or in its register, and the return address at its slot.
+unknown) and stores into the frame (which overwrite the slots they reach, at the
+address their base register held before the record's own writes, as `xchg
+[rbp], rbp` overwrites rbp's slot) have their effects; any other register write
+(by `x86_semantics.c`'s resolved effects) leaves the register unknown. A compare
+of two registers and the `jne`/`je` right after it in its block give their
+equality on the equal edge: the probe loop's exit. A jump that starts its block
+(a branch's target or a label) isn't refined, since a path may reach it with
+flags the compare never set. Then each reached record's state is checked
+against the rules: the CFA register's value must be the CFA less the rule's
+offset, a callee-saved register whose rule keeps it must hold its entry value, a
+saved one must be at its slot or in its register, and the return address at its
+slot.
 
 Its trust boundary: a store through a register it doesn't follow (an index, a
 pointer) is trusted not to reach the save area, which the frame's layout keeps
