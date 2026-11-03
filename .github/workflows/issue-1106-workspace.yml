@@ -1,27 +1,91 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Temporary investigation workflow on agent/1106-workspace only.
-name: Issue 1106 workspace
+# Temporary transport and qualification on agent/1106-workspace only; never part of the implementation PR.
+name: Issue 1106 focused qualification
 on:
   push:
     branches: [agent/1106-workspace]
 permissions:
   contents: read
 jobs:
-  snapshot:
+  publish:
     if: github.repository_id == '1421805693'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 96b6cbcd122ffdc45700cf01d6e8adb40a81243c
+          ref: ${{ github.sha }}
+          path: payload
           persist-credentials: false
-      - name: Archive the exact investigation base
-        shell: bash
-        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/issue-1106-source.tar.gz"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          name: issue-1106-source
-          path: ${{ runner.temp }}/issue-1106-source.tar.gz
+          ref: 96b6cbcd122ffdc45700cf01d6e8adb40a81243c
+          path: implementation
+      - name: Publish the exact reviewed patch on its own branch
+        id: publish
+        working-directory: implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 96b6cbcd122ffdc45700cf01d6e8adb40a81243c
+          xz -dc ../payload/.issue-1106.patch.xz > "$RUNNER_TEMP/issue-1106.patch"
+          printf '%s  %s\n' 52e573873a7c3c862be348b55032902c8a8d28fe2aa716db896235338c46b8bc "$RUNNER_TEMP/issue-1106.patch" | sha256sum --check
+          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-1106.patch"
+          git apply --unidiff-zero "$RUNNER_TEMP/issue-1106.patch"
+          git diff --check
+          git switch -c agent/1106-deep-values
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          sh .githooks/enable-sign-off.sh --maintainer-session
+          git add docs/commands/tier0.md docs/tier0.md src/buster/compiler/c_check_deep_driver_test.c src/buster/compiler/c_check_lanes_test.c src/buster/compiler/c_check_program_emit.c src/buster/compiler/c_checker_driver_test.c src/buster/compiler/tier0.c src/buster/compiler/tier0_int128_test.c src/buster/compiler/tier0_mask_test.c src/buster/compiler/tier0_test.c
+          git commit -m 'tier0: retain full-width depths for deep values and nested calls' -m 'Reconstruct 32-bit integer and floating depth columns only on the cold spill path, with a vector prefix scan and scalar twin. Rebase memory-only entries by their true depth and recompute ordinary call saves after byte wrap. Keep the normal byte path, mask limit, and ABI argument bound unchanged.' -m 'Add typed-stream boundary, native memory-class, and public-driver compile/link/run regressions through depth 1000. Replace lane failure fixtures that depended on the retired refusal with a genuine frame-size failure.' -m 'Fixes #1106' -m 'Agent model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          test "$(git log -1 --format=%B | tail -n 1)" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          git push origin HEAD:refs/heads/agent/1106-deep-values
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git show --stat --oneline HEAD
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      BUSTER_HOST_ARCH: native
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Install the project's verified Clang 23.1.4 toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build the unchanged public compiler entry point
+        shell: bash
+        run: set -o pipefail; ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-1106-build.log"
+      - name: Tier 0 native and Clang cross-checks
+        shell: bash
+        run: set -o pipefail; ./build/compiler test-tier0 --count 30 --cross-check --cross-count 5 2>&1 | tee "$RUNNER_TEMP/issue-1106-tier0.log"
+      - name: Public driver shard containing the deep regression
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: set -o pipefail; ./build/compiler test-checker-driver --part 2/64 --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-driver.log"
+      - name: Lane failure and retry semantics
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: set -o pipefail; ./build/compiler test-check-lanes --programs 1 --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-lanes.log"
+      - name: Check module ownership
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: set -o pipefail; ./build.sh check-call-graph 2>&1 | tee "$RUNNER_TEMP/issue-1106-call-graph.log"
+      - name: Preserve qualification output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1106-qualification
+          path: ${{ runner.temp }}/issue-1106-*.log
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: ignore
