@@ -3187,38 +3187,6 @@ static void check_test_driver_clock_reader(CheckTest* test)
     check_test_driver_clock_printer(test);
 }
 
-// --parsed-literals (#1172's temporary A/B of the expressions' walk's literals' pass): a unit of literals of every form,
-// the pass's plain decimals and the preprocessor's ints among them, compiled with every literal parsed by its action
-// must give the object the pass's compile gives.
-static void check_test_driver_parsed_literals(CheckTest* test, const char* executable, const char* directory)
-{
-    static const char program[] = "static const long long values[] = { 0, 1, 7, 42, 999999999, 1000000000, 2147483647, 2147483648, 4294967295, 4294967296,\n"
-                                  "    00, 017, 0x1f, 0b101, 12u, 7L, 9ll, 3ULL, 12'34, 'a', '\\n', L'b', __LINE__, __COUNTER__, (long long)1.5, (long long)1e3 };\n"
-                                  "int literal(int i) { switch (i) { case 0: return 10; case 1: return 0x10; case 2: return 010; default: break; }\n"
-                                  "    return (int)values[i % 26] + 123456789 - 99 * 3 + (i > 5 ? 600000 : 7); }\n";
-    char compiler[PATH_MAX];
-    char source[256];
-    char read[256];
-    char parsed[256];
-    snprintf(source, sizeof(source), "%s/parsed_literals.c", directory);
-    snprintf(read, sizeof(read), "%s/parsed_literals_read.o", directory);
-    snprintf(parsed, sizeof(parsed), "%s/parsed_literals_parsed.o", directory);
-    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
-    char* const compile_read[] = { compiler, "-std=c23", "-c", source, "-o", read, NULL };
-    char* const compile_parsed[] = { compiler, "-std=c23", "-c", "--parsed-literals", source, "-o", parsed, NULL };
-    char* text = NULL;
-    const int read_status = made ? check_test_driver_spawn(compile_read, &text) : -1;
-    free(text);
-    text = NULL;
-    const int parsed_status = made ? check_test_driver_spawn(compile_parsed, &text) : -1;
-    free(text);
-    check_test_expect(test, read_status == 0 && parsed_status == 0 && check_test_driver_same_files(read, parsed),
-                      "--parsed-literals, every literal parsed by its action, writes the object the literals' pass's compile writes");
-    unlink(source);
-    unlink(read);
-    unlink(parsed);
-}
-
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
 // its report must account for every stage once, adding up to its total; so must the direct path's, whose executable
 // runs, with -g too, whose DWARF and static data are stages of their own, and -fsyntax-only's, which emits nothing.
@@ -6653,10 +6621,6 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_time_stages(&test, executable, directory);
-            }
-            if (!lazy && check_test_driver_takes())
-            {
-                check_test_driver_parsed_literals(&test, executable, directory);
             }
         }
         rmdir(directory);

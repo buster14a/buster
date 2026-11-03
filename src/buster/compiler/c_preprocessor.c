@@ -330,9 +330,6 @@ struct PPOptions
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
     bool expression_numbering;
-    // Every literal of the expressions' walk parsed by its action, without the literals' pass
-    // (check_input_expression_literals): `--parsed-literals`, a temporary option for #1172's A/B of the pass on the 9700X.
-    bool expression_parsed_literals;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
@@ -20762,10 +20759,6 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             options->scalar = true;
         }
-        else if (strcmp(argument, "--parsed-literals") == 0)
-        {
-            options->expression_parsed_literals = true;
-        }
         else if (strcmp(argument, "--location-limit") == 0 && next != 0)
         {
             // A test option: a location space this many bytes long, to run out of it (#124).
@@ -21235,7 +21228,7 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
         const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
                                           strcmp(argument, "-idirafter") == 0);
         if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0 && strcmp(argument, "--scalar") != 0 &&
-            strcmp(argument, "--parsed-literals") != 0 && strcmp(argument, "--clang-features") != 0)
+            strcmp(argument, "--clang-features") != 0)
         {
             result[n] = arguments[i];
             n += 1;

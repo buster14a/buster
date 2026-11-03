@@ -4204,6 +4204,11 @@ the oracle.
   best walk interval: minimum 33.7 against 35.9 ms, median 37.8 against
   40.6 ms, for the build with only the trigger and the heads (21 rotated runs
   each).
+- **Measured on the 9700X (#1172).** The same step's `measure-compile` of
+  `sqlite3.c` (11 runs, medians), at #1172's `4cade144`: the walk's interval is
+  14.26 ms against #1144's 15.36 ms, with the leaves written once, the counters
+  by class and the literals' pass (below). Its parts: classes 0.43 ms, prepare
+  2.54, actions 8.96 and visits 2.41.
 - **Tried, and slower.** Identifier leaves built 16 at a time from gathered
   declaration columns, written before anything could read a leaf. That is
   before every token left to the walk's visit, whose node records the nodes
@@ -4228,58 +4233,62 @@ the oracle.
   guarded ranges of spellings, and every plain value against
   `check_literal_number`; `test-checker`'s graph comparisons check the walk's
   literals against the scalar walk's, which parses every literal.
-  `--parsed-literals` (`PPOptions.expression_parsed_literals`) is a temporary
-  option for #1172's A/B of the pass on the 9700X: every literal parsed by its
-  action, without the pass. `test-checker-driver` compiles a unit of literals
-  of every form with it and without and compares the objects; the option
-  leaves with the A/B's decision.
-  - **What it costs.** Most of a literal's cost is the first read since the
-    parser of its preprocessor columns and its source: on the VM the pass
-    takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms warm on the
-    same chunks (the scalar twin 2.7 and 0.8). The literals' actions fall
-    from 4.0 to 1.6 ms and the chunks' preparation rises by about 1.5 ms, so
-    on the VM, whose gathers its microcode slows, the walk is within its
-    noise. The lexer reads the source and the preprocessor writes those
-    columns in order, as they make the tokens: that is where a literal's
-    value would cost little more.
+  - **What it costs, on the 9700X.** Most of a literal's cost is the first
+    read since the parser of its preprocessor columns and its source: on the
+    VM the pass takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms
+    warm on the same chunks. #1172's A/B on the 9700X compiled the frozen
+    corpus's `sqlite3.c` with the pass and with every literal parsed by its
+    action instead (a temporary option, gone since), the same object:
+    - rotated whole processes (`time-runs`, 11 each): 113.81 ms (113.60 to
+      114.37) against 115.21 ms (115.03 to 116.14), 539.5 million user cycles
+      against 547.4 million, and 1,281.8 million instructions against
+      1,299.8 million;
+    - the walk (`measure-compile`, 11 each, neither with a reference): 14.30 ms
+      against 15.69 ms, `prepare` 2.53 against 1.62 ms and `actions` 9.05
+      against 11.32 ms.
+
+    So the pass takes 0.9 ms to save 2.3 ms of the actions, 1.4 ms (1.2%) of
+    the compile. On the VM, whose gathers its microcode slows, the walk was
+    within its noise. The lexer reads the source and the preprocessor writes
+    those columns in order, as they make the tokens: that is where a literal's
+    value would cost little more again.
 - **Where the class actions' time goes.** `benchmark-checker-bindings` times
   the walk by class (above). On the 9700X, the frozen corpus's `sqlite3.c`, 5
-  passes, at #1172's `fe98b891` (with the literals' pass, and the visits still
-  timed apart inside their classes' ticks, which later runs don't): the class
-  actions take 3.96 ms, 8.64 ns a token. The timing's own cost, 26.9 TSC ticks (7.1 ns) a token, is taken off
-  every class's and is the table's resolution: a class whose residual a token
-  is below it is marked, and is no measurement.
+  passes, at #1172's `4cade144` (with the literals' pass): the class actions
+  take 3.84 ms, 8.39 ns a token. The timing's own cost, 27.3 TSC ticks (7.2 ns)
+  a token, is taken off every class's and is the table's resolution: a class
+  whose residual a token is below it is marked, and is no measurement.
 
   | class | tokens | ns a token | share | resolved |
   | --- | --- | --- | --- | --- |
-  | the walk's own (scalar) | 6,639 | 264 | 44.3% | yes |
-  | literal | 44,307 | 12.2 | 13.6% | yes |
-  | prefix (913 left) | 8,381 | 45.7 | 9.7% | yes |
-  | identifier | 95,222 | 3.95 | 9.5% | no |
-  | terminator | 54,804 | 3.75 | 5.2% | no |
-  | call | 13,597 | 12.9 | 4.4% | yes |
-  | member | 31,957 | 5.51 | 4.4% | no |
-  | binary | 42,450 | 2.27 | 2.4% | no |
-  | separator | 25,264 | 1.88 | 1.2% | no |
-  | condition | 11,273 | 4.35 | 1.2% | no |
-  | list | 78,073 | 0.39 | 0.8% | no |
-  | subscript | 6,767 | 3.85 | 0.7% | no |
-  | cast | 8,995 | 2.69 | 0.6% | no |
-  | group | 21,807 | 1.07 | 0.6% | no |
-  | string | 1,851 | 10.5 | 0.5% | yes |
-  | return | 4,238 | 3.80 | 0.4% | no |
-  | postfix | 2,035 | 6.03 | 0.3% | no |
-  | ternary | 630 | 8.30 | 0.1% | yes |
+  | the walk's own (scalar) | 6,639 | 263 | 45.4% | yes |
+  | literal | 44,307 | 10.3 | 11.9% | yes |
+  | prefix (913 left) | 8,381 | 45.2 | 9.9% | yes |
+  | identifier | 95,222 | 3.57 | 8.8% | no |
+  | terminator | 54,804 | 3.96 | 5.6% | no |
+  | member | 31,957 | 5.46 | 4.5% | no |
+  | call | 13,597 | 12.2 | 4.3% | yes |
+  | binary | 42,450 | 2.48 | 2.7% | no |
+  | separator | 25,264 | 2.78 | 1.8% | no |
+  | condition | 11,273 | 4.39 | 1.3% | no |
+  | subscript | 6,767 | 3.83 | 0.7% | no |
+  | string | 1,851 | 11.8 | 0.6% | yes |
+  | cast | 8,995 | 2.45 | 0.6% | no |
+  | list | 78,073 | 0.25 | 0.5% | no |
+  | group | 21,807 | 0.87 | 0.5% | no |
+  | return | 4,238 | 3.75 | 0.4% | no |
+  | postfix | 2,035 | 5.99 | 0.3% | no |
+  | ternary | 630 | 8.42 | 0.1% | yes |
 
   The table is warm, as every pass of the benchmark is; the compile's walk is
-  cold, and its `actions` took 8.78 ms of the same head's 13.92 ms walk in the
-  compile-time step. What resolves is that the walk's own visits (44.3%), the
-  literals (13.6%), the prefixes (9.7%, 913 of whose 8,381 the visit takes) and
-  the calls (4.4%) are most of the warm actions. The operators and lists are
-  about a quarter in all: the prefixes, calls and ternaries (14.2%) resolve,
-  and the others, from the members (4.4%) down to the lists, are each below
-  the resolution, 12.6% together. The identifiers and the terminators (9.5% and
-  5.2%), which are no operators, are below it too. The dispatch that #1038
+  cold, and its `actions` took 9.05 ms of the same head's 14.30 ms walk in the
+  compile-time step. What resolves is that the walk's own visits (45.4%), the
+  literals (11.9%), the prefixes (9.9%, 913 of whose 8,381 the visit takes) and
+  the calls (4.3%) are most of the warm actions. The operators and lists are
+  27.6% in all, 1.06 ms: the prefixes, calls and ternaries (14.3%) resolve,
+  and the others, from the members (4.5%) down to the lists, are each below
+  the resolution, 13.3% together. The identifiers and the terminators (8.8% and
+  5.6%), which are no operators, are below it too. The dispatch that #1038
   found the walk's cost in (one long chain of tests a token) is gone with the
   classes.
 - **The graph by passes (stages 2 and 4), probed and not built.** The
@@ -4294,12 +4303,14 @@ the oracle.
   checked against the walk's graph: its token, and but for a VALUE its first
   operand; the barriers' nodes it only counts. Its time is the whole pass's,
   from its columns' allocation and clearing to its last token, the check
-  outside it. On the VM, with sqlite 3.53.2's amalgamation, it numbers all
-  311,412 nodes of the benchmark's options and checks 306,485 of them with no
-  difference; written plainly it takes 6.4 ms warm, 20.5 ns a node, where the
-  operators and lists it would replace take about a quarter of 12.9 ms. So the
-  numbering is right; it doesn't pay:
-  - it costs more than the per-token actions it would replace;
+  outside it. On the 9700X, the frozen corpus's `sqlite3.c` (the same runs as
+  the table above), it numbers all 316,441 nodes and checks 311,454 of them
+  with no difference; written plainly it takes 3.21 ms warm, 10.2 ns a node,
+  where the operators and lists it would replace take 1.06 ms of the same
+  runs. (On the VM, with sqlite 3.53.2's amalgamation: 6.4 ms warm, 20.5 ns a
+  node.) So the numbering is right; it doesn't pay:
+  - it costs three times the per-token actions it would replace, before a
+    node is written;
   - the walk's visits are its barriers: each makes as many nodes as it
     decides, and reads its operands' columns, so the ids after it are known
     only once it has run. On `sqlite3.c` they are 6,639 to 7,800, one in 58 to

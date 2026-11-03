@@ -591,17 +591,15 @@ static bool check_input_expression_identifier(CheckInputReader* reader, uint32_t
 
 // A number or a character operand, the chunk's literal `at`: its literal's VALUE node, or the report of an invalid one; in
 // a unit with overload tables, its token's head is its leaf's, none. A plain decimal's value the chunk's literals hold
-// (CheckInputLiterals); every other literal is parsed here, and every literal where `literals` is null
-// (PPOptions.expression_parsed_literals). A function's name is the walk's, as its tests take it after
+// (CheckInputLiterals); every other literal is parsed here. A function's name is the walk's, as its tests take it after
 // the literals.
 static bool check_input_expression_literal(CheckInputReader* reader, uint32_t token, const CheckInputLiterals* literals, uint32_t at)
 {
     const bool acted = !check_input_function_name_token(reader->parser, token);
     if (acted)
     {
-        const uint32_t plain = literals != NULL ? literals->values[at] : BUSTER_CHECK_NONE;
-        CheckLiteral literal = { .type = BUSTER_TYPE_INT, .integer = plain, .valid = true };
-        if (plain == BUSTER_CHECK_NONE)
+        CheckLiteral literal = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
+        if (literals->values[at] == BUSTER_CHECK_NONE)
         {
             check_input_literal(reader, token, &literal);
         }
@@ -1162,9 +1160,6 @@ static void check_input_expressions_coded(CheckInputReader* reader)
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
     CheckInputLiterals literals;
-    // Without the literals' pass (PPOptions.expression_parsed_literals), every literal's action parses it.
-    const bool parsed = reader->pp->options.expression_parsed_literals;
-    const CheckInputLiterals* read = parsed ? NULL : &literals;
     // The graph's nodes before the walk, from which the numbering's check counts (PPOptions.expression_numbering), and the
     // tokens the classes' actions leave, which it takes as the walk's visits.
     const uint32_t base = reader->output->graph.count;
@@ -1192,10 +1187,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         if (coded)
         {
             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
-            if (!parsed)
-            {
-                check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
-            }
+            check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
         }
         const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
@@ -1205,7 +1197,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
         {
             for (; i < acting && !reader->output->resource; i += 1)
             {
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, read, &literal, &visited);
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
             }
         }
         else
@@ -1215,7 +1207,7 @@ static void check_input_expressions_coded(CheckInputReader* reader)
             for (; i < acting && !reader->output->resource; i += 1)
             {
                 const uint64_t before = __rdtsc();
-                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, read, &literal, NULL);
+                check_input_expression_coded(reader, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, NULL);
                 const uint64_t after = __rdtsc();
                 reader->output->expression_class_ticks[(classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += after - before;
                 reader->output->expression_class_overhead += __rdtsc() - after;

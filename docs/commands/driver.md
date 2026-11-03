@@ -8,10 +8,8 @@ requirements. [Command index](README.md).
 
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
   for anything else the semantic driver (`run_check_command`, in
-  `c_checker_driver.c`): `./build/compiler [--scalar] [--parsed-literals]
-  -fsyntax-only [-E's options] file.c` (`--parsed-literals`: a temporary option
-  of #1172's A/B, every literal of the expressions' walk parsed by its action;
-  [the checker guide](../../docs/c-checker.md)) preprocesses, parses and checks the file and prints the
+  `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
+  options] file.c` preprocesses, parses and checks the file and prints the
   diagnostics as clang does, with exit status 0 for a unit without errors and
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
   Tier 0 ([the checker guide](../../docs/c-checker.md)); and with neither option it
