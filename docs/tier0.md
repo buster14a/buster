@@ -93,9 +93,9 @@ the former 65,536-local cap. Available arena memory and representable frame disp
 Per-entry instruction counts use 32 bits, including a call's complete aggregate copies. Both paths accumulate the
 prologue/body/epilogue total in 64 bits and refuse output before allocation when its record identities, including
 emission padding, cannot fit 32 bits. Available arena memory remains a separate bound.
-Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), within the 240-depth storage bound. An indirect
-call also holds its callee, so 238 simple arguments fit that bound; expressions inside arguments can need additional
-live values. Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
+Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), independently of evaluation depth. Indirect
+calls may also use all 239 arguments: the callee and values live across nested argument expressions occupy dynamically
+sized deep slots (#1106). Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
 Clang cross-checks. Beyond the argument bound, the C driver names the 239-argument limit.
 The C driver names an exhausted entry or local limit separately from insufficient lowering storage. Its
 `test-checker-driver` regression compiles 32,768 blocks with 65,537 locals through both paths, compares the objects,
@@ -551,7 +551,7 @@ opmask registers an EVEX form may take as a write mask) and whose deeper ones li
   (`tier0_mask_effect`), their exclusive prefix sums 64 entries at a time (`tier0_vector_mask_depths`, an `X86` entry's
   effect from its row, as the calls' are) with the scalar twin `tier0_mask_depths_scalar`, made only for a function
   that says it has masks. No mask entry absorbs or is absorbed: no template of the class has a fused variant. The stack
-  is bounded as the others are (`BUSTER_TIER0_MAX_DEPTH`): both paths refuse a function an entry of which finds 240
+  retains its own byte-depth bound (`BUSTER_TIER0_MAX_MASK_DEPTH`): both paths refuse a function an entry of which finds 240
   masks or more on it (`TIER0_ERROR_DEPTH`, which the C driver reports as more values live at once than Tier 0's deep
   slots take), since the column is of bytes. The vector path's sums are bytes too, the depths modulo 256 (a block's own
   sum among them, which rows of many mask operands take past an int8's range), exact below 256; and as an entry pushes
@@ -738,10 +738,18 @@ depth's slot; the 128-bit integers and vectors pass as aggregates, their address
 entry of theirs whose own registers would still pass the tables at its window's depths is refused
 (`TIER0_ERROR_DEPTH`) rather than placed past them.
 
-**Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a stack deeper than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth
-columns' bytes would wrap past (a stack rises by one entry at a time at most, so it shows there first). Before #780, a
-function with values of the memory classes or vectors whose stacks passed the tables was refused too: stb_image's
-`_mm_set1_epi8`, whose call of `_mm_set_epi8` has 16 arguments and returns a vector, among them.
+**Full-width deep values (#1106).** The ordinary byte-depth scan and compact selection remain unchanged. Once a
+function needs deep selection, two cold 32-bit columns reconstruct the folded effects' full prefix sums, including the
+linear exit after the last entry. A call's positive signed-byte effect greater than one is its wrapped negative pop,
+not a push; scalar and sixteen-lane AVX-512 scans correct it before accumulating. Taken `JUMP_VALUE` exits restore
+one value separately. Integer, floating, long-double, 128-bit and vector values no longer have a fixed 240-slot cap:
+the stream bound, available arena memory and checked signed frame displacements bound them instead. Memory-only
+operations past byte depth 255 rebase their slot areas even when they use no depth registers. Ordinary call-save
+storage is recomputed from full depths; deep calls already preserve their live values in deep slots.
+
+`TIER0_ERROR_DEPTH` remains for a mask stack at `BUSTER_TIER0_MAX_MASK_DEPTH` (240), or a deferred operation whose
+operand window itself cannot fit its register tables. The mask representation and per-call 239-argument bound are
+unchanged. No source-expression reassociation or evaluation-order change is involved.
 
 **Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
 crosses the line. `test-tier0`'s deep shape (below) has about 2% of its entries deep, and its cross-check's code is 1.33
@@ -1252,8 +1260,8 @@ Before the programs, checks of their own:
   `X86_FORM_NONE` (which keeps the record) and a random value.
 - **errors:** both paths must refuse the same streams alike: an entry without a template (`NOT` of a double, which
   `tier0_validate` refuses too) at 200 places among 64-entry blocks, before another (the first entry reported), and
-  14 to 17, 32, 239 and 240 values on the integer stack at once, past the 15 depths from 17 on (the last constant is
-  the first add's immediate), which must compile alike, and 241 and 250, past `BUSTER_TIER0_MAX_DEPTH`. And both must
+  integer stacks at the register boundary, the former 240-slot bound, both sides of byte wraps and 1000 values,
+  all of which must compile alike (the last constant is the first add's immediate). And both must
   compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
   homes, and an absorbed lane mustn't look its value up as a local's.
 - **objects:**
@@ -1413,9 +1421,8 @@ Before the programs, checks of their own:
   C (clang's code of `__int128`) is the oracle of their values and of the convention for them:
   - **rules:** each break of the classes' rules (above) refused at its entry by `tier0_validate`;
   - **slots:** for the 128-bit integers and for long double, stacks of a memory class's values to the integer table's
-    last slot, one and two past it and 40, each of which both paths compile to the same code and runs (past the table
-    through the deep slots, #780); of 238, which both compile; and of 239, whose stack with the output's address below
-    it reaches `BUSTER_TIER0_MAX_DEPTH`, which both refuse;
+    last slot, one and two past it, 40, the former 240-slot bound, byte wraps and 1000 values, each compiled by both
+    paths to the same code, encoded by both encoders and executed to check its sum;
   - **boundaries:** for each class, its six compares, `SHR` by 0, 1, 63, 64, 65 and 127, and `SHR` and `SHL` by variable
     counts, on every pair of ten boundary values (0, 1, -1, the extremes, 2^63, 2^64 and their neighbours), against the
     check's stack machine and against C's own operators;
@@ -1894,3 +1901,12 @@ sum its rows into a claimed measured total. [#136](https://github.com/buster14a/
 small/large full path measurements, ABI/initialization/copy/arena costs,
 partial-batch/fallback counts and generated code quality. Shared IR/SSA and
 Tier 1 remain [separately tracked branch integrations](simd-boundary-audit.md#pending-stage-integration).
+
+### Deep C driver regression (#1106)
+
+`test-checker-driver` generates right-nested expressions at depths 239, 240, 255, 256, 257, 300 and 1000 for integers,
+doubles, long doubles, 128-bit integers and 16-byte vectors. It also executes 1000 nested direct, indirect and floating
+calls, side-effecting argument calls, a conditional under a deep live prefix, and a 239-argument call under 300 live
+values. Clang, default Tier 0, scalar Tier 0 and both `--tier1` routes compile and run the same source. The Clang oracle
+raises its parser bracket-depth limit and, in its child only, its host stack limit. Buster keeps the original stack
+limit. Every binary must satisfy independent arithmetic and side-effect checks.

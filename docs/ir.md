@@ -572,9 +572,17 @@ The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then
 emits into final-sized columns. Stack replay and irregular calls/control flow
 are shared ordered work. Locals begin in typed slots. Only expression-stack
-depths live across block boundaries receive temporary slots. Values are spilled
-before outgoing edges and reloaded in the receiving block; `JUMP_VALUE` therefore
-preserves conditional-expression arms even with an outer expression still live.
+depths live across block boundaries receive temporary slots, one for each depth
+and IR type that some block's incoming shape has (#1189), so that each slot holds
+one type and promotes. Every block is entered with one shape, so a block's
+stores and its successors' loads agree on each depth's type. One slot per depth
+held several types in a function whose `&&`, `||` and `?:` results differ in type
+at one depth, as Lua's `luaV_execute`'s do, and stayed in memory: each truth value
+a store, a load and its slot's address, which removing took 1.2% of speedtest1's
+`--tier1` instructions and 1.3% of Lua's (the Tier 1 guide's "Where the gap to
+clang -O2 is"). Values are spilled before outgoing edges and reloaded in the
+receiving block; `JUMP_VALUE` therefore preserves conditional-expression arms
+even with an outer expression still live.
 
 A separate preheader materializes slot addresses and initializes parameters.
 Backedges to source entry zero skip that initialization. The typed stream's U64

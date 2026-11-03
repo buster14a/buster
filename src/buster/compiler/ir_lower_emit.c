@@ -20,7 +20,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     // stored in the dispatch slot, after the depth slots, and is the function's one br_indirect (as clang's indirectgoto
     // block): the CFG's edges are then the jumps' and the labels', not every jump's to every label.
     const bool dispatch = plan->indirect != 0;
-    const uint32_t dispatch_slot = input->local_count + plan->maximum_spill_depth;
+    const uint32_t dispatch_slot = input->local_count + plan->depth_slot_count;
     const uint32_t dispatch_block = plan->block_count + 1;
     IrTypedSink sink = {
         .output = output,
@@ -152,7 +152,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         {
             for (uint32_t d = 0; d < depth; d += 1)
             {
-                stack[d] = ir_typed_emit(&sink, IR_LOAD, ir_typed_stack_type(classes[d]), input->local_count + d, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
+                stack[d] = ir_typed_emit(&sink, IR_LOAD, ir_typed_stack_type(classes[d]), ir_typed_depth_slot(plan, input->local_count, d, classes[d]), BUSTER_IR_NONE, BUSTER_IR_NONE,
+                                         ir_typed_alignment(classes[d]));
             }
         }
         bool terminated = false;
@@ -324,7 +325,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 depth -= 1;
                 const uint32_t zero = ir_typed_constant(&sink, type, 0);
                 const uint32_t condition = ir_typed_emit(&sink, IR_ICMP, IR_I1, stack[depth], zero, IR_NE, 0);
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
+                ir_typed_spill(&sink, plan, stack, classes, depth, input->local_count);
                 const uint32_t target = plan->entry_blocks[value] + 1;
                 const uint32_t next = b + 2;
                 ir_typed_emit(&sink, IR_CBR, IR_VOID, condition, kind == BUSTER_TYPED_BRANCH_TRUE ? target : next, kind == BUSTER_TYPED_BRANCH_TRUE ? next : target, 0);
@@ -333,7 +334,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             }
             case BUSTER_TYPED_JUMP:
             case BUSTER_TYPED_JUMP_VALUE:
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
+                ir_typed_spill(&sink, plan, stack, classes, depth, input->local_count);
                 ir_typed_emit(&sink, IR_BR, IR_VOID, plan->entry_blocks[value] + 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 terminated = true;
                 break;
@@ -410,7 +411,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             }
             else
             {
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
+                ir_typed_spill(&sink, plan, stack, classes, depth, input->local_count);
                 ir_typed_emit(&sink, IR_BR, IR_VOID, b + 2, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
             }
         }
