@@ -92,7 +92,7 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         // its comparison the vector class's (#141).
         const bool mask = tier1_select_mask_width(type) != 0 || tier1_select_mask_rule(rule);
         // A long double's (#141) needs the CFG consumer's frame objects of values.
-        const bool floating = tier1_select_float_width(type) != 0 || tier1_select_float_rule(rule) || tier1_select_x87_node(function, node);
+        const bool floating = tier1_select_float_width(type) != 0 || tier1_select_float_rule(rule) || (plan->long_doubles && tier1_select_x87_node(function, node));
         // Arguments past their classes' registers, and parameters past them, which the CFG consumer's entry loads, are its
         // own (#141).
         const bool stacked = (op == IR_CALL && tier1_select_call_stack_bytes(function, &function->calls[function->b[node]]) != 0) ||
