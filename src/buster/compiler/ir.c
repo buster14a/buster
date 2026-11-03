@@ -743,8 +743,16 @@ static IrSimdShape ir_simd_shape(uint32_t type)
 
 // How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
 // took the vector path: test-tier1-masks and test-ir-simd read it to check that a scalar run takes each scan's scalar
-// twin, as --scalar promises (#141's review).
+// twin, as --scalar promises (#141's review). main.c's units share it, as lane.c's arena_small_floor, so that a command
+// whose scans run in a home's copy of the code (ir_source's, the checker's) counts them in the same variable
+// (./build.sh check-call-graph's split state).
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern _Thread_local uint64_t ir_scan_vector_paths;
+#elif defined(BUSTER_UNIT)
+_Thread_local uint64_t ir_scan_vector_paths;
+#else
 static _Thread_local uint64_t ir_scan_vector_paths;
+#endif
 
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
 // scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
