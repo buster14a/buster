@@ -148,6 +148,9 @@ struct Tier1EmitPrepared
     uint32_t mask_columns;
     uint32_t vector_save_mask;
     uint32_t vector_columns;
+    // The widest vector a value of the function is (#141), 16, 32 or 64 bytes, or 0 without one: the vector class's
+    // call-save rows and temporary slot take that width, and its moves of them that width's forms.
+    uint32_t vector_bytes;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other

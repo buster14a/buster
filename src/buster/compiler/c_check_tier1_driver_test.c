@@ -929,6 +929,49 @@ static const char check_test_tier1_shapes_source[] =
     "    return 0;\n"
     "}\n";
 
+// The vectors' fixture (#141), for x86-64-v4: vectors of each width, v4i32, v8i32 and v16i32 (unsigned among them),
+// passed and returned by value, as aggregates in a vector register whole (an xmm, ymm or zmm one), between this unit
+// (Tier 1's) and the other (clang -O2's) both ways, with the operations, comparisons and constants between.
+static const char check_test_tier1_vectors_header[] =
+    "#include <stdio.h>\n"
+    "typedef int V4 __attribute__((vector_size(16)));\n"
+    "typedef unsigned U8 __attribute__((vector_size(32)));\n"
+    "typedef int V16 __attribute__((vector_size(64)));\n"
+    "V4 b_v4(V4 a, int k);\n"
+    "U8 b_u8(U8 a, U8 b);\n"
+    "V16 b_v16(V16 a, long k, V4 c);\n"
+    "long b_back(int k);\n"
+    "V4 a_v4(V4 a, int k);\n"
+    "U8 a_u8(U8 a, U8 b);\n"
+    "V16 a_v16(V16 a, long k, V4 c);\n"
+    "long a_fold(V16 v, U8 u, V4 w);\n";
+
+static const char check_test_tier1_vectors_other_source[] =
+    "#include \"tier1-vectors.h\"\n"
+    "V4 b_v4(V4 a, int k) { V4 s = { k, k, k, k }; return a - s; }\n"
+    "U8 b_u8(U8 a, U8 b) { return (a ^ b) + a_u8(b, a); }\n"
+    "V16 b_v16(V16 a, long k, V4 c) { return a_v16(a, k + 1, c) + a; }\n"
+    "long b_back(int k) { V4 w = { k, 2, 3, 4 }; U8 u = { 9u, 8u, 7u, 6u, 5u, 4u, 3u, (unsigned)k }; V16 v = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, k }; return a_fold(a_v16(v, k, a_v4(w, k)), a_u8(u, u), w); }\n";
+
+static const char check_test_tier1_vectors_source[] =
+    "#include \"tier1-vectors.h\"\n"
+    "V4 a_v4(V4 a, int k) { V4 s = { 1, 2, 3, 4 }; V4 m = a < s; return (a + s) ^ (m & b_v4(s, k)); }\n"
+    "U8 a_u8(U8 a, U8 b) { U8 m = a >= b; return a * b - (a | b) + m; }\n"
+    "V16 a_v16(V16 a, long k, V4 c) { V16 s = { 7, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987 }; V16 m = a != s; return a * s + (m & ~a) - (V16){ c[0], c[1], c[2], c[3] }; }\n"
+    "long a_fold(V16 v, U8 u, V4 w) { long h = 0; for (int i = 0; i < 16; i += 1) h = h * 31 + v[i]; for (int i = 0; i < 8; i += 1) h = h * 37 + u[i]; for (int i = 0; i < 4; i += 1) h = h * 41 + w[i]; return h; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (int k = 0; k < 4; k += 1)\n"
+    "    {\n"
+    "        V4 w = { k, -k, k * 7, 100 - k };\n"
+    "        U8 u = { 1u, 2u, 3u, (unsigned)k, 0xffffffffu, 9u, 4u, 0x80000000u };\n"
+    "        V16 v = { k, 1, -2, 3, 4, -5, 6, 7, 8, 9, -10, 11, 12, 13, 14, 15 };\n"
+    "        printf(\"%ld %ld\\n\", a_fold(a_v16(v, k, w), a_u8(u, b_u8(u, u)), a_v4(w, k)), b_back(k));\n"
+    "        printf(\"%ld\\n\", a_fold(b_v16(v, k, w), b_u8(u, u), b_v4(w, k)));\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -2379,9 +2422,10 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // A fixture of two units sharing a header, `name`.h (#789, #141): its unit by --tier1 -c, by each path with and without
 // rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
 // build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the
-// checks' messages.
+// checks' messages. `option` (as -march=x86-64-v4), where it isn't NULL, every build takes, and only where the host can
+// (`runs`) are the programs run: elsewhere the builds are checked alone.
 static void check_test_driver_tier1_units(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* what, const char* header_source,
-                                          const char* unit_source, const char* other_source)
+                                          const char* unit_source, const char* other_source, const char* option, bool runs)
 {
     char header[512];
     char unit[512];
@@ -2398,8 +2442,14 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
     snprintf(both, sizeof(both), "%s/%s-both", directory, name);
     const bool written = parse_test_write(header, header_source, strlen(header_source)) && parse_test_write(unit, unit_source, strlen(unit_source)) &&
                          parse_test_write(other, other_source, strlen(other_source));
-    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
-    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    // The option, where there is one, after each command's first argument.
+    const uint32_t optioned = option != NULL ? 1 : 0;
+    char* reference_arguments[8] = { (char*)clang, "-O0", (char*)option };
+    char* other_arguments[9] = { (char*)clang, "-O2", (char*)option };
+    char* const reference_tail[] = { "-o", reference, unit, other, NULL };
+    char* const other_tail[] = { "-c", "-o", other_object, other, NULL };
+    memcpy(reference_arguments + 2 + optioned, reference_tail, sizeof(reference_tail));
+    memcpy(other_arguments + 2 + optioned, other_tail, sizeof(other_tail));
     char* text = NULL;
     const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
     free(text);
@@ -2407,7 +2457,7 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
     const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
     free(text);
     char expected[4096] = { 0 };
-    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    const bool ran = referenced && other_built && (!runs || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
     snprintf(message, sizeof(message), "clang's builds of the %s fixture run", what);
     check_test_expect(test, ran, message);
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
@@ -2419,7 +2469,7 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
             snprintf(object, sizeof(object), "%s/%s-%u-%u.o", directory, name, rematerialize, path);
             snprintf(program, sizeof(program), "%s/%s-%u-%u", directory, name, rematerialize, path);
             CheckTestTier1Build build;
-            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, option, &build);
             snprintf(message, sizeof(message), "the %s unit compiles by --tier1, every function Tier 1's (rematerialize %u, path %u)", what, rematerialize, path);
             check_test_expect(test, compiled, message);
             char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
@@ -2428,18 +2478,20 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
             free(link_text);
             char actual[4096] = { 0 };
             snprintf(message, sizeof(message), "the %s unit's Tier 1 code passes to and from clang -O2's as clang -O0's does (rematerialize %u, path %u)", what, rematerialize, path);
-            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+            check_test_expect(test, linked && (!runs || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
             unlink(object);
             unlink(program);
         }
     }
-    char* both_arguments[] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", "-o", both, unit, other, NULL };
+    char* both_arguments[11] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", (char*)option };
+    char* const both_tail[] = { "-o", both, unit, other, NULL };
+    memcpy(both_arguments + 5 + optioned, both_tail, sizeof(both_tail));
     text = NULL;
     const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
     free(text);
     char actual[4096] = { 0 };
     snprintf(message, sizeof(message), "both units of the %s fixture by --tier1, every function Tier 1's, print clang's build's output", what);
-    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+    check_test_expect(test, both_built && (!runs || (check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
     unlink(header);
     unlink(unit);
     unlink(other);
@@ -2452,20 +2504,30 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
 static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-records", "by-value aggregates'", check_test_tier1_records_header, check_test_tier1_records_source,
-                                  check_test_tier1_records_other_source);
+                                  check_test_tier1_records_other_source, NULL, true);
 }
 
 // The wide values' fixture (#141).
 static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source);
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source,
+                                  NULL, true);
+}
+
+// The vectors' fixture (#141), for x86-64-v4, run where the host has AVX-512 F and VL.
+static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool host = (x86_target_native().features & needed) == needed;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
+                                  check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
 }
 
 // The convention's rarer shapes' fixture (#141).
 static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
-                                  check_test_tier1_shapes_other_source);
+                                  check_test_tier1_shapes_other_source, NULL, true);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

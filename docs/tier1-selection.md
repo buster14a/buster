@@ -671,10 +671,8 @@ compile-time speedup is claimed for adding this consumer.
 
 The IR's masks, `m8` to `m64` (#732), are the opmask class's, which the CFG
 consumer allocates (the [allocation guide](tier1-allocation.md)'s "The opmask
-class"). The selector takes a function with masks and refuses one with vectors
-(`tier1_select_has_vectors`: a vector type, constant or operation in its
-instructions, parameters, calls or slots), which are #141's: a mask's operations
-need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
+class"). The selector takes a function with masks, and one with vectors ("Vectors",
+below): a mask's operations need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
 
 | IR | Rule | Records |
 | --- | --- | --- |
@@ -764,13 +762,58 @@ and without, and in each no mask may have a recipe or be marked to be recomputed
 with it, some of the general values beside the masks must be recomputed, which
 the division fixture's constants are.
 
-And the refusals, on both paths: a vector at selection, a mask's `select` at
+And the refusals, on both paths: a vector result at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
 masks alone is taken; and each width's `kmov` forms, none for a width no mask
 has. `--print` prints each fixture's records by the vector path, as GNU as reads
 them.
 
+
+## Vectors (#141)
+
+The IR's vectors, `v4i32`, `v8i32` and `v16i32` (#732), are the vector class's,
+as the floating values are: xmm0 to xmm14, xmm15 the class's scratch, a node's
+register its location's low four bits. Their rules (`TIER1_RULE_VECTOR`, its kind
+in the pattern's `scale`) are AVX-512's EVEX forms at the vector's width, 16, 32
+or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
+
+| IR | Kind | Records |
+| --- | --- | --- |
+| `vconst` of zeros, `undef` | `ZERO` | `vpxord x, x, x` |
+| `vconst` of every bit | `ONES` | `vpternlogd x, x, x, 0xff` |
+| `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
+| any other `vconst` | `CONSTANT` | its words into the red zone below rsp (a `mov qword` of a sign-extended imm32, or two `mov dword`) and `vmovdqu32` from there (`tier1_emit_cfg_vector_constant`) |
+| `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
+| `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
+| `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
+| `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
+| `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
+| `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+Unmasked, a quadword `and` or `or` is the doublewords' bits, and `x86_semantics.c`
+models those forms. A function with a vector constant keeps its frame out of the
+red zone (`tier1_emit_cfg_frame_flags`). Every function with a vector is the CFG
+consumer's. Its vector values' slots are their widths, aligned to 16 at most (their
+accesses are unaligned, and a wider alignment would realign the frame), spilled,
+reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
+the class's call-save rows and temporary slot take the widest vector's bytes,
+which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
+need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
+emission, as any record's. A vector C passes or returns by value is an aggregate
+to the lowering, a pointer to its bytes, in a vector register whole ("By-value
+aggregates"); an IR function whose own parameter or result is a vector value has
+no convention's place of Tier 1's and is refused at selection
+(`tier1_select_vector_signature`), as is a call with a vector argument or
+result. A vector local the checker initializes through its address (as C's vector
+locals) stays in its frame object, as a 128-bit integer's does.
+
+`test-tier1-masks` takes five fixtures of vectors too, natively against the IR's
+interpreter on both paths, with and without rematerialization: every operation
+and all ten predicates at each width; constants of every kind; a loop whose vector
+phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
+and reloaded; and vectors of each width live across two calls of the helper.
 ## Tests and benchmark
 
 `test-tier1-select` checks both original-IR covers, real records and native

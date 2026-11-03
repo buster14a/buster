@@ -106,9 +106,10 @@ read and written whole at its type, promotes as a scalar's does, the vector
 constants' payloads are copied as the scalar constants are, and SCCP takes no
 vector for a constant (a `v4i32` addition isn't an `i128` one, and `IR_CONST` has
 no vector type), so that it folds none; GVN, LICM, SROA and the
-inliner continue to reject every SIMD function. Native Tier 1 selection rejects a
-function with vectors, which
-are [#141](https://github.com/buster14a/buster/issues/141)'s, and takes masks:
+inliner continue to reject every SIMD function. Native Tier 1 selection takes a
+function's vectors ([#141](https://github.com/buster14a/buster/issues/141), [the
+selection guide](tier1-selection.md)'s "Vectors"), and C's vectors passed by
+value, which are aggregates in a vector register whole, and takes masks:
 [#179](https://github.com/buster14a/buster/issues/179) selects their operations
 and allocates them in the opmask class ([the selection
 guide](tier1-selection.md)'s "AVX-512's masks").

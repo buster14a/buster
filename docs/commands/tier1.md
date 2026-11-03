@@ -30,14 +30,16 @@ requirements. [Command index](README.md).
   function and the programs' stack machine; and Tier 0's random long double
   programs, whose values the CFG consumer keeps in frame objects and computes on
   the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine.
-  The convention's rarer aggregate shapes still refuse explicitly ([the Tier 1
-  guide](../../docs/tier1.md)'s list). AVX-512's
+  The convention's rarer aggregate shapes are taken; those of vectors still
+  refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
   stores, constants and bitcasts to and from integers of every width) and
   allocated in the opmask class by the CFG consumer, which moves and spills them
-  at their widths and saves them around calls; vectors are refused (#141). Run
+  at their widths and saves them around calls; and vectors (#141), in the vector
+  class at their widths, passed and returned by value as aggregates in a vector
+  register whole. Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
-  `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
+  `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
   natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
   builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the

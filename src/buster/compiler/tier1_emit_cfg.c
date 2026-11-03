@@ -78,6 +78,9 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     // Labels' symbols, which the CFG consumer defines at their blocks (tier1_emit_cfg_labels), make a function its own too,
     // and so does a variadic definition, whose prologue fills its register save area (tier1_emit_cfg_frame_flags).
     chain &= function->label_count == 0 && !function->variadic && function->parameter_passed == 0;
+    // A vector (#141) needs the vector class's allocation at its width: a function with one is the CFG consumer's, which
+    // one scan of it says.
+    chain &= !ir_function_has_vectors_path(function, true);
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -248,10 +251,12 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
     {
         dynamic |= function->op[node] == IR_ALLOCA || function->op[node] == IR_STACK_SAVE || function->op[node] == IR_STACK_RESTORE;
     }
+    const bool vector_constants = function->vector_constant_count != 0;
     // A function with its own ABI records (#789) stages an aggregate result's parts below rsp on its way out
-    // (tier1_emit_cfg_aggregate_result): its frame stays out of the red zone.
-    return options->frame_flags | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) | (function->parameter_passed != 0 ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) |
-           (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
+    // (tier1_emit_cfg_aggregate_result), and one with vector constants (#141) builds them there
+    // (tier1_emit_cfg_vector_constant): its frame stays out of the red zone.
+    return options->frame_flags | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) |
+           (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
 }
 
 // The alignment's log2 that rsp keeps in a dynamic frame (#141): 16 bytes', or a realigned frame's. An allocation rounds
@@ -403,7 +408,10 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint8_t* node_classes = ok ? ir_allocate(output, (uint64_t)count + 1, 1, &ok) : 0;
     prepared->x87_ranks = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
     prepared->x87_count = 0;
+    prepared->vector_bytes = 0;
     prepared->function = function;
+    // Whether the function has vectors (#141): one scan of it, so that a function without one pays no node's vector checks.
+    const bool vectors = ir_function_has_vectors_path(function, true);
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
         const bool x87 = function->type[node] == IR_F80;
@@ -411,7 +419,11 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         prepared->x87_count += x87;
         const bool value = plan->covered[node] == 0 && function->type[node] != IR_VOID && !x87;
         const bool mask = tier1_select_mask_width(function->type[node]) != 0;
-        const bool floating = tier1_select_float_width(function->type[node]) != 0;
+        // A vector (#141) is the vector class's, as a floating value is, at its width; none in a function without vectors.
+        const uint32_t vector_width = vectors ? tier1_select_vector_width(function->type[node]) : 0;
+        const uint32_t vector_bytes = value ? vector_width : 0;
+        const bool floating = tier1_select_float_width(function->type[node]) != 0 || vector_width != 0;
+        prepared->vector_bytes = vector_bytes > prepared->vector_bytes ? vector_bytes : prepared->vector_bytes;
         node_classes[node] = mask ? BUSTER_TIER1_ALLOCATE_MASK : floating ? BUSTER_TIER1_ALLOCATE_VECTOR : BUSTER_TIER1_ALLOCATE_GPR;
         masks += mask && value;
         floats += floating && value;
@@ -506,14 +518,25 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
-            // A mask's slot is its bytes, which kmov of its width writes and reads, and a floating value's its bytes,
-            // movss's or movsd's (#141).
+            // A mask's slot is its bytes, which kmov of its width writes and reads, a floating value's its bytes, movss's or
+            // movsd's (#141), and a vector's its bytes, vmovdqu32's (#141), aligned to 16 at most: its accesses are
+            // unaligned ones, and an alignment past the incoming stack's would realign the frame.
             const uint32_t mask_width = tier1_select_mask_width(function->type[node]);
             const uint32_t float_width = tier1_select_float_width(function->type[node]);
+            const uint32_t vector_width = vectors ? tier1_select_vector_width(function->type[node]) : 0;
             widths[node] = (uint8_t)tier1_select_width(function->type[node]);
-            prepared->sizes[node] = widths[node] != 0 ? widths[node] : mask_width != 0 ? mask_width : float_width != 0 ? float_width : 8;
-            prepared->alignments[node] = prepared->sizes[node];
+            prepared->sizes[node] = widths[node] != 0 ? widths[node] : mask_width != 0 ? mask_width : float_width != 0 ? float_width : vector_width != 0 ? vector_width : 8;
+            prepared->alignments[node] = prepared->sizes[node] < 16 ? prepared->sizes[node] : 16;
         }
+        // The vector class's call-save rows and its temporary slot hold a whole register of the widest vector (#141).
+        const uint32_t vector_save_bytes = prepared->vector_bytes != 0 ? prepared->vector_bytes : 8;
+        for (uint32_t column = count + call_slots + mask_columns; column < count + call_slots + mask_columns + prepared->vector_columns; column += 1)
+        {
+            prepared->sizes[column] = vector_save_bytes;
+            prepared->alignments[column] = vector_save_bytes < 16 ? vector_save_bytes : 16;
+        }
+        prepared->sizes[count + call_slots + mask_columns + prepared->vector_columns + BUSTER_TIER1_ALLOCATE_VECTOR] = vector_save_bytes;
+        prepared->alignments[count + call_slots + mask_columns + prepared->vector_columns + BUSTER_TIER1_ALLOCATE_VECTOR] = vector_save_bytes < 16 ? vector_save_bytes : 16;
         if (options->rematerialize)
         {
             tier1_emit_cfg_recipes(plan, emitted, operations, flags, constants, addends);
@@ -1452,15 +1475,15 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         const bool to_mask = to - BUSTER_TIER1_EMIT_MASK_LOCATION < 8;
         const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
         // A floating value (#141) between xmm registers (xmm15 the class's scratch among them) and slots, by movaps and
-        // movss or movsd of its width: tier1_cfg moves one slot to another through xmm15, in two moves, and recomputes
-        // none.
+        // movss or movsd of its width, and a vector (#141) by vmovdqa64 and vmovdqu32 of its: tier1_cfg moves one slot to
+        // another through xmm15, in two moves, and recomputes none.
         const bool vector = tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_VECTOR;
         const bool from_vector = from - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
         const bool to_vector = to - BUSTER_TIER1_EMIT_VECTOR_LOCATION < 16;
         const Tier1SelectFloatForms* floats = tier1_select_float_forms(width);
         if (vector && from_vector && to_vector)
         {
-            records[record_count++] = tier1_select_float_move((uint8_t)(to & 15), (uint8_t)(from & 15));
+            records[record_count++] = tier1_select_class_move((uint8_t)(to & 15), (uint8_t)(from & 15), width);
         }
         else if (vector && from_vector && tier1_emit_cfg_slot(emitted, to, &offset))
         {
@@ -1807,6 +1830,37 @@ static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1Emi
     return known && tier1_emit_cfg_object(function, emitted, tier1_emit_cfg_x87_object(function, &emitted->prepared, node), offset);
 }
 
+// A vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT, whose constant's index is the pattern's
+// `immediate`): its words as immediates into the red zone below rsp, a sign-extended imm32's mov qword or two mov dword
+// each, and the vector loaded from there by vmovdqu32 of its width into its register, as Tier 0 builds one in its slot
+// (tier0_emit_vector_value). A function with one keeps its frame out of the red zone (tier1_emit_cfg_frame_flags).
+static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+{
+    const uint32_t width = holes->width;
+    const uint64_t index = holes->immediate;
+    Tier1EmitError error = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
+    const int32_t first = -(int32_t)width;
+    for (uint32_t w = 0; error == TIER1_EMIT_OK && w < width / 8; w += 1)
+    {
+        const uint64_t word = function->vector_constants[index].words[w];
+        const bool fits = x86_immediate_encodes(X86_FORM_MOV_RM64_IMM32, (int64_t)word);
+        for (uint32_t half = 0; error == TIER1_EMIT_OK && half < (fits ? 1u : 2u); half += 1)
+        {
+            const X86Instruction record = {
+                .form = fits ? X86_FORM_MOV_RM64_IMM32 : X86_FORM_MOV_RM32_IMM32,
+                .rm = X86_REGISTER_RSP,
+                .mode = BUSTER_X86_MEMORY_BASE,
+                .displacement = first + (int32_t)(8 * w + 4 * half),
+                .immediate = (int32_t)(uint32_t)(word >> (32 * half)),
+            };
+            error = tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+        }
+    }
+    const X86Instruction load = { .form = tier1_select_float_forms(width)->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
+    error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+    return error;
+}
+
 // A long double node's records (TIER1_RULE_X87, #141), as Tier 0's (tier0_emit_x87): its long double operands loaded onto
 // the x87 stack from their objects, the operation, and a long double result stored into its object, leaving the x87
 // stack empty. The scratch object (16 bytes) holds a conversion's control words (bytes 0 to 3: the caller's, then rounding
@@ -2058,6 +2112,8 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function)
         const bool recorded = call != 0 && call->abi != 0;
         records += recorded ? function->abi_calls[call->abi - 1].call.stack_bytes / 4u + 4u * (uint64_t)call->argument_count + 5u * (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS) + 16u : 0;
         records += op == IR_RET && function->result_size != 0 ? function->result_size / 4u + 32u : 0;
+        // A vector constant's immediates and its load (#141, tier1_emit_cfg_vector_constant).
+        records += op == IR_VCONST ? 17u : 0;
     }
     return records;
 }
@@ -2396,8 +2452,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 }
                 error = (masks_saved & ~emitted->prepared.mask_save_mask) == 0 ? error : TIER1_EMIT_ALLOCATION;
                 // And the floating values that live past it (#141), which no xmm register keeps across a call: each saved
-                // in its register's row before the call and reloaded after, its 8 bytes by movsd. The call's own result
-                // can't share a register with one.
+                // in its register's row before the call and reloaded after, its 8 bytes by movsd, or in a function with
+                // vectors (#141) the widest one's bytes by vmovdqu32. The call's own result can't share a register with one.
                 uint32_t vectors_saved = 0;
                 for (uint32_t x = 0; x < 15; x += 1)
                 {
@@ -2422,7 +2478,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                                 .reg = (uint8_t)x,
                                 .rm = (uint8_t)emitted->frame.base_register,
                                 .mode = BUSTER_X86_MEMORY_BASE,
-                                .form = pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
+                                .form = emitted->prepared.vector_bytes != 0 ? (pass == 0 ? tier1_select_float_forms(emitted->prepared.vector_bytes)->store : tier1_select_float_forms(emitted->prepared.vector_bytes)->load) :
+                                        pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
                             };
                             error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
                             emitted->call_stores += pass == 0;
@@ -2503,6 +2560,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_X87)
             {
                 error = tier1_emit_cfg_x87(function, emitted, node, &holes, &buffer);
+            }
+            else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_VECTOR && plan->patterns[node].scale == BUSTER_TIER1_VECTOR_CONSTANT)
+            {
+                error = tier1_emit_cfg_vector_constant(function, &holes, &buffer);
             }
             else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
             {

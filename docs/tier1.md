@@ -56,15 +56,16 @@ real C's `vcmp` masks ([the allocation guide](tier1-allocation.md)'s "The
 opmask class"). The selector takes masks' operations, and the CFG consumer
 spills and reloads a mask at its width, moves it along CFG edges with `kmov` and
 saves it around calls ([the selection guide](tier1-selection.md)'s "AVX-512's
-masks"): `test-tier1-masks` runs hand-written IR of masks natively against the
+masks"): `test-tier1-masks` runs hand-written IR of masks, and of vectors (#141),
+natively against the
 shared IR's interpreter. Neither consumer may reinterpret a mask as an ordinary
 GPR value or infer target permission from the compiler host. SSA promotion and
 SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
 stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
 guide](ir-simd.md)'s "Masks from the typed stream"), and one with vectors
 (#141), folding no vector; GVN, LICM, SROA and the inliner still refuse every
-SIMD function, and selection refuses vectors; this handoff does not claim
-native Tier 1 vector execution, full vector ABI support or a throughput gain.
+SIMD function. Selection takes vectors (#141, the selection guide's
+"Vectors"), and claims no throughput gain for them.
 
 ## Required evidence
 
@@ -265,9 +266,11 @@ below), and long double (#141), in frame objects of their own, computed on the
 x87 stack (the selection guide's "Long double"), with aggregates returned in
 the x87's registers, and the convention's rarer aggregate shapes (#141): a
 part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
-register whole, and an aggregate it ignores. Still refused: vectors (and with
-them a result LLVM demotes to a hidden pointer), and naked
-functions, whose bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
+register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
+selection guide's "Vectors"), within a function and passed or returned by value,
+which the lowering makes aggregates in a vector register whole. Still refused: a
+vector result LLVM demotes to a hidden pointer, and naked functions, whose
+bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 

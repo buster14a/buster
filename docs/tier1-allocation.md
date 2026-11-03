@@ -493,6 +493,16 @@ rather than through fixed ranges. No floating value is rematerializable: a
 constant's recipe would need its bits in a general register first, which the
 recipes don't make.
 
+The IR's vectors (#141), `v4i32`, `v8i32` and `v16i32`, are the class's values
+too, at their widths, 16, 32 and 64 bytes: a vector's slot is its bytes, aligned
+to 16 at most, which `vmovdqu32` of its width spills and reloads, and a move
+between two registers is a `vmovdqa64` of its ymm or zmm register (a 16-byte
+one's a `movaps`). In a function with vectors, the class's call-save rows and
+its temporary slot take the widest vector's bytes: the saves around a call move
+a register's whole widest vector (`Tier1EmitPrepared.vector_bytes`), and the
+temporary slot fits any value a cycle stages there; without one they stay 8 bytes
+and `movsd`'s. No vector is rematerializable either.
+
 A floating parameter arrives in xmm0 to xmm7 by its place among the function's
 floating parameters (`tier1_select_parameter_place`), its definition bound to
 that register (`Tier1CfgInput.definition_registers`) as a general parameter's

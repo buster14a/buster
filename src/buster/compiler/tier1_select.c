@@ -176,8 +176,39 @@ typedef enum Tier1SelectRule
     // store's address, a conversion's integer or floating operand), its long double operands read from the IR's
     // operands, which no register holds. Only the CFG consumer takes it.
     TIER1_RULE_X87,
+    // The IR's vectors (#141), v4i32, v8i32 and v16i32, in the vector class's registers that the CFG consumer's
+    // allocation gives them as it gives the floating values (xmm0 to xmm14, a node's register its location's low four
+    // bits, xmm15 the class's scratch), by AVX-512's EVEX forms of `width` 16, 32 or 64 bytes, the xmm, ymm or zmm one
+    // (tier1_select_vector_forms): its kind in `scale` (BUSTER_TIER1_VECTOR_*). A vector's loads and stores are
+    // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32), and its phis
+    // TIER1_RULE_PHI's. Only the CFG consumer takes it.
+    TIER1_RULE_VECTOR,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
+
+// TIER1_RULE_VECTOR's kinds, its pattern's `scale` (#141):
+// - ZERO (a constant of zeros, or undef): vpxord of the destination with itself;
+// - ONES (every bit): vpternlogd of the destination with itself, 0xff;
+// - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
+// - CONSTANT (any other, its index in `immediate`): its words as immediates into the red zone below rsp and a load, which
+//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload;
+// - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
+// - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
+//   vpmulld, vpandq, vporq, vpxord: unmasked, a quadword's and and or are the doublewords' bits): three operands, so the
+//   destination may be either;
+// - NOT of values[0]: vpternlogd with 0x55, the complement of its third operand;
+// - COMPARE of values[0] and values[1] into a mask, `condition` its IR predicate: vpcmpd, or vpcmpud for an unsigned
+//   one, into the mask's opmask register (the destination's low three bits, class 2's);
+// - SELECT of values[1] where the mask values[0] is set and of values[2] where it isn't: vpblendmd under the mask.
+#define BUSTER_TIER1_VECTOR_ZERO 0
+#define BUSTER_TIER1_VECTOR_ONES 1
+#define BUSTER_TIER1_VECTOR_SPLAT 2
+#define BUSTER_TIER1_VECTOR_CONSTANT 3
+#define BUSTER_TIER1_VECTOR_COPY 4
+#define BUSTER_TIER1_VECTOR_BINARY 5
+#define BUSTER_TIER1_VECTOR_NOT 6
+#define BUSTER_TIER1_VECTOR_COMPARE 7
+#define BUSTER_TIER1_VECTOR_SELECT 8
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -676,7 +707,7 @@ struct Tier1SelectFloatForms
     uint16_t resize;
 };
 
-static const Tier1SelectFloatForms tier1_select_float_forms_table[3] =
+static const Tier1SelectFloatForms tier1_select_float_forms_table[6] =
 {
     {
         X86_FORM_MOVSS_X_XM32, X86_FORM_MOVSS_XM32_X, { X86_FORM_ADDSS_X_XM32, X86_FORM_SUBSS_X_XM32, X86_FORM_MULSS_X_XM32, X86_FORM_DIVSS_X_XM32 }, X86_FORM_UCOMISS_X_XM32,
@@ -692,11 +723,79 @@ static const Tier1SelectFloatForms tier1_select_float_forms_table[3] =
         X86_FORM_NONE, X86_FORM_NONE, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, { X86_FORM_NONE, X86_FORM_NONE },
         { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
     },
+    // A vector's (#141), 16, 32 and 64 bytes: its loads, stores, spills and reloads, vmovdqu32 at its width.
+    {
+        X86_FORM_VMOVDQU32_X_XM128, X86_FORM_VMOVDQU32_XM128_X, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
+    {
+        X86_FORM_VMOVDQU32_Y_YM256, X86_FORM_VMOVDQU32_YM256_Y, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
+    {
+        X86_FORM_VMOVDQU32_Z_ZM512, X86_FORM_VMOVDQU32_ZM512_Z, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
 };
 
 static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
 {
-    return &tier1_select_float_forms_table[width == 4 ? 0 : width == 8 ? 1 : 2];
+    return &tier1_select_float_forms_table[width == 4 ? 0 : width == 8 ? 1 : width == 16 ? 3 : width == 32 ? 4 : width == 64 ? 5 : 2];
+}
+
+// A vector's EVEX forms at its width (#141, TIER1_RULE_VECTOR's): xmm's, ymm's and zmm's, each AVX512F's and the narrower
+// two AVX512VL's too, which a target without them refuses at emission as any record's.
+typedef struct Tier1SelectVectorForms Tier1SelectVectorForms;
+struct Tier1SelectVectorForms
+{
+    uint16_t move;
+    uint16_t binary[6];
+    uint16_t ternary;
+    uint16_t compare[2];
+    uint16_t blend;
+    uint16_t broadcast;
+};
+
+static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
+{
+    {
+        X86_FORM_VMOVDQA64_X_XM128,
+        { X86_FORM_VPADDD_X_X_XM128_EVEX, X86_FORM_VPSUBD_X_X_XM128_EVEX, X86_FORM_VPMULLD_X_X_XM128_EVEX, X86_FORM_VPANDQ_X_X_XM128, X86_FORM_VPORQ_X_X_XM128, X86_FORM_VPXORD_X_X_XM128 },
+        X86_FORM_VPTERNLOGD_X_X_XM128_IMM8,
+        { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_X_XM128_IMM8 },
+        X86_FORM_VPBLENDMD_X_X_XM128,
+        X86_FORM_VPBROADCASTD_X_R32,
+    },
+    {
+        X86_FORM_VMOVDQA64_Y_YM256,
+        { X86_FORM_VPADDD_Y_Y_YM256_EVEX, X86_FORM_VPSUBD_Y_Y_YM256_EVEX, X86_FORM_VPMULLD_Y_Y_YM256_EVEX, X86_FORM_VPANDQ_Y_Y_YM256, X86_FORM_VPORQ_Y_Y_YM256, X86_FORM_VPXORD_Y_Y_YM256 },
+        X86_FORM_VPTERNLOGD_Y_Y_YM256_IMM8,
+        { X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8 },
+        X86_FORM_VPBLENDMD_Y_Y_YM256,
+        X86_FORM_VPBROADCASTD_Y_R32,
+    },
+    {
+        X86_FORM_VMOVDQA64_Z_ZM512,
+        { X86_FORM_VPADDD_Z_Z_ZM512, X86_FORM_VPSUBD_Z_Z_ZM512, X86_FORM_VPMULLD_Z_Z_ZM512, X86_FORM_VPANDQ_Z_Z_ZM512, X86_FORM_VPORQ_Z_Z_ZM512, X86_FORM_VPXORD_Z_Z_ZM512 },
+        X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8,
+        { X86_FORM_VPCMPD_K_Z_ZM512_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 },
+        X86_FORM_VPBLENDMD_Z_Z_ZM512,
+        X86_FORM_VPBROADCASTD_Z_R32,
+    },
+    {
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        X86_FORM_NONE,
+    },
+};
+
+// A width no vector has gets no form (X86_FORM_NONE), which no target allows, rather than another width's.
+static const Tier1SelectVectorForms* tier1_select_vector_forms(uint32_t width)
+{
+    return &tier1_select_vector_forms_table[width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3];
 }
 
 // movaps between two xmm registers: a whole register's copy, which unlike movss's and movsd's doesn't merge into its
@@ -704,6 +803,13 @@ static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
 static X86Instruction tier1_select_float_move(uint8_t destination, uint8_t source)
 {
     return tier1_select_register_record(X86_FORM_MOVAPS_X_XM, destination, source);
+}
+
+// A copy of the vector class's value of `width` bytes between two of its registers (#141): a floating value's and a
+// 16-byte vector's movaps, and a wider vector's vmovdqa64 of its ymm or zmm register.
+static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width)
+{
+    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width)->move, destination, source);
 }
 
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
@@ -1040,6 +1146,78 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     // A floating value's registers are xmm registers (#141): a node's register is its location (class 1's), whose low
     // four bits are the xmm register; a memory operand's base and index, an integer's and the scratch register are
     // general registers.
+    // A vector's (#141): its EVEX forms at its width, three operands, the destination any of the class's registers.
+    case TIER1_RULE_VECTOR:
+    {
+        const Tier1SelectVectorForms* forms = tier1_select_vector_forms(width);
+        const uint8_t x = destination & 15;
+        const uint8_t left = holes->left & 15;
+        const uint8_t right = holes->right & 15;
+        const uint32_t kind = holes->scale;
+        if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
+        {
+            const X86Instruction record = {
+                .form = kind == BUSTER_TIER1_VECTOR_ZERO ? forms->binary[5] : forms->ternary,
+                .reg = x,
+                .vvvv = x,
+                .rm = x,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = kind == BUSTER_TIER1_VECTOR_ZERO ? 0 : 0xff,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_SPLAT)
+        {
+            tier1_select_request(&result, X86_OPERATION_MOV, 4, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(uint32_t)holes->immediate, 0);
+            tier1_select_append(&result, tier1_select_register_record(forms->broadcast, x, BUSTER_TIER1_SELECT_SCRATCH));
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_COPY && x != left)
+        {
+            tier1_select_append(&result, tier1_select_class_move(x, left, width));
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_BINARY || kind == BUSTER_TIER1_VECTOR_NOT)
+        {
+            const bool complement = kind == BUSTER_TIER1_VECTOR_NOT;
+            const X86Instruction record = {
+                .form = complement ? forms->ternary : forms->binary[holes->operation < 6 ? holes->operation : 0],
+                .reg = x,
+                .vvvv = left,
+                .rm = complement ? left : right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = complement ? 0x55 : 0,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_COMPARE)
+        {
+            // vpcmp's predicates: 0 ==, 1 <, 2 <=, 4 !=, 5 >= (not <) and 6 > (not <=); vpcmpud's the unsigned ones.
+            static const uint8_t predicates[IR_PREDICATE_COUNT] = { [IR_EQ] = 0, [IR_NE] = 4, [IR_LT] = 1, [IR_LE] = 2, [IR_GT] = 6, [IR_GE] = 5, [IR_ULT] = 1, [IR_ULE] = 2, [IR_UGT] = 6, [IR_UGE] = 5 };
+            const uint32_t condition = holes->condition < IR_PREDICATE_COUNT ? holes->condition : IR_EQ;
+            const X86Instruction record = {
+                .form = forms->compare[condition >= IR_ULT],
+                .reg = (uint8_t)(destination & 7),
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = predicates[condition],
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_SELECT)
+        {
+            // vpblendmd's destination is its third operand (rm) where the mask is set, its second (vvvv) where it isn't.
+            const X86Instruction record = {
+                .form = forms->blend,
+                .reg = x,
+                .vvvv = (uint8_t)(holes->third & 15),
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = (uint8_t)(holes->left & BUSTER_X86_DECORATION_MASK),
+            };
+            tier1_select_append(&result, record);
+        }
+        break;
+    }
     case TIER1_RULE_FLOAT_CONSTANT:
     {
         const uint8_t x = destination & 15;
@@ -1549,6 +1727,9 @@ struct Tier1SelectForest
     const uint32_t* barriers;
     // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
     const uint8_t* canonical;
+    // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
+    // one pays no node's vector checks (tier1_select_candidates).
+    bool vectors;
 };
 
 static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
@@ -1621,6 +1802,12 @@ static uint32_t tier1_select_mask_width(uint32_t type)
     return type == IR_M8 ? 1 : type == IR_M16 ? 2 : type == IR_M32 ? 4 : type == IR_M64 ? 8 : 0;
 }
 
+// A vector's bytes (#141): v4i32's 16, v8i32's 32 and v16i32's 64, its xmm, ymm or zmm register's; 0 for any other type.
+static uint32_t tier1_select_vector_width(uint32_t type)
+{
+    return type == IR_V4I32 ? 16 : type == IR_V8I32 ? 32 : type == IR_V16I32 ? 64 : 0;
+}
+
 // A floating value's bytes (#141): F32's 4 and F64's 8, the ss and sd forms' widths; 0 for any other type. F80, the x87's,
 // isn't taken.
 static uint32_t tier1_select_float_width(uint32_t type)
@@ -1639,11 +1826,16 @@ static bool tier1_select_x87_node(const IrFunction* function, uint32_t node)
     return function->type[node] == IR_F80 || (op == IR_STORE && b < function->instruction_count && function->type[b] == IR_F80) || from;
 }
 
-// Whether a function has vectors, which the selector doesn't take (#141): ir_function_has_vectors_path's answer. Masks
-// (#179) it takes, as ir_function_has_simd doesn't.
-static bool tier1_select_has_vectors(const IrFunction* function, bool vector)
+// Whether a function takes or returns a vector (#141), which no convention's place Tier 1 has: its vectors are its own
+// values otherwise, and a call's vector argument or result tier1_select_call_supported refuses.
+static bool tier1_select_vector_signature(const IrFunction* function)
 {
-    return ir_function_has_vectors_path(function, vector);
+    bool found = tier1_select_vector_width(function->result_type) != 0;
+    for (uint32_t p = 0; !found && p < function->parameter_count; p += 1)
+    {
+        found = tier1_select_vector_width(function->parameter_types[p]) != 0;
+    }
+    return found;
 }
 
 // The width a narrow source's copy reads: I1's canonical storage is its 32 bits, I8 one byte and I16 two. Zero says the
@@ -2477,7 +2669,85 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const uint32_t float_width = tier1_select_float_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type);
     // The operand's width where it is a floating value: a comparison's, a conversion's from one or a return's.
     const uint32_t operand_float = a < function->instruction_count ? tier1_select_float_width(function->type[a]) : 0;
-    if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
+    // A vector's (#141): the stored vector's width for a store, the result's for the others, and a comparison's operands';
+    // none in a function without vectors.
+    const uint32_t vector_width = forest->vectors ? tier1_select_vector_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type) : 0;
+    const uint32_t compare_width = forest->vectors && op == IR_VCMP && a < function->instruction_count ? tier1_select_vector_width(function->type[a]) : 0;
+    // The vector class's value's width, a floating value's or a vector's: its loads', stores' and phis' rules are one.
+    const uint32_t class_width = float_width != 0 ? float_width : vector_width;
+    // A vector's operations (#141), behind one test: a function without vectors pays no other here.
+    const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
+                                                   op == IR_OR || op == IR_XOR || op == IR_VSELECT)) ||
+                             compare_width != 0;
+    if (vector_node)
+    {
+        if (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF))
+        {
+            // A constant's lanes: all zeros, every bit or one lane in all, which no memory needs; any other, the CFG
+            // consumer's from its payload. An undefined vector is any: zeros.
+            const IrSimdValue* payload = op == IR_VCONST && a < function->vector_constant_count ? &function->vector_constants[a] : 0;
+            const uint32_t first = payload != 0 ? (uint32_t)payload->words[0] : 0;
+            bool zero = true;
+            bool ones = true;
+            bool splat = true;
+            for (uint32_t lane = 0; payload != 0 && lane < vector_width / 4; lane += 1)
+            {
+                const uint32_t bits = (uint32_t)(payload->words[lane / 2] >> (32 * (lane & 1)));
+                zero &= bits == 0;
+                ones &= bits == UINT32_MAX;
+                splat &= bits == first;
+            }
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = (uint8_t)(zero ? BUSTER_TIER1_VECTOR_ZERO : ones ? BUSTER_TIER1_VECTOR_ONES : splat ? BUSTER_TIER1_VECTOR_SPLAT : BUSTER_TIER1_VECTOR_CONSTANT);
+            base.immediate = zero || ones ? 0 : splat ? first : a;
+            base.intrinsic_cost = zero || ones ? 1 : 2;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = op == IR_COPY ? BUSTER_TIER1_VECTOR_COPY : BUSTER_TIER1_VECTOR_NOT;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR))
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_BINARY;
+            base.operation = (uint8_t)(op == IR_ADD ? 0 : op == IR_SUB ? 1 : op == IR_MUL ? 2 : op == IR_AND ? 3 : op == IR_OR ? 4 : 5);
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)compare_width;
+            base.scale = BUSTER_TIER1_VECTOR_COMPARE;
+            base.condition = (uint8_t)c;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_VSELECT)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_SELECT;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = c;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if (mask_width != 0 && (op == IR_CONST || op == IR_UNDEF))
     {
         // An undefined mask is any mask: zero, kxor's.
         base.rule = TIER1_RULE_MASK_CONSTANT;
@@ -2635,11 +2905,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (float_width != 0 && (op == IR_LOAD || op == IR_STORE))
+    else if (class_width != 0 && (op == IR_LOAD || op == IR_STORE))
     {
         const bool store = op == IR_STORE;
         base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
-        base.width = (uint8_t)float_width;
+        base.width = (uint8_t)class_width;
         base.values[0] = a;
         base.values[2] = store ? b : BUSTER_IR_NONE;
         base.intrinsic_cost = 1;
@@ -2656,10 +2926,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
-    else if (float_width != 0 && op == IR_PHI)
+    else if (class_width != 0 && op == IR_PHI)
     {
         base.rule = TIER1_RULE_PHI;
-        base.width = (uint8_t)float_width;
+        base.width = (uint8_t)class_width;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (float_width != 0 && op == IR_PARAM && a < BUSTER_TIER1_SELECT_MAX_ARGUMENTS)
@@ -3467,7 +3737,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
             failed_node = check.instruction;
         }
-        else if (tier1_select_has_vectors(function, vector))
+        else if (tier1_select_vector_signature(function))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -3631,6 +3901,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .costs = plan.costs,
         .barriers = barriers,
         .canonical = canonical,
+        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
     // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
     // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
@@ -3919,7 +4190,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
             plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_LIFETIME ||
             tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
-            tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].stack_object != BUSTER_IR_NONE ||
+            tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].rule == TIER1_RULE_VECTOR ||
+            plan->patterns[node].stack_object != BUSTER_IR_NONE ||
             plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT || (plan->patterns[node].rule >= TIER1_RULE_ALLOCA && plan->patterns[node].rule <= TIER1_RULE_STACK_RESTORE))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;

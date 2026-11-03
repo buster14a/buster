@@ -113,10 +113,11 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             error = TIER1_LIVENESS_INVALID;
         }
         else if ((op == IR_PHI && !phis) || (op == IR_CALL_INDIRECT && !phis) || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)) ||
-                 (type != IR_VOID && tier1_select_width(type) == 0 && !(phis && (tier1_select_mask_width(type) != 0 || tier1_select_float_width(type) != 0 || type == IR_F80))))
+                 (type != IR_VOID && tier1_select_width(type) == 0 &&
+                  !(phis && (tier1_select_mask_width(type) != 0 || tier1_select_float_width(type) != 0 || tier1_select_vector_width(type) != 0 || type == IR_F80))))
         {
-            // A mask (#179) and a floating value (#141) are the CFG consumer's alone, whose allocation has the opmask and
-            // vector classes, and a long double (#141) its, whose frame objects of values hold them.
+            // A mask (#179), a floating value (#141) and a vector (#141) are the CFG consumer's alone, whose allocation has
+            // the opmask and vector classes, and a long double (#141) its, whose frame objects of values hold them.
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
         else if (op == IR_PHI && (plan->covered[node] || plan->patterns[node].rule != TIER1_RULE_PHI || first != end))
