@@ -1360,6 +1360,17 @@ static void check_constant_callee_syntax(CheckConstantInput* input, uint32_t tok
     }
 }
 
+// Whether the identifier at `token`, which no declaration binds, is __builtin_invoke's name before its call's '(' (in
+// parentheses or not), whose call is its first argument's (#148): the name is the call's syntax, as the reader drops it.
+static bool check_constant_invoke(CheckConstantInput* input, uint32_t token, uint32_t handle)
+{
+    const Parser* parser = input->reader->parser;
+    uint32_t group = token;
+    const uint32_t end = check_input_callee_end(parser, token, &group);
+    return handle == 0 && check_constant_builtin_name(input->reader, parser->tokens.names[token]) == CBUILTIN_INVOKE && end + 1 < input->end &&
+           parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
+}
+
 // Whether the identifier at `token`, bound to the declaration of binding `handle`, is a call of C23's <stdbit.h> function
 // `builtin` as clang's library builtin (#148, cbuiltin_stdc_library): the name a builtin of the unit (pp_library_builtin:
 // C23's, unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise), its declaration a function of external
@@ -1434,7 +1445,9 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
         }
         builtin = library ? builtin : CBUILTIN_NONE;
     }
-    return builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT ? builtin : CBUILTIN_NONE;
+    // __builtin_invoke's call is its first argument's (check_input_declaration's walk), never a constant.
+    return builtin != CBUILTIN_INVOKE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT) ?
+           builtin : CBUILTIN_NONE;
 }
 
 // A deferred typeof region has already passed through the ordered declaration reader. Its declaration tokens
@@ -1681,8 +1694,9 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         {
             const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
-            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
-            if (builtin != CBUILTIN_NONE)
+            const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
+            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE && !invoke ? check_constant_intrinsic_type(input, token, handle) : 0;
+            if (builtin != CBUILTIN_NONE || invoke)
             {
                 check_constant_callee_syntax(input, token);
             }
@@ -3703,8 +3717,9 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
             const bool type = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
-            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
-            if (builtin != CBUILTIN_NONE)
+            const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
+            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE && !invoke ? check_constant_intrinsic_type(input, token, handle) : 0;
+            if (builtin != CBUILTIN_NONE || invoke)
             {
                 check_constant_callee_syntax(input, token);
             }

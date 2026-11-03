@@ -1622,6 +1622,26 @@ object p points to, as clang's `PaddingClearer` does.
   an array's padding. The type table here has no typedef sugar, so the
   padding is cleared.
 
+`__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
+clang's Sema builds it.
+
+- The reader drops the name and its parentheses (`check_input_declaration`'s
+  walk), so the call's first operand is its callee and the rest are its
+  arguments. A function, a pointer to one, a member of one, `*p` and `&g` are
+  all fine. The checks are the call's: a prototype's conversions, a variadic
+  function's promotions, and argument counts.
+- With no arguments, clang's error "too few arguments to function call,
+  expected at least 1, have 0" is at the name
+  (`CHECK_INPUT_INVOKE_ARGUMENTS`). The constant evaluator takes the name as
+  the call's syntax too (`check_constant_invoke`), so the call's type is
+  known in `_Generic` and `sizeof`.
+- Clang reports the call's other errors (a callee that isn't a function, a
+  call without a prototype's warning) at the name. Here they are at the
+  callee, in the checker's wording for calls.
+- It is never a constant, and its name alone is refused as other builtins'
+  are.
+- `__has_builtin` answers 1.
+
 `__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;

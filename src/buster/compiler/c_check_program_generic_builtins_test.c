@@ -259,6 +259,21 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: clear_padding of an incomplete array", .source = "void f(int (*q)[])\n{\n__builtin_clear_padding(q);\n}\n", .rejected = true },
         { .name = "generic: clear_padding of two", .source = "void f(int* p)\n{\n__builtin_clear_padding(p, p);\n}\n", .rejected = true },
         { .name = "generic: clear_padding's value", .source = "int f(int* p)\n{\nreturn __builtin_clear_padding(p);\n}\n", .rejected = true },
+        // __builtin_invoke(f, a...) is the call f(a...) in C (#148): of a function, a pointer to one and a member of one,
+        // with a prototype's conversions and a variadic one's promotions; its errors are the call's.
+        { .name = "generic: invoke", .source =
+          "int g(int);\nint v(int, ...);\nint (*p)(int) = g;\nstruct S { int (*fn)(int); };\nlong f(struct S s)\n{\n"
+          "_Static_assert(_Generic(__builtin_invoke(g, 1), int: 1, default: 0), \"\");\n"
+          "return __builtin_invoke(g, 1.5) + __builtin_invoke(p, 2) + __builtin_invoke(*p, 3) + __builtin_invoke(s.fn, 4) + __builtin_invoke(&g, 5) + __builtin_invoke(v, 1, 2.0f, \"x\");\n}\n" },
+        { .name = "generic: invoke of none", .source = "int f(void)\n{\nreturn __builtin_invoke();\n}\n", .rejected = true },
+        { .name = "generic: invoke of too many", .source = "int g(int);\nint f(void)\n{\nreturn __builtin_invoke(g, 1, 2);\n}\n", .rejected = true },
+        { .name = "generic: invoke of too few", .source = "int g(int);\nint f(void)\n{\nreturn __builtin_invoke(g);\n}\n", .rejected = true },
+        { .name = "generic: invoke of an int", .source = "int f(int x)\n{\nreturn __builtin_invoke(x, 1);\n}\n", .rejected = true },
+        { .name = "generic: invoke's address", .source = "void* h = __builtin_invoke;\n", .rejected = true },
+        // Any builtin's name that no call takes is clang's "builtin functions must be directly called".
+        { .name = "generic: a builtin's address", .source = "int (*p)(unsigned) = &__builtin_popcount;\n", .rejected = true },
+        { .name = "generic: a builtin's value", .source = "void f(void)\n{\n(void)__builtin_trap;\n}\n", .rejected = true },
+        { .name = "generic: invoke in a constant", .source = "int g(int);\nenum { E = __builtin_invoke(g, 1) };\n", .rejected = true },
         { .name = "generic: hlsl resource pointer of void", .source = "void g(void);\nvoid f(void)\n{\n__builtin_hlsl_resource_getpointer_typed(g());\n}\n", .rejected = true },
         { .name = "generic: hlsl resource pointer's value", .source = "int* f(void)\n{\nreturn __builtin_hlsl_resource_getpointer_typed();\n}\n", .rejected = true },
         { .name = "generic: xray typed event of two", .source = "void f(void)\n{\n__xray_typedevent(1, \"x\");\n}\n", .rejected = true },
@@ -526,6 +541,14 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "T(struct A v[3]);T(struct A v[2][3]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
         "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
         "generic-clear-padding", clang);
+    // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
+    // evaluated once, as the call's.
+    check_test_program_source(test,
+        "static int calls;static int next(int v){calls++;return v;}static int twice(int x){return 2*x;}static int sum(int n,...){return n;}\n"
+        "struct S{int (*fn)(int);};\n"
+        "int tested(int n){int (*p)(int)=twice;struct S s={twice};return __builtin_invoke(twice,next(n))+__builtin_invoke(p,3)*10+__builtin_invoke(*p,1)*100+\n"
+        "__builtin_invoke(s.fn,next(2))*1000+__builtin_invoke(sum,7,1.5,\"x\")*10000+calls;}\n",
+        "generic-invoke", clang);
     // clang's type traits of C (#148), their values in code: of complete, incomplete and variably modified types.
     check_test_program_source(test,
         "struct T{int x;};\n"

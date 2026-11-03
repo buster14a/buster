@@ -123,6 +123,8 @@ typedef enum CheckInputMessage
     // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
     // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
     CHECK_INPUT_UNKNOWN_BUILTIN,
+    CHECK_INPUT_INVOKE_ARGUMENTS,
+    CHECK_INPUT_BUILTIN_NOT_CALLED,
     // GNU's function multiversioning: a function attribute clang refuses beside target("default"), target_clones or
     // cpu_specific/cpu_dispatch, at the function's name, naming the attribute; and a target attribute incompatible with
     // another multiversioning attribute, at the later attribute, with a note at the earlier one.
@@ -7089,7 +7091,21 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 const uint32_t close = parser->tree.parents[end];
                 const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
                                   end + 1 < close && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
-                if (call)
+                if (call && builtin == CBUILTIN_INVOKE)
+                {
+                    // __builtin_invoke(f, a...) is the call f(a...) in C (#148), as clang's Sema builds it: the name goes, with
+                    // its parentheses, and the call's first operand is its callee, its others its arguments. With none,
+                    // clang's "too few arguments" is at the name.
+                    for (uint32_t t = group; t <= end; t += 1)
+                    {
+                        reader->ignored[t] = true;
+                    }
+                    if (end + 2 == close)
+                    {
+                        check_input_report(reader, i, CHECK_INPUT_INVOKE_ARGUMENTS);
+                    }
+                }
+                else if (call)
                 {
                     check_input_rare_claim(reader, &reader->builtins[close]);
                     reader->builtins[close] = builtin;
@@ -7104,7 +7120,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
                 else
                 {
-                    check_input_report(reader, i, CHECK_INPUT_UNSUPPORTED);
+                    // A builtin's name that no call takes (its address, a value of it): clang's error at it.
+                    check_input_report(reader, i, CHECK_INPUT_BUILTIN_NOT_CALLED);
                 }
             }
             else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)

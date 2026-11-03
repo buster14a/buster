@@ -7856,6 +7856,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_PRESERVE_ACCESS_INDEX, "__builtin_preserve_access_index", false, true, false },
         { CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED, "__builtin_hlsl_resource_getpointer_typed", false, true, false },
         { CBUILTIN_CLEAR_PADDING, "__builtin_clear_padding", false, true, false },
+        { CBUILTIN_INVOKE, "__builtin_invoke", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

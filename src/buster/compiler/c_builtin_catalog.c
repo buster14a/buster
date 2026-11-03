@@ -464,7 +464,8 @@
     X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE) \
     X(PRESERVE_ACCESS_INDEX, 0x452u, "__builtin_preserve_access_index", BUSTER_CBUILTIN_SOURCE) \
     X(HLSL_RESOURCE_GETPOINTER_TYPED, 0x453u, "__builtin_hlsl_resource_getpointer_typed", BUSTER_CBUILTIN_SOURCE) \
-    X(CLEAR_PADDING, 0x454u, "__builtin_clear_padding", BUSTER_CBUILTIN_SOURCE)
+    X(CLEAR_PADDING, 0x454u, "__builtin_clear_padding", BUSTER_CBUILTIN_SOURCE) \
+    X(INVOKE, 0x455u, "__builtin_invoke", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
