@@ -786,7 +786,8 @@ read/modify/writes"), an atomic access no pass moves, merges or drops, and Tier 
 selects the same instructions, the object's width and never its narrow value's
 32-bit register's, as a barrier no load folds past. clang -O0's code is the same
 (`xchg`, `lock xadd`); -O2's has a `lock add` where an addition's result is unused.
-The bitwise, minimum, maximum and floating operations, a dynamic order and a
+The bitwise, minimum and maximum operations are loops of compare-exchanges
+("Direct fetch loops", below); the floating operations, a dynamic order and a
 scoped family's keep their helper; an implicit update of another operation keeps
 its loop, whose compare-exchange is direct. The compiler's own `main.c` calls 3
 read/modify/write helpers where it called 19 (16 direct; 2 helpers planned where
@@ -826,6 +827,32 @@ compiler's own `main.c` calls 1 read/modify/write helper where it called 3 (18
 direct; 1 helper planned where 2 were), and with every function lowered 281
 where it called 305 (126 direct; 144 planned where 152 were); SQLite 3.50.4 has
 none, and its object is unchanged.
+
+**Direct fetch loops.** `check_program_direct_fetch` admits the bitwise, minimum
+and maximum read/modify/writes, returning the old value or the new one: GNU's
+`__atomic_fetch_and`, `_or`, `_xor`, `_nand`, `_min` and `_max` and their
+`_fetch` forms, the `__sync` ones (clang's `__sync_fetch_and_min`, `_max`,
+`_umin` and `_umax` too) and C11's `__c11_atomic_fetch_and`, `_or`, `_xor`,
+`_nand`, `_min` and `_max`, unscoped, of an integer's or an enumeration's object
+(a bool's for and, or and xor alone, whose bits stay 0 or 1) of 1, 2, 4 or 8
+bytes, its value's size, known aligned to it (a native one, for C11's), of an
+order the checker knows (any of C's; a `__sync` builtin's is seq_cst) whose
+argument evaluates for no effect, its effect's shape its rule's. x86 has no
+instruction that leaves such an operation's old value, so that clang's code is
+a `lock cmpxchg` loop, and so is this one (`check_lower_atomic_fetch_direct`):
+the pointer and the operand converted to the object's type into temporaries, the
+object read by a relaxed atomic `LOAD`, and a loop that computes the new value
+from the old one (in `int` for a narrow object, converted back; nand's and
+complemented; the minimum or the maximum by the value type's ordering, an arm
+of each), runs `ATOMIC_CAS` of the old value and the new one, and goes round
+again, the old value its result, until that result is the old value. Its result
+is the old value or the kept new one. No helper is planned for one, and no new
+typed kind or IR operation is needed. clang's wrapping increment and decrement,
+the floating minimums and maximums, a pointer's, a dynamic order and a scoped
+family's keep their helper. The compiler's own `main.c` calls no
+read/modify/write helper where it called 1 (19 direct; none planned where 1
+was), and with every function lowered 194 where it called 281 (213 direct; 112
+planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the

@@ -26,7 +26,8 @@ struct CheckProgramHelperRmwCase
     uint32_t operands;
     bool rmw;
     CheckProgramStatus status;
-    // Taken directly (#1059: check_program_direct_rmw), the typed stream's ATOMIC_RMW, with no leaf.
+    // Taken directly (#1059: check_program_direct_rmw, the typed stream's ATOMIC_RMW, or check_program_direct_fetch, a
+    // loop of its ATOMIC_CAS), with no leaf.
     bool direct;
 };
 
@@ -954,14 +955,14 @@ static void check_test_program_helpers(CheckTest* test)
         // A read/modify/write's effect at the load's node, with the call's fixed arguments and a long object: only a
         // well-formed one, its rule's fixed arguments evaluated and its rmw bit as its operation has it, is planned, its
         // helper the builtin's leaf; any other is invalid. The effects have no known order, so that the __atomic_ ones keep
-        // their leaf; a well-formed legacy addition, seq_cst, is taken directly (#1059) and plans none, and a malformed
-        // one is the planner's to refuse.
+        // their leaf; a well-formed legacy addition or or, seq_cst, is taken directly (#1059) and plans none, and a
+        // malformed one is the planner's to refuse.
         static const CheckProgramHelperRmwCase rmw_cases[] = {
             { CBUILTIN_ATOMIC_FETCH_ADD, 7, true, CHECK_PROGRAM_OK },
             { CBUILTIN_ATOMIC_FETCH_ADD, 0, true, CHECK_PROGRAM_INVALID },
             { CBUILTIN_ATOMIC_FETCH_ADD, 3, true, CHECK_PROGRAM_INVALID },
             { CBUILTIN_ATOMIC_FETCH_ADD, 7, false, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_SYNC_FETCH_AND_OR, 3, true, CHECK_PROGRAM_OK },
+            { CBUILTIN_SYNC_FETCH_AND_OR, 3, true, CHECK_PROGRAM_OK, true },
             { CBUILTIN_SYNC_FETCH_AND_OR, 7, true, CHECK_PROGRAM_INVALID },
             { CBUILTIN_SYNC_FETCH_AND_ADD, 3, true, CHECK_PROGRAM_OK, true },
             { CBUILTIN_SYNC_FETCH_AND_ADD, 7, true, CHECK_PROGRAM_INVALID },
