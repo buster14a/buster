@@ -13,8 +13,9 @@
 // nocommon's. Include after c_check_alias_driver_test.c.
 
 // The symbol `name` of the object at `path`: its st_info, st_other, whether it is SHN_COMMON's, its value where it is,
-// and its size, in `summary`. Whether the object could be read and has the symbol.
-static bool check_test_common_symbol(const char* path, const char* name, char* summary, size_t capacity)
+// and its size, in `summary`; and its section's index and value in `place` (if not null). Whether the object could be
+// read and has the symbol.
+static bool check_test_common_place(const char* path, const char* name, char* summary, size_t capacity, uint64_t* place)
 {
     FILE* file = fopen(path, "rb");
     uint8_t* bytes = NULL;
@@ -51,6 +52,11 @@ static bool check_test_common_symbol(const char* path, const char* name, char* s
                 const bool common = symbol->st_shndx == SHN_COMMON;
                 snprintf(summary, capacity, "%s: info %u other %u %s value %llu size %llu", name, symbol->st_info, symbol->st_other, common ? "common" : "defined",
                          common ? (unsigned long long)symbol->st_value : 0ull, (unsigned long long)symbol->st_size);
+                if (place != NULL)
+                {
+                    place[0] = symbol->st_shndx;
+                    place[1] = symbol->st_value;
+                }
                 found = true;
             }
         }
@@ -59,8 +65,60 @@ static bool check_test_common_symbol(const char* path, const char* name, char* s
     return found;
 }
 
+static bool check_test_common_symbol(const char* path, const char* name, char* summary, size_t capacity)
+{
+    return check_test_common_place(path, name, summary, capacity, NULL);
+}
+
+// An alias of a common symbol, which clang's assembler refuses ("Common symbol 'x' cannot be used in assignment expr"),
+// is refused at -c by both paths (#1126's review); an initialized definition's alias is at its place, in clang's object
+// and ours.
+static void check_test_driver_common_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] = {
+        "int x __attribute__((common));\nextern int y __attribute__((alias(\"x\")));\nint get(void) { return y; }\n",
+        "int x = 7;\nextern int y __attribute__((alias(\"x\")));\nint get(void) { return y; }\n",
+    };
+    char path[512];
+    char object[512];
+    snprintf(path, sizeof(path), "%s/common-alias.c", directory);
+    snprintf(object, sizeof(object), "%s/common-alias.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sources); c += 1)
+    {
+        const bool written = parse_test_write(path, sources[c], strlen(sources[c]));
+        for (uint32_t p = 0; written && p < 3; p += 1)
+        {
+            char* text = NULL;
+            char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-w", "-c", path, "-o", object, p == 2 ? "--scalar" : NULL, NULL };
+            const int status = check_test_driver_spawn(arguments, &text);
+            char description[768];
+            if (c == 0)
+            {
+                snprintf(description, sizeof(description), "common aliases: an alias of a common symbol is refused at -c, by %s: status %d, \"%s\"",
+                         p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path", status, text != NULL ? text : "");
+                check_test_expect(test, status == 1 && text != NULL && (p == 0 || strstr(text, "an alias of a common symbol") != NULL), description);
+            }
+            else
+            {
+                char summary[192] = { 0 };
+                uint64_t target[2] = { 0 };
+                uint64_t alias[2] = { 1 };
+                const bool placed = status == 0 && check_test_common_place(object, "x", summary, sizeof(summary), target) &&
+                                    check_test_common_place(object, "y", summary, sizeof(summary), alias);
+                snprintf(description, sizeof(description), "common aliases: an initialized definition's alias is at its place, by %s",
+                         p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path");
+                check_test_expect(test, placed && target[0] == alias[0] && target[1] == alias[1] && target[0] != SHN_COMMON && target[0] != SHN_UNDEF, description);
+            }
+            free(text);
+            unlink(object);
+        }
+    }
+    unlink(path);
+}
+
 static void check_test_driver_commons(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_common_aliases(test, clang, executable, directory);
     static const char unit[] =
         "int plain __attribute__((common));\n"
         "char buffer[100] __attribute__((common));\n"
@@ -76,11 +134,13 @@ static void check_test_driver_commons(CheckTest* test, const char* clang, const 
         "int placed __attribute__((common, section(\"common_placed\")));\n"
         "_Thread_local int thread __attribute__((common));\n"
         "long aligned __attribute__((common, aligned(32)));\n"
+        "int zero[0] __attribute__((common));\n"
+        "struct E { } empty __attribute__((common));\n"
         "int* pointer = &plain;\n"
         "int get(void) { return plain + buffer[3] + constant + open[0] + flexible.n + declared + later + initialized + internal + hidden + weak + placed + "
         "thread + (int)aligned; }\n";
     static const char* const names[] = { "plain", "buffer", "constant", "open", "flexible", "declared", "later", "initialized", "hidden", "weak", "placed",
-                                          "thread", "aligned", "pointer" };
+                                          "thread", "aligned", "zero", "empty", "pointer" };
     char path[512];
     char objects[3][512];
     snprintf(path, sizeof(path), "%s/commons.c", directory);
@@ -109,9 +169,9 @@ static void check_test_driver_commons(CheckTest* test, const char* clang, const 
     // with nocommon beside it.
     static const char everything[] =
         "int tentative;\nint initialized = 1;\nint kept __attribute__((nocommon));\nint both __attribute__((common, nocommon));\n"
-        "static int internal;\nextern int declared;\nint declared;\nchar array[40];\n_Thread_local int thread;\n"
+        "static int internal;\nextern int declared;\nint declared;\nchar array[40];\n_Thread_local int thread;\nint none[0];\n"
         "int get(void) { return tentative + initialized + kept + both + internal + declared + array[1] + thread; }\n";
-    static const char* const everything_names[] = { "tentative", "initialized", "kept", "both", "declared", "array", "thread" };
+    static const char* const everything_names[] = { "tentative", "initialized", "kept", "both", "declared", "array", "thread", "none" };
     char everything_path[512];
     char everything_objects[2][512];
     snprintf(everything_path, sizeof(everything_path), "%s/commons-everything.c", directory);
@@ -149,7 +209,10 @@ static void check_test_driver_commons(CheckTest* test, const char* clang, const 
         "long d __attribute__((common));\n"
         "char p __attribute__((common));\n"
         "char e[64] __attribute__((common, aligned(1)));\n"
-        "int first(void) { a += 1; b[7] = 'a'; p = 1; e[63] = 'z'; return a + c + (int)d + e[63]; }\n";
+        "int z1[0] __attribute__((common));\n"
+        "int z2[0] __attribute__((common));\n"
+        "__attribute__((visibility(\"hidden\"))) int hidden[17] __attribute__((common));\n"
+        "int first(void) { a += 1; b[7] = 'a'; p = 1; e[63] = 'z'; hidden[16] = 5; return a + c + (int)d + e[63]; }\n";
     static const char second[] =
         "#include <stdio.h>\n#include <stdint.h>\n"
         "int a __attribute__((common));\n"
@@ -157,9 +220,12 @@ static void check_test_driver_commons(CheckTest* test, const char* clang, const 
         "int c = 40;\n"
         "long d __attribute__((common, weak));\n"
         "char e[8] __attribute__((common, aligned(64)));\n"
+        "extern int z1[], z2[];\n"
+        "__attribute__((visibility(\"hidden\"))) long hidden[2] __attribute__((common, aligned(256)));\n"
         "int first(void);\n"
         "int main(void) { a = 1; for (int i = 0; i < 64; i++) b[i] = (char)i; int r = first();\n"
-        "printf(\"%d %d %d %ld %d %zu %d\\n\", r, a, b[7], d, (int)((uintptr_t)b % 32), sizeof b, (int)((uintptr_t)e % 64)); return 0; }\n";
+        "printf(\"%d %d %d %ld %d %zu %d %d %d %d\\n\", r, a, b[7], d, (int)((uintptr_t)b % 32), sizeof b, (int)((uintptr_t)e % 64),\n"
+        "(void*)z1 == (void*)z2, ((int*)hidden)[16], (int)((uintptr_t)hidden % 256)); return 0; }\n";
     char sources[2][512];
     snprintf(sources[0], sizeof(sources[0]), "%s/commons-first.c", directory);
     snprintf(sources[1], sizeof(sources[1]), "%s/commons-second.c", directory);
@@ -204,6 +270,19 @@ static void check_test_driver_commons(CheckTest* test, const char* clang, const 
         snprintf(description, sizeof(description), "commons: the direct path's executable of both units runs as clang's build (%s): %s against %s",
                  ways[w] != NULL ? ways[w] : "by default", running ? output : "(nothing)", expected);
         check_test_expect(test, running && strcmp(output, expected) == 0, description);
+        // The hidden common the executable allocates is an object in its table, as GNU ld's and lld's are, local or not
+        // (#1126's review), and so are the zero-length ones, of a byte each.
+        static const char* const allocated[] = { "hidden", "z1", "z2" };
+        for (uint32_t n = 0; made && n < BUSTER_ARRAY_LENGTH(allocated); n += 1)
+        {
+            char summary[192] = { 0 };
+            unsigned info = 256;
+            const bool found = check_test_common_symbol(direct, allocated[n], summary, sizeof(summary)) &&
+                               sscanf(strchr(summary, ':') != NULL ? strchr(summary, ':') : "", ": info %u", &info) == 1;
+            snprintf(description, sizeof(description), "commons: the direct path's executable (%s) writes %s as an allocated object: %s",
+                     ways[w] != NULL ? ways[w] : "by default", allocated[n], found ? summary : "(no symbol)");
+            check_test_expect(test, found && ELF64_ST_TYPE(info) == STT_OBJECT && strstr(summary, " defined ") != NULL, description);
+        }
         unlink(direct);
     }
     for (uint32_t p = 0; written && p < 3; p += 1)

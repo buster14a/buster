@@ -2254,6 +2254,27 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         check_program_emit_commons(program, commons, BUSTER_SCALAR_PATH(scalar));
     }
+    // An alias of a variable whose definition is a common symbol (#147, #1126's review): clang's integrated assembler
+    // refuses it ("Common symbol 'x' cannot be used in assignment expr"), and a common's storage is the linker's, which no
+    // symbol of -c's object can be placed in. It is refused at its attribute, as -c's output would be wrong.
+    for (uint32_t k = 0; valid && common && k < program->alias_count; k += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + k;
+        const uint32_t base = alias->kind == CHECK_PROGRAM_ALIAS && alias->error == CHECK_PROGRAM_ALIAS_OK ? alias->base : 0;
+        const SymbolId taken = base != 0 && base < program->object_count ? program->object_symbols[base] : 0;
+        const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == base ? taken : 0;
+        const uint32_t declaration = symbol != 0 ? program->object_declarations[base] : BUSTER_CHECK_NONE;
+        const CheckInput* input = program->input;
+        const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] != C_BINDING_FUNCTION && !input->thread_local[declaration] &&
+                              input->linkage[declaration] == 2 && !weak[symbol] && (symbol_aliases == 0 || symbol_aliases[symbol] == 0);
+        if (variable && check_program_emit_common(commons[symbol], input->common_tentatives))
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "an alias of a common symbol, which clang's assembler refuses";
+            result->token = alias->attribute;
+            valid = false;
+        }
+    }
     // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
     // retain attribute for the counting pass to look for.
     uint32_t retained_count = 0;

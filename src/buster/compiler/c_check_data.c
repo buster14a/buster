@@ -695,6 +695,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             {
                 status = CHECK_DATA_SYMBOL;
             }
+            // A common symbol of no bytes (`int x[0];`, an empty struct, #147) has one, as clang's code publishes it
+            // (LLVM's AsmPrinter: `.comm Foo, 0` is undefined), so that two of them don't share an address.
+            plan->size = symbol_type == BUSTER_LINK_SYMBOL_COMMON && plan->size == 0 ? 1 : plan->size;
         }
     }
     const CheckInitializer* initializer = object->initializer_plan;
