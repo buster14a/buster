@@ -811,6 +811,399 @@ static uint32_t check_input_fallthrough_item(const CheckInputReader* reader, uin
     return result;
 }
 
+// A token's spelling into `buffer` (`capacity` bytes), without the reader's scratch arena: an identifier's or a keyword's
+// interned name, a short literal's as the preprocessor spells it. 0 for none or a longer one.
+static uint32_t check_input_fallthrough_spelling(const CheckInputReader* reader, uint32_t token, uint8_t* buffer, uint32_t capacity, const uint8_t** bytes)
+{
+    const Parser* parser = reader->parser;
+    Preprocessor* pp = reader->pp;
+    const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : 0;
+    const uint32_t source = pp != NULL && token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const bool spelled = pp != NULL && source < pp->output.count;
+    const uint8_t kind = spelled ? pp->output.kinds[source] : 0;
+    const uint64_t needed = spelled && kind != BUSTER_PP_KIND_EMBED ?
+                            (kind == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[source] - pp->output.locations[source] + 1) : UINT64_MAX;
+    uint32_t length = 0;
+    if (pp != NULL && name != 0)
+    {
+        *bytes = intern_bytes(pp->table, name);
+        length = intern_length(pp->table, name);
+    }
+    else if (needed <= capacity)
+    {
+        length = pp_spelling(pp, kind, pp->output.values[source], pp->output.locations[source], buffer, bytes);
+    }
+    return length;
+}
+
+// The first token of statement `item`'s subtree.
+static uint32_t check_input_fallthrough_first(const Parser* parser, uint32_t item)
+{
+    uint32_t first = item;
+    while (first > 0 && check_input_fallthrough_within(parser, first - 1, item))
+    {
+        first -= 1;
+    }
+    return first;
+}
+
+// The statement a plain label or a case or default label (`item`, its colon) labels: its child after it, or none.
+static uint32_t check_input_fallthrough_labeled(const CheckInputReader* reader, uint32_t item)
+{
+    uint32_t statement = BUSTER_CHECK_NONE;
+    for (uint32_t child = reader->first_child[item]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+    {
+        statement = statement == BUSTER_CHECK_NONE && child > item ? child : statement;
+    }
+    return statement;
+}
+
+// A control statement's condition, as clang's CFG prunes a trivially true or false one (#1126's review): 1 for an
+// integer literal other than zero or `true`, 0 for a zero one or `false`, 2 for any other (or none: `for (;;)`'s is
+// true, which its caller takes). The condition is the tokens strictly inside its parentheses, `open` to `close`.
+static uint32_t check_input_fallthrough_condition(const CheckInputReader* reader, uint32_t open, uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = 2;
+    const uint32_t token = open + 1;
+    if (open < close && token + 1 == close && parser->tokens.names[token] == C_NAME_TRUE)
+    {
+        result = 1;
+    }
+    else if (open < close && token + 1 == close && parser->tokens.names[token] == C_NAME_FALSE)
+    {
+        result = 0;
+    }
+    else if (open < close && token + 1 == close && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && reader->pp != NULL)
+    {
+        uint8_t buffer[64];
+        const uint8_t* bytes = NULL;
+        const uint32_t length = check_input_fallthrough_spelling(reader, token, buffer, sizeof(buffer), &bytes);
+        if (length != 0)
+        {
+            // An integer's digits, after a 0x or 0b prefix, before its suffix: it is zero when each is.
+            const bool prefixed = length > 2 && bytes[0] == '0' && (bytes[1] == 'x' || bytes[1] == 'X' || bytes[1] == 'b' || bytes[1] == 'B');
+            bool integer = true;
+            bool zero = true;
+            for (uint32_t i = prefixed ? 2 : 0; i < length; i += 1)
+            {
+                const uint8_t c = bytes[i];
+                const bool digit = (c >= '0' && c <= '9') || (prefixed && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')));
+                const bool suffix = c == 'u' || c == 'U' || c == 'l' || c == 'L' || c == 'w' || c == 'W' || c == 'b' || c == 'B' || c == '\'';
+                integer &= digit || suffix;
+                zero &= !digit || c == '0';
+            }
+            result = integer ? (zero ? 0 : 1) : 2;
+        }
+    }
+    return result;
+}
+
+// Whether a loop's body (`body`, its top token) has a break of its own: one not inside a nested loop or switch.
+static bool check_input_fallthrough_breaks(const CheckInputReader* reader, uint32_t body)
+{
+    const Parser* parser = reader->parser;
+    bool breaks = false;
+    for (uint32_t token = body < parser->tokens.count ? check_input_fallthrough_first(parser, body) : body; token < body && !breaks; token += 1)
+    {
+        bool own = parser->tokens.kinds[token] == PARSE_KIND_BREAK;
+        for (uint32_t at = parser->tree.parents[token]; own && at < body; at = parser->tree.parents[at])
+        {
+            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? reader->first_child[at] :
+                                                                                                                                          BUSTER_CHECK_NONE;
+            const uint8_t kind = keyword < parser->tokens.count ? parser->tokens.kinds[keyword] : 0;
+            own = kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH && parser->tokens.kinds[at] != PARSE_KIND_DO;
+        }
+        breaks = own;
+    }
+    return breaks;
+}
+
+// Whether a call statement's callee is __builtin_unreachable or __builtin_trap, after which nothing runs.
+static bool check_input_fallthrough_trap(const CheckInputReader* reader, uint32_t first)
+{
+    const Parser* parser = reader->parser;
+    uint8_t buffer[32];
+    const uint8_t* bytes = NULL;
+    const bool identifier = first < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER && reader->pp != NULL;
+    const uint32_t length = identifier ? check_input_fallthrough_spelling(reader, first, buffer, sizeof(buffer), &bytes) : 0;
+    return (length == 21 && memcmp(bytes, "__builtin_unreachable", 21) == 0) || (length == 14 && memcmp(bytes, "__builtin_trap", 14) == 0);
+}
+
+// Whether statement `item` never completes, as clang's CFG has no edge out of it (#1126's review): a return, break,
+// continue or goto; a call of __builtin_unreachable or __builtin_trap; a while, do or for loop whose condition is true
+// (check_input_fallthrough_condition, or a for's absent one) without a break of its own; an if whose true condition's
+// branch never completes, or one whose two branches don't; a block whose last statement doesn't (but a label's, which
+// another jump may reach); and a labeled statement whose statement doesn't. Unknown calls complete (noreturn functions
+// aren't known here). A stack of pending statements takes the branches: no recursion (the call graph's rule).
+static bool check_input_fallthrough_leaves(const CheckInputReader* reader, uint32_t item)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t pending[16];
+    uint32_t pending_count = 1;
+    pending[0] = item;
+    bool leaves = item < count;
+    while (leaves && pending_count != 0)
+    {
+        const uint32_t node = pending[--pending_count];
+        const uint8_t role = parser->tree.roles[node];
+        const uint32_t first = check_input_fallthrough_first(parser, node);
+        const uint8_t first_kind = parser->tokens.kinds[first];
+        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? reader->first_child[node] : BUSTER_CHECK_NONE;
+        const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
+        const bool statement = parser->tokens.kinds[node] == PARSE_KIND_SEMI;
+        if (statement && (first_kind == PARSE_KIND_RETURN || first_kind == PARSE_KIND_GOTO || first_kind == PARSE_KIND_BREAK || first_kind == PARSE_KIND_CONTINUE))
+        {
+            // It leaves.
+        }
+        else if (statement && first_kind == PARSE_KIND_DO)
+        {
+            // do body while (condition);: the condition's parentheses are the `;`'s child, the body the do's.
+            uint32_t condition = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[node]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                condition = parser->tree.roles[child] == PARSE_ROLE_CLOSE_CONDITION ? child : condition;
+            }
+            uint32_t open = BUSTER_CHECK_NONE;
+            for (uint32_t child = condition != BUSTER_CHECK_NONE ? reader->first_child[condition] : BUSTER_CHECK_NONE; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                open = parser->tree.roles[child] == PARSE_ROLE_OPEN_CONDITION ? child : open;
+            }
+            const uint32_t body = check_input_fallthrough_labeled(reader, first);
+            leaves = open != BUSTER_CHECK_NONE && check_input_fallthrough_condition(reader, open, condition) == 1 && body != BUSTER_CHECK_NONE &&
+                     !check_input_fallthrough_breaks(reader, body);
+        }
+        else if (statement && check_input_fallthrough_trap(reader, first))
+        {
+            // It traps or is unreachable.
+        }
+        else if (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE)
+        {
+            const uint32_t labeled = check_input_fallthrough_labeled(reader, node);
+            leaves = labeled != BUSTER_CHECK_NONE;
+            pending[pending_count] = labeled;
+            pending_count += leaves ? 1 : 0;
+        }
+        else if (role == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            // Its last statement that isn't a null statement.
+            uint32_t last = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[node]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                const bool empty = parser->tokens.kinds[child] == PARSE_KIND_SEMI && (child == 0 || !check_input_fallthrough_within(parser, child - 1, child));
+                last = parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK && !empty ? child : last;
+            }
+            // A label at the end lets a jump reach the block's end.
+            leaves = last != BUSTER_CHECK_NONE && parser->tree.roles[last] != PARSE_ROLE_LABEL && parser->tree.roles[last] != PARSE_ROLE_CLOSE_CASE;
+            pending[pending_count] = last;
+            pending_count += leaves ? 1 : 0;
+        }
+        else if (keyword_kind == PARSE_KIND_IF)
+        {
+            uint32_t open = BUSTER_CHECK_NONE;
+            uint32_t branch = BUSTER_CHECK_NONE;
+            uint32_t otherwise = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[node]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                open = parser->tree.roles[child] == PARSE_ROLE_OPEN_CONDITION ? child : open;
+                branch = branch == BUSTER_CHECK_NONE && child > node && parser->tokens.kinds[child] != PARSE_KIND_ELSE ? child : branch;
+                otherwise = parser->tokens.kinds[child] == PARSE_KIND_ELSE ? check_input_fallthrough_labeled(reader, child) : otherwise;
+            }
+            const uint32_t condition = open != BUSTER_CHECK_NONE ? check_input_fallthrough_condition(reader, open, node) : 2;
+            const bool both = otherwise != BUSTER_CHECK_NONE && condition == 2;
+            const uint32_t taken = condition == 1 ? branch : condition == 0 ? otherwise : BUSTER_CHECK_NONE;
+            leaves = branch != BUSTER_CHECK_NONE && (both || taken != BUSTER_CHECK_NONE) && pending_count + 2 <= 16;
+            if (leaves && both)
+            {
+                pending[pending_count++] = branch;
+                pending[pending_count++] = otherwise;
+            }
+            else if (leaves)
+            {
+                pending[pending_count++] = taken;
+            }
+        }
+        else if (keyword_kind == PARSE_KIND_WHILE || keyword_kind == PARSE_KIND_FOR)
+        {
+            // The loop's parentheses' children: its condition (a while's tokens inside them, a for's second clause), then
+            // the body after them.
+            uint32_t open = BUSTER_CHECK_NONE;
+            uint32_t body = BUSTER_CHECK_NONE;
+            uint32_t clauses = 0;
+            uint32_t second = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[node]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                open = parser->tree.roles[child] == PARSE_ROLE_OPEN_CONDITION || parser->tree.roles[child] == PARSE_ROLE_OPEN_FOR ? child : open;
+                const bool clause = child < node && parser->tokens.kinds[child] == PARSE_KIND_SEMI && keyword_kind == PARSE_KIND_FOR;
+                clauses += clause ? 1 : 0;
+                second = clause && clauses == 2 ? child : second;
+                body = child > node ? child : body;
+            }
+            // A for's condition is its second clause: absent (true) when that `;` has nothing under it.
+            const bool forever = keyword_kind == PARSE_KIND_FOR ? second != BUSTER_CHECK_NONE && (second == 0 || !check_input_fallthrough_within(parser, second - 1, second)) :
+                                                                  open != BUSTER_CHECK_NONE && check_input_fallthrough_condition(reader, open, node) == 1;
+            leaves = forever && body != BUSTER_CHECK_NONE && !check_input_fallthrough_breaks(reader, body);
+        }
+        else
+        {
+            leaves = false;
+        }
+    }
+    return leaves;
+}
+
+// Whether fallthrough null statement `token` can't run, as clang's CFG has it (#1126's review): a statement before it in
+// its block, or in the blocks around it, never completes (check_input_fallthrough_leaves) with no label or case label
+// after it, which would let control in again. A statement at a case label, or one that starts an if's or a loop's
+// body, a labeled statement's or the function's, may run.
+static bool check_input_fallthrough_dead(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t statement = token;
+    uint32_t state = 2;
+    while (state == 2)
+    {
+        const uint32_t parent = statement < count ? parser->tree.parents[statement] : count;
+        if (parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            // The block's statements before this one, in order: each label lets control in (live), each statement that
+            // never completes makes what follows dead.
+            for (uint32_t child = reader->first_child[parent]; child != BUSTER_CHECK_NONE && child < statement; child = reader->next_child[child])
+            {
+                uint32_t inner = child;
+                bool labeled = false;
+                while (inner != BUSTER_CHECK_NONE && (parser->tree.roles[inner] == PARSE_ROLE_LABEL || parser->tree.roles[inner] == PARSE_ROLE_CLOSE_CASE))
+                {
+                    labeled = true;
+                    inner = check_input_fallthrough_labeled(reader, inner);
+                }
+                const bool leaves = parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK && check_input_fallthrough_leaves(reader, child);
+                state = leaves ? 0 : labeled ? 1 : state;
+            }
+            statement = parent;
+        }
+        else
+        {
+            // A function's body, a case's or a label's statement, or a control statement's body: it may run.
+            state = 1;
+        }
+    }
+    return state == 0;
+}
+
+// Whether statement `item` (its top token) adds no CFG block's end of its own after a fallthrough that can't run, as clang
+// builds the block (#1126's review): no conditional operator, `&&` or `||` (a label's address excepted), no jump, loop,
+// if, switch, label or case label, no other fallthrough (the block's last is the one clang takes) and no call of
+// __builtin_unreachable or __builtin_trap, anywhere in it; a block or a statement expression of such statements is one.
+static bool check_input_fallthrough_straight(const CheckInputReader* reader, uint32_t item)
+{
+    const Parser* parser = reader->parser;
+    bool straight = item < parser->tokens.count && (parser->tokens.kinds[item] == PARSE_KIND_SEMI || parser->tree.roles[item] == PARSE_ROLE_CLOSE_BLOCK);
+    for (uint32_t at = straight ? check_input_fallthrough_first(parser, item) : item; straight && at <= item; at += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[at];
+        const uint8_t role = parser->tree.roles[at];
+        straight = kind != PARSE_KIND_QUESTION && kind != PARSE_KIND_PIPEPIPE && (kind != PARSE_KIND_AMPAMP || role == PARSE_ROLE_PREFIX) &&
+                   kind != PARSE_KIND_RETURN && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_BREAK && kind != PARSE_KIND_CONTINUE &&
+                   kind != PARSE_KIND_DO && kind != PARSE_KIND_IF && kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH &&
+                   role != PARSE_ROLE_LABEL && role != PARSE_ROLE_CLOSE_CASE && (kind != PARSE_KIND_SEMI || reader->output->attributes[at] == 0) &&
+                   !check_input_fallthrough_trap(reader, at);
+    }
+    return straight;
+}
+
+// Whether a goto (or a label's address) names plain label `label`, anywhere in the unit.
+static bool check_input_fallthrough_targeted(const CheckInputReader* reader, uint32_t label)
+{
+    const Parser* parser = reader->parser;
+    bool targeted = false;
+    for (uint32_t token = 0; token < parser->tokens.count && !targeted; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        targeted = (kind == PARSE_KIND_GOTO || kind == PARSE_KIND_AMPAMP) && check_sparse_get(reader->output->label_targets, token) == label;
+    }
+    return targeted;
+}
+
+// Whether the code after a fallthrough that can't run (`token`, check_input_fallthrough_dead) reaches a case or default
+// label in its CFG block, as clang's analysis then takes it, with only a warning (and instead of
+// check_input_fallthrough_placed, which looks through plain labels that clang, for code that can't run, doesn't):
+// statements that don't end a block (check_input_fallthrough_straight), then the label; an if
+// without an else may come last, its false edge the label's. A jump, a loop, an if with an else, another fallthrough (the
+// last in a block is the one clang takes), a statement expression, and a plain label that a goto doesn't name end it
+// (an empty one that a goto names is looked through, as clang looks through a reachable block of no statements).
+static bool check_input_fallthrough_flows(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t statement = token;
+    uint32_t result = 2;
+    while (result == 2)
+    {
+        const uint32_t parent = statement < count ? parser->tree.parents[statement] : count;
+        const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+        if (parent_role == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            // The block's statements after this one.
+            uint32_t child = reader->next_child[statement];
+            bool pending_if = false;
+            while (result == 2 && child != BUSTER_CHECK_NONE)
+            {
+                const uint8_t role = parser->tree.roles[child];
+                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? reader->first_child[child] : BUSTER_CHECK_NONE;
+                const bool straight = check_input_fallthrough_straight(reader, child);
+                bool if_alone = keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_IF;
+                for (uint32_t branch = if_alone ? reader->first_child[child] : BUSTER_CHECK_NONE; branch != BUSTER_CHECK_NONE; branch = reader->next_child[branch])
+                {
+                    if_alone = if_alone && parser->tokens.kinds[branch] != PARSE_KIND_ELSE;
+                }
+                const uint32_t labeled = role == PARSE_ROLE_LABEL ? check_input_fallthrough_labeled(reader, child) : BUSTER_CHECK_NONE;
+                const bool empty_label = labeled != BUSTER_CHECK_NONE && parser->tokens.kinds[labeled] == PARSE_KIND_SEMI &&
+                                         (labeled == 0 || !check_input_fallthrough_within(parser, labeled - 1, labeled)) &&
+                                         check_input_fallthrough_targeted(reader, child);
+                if (role == PARSE_ROLE_CLOSE_CASE)
+                {
+                    result = 1;
+                }
+                else if (pending_if)
+                {
+                    // An if without an else whose false edge isn't a case label's.
+                    result = 0;
+                }
+                else if (straight || empty_label)
+                {
+                    child = reader->next_child[child];
+                }
+                else if (if_alone)
+                {
+                    pending_if = true;
+                    child = reader->next_child[child];
+                }
+                else
+                {
+                    result = 0;
+                }
+            }
+            // Out of the block, to the statements after it, but for an if's pending false edge.
+            result = result == 2 && pending_if ? 0 : result;
+            statement = parent;
+        }
+        else if (parent_role == PARSE_ROLE_CLOSE_CASE)
+        {
+            // A case label's statement: what follows the label.
+            statement = parent;
+        }
+        else
+        {
+            // A function's, a switch's or a control statement's end, a plain label's statement.
+            result = 0;
+        }
+    }
+    return result == 1;
+}
+
 // Whether a fallthrough null statement (`token`, its `;`) directly precedes a switch label, as clang's analysis of the
 // function's CFG has it: the statement that runs after it, past statements without executable ones
 // (check_input_fallthrough_item: null statements, empty compounds, plain labels on them), out of compound statements, the
@@ -1115,7 +1508,8 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 {
                     check_input_report(reader, at, CHECK_INPUT_FALLTHROUGH_SWITCH);
                 }
-                else if (check_input_fallthrough_analyzed(reader, token) && !check_input_fallthrough_placed(reader, token))
+                else if (check_input_fallthrough_analyzed(reader, token) &&
+                         !(check_input_fallthrough_dead(reader, token) ? check_input_fallthrough_flows(reader, token) : check_input_fallthrough_placed(reader, token)))
                 {
                     // clang's analysis of the function's CFG reports it at the statement's first token.
                     uint32_t first = token;

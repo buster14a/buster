@@ -127,6 +127,20 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "fallthrough before a variable", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { extern int z; } case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "fallthrough before a function pointer variable", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { int (*h)(int r); } case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "fallthrough before a variably modified typedef", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { typedef int V[x]; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        // A fallthrough that can't run (#1126's review): clang takes it, with only a warning, when its CFG block reaches a case
+        // label, after a return, a break, a goto whose label comes later, a constant-true if's return and an infinite loop,
+        // through straight-line code, a block of it and an if without an else; but not past another return, a loop or the
+        // switch's end, nor where a label (or a case before it) lets control reach it.
+        { "an unreachable fallthrough after a return", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; __attribute__((fallthrough)); x++; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough after a break", "int f(int x, int y) {\nswitch (x) {\ncase 1: break; __attribute__((fallthrough)); x++; { int z = y; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough before a goto's later label", "int f(int x, int y) {\nswitch (x) {\ncase 1: goto skip; __attribute__((fallthrough)); x++; skip: ; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough after if (1) and an infinite loop", "int f(int x, int y) {\nswitch (x) {\ncase 1: if (1) return 2; __attribute__((fallthrough)); if (y) x++; case 2: for (;;) ; __attribute__((fallthrough)); y++; case 3: return 1;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough before a return", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; __attribute__((fallthrough)); x++; return 3; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough at the switch's end", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; __attribute__((fallthrough)); x++;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough before a conditional", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; __attribute__((fallthrough)); x = y ? 1 : 2; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "an unreachable fallthrough before a label no goto names", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; __attribute__((fallthrough)); here: ; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a fallthrough after a conditional return", "int f(int x, int y) {\nswitch (x) {\ncase 1: if (y) return 2; __attribute__((fallthrough)); x++; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a fallthrough after a return and a case", "int f(int x, int y) {\nswitch (x) {\ncase 1: return 2; case 5: __attribute__((fallthrough)); x++; case 2: return 1;\n}\nreturn 0;\n}\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/label-attributes.c", directory);
