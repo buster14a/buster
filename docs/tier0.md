@@ -179,7 +179,9 @@ table. The kinds are:
   without it) and a C memory order, any of the six. Tier 0 defers it and emits `xchg` (an exchange) or `lock xadd` (an
   addition) of the operand's register with the object, the class's bytes, a full barrier on x86-64 that every order
   takes, then the old value into the address's register, extended as the class's load extends it. No consumer moves an
-  access across it or drops it; `ir_lower` makes it the IR's `rmw` with its class's natural alignment. The C producer
+  access across it or drops it; `ir_lower` makes it the IR's `rmw` with its class's natural alignment. The typed
+  interpreter runs it as one thread does, refusing a misaligned object and checking it as a load's (undefined bytes are
+  reported) before a store's. The C producer
   gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
   `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
   guide](c-builtins-integration.md)'s "Direct read/modify/writes").

@@ -1084,9 +1084,16 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 {
                     // An atomic read/modify/write (#1059), as one thread runs it: its object's old value read, the operand
                     // (an exchange) or the sum (an addition) written, a byte at a time through volatile accesses as an
-                    // atomic load's and store's are here, the old value the result.
+                    // atomic load's and store's are here, the old value the result. With memory checks, its address is
+                    // refused where its declared alignment isn't, whatever its bytes hold; then its object is checked as a
+                    // load's, which reports reading undefined bytes, before a store's marks them written.
                     const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
-                    result.status = interpreter_memory_access(&runtime, av.low, bytes, true);
+                    const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
+                    result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
+                    if (result.status == INTERPRETER_OK)
+                    {
+                        result.status = interpreter_memory_access(&runtime, av.low, bytes, true);
+                    }
                     if (result.status == INTERPRETER_OK)
                     {
                         uint64_t old = 0;

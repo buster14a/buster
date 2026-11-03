@@ -551,6 +551,74 @@ static void ir_interpreter_test_memory(IrInterpreterTestTally* tally, Arena* mem
     arena_pop_to(memory, mark);
 }
 
+// #1059's atomic read/modify/writes, rmw, as one thread runs them: an addition and an exchange of an i32 in a slot return
+// its old values and leave the sum and the operand, and the object is checked as a load's and a store's: its undefined
+// bytes reported (or not, when the check is off), and an address misaligned for the access's declared alignment refused.
+static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    IrFunction function = { 0 };
+    const IrSizes sizes = {
+        .instruction_count = 10,
+        .block_count = 1,
+        .constant_count = 2,
+        .slot_count = 1,
+        .address_count = 1,
+    };
+    if (ir_create(memory, &sizes, &function) == IR_OK)
+    {
+        // x = 5; a = rmw x add 3 (5, x 8); b = rmw x xchg 5 (8, x 5); a + b + x.
+        function.result_type = IR_I32;
+        function.block_offsets[1] = 10;
+        function.slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64 };
+        function.constants[0].low = 5;
+        function.constants[1].low = 3;
+        function.addresses[0] = (IrAddress){ .offset = 1, .scale = 1 };
+        ir_interpreter_test_instruction(&function, 0, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_RMW_ADD);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_RMW_EXCHANGE);
+        ir_interpreter_test_instruction(&function, 6, IR_ADD, IR_I32, 4, 5, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 7, IR_LOAD, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 8, IR_ADD, IR_I32, 6, 7, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t i = 2; i < 8; i += 1)
+        {
+            function.alignment_log2[i] = i == 2 || i == 4 || i == 5 || i == 7 ? 2 : 0;
+        }
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT;
+        function.flags[5] = BUSTER_IR_ATOMIC;
+        const IrInterpreterFunction code = { .symbol = 71, .function = &function };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
+                                "atomic addition and exchange return old values and leave the sum and the operand");
+        // Its store a constant's in place: the read/modify/writes read undefined bytes.
+        ir_interpreter_test_instruction(&function, 2, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.alignment_log2[2] = 0;
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){ 0 },
+                                "an atomic read/modify/write of undefined bytes diagnosed");
+        InterpreterOptions options = interpreter_default_options();
+        options.check_undefined = false;
+        const InterpreterResult unchecked = ir_interpret(&program, 71, 0, 0, &options, execution);
+        ir_interpreter_test_expect(tally, unchecked.status == INTERPRETER_OK, "an atomic read/modify/write's undefined-byte check can be disabled");
+        // The read/modify/writes at the slot's address plus one, inside it, claiming align=4: refused.
+        ir_interpreter_test_instruction(&function, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        function.alignment_log2[2] = 2;
+        ir_interpreter_test_instruction(&function, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_RMW_ADD);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_RMW_EXCHANGE);
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_MEMORY, (InterpreterValue){ 0 },
+                                "a misaligned atomic read/modify/write rejected");
+    }
+    else
+    {
+        ir_interpreter_test_expect(tally, false, "atomic read/modify/write fixture allocation");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_interpreter_test_mappings(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -807,6 +875,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_eightbytes(&tally, &memory, &execution);
             ir_interpreter_test_native_records(&tally, &memory, &execution);
             ir_interpreter_test_memory(&tally, &memory, &execution);
+            ir_interpreter_test_atomic_rmw(&tally, &memory, &execution);
             ir_interpreter_test_mappings(&tally, &memory, &execution);
             ir_interpreter_test_generated(&tally, seed, count);
         }

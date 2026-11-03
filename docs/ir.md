@@ -496,7 +496,9 @@ so promotion and private-field replacement leave its object in memory; dataflow
 reads its address and its operand, as a store's. Both verifiers check its flags
 (`ir_rmw_flags_valid`) and its type and alignment (`ir_atomic_access`, its own
 rule's, `IR_RULE_ATOMIC_RMW`); both interpreters run it as one thread does, a
-byte at a time through volatile accesses. Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
+byte at a time through volatile accesses, refusing an address misaligned for its
+declared alignment and checking its object as a load's (undefined bytes are
+reported) before a store's. Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
 the operand copied to the scratch register, `xchg` or `lock xadd` of the object's
 width (never the narrow value's 32-bit register's), and the old value
 zero-extended as a load's is, a barrier no load folds past. `tests/ir/atomics.ir`
