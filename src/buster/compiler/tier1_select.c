@@ -1689,6 +1689,9 @@ struct Tier1SelectPlan
     uint64_t arena_bytes;
     // The path that planned it, which the legacy emitter's choice of immediates' forms takes too.
     bool vector;
+    // Whether the function has vectors (#141): selection's one scan of it (ir_function_has_vectors_path), which the CFG
+    // consumer's chain check and its problem read rather than scan the function again.
+    bool vectors;
 };
 
 typedef struct Tier1SelectCode Tier1SelectCode;
@@ -3903,6 +3906,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .canonical = canonical,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
     };
+    plan.vectors = forest.vectors;
     // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
     // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
     // are munch's, made here in the levels' order, as the scalar path makes every node's, so that a node either path

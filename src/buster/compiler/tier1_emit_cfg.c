@@ -79,8 +79,8 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     // and so does a variadic definition, whose prologue fills its register save area (tier1_emit_cfg_frame_flags).
     chain &= function->label_count == 0 && !function->variadic && function->parameter_passed == 0;
     // A vector (#141) needs the vector class's allocation at its width: a function with one is the CFG consumer's, which
-    // one scan of it says.
-    chain &= !ir_function_has_vectors_path(function, true);
+    // selection's scan of it says (Tier1SelectPlan.vectors).
+    chain &= !plan->vectors;
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -410,8 +410,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     prepared->x87_count = 0;
     prepared->vector_bytes = 0;
     prepared->function = function;
-    // Whether the function has vectors (#141): one scan of it, so that a function without one pays no node's vector checks.
-    const bool vectors = ir_function_has_vectors_path(function, true);
+    // Whether the function has vectors (#141), from selection's scan of it, so that a function without one pays no node's
+    // vector checks.
+    const bool vectors = plan->vectors;
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
         const bool x87 = function->type[node] == IR_F80;
