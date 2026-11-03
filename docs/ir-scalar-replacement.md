@@ -79,6 +79,25 @@ when comparing promoted results; refused volatile/escaped cases preserve
 their original trace. Accepted fixtures end with no memory accesses or
 residual aggregate slots after promotion.
 
+## In `--tier1`
+
+`--tier1` doesn't run this stage (#1189). An experiment ran it before
+promotion, in `--tier1`'s pipeline, and counted user-space instructions by
+callgrind against the same head without it:
+
+| | without SROA | with SROA |
+| --- | ---: | ---: |
+| speedtest1 | 3,869.8 M | 3,868.5 M (−0.03%) |
+| Lua 5.4.8's five scripts | 7,610.3 M | 7,613.9 M (+0.05%) |
+| speedtest1's records | 353,256 | 353,395 |
+
+On speedtest1 it split 18,270 slots into 18,270 fields. Those are the C
+driver's scalar locals, one typed slot each, which promotion takes without it.
+It refused the 1,144 slots that matter: aggregates whose address escapes to a
+call. `--tier1 -c` of speedtest1's unit took 948 ms against 828 ms, on one CPU
+of a cloud container, so as a ratio only. The stage pays only once inlining
+removes those escapes.
+
 Memcopies, partial/overlapping field splitting, dynamic array indexing,
 pointer phi/select analysis and aggregate call ABI handling remain outside
 this conservative implementation. Target-host compile-time, stack-size and
