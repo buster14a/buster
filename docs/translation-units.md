@@ -405,8 +405,10 @@ eighths of what the process may still take when the run starts
 (`check_units_memory_read`: the least of `MemAvailable`, or the free pages
 without it, and, for each cgroup v2 from the process's own up to its
 hierarchy's root, `memory.max` less `memory.current`, the files' pages on
-its lists counted as free; a cgroup v1 limit isn't read, so under one the
-machine's memory is the bound), the eighth left for what the estimates
+its lists counted as free, and nothing where a limit's `memory.current`
+can't be read, since what the cgroup uses is then unknown and the lanes
+take turns; a cgroup v1 limit isn't read, so under one the machine's memory
+is the bound), the eighth left for what the estimates
 don't count (the links the lanes keep, the lanes' thread scratch, the
 lanes that take only functions' parts, the link). Each process budgets
 alone: several compilers at once (`make -j`) still add up. A unit takes its
@@ -424,10 +426,13 @@ memory back at each unit's end while another lane waits, and once it has
 no unit left to take, with its release, its pages freed, before it helps
 the other lanes' emissions on the board (#777); the lane that stops taking
 units last in a command that leaves its memory to the exit returns its
-share alone, since no lane takes memory after it. The help waits for the
-lanes still taking units, one of which may wait for that memory, and a
-lane that kept it there deadlocked
-with such a unit (a 16 MiB unit of comments beside a tiny one, by two
+share alone, since no lane takes memory after it. Which lane that is, the
+units' memory counts itself (`CheckUnitsMemory.taking`): the board counts
+the lanes still taking units too, but a run without one (its allocation
+failed) would have every lane take itself for the last, and keep its pages
+while the others still take memory. The help waits for the lanes still
+taking units, one of which may wait for that memory, and a lane that kept
+it there deadlocked with such a unit (a 16 MiB unit of comments beside a tiny one, by two
 lanes with one unit's memory, found in review). So a lane holds memory
 only while it takes units, and waits for nothing but its own units' work
 then. What a unit writes doesn't depend on when it ran, so the outputs are
@@ -436,8 +441,11 @@ units with `--units-memory=1`, which serializes every unit's parse and
 later stages, into each unit's object alone; reads the budget from files
 of its own for each branch of `check_units_memory_read`; requires one of
 two equal units by two lanes to wait for the other's memory; and compiles
-that slow unit beside the tiny one under two budgets, each object its own
-alone, where the deadlock would hang until the children's alarm.
+that slow unit beside the tiny one under two budgets and, under a byte,
+without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands
+for its allocation failing), each object its own alone and the report
+saying that one lane alone kept its pages, where the deadlock would hang
+until the children's alarm.
 
 The estimate (`check_units_estimate`) is 600 bytes a preprocessed token and
 48 MB a unit. On the laptop, `-c --lanes 1` of each of build.sh's 41

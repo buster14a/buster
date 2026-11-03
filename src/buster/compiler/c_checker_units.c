@@ -80,6 +80,9 @@ struct CheckUnitsUnit
 // ends a unit give its memory back rather than keep it for its next; and for --units-memory's report, `waits` the units
 // that waited, and `holders` the lanes that hold memory now, which a lane adds itself to after it takes the memory and
 // takes itself out of before it gives it back, so that it never counts more than hold it, and `most` the most it counted.
+// `taking` counts the lanes that still take units, and so may still take memory, whether or not the run has a board
+// (check_units_lane): the one that stops last, alone, may keep its pages for the process's exit, and `kept` counts the
+// lanes that did, for the report.
 typedef struct CheckUnitsMemory CheckUnitsMemory;
 struct CheckUnitsMemory
 {
@@ -90,6 +93,8 @@ struct CheckUnitsMemory
     uint32_t waits;
     uint32_t holders;
     uint32_t most;
+    uint32_t taking;
+    uint32_t kept;
 };
 
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
@@ -1514,8 +1519,9 @@ static uint64_t check_units_text_value(const char* text, const char* key, uint64
 // its own): the least of MemAvailable (or, without it, the free pages, _SC_AVPHYS_PAGES, which leave out what the kernel
 // could take back) and, for each cgroup from the process's own (`cgroup`'s "0::" line) up to the hierarchy's root, its
 // memory.max less its memory.current, the files' pages on its lists (memory.stat's active_file and inactive_file)
-// counted as free, since the kernel takes them back before it kills. A cgroup v1 limit isn't read: under one, the
-// machine's memory is the bound.
+// counted as free, since the kernel takes them back before it kills. A limit whose memory.current can't be read, or
+// doesn't hold a number, leaves nothing: what the cgroup uses is unknown, and the lanes then take turns. A cgroup v1
+// limit isn't read: under one, the machine's memory is the bound.
 static uint64_t check_units_memory_read(const char* meminfo, const char* cgroup, const char* root)
 {
     char text[8192];
@@ -1548,11 +1554,11 @@ static uint64_t check_units_memory_read(const char* meminfo, const char* cgroup,
         if (limit != UINT64_MAX)
         {
             snprintf(file, sizeof(file), "%.*s/memory.current", (int)end, directory);
-            const uint64_t current = check_units_read_text(file, text, sizeof(text)) != 0 ? check_units_text_value(text, "", 1, 0) : 0;
+            const uint64_t current = check_units_read_text(file, text, sizeof(text)) != 0 ? check_units_text_value(text, "", 1, UINT64_MAX) : UINT64_MAX;
             snprintf(file, sizeof(file), "%.*s/memory.stat", (int)end, directory);
             const bool stat = check_units_read_text(file, text, sizeof(text)) != 0;
             const uint64_t files = stat ? check_units_text_value(text, "active_file ", 1, 0) + check_units_text_value(text, "inactive_file ", 1, 0) : 0;
-            const uint64_t used = current > files ? current - files : 0;
+            const uint64_t used = current == UINT64_MAX ? limit : current > files ? current - files : 0;
             const uint64_t headroom = limit > used ? limit - used : 0;
             result = headroom < result ? headroom : result;
         }
@@ -1830,8 +1836,14 @@ static void check_units_lane(void* argument)
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
-    // The lanes that still take units after this one, which help the units' emissions (#777) from now on.
-    const uint32_t taking = run->board != NULL ? __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE) : 0;
+    // The lanes that still take units after this one: the board's, which help the units' emissions (#777) from now on, and
+    // the units' memory's (#1109), which counts them without a board too, so that only the lane that stops last may keep
+    // its pages, whichever counts first.
+    if (run->board != NULL)
+    {
+        __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE);
+    }
+    const uint32_t taking = __atomic_sub_fetch(&run->memory->taking, 1, __ATOMIC_ACQ_REL);
     if (run->release || taking != 0)
     {
         // Its release gives back its part of the units' memory (#1109), its pages freed, before it helps: the help
@@ -1844,6 +1856,7 @@ static void check_units_lane(void* argument)
         // The lane that stops taking units last keeps its memory for the exit, and no lane takes the units' memory
         // after it: it returns its share alone, without freeing pages.
         check_units_memory_return(lane);
+        __atomic_add_fetch(&run->memory->kept, 1, __ATOMIC_RELAXED);
     }
     arena_pool = 0;
     // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
@@ -2046,8 +2059,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             memset(states, 0, (uint64_t)active * sizeof(*states));
             // The lanes' board (#777): every lane takes units at first. Without its memory, each unit's functions compile
-            // on its lane alone.
-            CheckEmitBoard* board = active > 1 ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
+            // on its lane alone; BUSTER_TEST_NO_UNITS_BOARD, a test hook (test-check-units), stands for its allocation
+            // failing.
+            const bool boarded = active > 1 && getenv("BUSTER_TEST_NO_UNITS_BOARD") == NULL;
+            CheckEmitBoard* board = boarded ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
             if (board != NULL)
             {
                 memset(board, 0, sizeof(*board));
@@ -2058,6 +2073,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             const uint64_t available = command->units_memory != 0 ? 0 : check_units_memory_available();
             CheckUnitsMemory memory = {
                 .limit = command->units_memory != 0 ? command->units_memory : available / 8 * BUSTER_CHECK_UNITS_MEMORY_EIGHTHS,
+                .taking = active,
             };
             CheckUnitsRun run = {
                 .command = command,
@@ -2117,7 +2133,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             }
             if (command->units_memory != 0)
             {
-                fprintf(stderr, "units memory: %u units waited, at most %u lane%s held memory at once\n", memory.waits, memory.most, memory.most != 1 ? "s" : "");
+                fprintf(stderr, "units memory: %u units waited, at most %u lane%s held memory at once, %u lane%s kept pages for the exit\n", memory.waits,
+                        memory.most, memory.most != 1 ? "s" : "", memory.kept, memory.kept != 1 ? "s" : "");
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release), but the last one's in a
             // command without a link that doesn't release its memory: the kept links are all the link reads.

@@ -48,11 +48,13 @@
 //   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
 //   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
 // - The units' memory (#1109, check_units_test_memory): the budget read from files of the test's own for each branch of
-//   check_units_memory_read (without MemAvailable, the free pages: a page at least, bounded); two equal units by two
-//   lanes with a byte of memory, one of which must wait for the other's (unless the process may run on one CPU, where
-//   the command runs one lane), each object its own alone; and a unit of 16 MiB of comments beside a tiny one, by two
-//   lanes with a byte and with one unit's memory, each object its own alone, where a lane that kept its memory while it
-//   helped on the board deadlocked with the slow unit's waiting for it (the children's alarm fails the run).
+//   check_units_memory_read (without MemAvailable, the free pages: a page at least, bounded; a limit whose use can't
+//   be read: nothing); two equal units by two lanes with a byte of memory, one of which must wait for the other's
+//   (unless the process may run on one CPU, where the command runs one lane), each object its own alone; and a unit of
+//   16 MiB of comments beside a tiny one, by two lanes with a byte, with one unit's memory and with a byte without the
+//   board (BUSTER_TEST_NO_UNITS_BOARD), each object its own alone and the last lane alone keeping its pages, where a
+//   lane that kept its memory while it helped on the board deadlocked with the slow unit's waiting for it (the
+//   children's alarm fails the run).
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -87,6 +89,9 @@
 // Enough for the serial duplicate-name merge, but not its four-lane counts (at least 8192 bytes alone).
 #define BUSTER_CHECK_UNITS_TEST_MERGE_SCRATCH 4096
 #define BUSTER_CHECK_UNITS_TEST_MERGE_PATTERN 0xa5
+// The end of --units-memory's report (#1109) under a byte of memory with -c, after how many units waited: one lane at
+// most held memory, and the lane that stopped taking units last alone kept its pages for the exit.
+#define BUSTER_CHECK_UNITS_TEST_MEMORY_REPORT " units waited, at most 1 lane held memory at once, 1 lane kept pages for the exit\n"
 
 typedef struct CheckUnitsTestTally CheckUnitsTestTally;
 struct CheckUnitsTestTally
@@ -472,10 +477,11 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
         snprintf(detail, sizeof(detail), "program %u, %u units, -c by --lanes %s%s", program, count,
                  poisoned || limited ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default",
                  poisoned ? ", the lanes' arenas poisoned" : limited ? ", --units-memory=1" : "");
-        // The limited run's report, its only line: how many units waited, and that one lane at most held memory.
+        // The limited run's report, its only line: how many units waited, that one lane at most held memory, and that
+        // the last lane alone kept its pages.
         const char* report = limited && error_text != NULL ? strstr(error_text, "units memory: ") : NULL;
-        const char* most = report != NULL ? strstr(report, " units waited, at most 1 lane held memory at once\n") : NULL;
-        const bool reported = report == error_text && most != NULL && most[strlen(" units waited, at most 1 lane held memory at once\n")] == 0;
+        const char* most = report != NULL ? strstr(report, BUSTER_CHECK_UNITS_TEST_MEMORY_REPORT) : NULL;
+        const bool reported = report == error_text && most != NULL && most[strlen(BUSTER_CHECK_UNITS_TEST_MEMORY_REPORT)] == 0;
         check_units_test_expect(tally, status == 0 && (limited ? reported : error_bytes == 0), "the units at once write their objects, without a diagnostic", detail);
         free(error_text);
         for (uint32_t u = 0; u < count; u += 1)
@@ -1187,12 +1193,27 @@ static bool check_units_test_memory_file(const char* root, const char* relative,
     return written && parse_test_write(path, text, strlen(text));
 }
 
+// --units-memory's report in `errors`, its only line: true if it ends as BUSTER_CHECK_UNITS_TEST_MEMORY_REPORT does, with
+// how many units waited into `waits`.
+static bool check_units_test_memory_report(const char* errors, unsigned long long* waits)
+{
+    static const char prefix[] = "units memory: ";
+    uint64_t length = 0;
+    char* text = check_units_test_read(errors, &length);
+    char* end = NULL;
+    *waits = text != NULL && strncmp(text, prefix, strlen(prefix)) == 0 ? strtoull(text + strlen(prefix), &end, 10) : 0;
+    const bool reported = end != NULL && strcmp(end, BUSTER_CHECK_UNITS_TEST_MEMORY_REPORT) == 0;
+    free(text);
+    return reported;
+}
+
 // The units' memory (#1109): the budget read from files of the test's own, every branch of check_units_memory_read;
 // two equal units by two lanes with a byte of memory, one of which waits for the other's, each object its own alone; and
-// a unit whose preprocessing outlasts a tiny unit's whole compile, beside it, by two lanes with a byte of memory and with
-// one unit's estimate: the tiny unit's lane, with no unit left to take, gives its memory back before it helps on the
-// board, where it would wait for the slow unit's lane while that lane waits for its memory (a deadlock, which the
-// children's alarm turns into a failure).
+// a unit whose preprocessing outlasts a tiny unit's whole compile, beside it, by two lanes with a byte of memory, with
+// one unit's estimate and with a byte without the board: the tiny unit's lane, with no unit left to take, gives its
+// memory back, its pages freed, before it helps on the board, where it would wait for the slow unit's lane while that
+// lane waits for its memory (a deadlock, which the children's alarm turns into a failure); without the board too, only
+// the slow unit's lane, the last to stop taking units, keeps its pages for the exit.
 static void check_units_test_memory(CheckUnitsTestTally* tally, const char* executable, const char* directory)
 {
     char memory_directory[PATH_MAX];
@@ -1249,6 +1270,25 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
                 { "memory.stat", "active_file 500000000\ninactive_file 0\n" },
             },
             .expected = 2500000000u,
+        },
+        {
+            .name = "a limit without memory.current: nothing",
+            .meminfo = meminfo,
+            .cgroup = "0::/a\n",
+            .files = {
+                { "a/memory.max", "4000000000\n" },
+            },
+            .expected = 0,
+        },
+        {
+            .name = "a limit whose memory.current isn't a number: nothing",
+            .meminfo = meminfo,
+            .cgroup = "0::/a\n",
+            .files = {
+                { "a/memory.max", "4000000000\n" },
+                { "a/memory.current", "unknown\n" },
+            },
+            .expected = 0,
         },
         {
             .name = "cgroup v1 alone: MemAvailable",
@@ -1324,14 +1364,8 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
     check_units_test_expect(tally, written, "write the equal units and their objects alone", memory_directory);
     char* equal[] = { (char*)executable, "--units-memory=1", "--lanes", "2", "-c", "equal_0.c", "equal_1.c", NULL };
     const int equal_status = written ? check_units_test_run(memory_directory, equal, "/dev/null", errors_path, false) : -1;
-    uint64_t length = 0;
-    char* text = check_units_test_read(errors_path, &length);
-    static const char prefix[] = "units memory: ";
-    static const char suffix[] = " units waited, at most 1 lane held memory at once\n";
-    char* end = NULL;
-    const unsigned long long waits = text != NULL && strncmp(text, prefix, strlen(prefix)) == 0 ? strtoull(text + strlen(prefix), &end, 10) : 0;
-    const bool reported = end != NULL && strcmp(end, suffix) == 0;
-    free(text);
+    unsigned long long waits = 0;
+    const bool reported = check_units_test_memory_report(errors_path, &waits);
     // One waits only when both lanes run: on one CPU the command runs one lane (check_driver_cpus), and none waits.
     const bool one_cpu = check_driver_cpus() < 2;
     check_units_test_expect(tally, equal_status == 0 && reported && (waits != 0 || one_cpu),
@@ -1363,8 +1397,11 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
               check_units_test_run(memory_directory, alone_fast, "/dev/null", errors_path, false) == 0;
     check_units_test_expect(tally, written, "write the slow and the tiny unit and their objects alone", memory_directory);
     // A byte of memory, and about one unit's estimate (BUSTER_CHECK_UNITS_UNIT_BYTES and a few tokens), which no two
-    // units fit.
-    static const char* const budgets[] = { "--units-memory=1", "--units-memory=60000000" };
+    // units fit; and a byte of memory without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where
+    // the lanes still count which of them stops taking units last: the tiny unit's lane releases its memory, and the
+    // report says that one lane alone kept its pages.
+    static const char* const budgets[] = { "--units-memory=1", "--units-memory=60000000", "--units-memory=1" };
+    static const char* const runs[] = { "--units-memory=1", "--units-memory=60000000", "--units-memory=1 without the board" };
     static const char* const names[] = { "slow", "fast" };
     for (uint32_t b = 0; written && b < BUSTER_ARRAY_LENGTH(budgets); b += 1)
     {
@@ -1373,9 +1410,15 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
             snprintf(path, sizeof(path), "%s/%s.o", memory_directory, names[n]);
             unlink(path);
         }
+        const bool boardless = b == 2;
         char* together[] = { (char*)executable, (char*)budgets[b], "--lanes", "2", "-c", "slow.c", "fast.c", NULL };
-        const int status = check_units_test_run(memory_directory, together, "/dev/null", errors_path, false);
-        check_units_test_expect(tally, status == 0, "a slow unit beside a tiny one by two lanes: neither lane waits for the other's memory forever", budgets[b]);
+        const bool hooked = !boardless || setenv("BUSTER_TEST_NO_UNITS_BOARD", "1", 1) == 0;
+        const int status = hooked ? check_units_test_run(memory_directory, together, "/dev/null", errors_path, false) : -1;
+        unsetenv("BUSTER_TEST_NO_UNITS_BOARD");
+        unsigned long long slow_waits = 0;
+        const bool slow_reported = check_units_test_memory_report(errors_path, &slow_waits);
+        check_units_test_expect(tally, status == 0, "a slow unit beside a tiny one by two lanes: neither lane waits for the other's memory forever", runs[b]);
+        check_units_test_expect(tally, status != 0 || slow_reported, "a slow unit beside a tiny one by two lanes: the last lane alone keeps its pages", runs[b]);
         for (uint32_t n = 0; status == 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
         {
             char together_path[PATH_MAX];
@@ -1387,7 +1430,7 @@ static void check_units_test_memory(CheckUnitsTestTally* tally, const char* exec
         }
     }
     printf("  memory: %u budgets read from the machine's files; %llu of two equal units waited for a byte of memory%s; a slow unit "
-           "beside a tiny one by %u budgets, each object its own alone\n",
+           "beside a tiny one by %u runs, one without the board, each object its own alone and the last lane alone keeping its pages\n",
            (uint32_t)BUSTER_ARRAY_LENGTH(cases), waits, one_cpu ? " (skipped: the process may run on one CPU, one lane)" : "",
            (uint32_t)BUSTER_ARRAY_LENGTH(budgets));
 }

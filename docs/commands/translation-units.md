@@ -35,18 +35,22 @@ write would show. The lanes' units are held to the memory (#1109,
 (`check_units_estimate`: 600 bytes a token and 48 MB) from seven eighths of
 what the process may take when the run starts (`MemAvailable`, or the free
 pages without it, and each cgroup v2 `memory.max` up its cgroup less what it
-uses, `check_units_memory_read`; not cgroup v1's) before it parses
+uses, nothing where that can't be read, `check_units_memory_read`; not cgroup
+v1's) before it parses
 (`check_units_admit`); a unit that doesn't fit beside what the other lanes hold
 waits until a lane gives its memory back (at its unit's end while one waits,
 and once it has no unit left, before it helps on the board), and a unit alone
 always runs.
 `--units-memory=BYTES`, a test option, sets that budget and reports how many
-units waited and the most lanes that held memory at once. Each lane releases
+units waited, the most lanes that held memory at once and how many lanes kept
+their pages for the exit. Each lane releases
 what its units shared, into its pool and then the pool itself, on the lane as
 soon as it takes no more units, before it helps the others' functions (#777);
 without a link, in a command whose process exits after the lanes (main's,
 which releases no memory), the lane that stops taking units last leaves its
-memory to the exit and returns its share of the budget alone. The
+memory to the exit and returns its share of the budget alone, the last by a
+count of the units' memory's own (`CheckUnitsMemory.taking`), which holds
+without the board too. The
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
 that lane 0 announces and every lane runs, with a worker-budget lease of its
@@ -73,13 +77,16 @@ and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 objects defines, and each of whose units' `-c` objects is the unit's alone
 (by `--lanes` 1, 2, 3 and 8, by default, by 8 poisoned, and by 8 with
 `--units-memory=1`, whose report must say that at most one lane held memory at
-once); the units' memory (#1109: the budget read from files of the test's own,
-without `MemAvailable` the free pages, a page at least and bounded; two equal
+once and one kept its pages); the units' memory (#1109: the budget read from
+files of the test's own, without `MemAvailable` the free pages, a page at least
+and bounded, and a limit whose use can't be read leaving nothing; two equal
 units by two lanes with a byte of memory, one of which must wait unless the
 process may run on one CPU, where the command runs one lane; and
-a 16 MiB unit of comments beside a tiny one, by two lanes with a byte and with
-one unit's memory, which deadlocked before the lanes gave memory back before
-helping);
+a 16 MiB unit of comments beside a tiny one, by two lanes with a byte, with
+one unit's memory and with a byte without the board
+(`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands for its allocation
+failing), which deadlocked before the lanes gave memory back before helping,
+and where only the last lane may keep its pages);
 diagnostics, each unit's alone in the command line's order; refusals, one
 of them over a poisoned stack; the merge on lanes against its twin, by
 `--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
