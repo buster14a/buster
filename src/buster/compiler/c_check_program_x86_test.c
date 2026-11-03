@@ -1692,6 +1692,46 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
                                   "__builtin_ia32_palignr256(d,c,17),__builtin_ia32_palignr256(c,d,32),__builtin_ia32_palignr256(c,d,255)};FOLD(l);"
                                   "v8si deep=x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(__builtin_ia32_pshufd256(y,0x4e))))))))))))))))));"
                                   "FOLD(deep);return (int)h;}");
+    // #799's report and its follow-up through <immintrin.h>, as stb_image, xxHash and zstd call them: every immediate
+    // intrinsic the report names at its immediate's edges (0, the fields' widths and one past them, the lanes' and
+    // elements' counts, 255) and with its operands both ways, stb_image's store of a swapped half, xxHash's
+    // _MM_SHUFFLE(0,3,0,1) and zstd's 0xE8.
+    check_test_program_x86_source(test, clang, target, run_native, "x86-immediate-header-intrinsics",
+                                  "#include <immintrin.h>\n"
+                                  "int tested(int n){unsigned h=2166136261u;__m128i a,b;__m128 f,g;__m128d d,e;__m256i x,y;__m256 p;__m256d q;"
+                                  "fill(&a,16,n);fill(&b,16,n+1);fill(&f,16,n+2);fill(&g,16,n+3);fill(&d,16,n+4);fill(&e,16,n+5);fill(&x,32,n+6);"
+                                  "fill(&y,32,n+7);fill(&p,32,n+8);fill(&q,32,n+9);"
+                                  "__m128i s[]={_mm_shuffle_epi32(a,0),_mm_shuffle_epi32(a,0x4e),_mm_shuffle_epi32(b,_MM_SHUFFLE(0,3,0,1)),"
+                                  "_mm_shuffle_epi32(a,255),_mm_shufflelo_epi16(a,0),_mm_shufflelo_epi16(a,0x1b),_mm_shufflelo_epi16(b,255),"
+                                  "_mm_shufflehi_epi16(a,0),_mm_shufflehi_epi16(a,0x1b),_mm_shufflehi_epi16(b,255)};FOLD(s);"
+                                  "__m128i t[]={_mm_srli_si128(a,0),_mm_srli_si128(a,1),_mm_srli_si128(a,4),_mm_srli_si128(a,15),_mm_srli_si128(a,16),"
+                                  "_mm_srli_si128(a,255),_mm_slli_si128(a,0),_mm_slli_si128(a,1),_mm_slli_si128(a,4),_mm_slli_si128(a,15),"
+                                  "_mm_slli_si128(a,16),_mm_slli_si128(a,255),_mm_bsrli_si128(b,7),_mm_bslli_si128(b,7)};FOLD(t);"
+                                  "__m128 u[]={_mm_shuffle_ps(f,g,0),_mm_shuffle_ps(f,g,0x1b),_mm_shuffle_ps(g,f,0xe4),_mm_shuffle_ps(f,g,255)};FOLD(u);"
+                                  "__m128d v[]={_mm_shuffle_pd(d,e,0),_mm_shuffle_pd(d,e,1),_mm_shuffle_pd(d,e,2),_mm_shuffle_pd(e,d,3)};FOLD(v);"
+                                  "__m128i w[]={_mm_insert_epi16(a,n*977,0),_mm_insert_epi16(a,-1,3),_mm_insert_epi16(b,n,7)};FOLD(w);"
+                                  "int k[]={_mm_extract_epi16(a,0),_mm_extract_epi16(a,5),_mm_extract_epi16(b,7)};FOLD(k);"
+                                  "__m128i l[]={_mm_alignr_epi8(a,b,0),_mm_alignr_epi8(a,a,3),_mm_alignr_epi8(a,b,15),_mm_alignr_epi8(a,b,16),"
+                                  "_mm_alignr_epi8(a,b,17),_mm_alignr_epi8(b,a,31),_mm_alignr_epi8(a,b,32),_mm_alignr_epi8(a,b,255),"
+                                  "_mm_blend_epi16(a,b,0),_mm_blend_epi16(a,a,0x0f),_mm_blend_epi16(a,b,0xa5),_mm_blend_epi16(b,a,255)};FOLD(l);"
+                                  "long long half[2]={0,0};_mm_storel_epi64((__m128i*)half,_mm_shuffle_epi32(a,0x4e));FOLD(half);"
+                                  "__m256i r[]={_mm256_permute4x64_epi64(x,0),_mm256_permute4x64_epi64(x,0xE8),_mm256_permute4x64_epi64(y,0x1b),"
+                                  "_mm256_permute4x64_epi64(x,255),_mm256_shuffle_epi32(x,0),_mm256_shuffle_epi32(x,0x4e),_mm256_shuffle_epi32(y,255),"
+                                  "_mm256_shufflelo_epi16(x,0),_mm256_shufflelo_epi16(x,0x1b),_mm256_shufflelo_epi16(y,255),_mm256_shufflehi_epi16(x,0x1b),"
+                                  "_mm256_shufflehi_epi16(y,255)};FOLD(r);"
+                                  "__m256i m[]={_mm256_permute2x128_si256(x,y,0),_mm256_permute2x128_si256(x,y,0x21),_mm256_permute2x128_si256(x,y,0x13),"
+                                  "_mm256_permute2x128_si256(y,x,0x08),_mm256_permute2x128_si256(x,y,0x80),_mm256_permute2x128_si256(x,y,0x88),"
+                                  "_mm256_permute2x128_si256(x,y,0x31),_mm256_permute2x128_si256(x,y,255),_mm256_blend_epi32(x,y,0),"
+                                  "_mm256_blend_epi32(x,y,0x0f),_mm256_blend_epi32(y,x,0xa5),_mm256_blend_epi32(x,y,255)};FOLD(m);"
+                                  "__m256i o[]={_mm256_alignr_epi8(x,y,0),_mm256_alignr_epi8(x,x,3),_mm256_alignr_epi8(x,y,15),_mm256_alignr_epi8(x,y,16),"
+                                  "_mm256_alignr_epi8(y,x,17),_mm256_alignr_epi8(x,y,31),_mm256_alignr_epi8(x,y,32),_mm256_alignr_epi8(x,y,255)};FOLD(o);"
+                                  "__m256i z[]={_mm256_slli_si256(x,0),_mm256_slli_si256(x,4),_mm256_slli_si256(x,15),_mm256_slli_si256(x,16),"
+                                  "_mm256_slli_si256(x,255),_mm256_srli_si256(x,0),_mm256_srli_si256(x,4),_mm256_srli_si256(x,15),_mm256_srli_si256(x,16),"
+                                  "_mm256_srli_si256(x,255),_mm256_bsrli_epi128(y,4),_mm256_bslli_epi128(y,9)};FOLD(z);"
+                                  "__m128i c[]={_mm256_extracti128_si256(x,0),_mm256_extracti128_si256(x,1),_mm256_extracti128_si256(y,1)};FOLD(c);"
+                                  "__m256 i[]={_mm256_permute_ps(p,0),_mm256_permute_ps(p,0x1b),_mm256_permute_ps(p,255)};FOLD(i);"
+                                  "__m256d j[]={_mm256_permute4x64_pd(q,0),_mm256_permute4x64_pd(q,0x1b),_mm256_permute4x64_pd(q,255)};FOLD(j);"
+                                  "return (int)h;}");
     check_test_program_includes = false;
 }
 

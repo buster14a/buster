@@ -186,6 +186,144 @@ static void check_test_x86_range_mappings(CheckTest* test, const char* clang)
 
 #undef BUSTER_X86_RANGE_8
 
+// A run's diagnostics through a header's macros: the lines of the file `path` that start with `source` and a colon,
+// without them (check_test_x86_range_lines), and of the other lines each note's text from "note: " on, which names the
+// macro the error's call expanded, but not the header's directory, which the two compilers reach by different links.
+// Returns false where the file can't be read or the lines don't fit in `capacity` bytes.
+static bool check_test_x86_header_lines(const char* path, const char* source, char* text, size_t capacity)
+{
+    size_t used = 0;
+    const size_t name = strlen(source);
+    FILE* file = fopen(path, "r");
+    bool result = file != NULL;
+    char line[1024];
+    while (result && fgets(line, sizeof(line), file) != NULL)
+    {
+        const bool own = strncmp(line, source, name) == 0 && line[name] == ':';
+        const char* note = own ? NULL : strstr(line, ": note: ");
+        const char* kept = own ? line + name + 1 : note != NULL ? note + 2 : NULL;
+        const size_t length = kept != NULL ? strlen(kept) : 0;
+        result = used + length < capacity;
+        if (result && kept != NULL)
+        {
+            memcpy(text + used, kept, length);
+            used += length;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    text[used] = 0;
+    return result;
+}
+
+// #799: the immediate intrinsics of the report and its follow-up through <immintrin.h> at znver5, as stb_image, xxHash
+// and zstd call them, each in a function of its own: one past its immediate's range, below it, and not a constant, and
+// every one at its range's top. Clang reports each error at the macro's use in the source, with a note naming the macro;
+// both of the driver's paths must give its lines and its exit status.
+static void check_test_x86_header_ranges(CheckTest* test, const char* clang)
+{
+#define BUSTER_X86_HEADER_PARAMETERS "(__m128i a,__m128 g,__m128d d,__m256i x,__m256 p,__m256d q,int n)"
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        int status;
+    } fixtures[] =
+    {
+        { "SSE immediates past their ranges",
+          "__m128i f1" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_epi32(a,256);}\n"
+          "__m128i f2" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_epi32(a,-1);}\n"
+          "__m128i f3" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_epi32(a,n);}\n"
+          "__m128i f4" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shufflelo_epi16(a,256);}\n"
+          "__m128i f5" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shufflehi_epi16(a,256);}\n"
+          "__m128i f6" BUSTER_X86_HEADER_PARAMETERS "{return _mm_srli_si128(a,256);}\n"
+          "__m128i f7" BUSTER_X86_HEADER_PARAMETERS "{return _mm_slli_si128(a,256);}\n"
+          "__m128 f8" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_ps(g,g,256);}\n"
+          "__m128d f9" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_pd(d,d,4);}\n"
+          "__m128i f10" BUSTER_X86_HEADER_PARAMETERS "{return _mm_insert_epi16(a,n,8);}\n"
+          "int f11" BUSTER_X86_HEADER_PARAMETERS "{return _mm_extract_epi16(a,8);}\n"
+          "__m128i f12" BUSTER_X86_HEADER_PARAMETERS "{return _mm_alignr_epi8(a,a,256);}\n"
+          "__m128i f13" BUSTER_X86_HEADER_PARAMETERS "{return _mm_blend_epi16(a,a,256);}\n"
+          "__m128i f14" BUSTER_X86_HEADER_PARAMETERS "{return _mm_blend_epi16(a,a,n);}\n",
+          1 },
+        { "AVX2 immediates past their ranges",
+          "__m256i f1" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_permute4x64_epi64(x,256);}\n"
+          "__m256i f2" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_permute4x64_epi64(x,n);}\n"
+          "__m256i f3" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_shuffle_epi32(x,256);}\n"
+          "__m256i f4" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_permute2x128_si256(x,x,256);}\n"
+          "__m256i f5" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_alignr_epi8(x,x,256);}\n"
+          "__m256i f6" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_blend_epi32(x,x,256);}\n"
+          "__m256i f7" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_slli_si256(x,256);}\n"
+          "__m256i f8" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_srli_si256(x,256);}\n"
+          "__m256i f9" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_bsrli_epi128(x,-1);}\n"
+          "__m128i f10" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_extracti128_si256(x,2);}\n"
+          "__m256i f11" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_shufflelo_epi16(x,256);}\n"
+          "__m256i f12" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_shufflehi_epi16(x,256);}\n"
+          "__m256 f13" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_permute_ps(p,256);}\n"
+          "__m256d f14" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_permute4x64_pd(q,256);}\n",
+          1 },
+        { "the immediates at their ranges' tops",
+          "__m128i f1" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_epi32(a,255)+_mm_shufflelo_epi16(a,255)+_mm_shufflehi_epi16(a,255)+"
+          "_mm_srli_si128(a,255)+_mm_slli_si128(a,255)+_mm_insert_epi16(a,n,7)+_mm_alignr_epi8(a,a,255)+_mm_blend_epi16(a,a,255)+"
+          "_mm_extract_epi16(a,7)+_mm256_extracti128_si256(x,1);}\n"
+          "__m128 f2" BUSTER_X86_HEADER_PARAMETERS "{return _mm_shuffle_ps(g,g,255)+(__m128)_mm_shuffle_pd(d,d,3);}\n"
+          "__m256i f3" BUSTER_X86_HEADER_PARAMETERS "{return _mm256_permute4x64_epi64(x,255)+_mm256_shuffle_epi32(x,255)+"
+          "_mm256_permute2x128_si256(x,x,255)+_mm256_alignr_epi8(x,x,255)+_mm256_blend_epi32(x,x,255)+_mm256_slli_si256(x,255)+"
+          "_mm256_srli_si256(x,255)+_mm256_bsrli_epi128(x,255)+_mm256_shufflelo_epi16(x,255)+_mm256_shufflehi_epi16(x,255)+"
+          "(__m256i)_mm256_permute_ps(p,255)+(__m256i)_mm256_permute4x64_pd(q,255);}\n",
+          0 },
+    };
+#undef BUSTER_X86_HEADER_PARAMETERS
+    char directory[] = "/tmp/buster-x86-header-range-XXXXXX";
+    const bool ready = mkdtemp(directory) != NULL;
+    check_test_expect(test, ready, "x86 header range directory");
+    char path[256];
+    char output[256];
+    char errors[256];
+    snprintf(path, sizeof(path), "%s/source.c", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
+    snprintf(errors, sizeof(errors), "%s/errors", directory);
+    const char* const options[] = { "-march=znver5" };
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[8192];
+        const int length = snprintf(source, sizeof(source), "#include <immintrin.h>\n%s", fixtures[i].source);
+        const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-fno-color-diagnostics", (char*)options[0], path, NULL };
+        const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
+        static char expected[8192];
+        static char text[8192];
+        const bool read = check_test_x86_header_lines(errors, path, expected, sizeof(expected));
+        // Each refused function's error, and its note; none where every immediate is in range.
+        uint32_t errors_seen = 0;
+        for (const char* at = strstr(expected, ": error: "); at != NULL; at = strstr(at + 1, ": error: "))
+        {
+            errors_seen += 1;
+        }
+        static char description[3 * 8192];
+        snprintf(description, sizeof(description), "x86 header ranges, %s: Clang status %d, expected %d, %u errors:\n%s", fixtures[i].name, oracle_status,
+                 fixtures[i].status, errors_seen, expected);
+        check_test_expect(test, read && oracle_status == fixtures[i].status && errors_seen == (fixtures[i].status != 0 ? 14u : 0u), description);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const int status = written ? check_test_packed_run_options(NULL, path, output, errors, scalar != 0, false, options, BUSTER_ARRAY_LENGTH(options)) : -1;
+            const bool same = check_test_x86_header_lines(errors, path, text, sizeof(text)) && status == oracle_status && strcmp(text, expected) == 0;
+            snprintf(description, sizeof(description), "x86 header ranges, %s, scalar %u: status %d, Clang's %d:\n%s", fixtures[i].name, scalar, status,
+                     oracle_status, text);
+            check_test_expect(test, same, description);
+        }
+    }
+    if (ready)
+    {
+        unlink(path);
+        unlink(output);
+        unlink(errors);
+        rmdir(directory);
+    }
+}
+
 static void check_test_x86_diagnostic_storage(CheckTest* test)
 {
     Arena scratch = arena_reserve(4096);
@@ -952,6 +1090,7 @@ static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const 
     check_test_x86_diagnostic_storage(test);
     check_test_x86_context_storage(test);
     check_test_x86_range_mappings(test, clang);
+    check_test_x86_header_ranges(test, clang);
     static const struct
     {
         const char* name;

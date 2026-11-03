@@ -97,7 +97,7 @@ as build/x86_mode16.s -o build/x86_mode16.o
 ./build/compiler test-x86-encoder --compare-object build/x86_mode16.o 400000 --seed 1 --mode16
 ```
 
-(`build.sh` deletes `build/`, so run these after building.) The printed assembly
+The printed assembly
 uses only operands GNU as encodes with the same form (`{load}`/`{store}`,
 `{vex}` and `{evex}`, immediates outside the imm8 range for imm32 forms, `{nf}`
 for APX's NF forms, `{dfv=...}` for `ccmp`'s and `ctest`'s default flags value,
