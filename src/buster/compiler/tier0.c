@@ -524,6 +524,9 @@ struct Tier0Function
     uint32_t x87_constant_count;
     bool x87;
     bool int128;
+    // Whether the function saves every callee-saved register and restores it, as LLVM's llvm.eh.unwind.init makes a
+    // function that calls __builtin_unwind_init (#148): its frame then holds their values, which an unwinder reads.
+    bool unwind_init;
     const uint64_t* vector_constants;
     const uint8_t* vector_constant_bytes;
     uint32_t vector_constant_count;
@@ -4431,6 +4434,11 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
         frame->saved |= (frame->clobbers & 1u << tier0_callee_saved[c]) != 0 ? 1u << c : 0;
     }
     frame->saved |= frame->based ? 1u << BUSTER_TIER0_SAVED_R15 : 0;
+    // __builtin_unwind_init's function saves them all (Tier0Function.unwind_init), rbp as the frame pointer where it is one.
+    for (uint32_t c = 0; function->unwind_init && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    {
+        frame->saved |= tier0_callee_saved[c] != X86_REGISTER_RBP || !frame->pointer ? 1u << c : 0;
+    }
     // The frame pointer's push, first, counts with the others.
     frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
 }

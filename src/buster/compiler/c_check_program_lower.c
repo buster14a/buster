@@ -704,6 +704,9 @@ struct CheckLowerWriter
     // values or X86 entries (Tier0Function.vectors's): an entry of class VECTOR, or an x86 builtin's X86 entry, whose
     // values may all be integers (an opmask's).
     bool int128;
+    // Whether the body calls __builtin_unwind_init, whose function saves every callee-saved register
+    // (Tier0Function.unwind_init).
+    bool unwind_init;
     bool vectors;
     // Whether the function's x86 builtins take or give masks in Tier 0's mask class (Tier0Function.masks, #179).
     bool masks;
@@ -8352,6 +8355,9 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
         }
         else
         {
+            // __builtin_unwind_init's leaf does nothing: its function saves every callee-saved register, as LLVM's
+            // llvm.eh.unwind.init makes it (#1126's review), which Tier 0's frame does (Tier0Function.unwind_init).
+            writer->unwind_init |= leaf == CBUILTIN_X86_HELPER_UNWIND_INIT;
             check_lower_helper(writer, node);
         }
     }
@@ -12297,6 +12303,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->varargs_count = 0;
         writer->x87 = check_lower_x87(writer, result);
         writer->int128 = false;
+        writer->unwind_init = false;
         writer->vectors = false;
         writer->masks = false;
         writer->operation_count = 0;
@@ -12745,6 +12752,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->x87 = true;
         }
         function->int128 = writer->int128;
+        function->unwind_init = writer->unwind_init;
         function->vectors = writer->vectors;
         function->masks = writer->masks;
         if (writer->vectors)

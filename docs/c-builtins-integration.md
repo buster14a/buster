@@ -1391,9 +1391,11 @@ features. Their prototypes are clang's metadata's:
 - `__builtin_memcpy_inline` and `__builtin_memset_inline`: their constant
   size's bytes, by `rep movsb` and `rep stosb`, where clang's code stores them
   itself;
-- `__builtin_unwind_init`: nothing. clang's code pushes and pops the
-  callee-saved registers in its caller's frame and computes nothing, and a leaf
-  preserves them anyway;
+- `__builtin_unwind_init`: a leaf that does nothing, whose caller's frame
+  saves every callee-saved register (rbx, r12 to r15, and rbp where it isn't the
+  frame pointer) and restores it, with its unwind information, as LLVM's
+  `llvm.eh.unwind.init` makes it (`Tier0Function.unwind_init`, #1126's review);
+  ordinary Tier 1 leaves such a function to Tier 0;
 - `__builtin_init_dwarf_reg_size_table(p)`: 8 in each of the 17 bytes at p, the
   sizes of the DWARF registers rax to rip, as clang's code stores them;
 - `__builtin_set_flt_rounds(v)`: the rounding mode `FLT_ROUNDS`'s value v names,

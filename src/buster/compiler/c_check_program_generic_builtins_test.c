@@ -327,6 +327,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "int status=0;waitpid(pid,&status,0);mix((unsigned)status&0x7f);"
         "return (int)(h^(h>>32));}",
         "generic-rounding-unwinder-and-trap", clang);
+    // __builtin_unwind_init's function saves the callee-saved registers rbx and r12 to r15 in its prologue, as clang's
+    // does (#1126's review), where a function that doesn't call it, and uses none of them, saves none: the leading pushes
+    // of each function's code, read by the program itself (past an endbr64, and a frame pointer's move).
+    check_test_program_source(test,
+        "static void saver(void){__builtin_unwind_init();}"
+        "static int plain(int x){return x+1;}"
+        "static int kept(int x){int a=x*3,b=x*5;__builtin_unwind_init();return a+b;}"
+        "static unsigned pushed(const unsigned char* code){unsigned mask=0;unsigned i=0;int going=1;"
+        "if(code[0]==0xf3&&code[1]==0x0f&&code[2]==0x1e&&code[3]==0xfa)i=4;"
+        "while(going&&i<64){if(code[i]>=0x50&&code[i]<=0x57){mask|=1u<<(code[i]-0x50);i+=1;}"
+        "else if(code[i]==0x41&&code[i+1]>=0x50&&code[i+1]<=0x57){mask|=1u<<(code[i+1]-0x50+8);i+=2;}"
+        "else if(code[i]==0x48&&code[i+1]==0x89&&code[i+2]==0xe5){i+=3;}else going=0;}return mask;}"
+        "int tested(int n){const unsigned callee=1u<<3|1u<<12|1u<<13|1u<<14|1u<<15;saver();"
+        "return (int)((pushed((const unsigned char*)saver)&callee)*4+(pushed((const unsigned char*)kept)&callee)*2+"
+        "((pushed((const unsigned char*)plain)&callee)!=0))+plain(n)*7+kept(n);}",
+        "generic-unwind-init-saves", clang);
     // The alloca variants' bytes and alignments, in a loop whose allocations each stay apart; the checks' values; the
     // annotation's integer, once evaluated; and addressof's and function_start's addresses, of a local, a member, an
     // array, a function, and in static data.
