@@ -549,11 +549,36 @@ typedef struct CheckCommonEmission
     const uint8_t* evaluated;
     const uint32_t* parents;
     uint8_t* emitted;
+    // Whether a discarded conditional's arms carry an effect: CONDITIONAL answers its arms' column entries,
+    // COMMA its result operand's and everything else its own node's effect. Children precede parents in the
+    // graph, so one ascending pass fills it and every query stays iterative.
+    const uint8_t* arm_effects;
+    // The deferred-emission worklist. Each (kind, node) frame stands in for a recursive call the
+    // no-recursion rule forbids; push order is the calls' reverse so popping replays them exactly. A
+    // full worklist fails the translation rather than dropping warnings.
+    uint32_t* work_nodes;
+    uint8_t* work_kinds;
+    uint32_t work_capacity;
+    uint32_t work_count;
     Arena* scratch;
 } CheckCommonEmission;
 
-static void check_common_emit_tree(CheckCommonEmission* emission, uint32_t node);
-static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node);
+// The worklist frame kinds.
+#define BUSTER_CHECK_EMIT_TREE 0u
+#define BUSTER_CHECK_EMIT_CHILDREN 1u
+#define BUSTER_CHECK_EMIT_OWN 2u
+#define BUSTER_CHECK_EMIT_COMMA 3u
+#define BUSTER_CHECK_EMIT_COMMA_TAIL 4u
+#define BUSTER_CHECK_EMIT_COMMA_END 5u
+#define BUSTER_CHECK_EMIT_MARKER 6u
+#define BUSTER_CHECK_EMIT_MARK 7u
+#define BUSTER_CHECK_EMIT_DIV_SCAN 8u
+#define BUSTER_CHECK_EMIT_DIV_OWN 9u
+#define BUSTER_CHECK_EMIT_SIGN_SCAN 10u
+#define BUSTER_CHECK_EMIT_SIGN_OWN 11u
+
+static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind);
+static void check_common_emit_run(CheckCommonEmission* emission);
 static void check_common_own(CheckCommonEmission* emission, uint32_t node);
 
 // The node a discard marker points at inside an operand: a comma resolves to its result and a conditional
@@ -589,80 +614,63 @@ static bool check_common_literal_zero(const Parser* parser, const CheckStream* s
 // Whether a conditional's arm carries an effect along its own value path and so keeps the statement quiet:
 // `x ? f() : y` and `x ? (y, x = 1) : z` do not report, while `x ? (x = 1, y) : z` still does because the
 // comma's value is the quiet `y`.
-static bool check_common_arm_effect(const CheckGraph* graph, uint32_t node)
+static bool check_common_arm_at(const CheckCommonEmission* emission, uint32_t node)
 {
-    bool result = false;
-    if (node < graph->count)
-    {
-        const CheckOp op = graph->ops[node];
-        result = op == CHECK_OP_CONDITIONAL ? check_common_arm_effect(graph, graph->operand1[node]) || check_common_arm_effect(graph, graph->operand2[node]) :
-                 op == CHECK_OP_COMMA ? check_common_arm_effect(graph, graph->operand1[node]) : check_common_node_effect(graph, node);
-    }
+    return node < emission->input->graph.count && emission->arm_effects[node] != 0;
+}
+
+// One evaluated node's arm-effect column entry, in graph order so every operand's entry already holds.
+static bool check_common_arm_effect(const CheckGraph* graph, const uint8_t* arm_effects, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const uint32_t first = graph->operand1[node];
+    const uint32_t second = graph->operand2[node];
+    const bool result = op == CHECK_OP_CONDITIONAL ?
+                        ((first < graph->count && arm_effects[first] != 0) || (second < graph->count && arm_effects[second] != 0)) :
+                        op == CHECK_OP_COMMA ? (first < graph->count && arm_effects[first] != 0) : check_common_node_effect(graph, node);
     return result;
 }
 
-// The subtree warnings a node's own slot precedes. A conditional's arms report where its value is used —
-// at its own slot — so only its condition descends here.
-static void check_common_emit_children(CheckCommonEmission* emission, uint32_t node)
+// A frame on the deferred-emission worklist, or the translation's failure when scratch is full.
+static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind)
 {
-    const CheckGraph* graph = &emission->input->graph;
-    if (node >= graph->count)
+    if (emission->work_count < emission->work_capacity)
     {
-        return;
+        emission->work_nodes[emission->work_count] = node;
+        emission->work_kinds[emission->work_count] = kind;
+        emission->work_count += 1;
     }
-    const uint32_t slots = graph->ops[node] == CHECK_OP_CONDITIONAL ? 1u : 3u;
-    for (uint32_t i = 0; i < slots; i += 1)
+    else
     {
-        check_common_emit_tree(emission, i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node]);
-    }
-    if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
-    {
-        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
-        {
-            check_common_emit_tree(emission, graph->argument_nodes[graph->argument_offsets[node] + i]);
-        }
+        emission->pp->fatal = true;
     }
 }
 
-// The warnings one evaluated node's subtree produces, in value order: children first, then the node's own.
-static void check_common_emit_tree(CheckCommonEmission* emission, uint32_t node)
+// A node's operand and argument children pushed in reverse so they pop in the order the subtree walks
+// read them: operands left to right, then the call's arguments.
+static void check_common_emit_kids(CheckCommonEmission* emission, uint32_t node, uint32_t slots, uint8_t kind)
 {
     const CheckGraph* graph = &emission->input->graph;
-    if (node >= graph->count || emission->emitted[node] != 0 || (emission->evaluated != NULL && emission->evaluated[node] == 0))
-    {
-        return;
-    }
-    emission->emitted[node] = 1;
-    if (graph->ops[node] == CHECK_OP_COMMA)
-    {
-        check_common_comma_emit(emission, node);
-        return;
-    }
-    check_common_emit_children(emission, node);
-    check_common_own(emission, node);
-}
-
-// The division warnings inside an evaluated subtree, in evaluation order: they precede every other
-// warning the expression produces.
-static void check_common_div_scan(CheckCommonEmission* emission, uint32_t node)
-{
-    const CheckGraph* graph = &emission->input->graph;
-    if (node >= graph->count || (emission->evaluated != NULL && emission->evaluated[node] == 0))
-    {
-        return;
-    }
-    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
-    {
-        check_common_div_scan(emission, operands[i]);
-    }
     if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
     {
-        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+        for (uint32_t i = graph->argument_counts[node]; i-- > 0;)
         {
-            check_common_div_scan(emission, graph->argument_nodes[graph->argument_offsets[node] + i]);
+            check_common_emit_push(emission, graph->argument_nodes[graph->argument_offsets[node] + i], kind);
         }
     }
+    for (uint32_t i = slots; i-- > 0;)
+    {
+        check_common_emit_push(emission, i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node], kind);
+    }
+}
+
+static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node);
+static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node);
+
+// The division-warning visit one scan frame runs after its subtree: `emit_children`'s other half.
+static void check_common_div_own(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
     const CheckOp op = graph->ops[node];
     if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
     {
@@ -683,27 +691,13 @@ static void check_common_div_scan(CheckCommonEmission* emission, uint32_t node)
     }
 }
 
-// The sign-mismatch warnings inside an evaluated subtree, in evaluation order: they follow every other
+
+
+// The sign-mismatch visit one scan frame runs after its subtree: these warnings follow every other
 // warning the expression produces.
-static void check_common_signcmp_scan(CheckCommonEmission* emission, uint32_t node)
+static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
-    if (node >= graph->count || (emission->evaluated != NULL && emission->evaluated[node] == 0))
-    {
-        return;
-    }
-    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
-    {
-        check_common_signcmp_scan(emission, operands[i]);
-    }
-    if (check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
-    {
-        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
-        {
-            check_common_signcmp_scan(emission, graph->argument_nodes[graph->argument_offsets[node] + i]);
-        }
-    }
     const CheckOp op = graph->ops[node];
     const CheckStream* stream = emission->stream;
     const Parser* parser = emission->parser;
@@ -802,12 +796,6 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
     const CheckGraph* graph = &input->graph;
     const CheckOp op = graph->ops[node];
     const uint32_t token = graph->tokens[node];
-    if (op == CHECK_OP_CONDITIONAL)
-    {
-        check_common_emit_tree(emission, graph->operand1[node]);
-        check_common_emit_tree(emission, graph->operand2[node]);
-        return;
-    }
     if (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT)
     {
         const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
@@ -993,7 +981,9 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
 // comparison reports as a comparison when the operand's own root is the comparison, anything else as the
 // operand's own value, and a nested comma's contribution is its right operand's. A chain ending a
 // statement or for clause leaves its result unused.
-static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node)
+// The discarded-left-operand analysis a comma node's frame runs once both operands' deep warnings are
+// out: the marker between the children's warnings and the operand roots' own.
+static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node)
 {
     const CheckGraph* graph = &emission->input->graph;
     const Parser* parser = emission->parser;
@@ -1005,24 +995,6 @@ static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node
     const uint32_t count = parser->tokens.count;
     const uint32_t comma = graph->tokens[node];
     const uint32_t left_node = graph->operand0[node];
-    const uint32_t right_node = graph->operand1[node];
-    // Each operand's deep warnings come first; a nested comma runs its own sequence.
-    if (left_node < graph->count && graph->ops[left_node] == CHECK_OP_COMMA)
-    {
-        check_common_comma_emit(emission, left_node);
-    }
-    else
-    {
-        check_common_emit_children(emission, left_node);
-    }
-    if (right_node < graph->count && graph->ops[right_node] == CHECK_OP_COMMA)
-    {
-        check_common_comma_emit(emission, right_node);
-    }
-    else
-    {
-        check_common_emit_children(emission, right_node);
-    }
     uint32_t left = comma - 1;
     for (uint32_t steps = 0; steps < count; steps += 1)
     {
@@ -1036,7 +1008,7 @@ static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node
     const uint32_t left_start = check_common_subtree_start(parser, left);
     const uint32_t left_result = check_common_result_root(graph, left_node);
     const bool left_effect = left_node < graph->count ?
-                             (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_effect(graph, left_node) :
+                             (graph->ops[left_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, left_node) :
                               check_common_node_effect(graph, left_result)) :
                              check_common_expression_has_effect(parser, left_start, comma);
     // A left operand that resolves to a literal 0 through commas of its own stays quiet, like the
@@ -1096,15 +1068,23 @@ static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node
                                        "left operand of comma operator has no effect", NULL, 0, scratch);
         }
     }
-    // The operand roots' own warnings follow the left operand's marker.
-    if (left_node < graph->count && graph->ops[left_node] != CHECK_OP_COMMA)
-    {
-        check_common_own(emission, left_node);
-    }
-    if (right_node < graph->count && graph->ops[right_node] != CHECK_OP_COMMA)
-    {
-        check_common_own(emission, right_node);
-    }
+}
+
+// The comma node's last stage: its operand roots marked emitted and, in a discarded position, the
+// right operand's own marker after them.
+static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const Parser* parser = emission->parser;
+    Preprocessor* pp = emission->pp;
+    const CheckInput* input = emission->input;
+    const CheckStream* stream = emission->stream;
+    const TypeTable* types = emission->types;
+    Arena* scratch = emission->scratch;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t comma = graph->tokens[node];
+    const uint32_t left_node = graph->operand0[node];
+    const uint32_t right_node = graph->operand1[node];
     if (left_node < graph->count)
     {
         emission->emitted[left_node] = 1;
@@ -1136,7 +1116,7 @@ static void check_common_comma_emit(CheckCommonEmission* emission, uint32_t node
         const bool right_void = right_cast && check_common_void_cast(parser, pp, input, stream, types, right);
         const bool right_zero = check_common_literal_zero(parser, stream, graph, zero_node);
         const bool right_effect = right_node < graph->count ?
-                                  (graph->ops[right_node] == CHECK_OP_CONDITIONAL ? check_common_arm_effect(graph, right_node) :
+                                  (graph->ops[right_node] == CHECK_OP_CONDITIONAL ? check_common_arm_at(emission, right_node) :
                                    check_common_node_effect(graph, right_result)) :
                                   check_common_expression_has_effect(parser, right_start, parent);
         if (right_start < parent && !right_void && !right_zero && !right_effect)
@@ -1189,7 +1169,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     }
     else if (discarded && op == CHECK_OP_CONDITIONAL)
     {
-        if (!check_common_arm_effect(graph, graph->operand1[node]) && !check_common_arm_effect(graph, graph->operand2[node]))
+        if (!check_common_arm_at(emission, graph->operand1[node]) && !check_common_arm_at(emission, graph->operand2[node]))
         {
             const uint32_t root = check_common_result_root(graph, node);
             const uint32_t report = root < graph->count && graph->tokens[root] < count ? graph->tokens[root] : token;
@@ -1224,13 +1204,123 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     }
 }
 
+// The worklist's frames replaying what recursion did: TREE gates and marks, CHILDREN pushes operands and
+// arguments, OWN runs the node's checks or a conditional's arm emissions, COMMA/TAIL/END run a comma's
+// stages, MARKER and MARK the deferred statements, and the scan pairs descend then visit each node.
+static void check_common_emit_run(CheckCommonEmission* emission)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    while (emission->work_count != 0 && !emission->pp->fatal)
+    {
+        emission->work_count -= 1;
+        const uint32_t node = emission->work_nodes[emission->work_count];
+        const uint8_t kind = emission->work_kinds[emission->work_count];
+        switch (kind)
+        {
+            case BUSTER_CHECK_EMIT_TREE:
+                if (node >= graph->count || emission->emitted[node] != 0 ||
+                    (emission->evaluated != NULL && emission->evaluated[node] == 0))
+                {
+                    break;
+                }
+                emission->emitted[node] = 1;
+                if (graph->ops[node] == CHECK_OP_COMMA)
+                {
+                    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_COMMA);
+                }
+                else
+                {
+                    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_OWN);
+                    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_CHILDREN);
+                }
+                break;
+            case BUSTER_CHECK_EMIT_CHILDREN:
+                if (node < graph->count)
+                {
+                    check_common_emit_kids(emission, node, graph->ops[node] == CHECK_OP_CONDITIONAL ? 1u : 3u, BUSTER_CHECK_EMIT_TREE);
+                }
+                break;
+            case BUSTER_CHECK_EMIT_OWN:
+                if (node < graph->count)
+                {
+                    if (graph->ops[node] == CHECK_OP_CONDITIONAL)
+                    {
+                        check_common_emit_push(emission, graph->operand2[node], BUSTER_CHECK_EMIT_TREE);
+                        check_common_emit_push(emission, graph->operand1[node], BUSTER_CHECK_EMIT_TREE);
+                    }
+                    else
+                    {
+                        check_common_own(emission, node);
+                    }
+                }
+                break;
+            case BUSTER_CHECK_EMIT_COMMA:
+            {
+                const uint32_t left_node = node < graph->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+                const uint32_t right_node = node < graph->count ? graph->operand1[node] : BUSTER_CHECK_NONE;
+                check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_COMMA_TAIL);
+                check_common_emit_push(emission, right_node,
+                                       right_node < graph->count && graph->ops[right_node] == CHECK_OP_COMMA ?
+                                       BUSTER_CHECK_EMIT_COMMA : BUSTER_CHECK_EMIT_CHILDREN);
+                check_common_emit_push(emission, left_node,
+                                       left_node < graph->count && graph->ops[left_node] == CHECK_OP_COMMA ?
+                                       BUSTER_CHECK_EMIT_COMMA : BUSTER_CHECK_EMIT_CHILDREN);
+                break;
+            }
+            case BUSTER_CHECK_EMIT_COMMA_TAIL:
+            {
+                check_common_comma_marker(emission, node);
+                const uint32_t left_node = node < graph->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+                const uint32_t right_node = node < graph->count ? graph->operand1[node] : BUSTER_CHECK_NONE;
+                check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_COMMA_END);
+                if (right_node < graph->count && graph->ops[right_node] != CHECK_OP_COMMA)
+                {
+                    check_common_emit_push(emission, right_node, BUSTER_CHECK_EMIT_OWN);
+                }
+                if (left_node < graph->count && graph->ops[left_node] != CHECK_OP_COMMA)
+                {
+                    check_common_emit_push(emission, left_node, BUSTER_CHECK_EMIT_OWN);
+                }
+                break;
+            }
+            case BUSTER_CHECK_EMIT_COMMA_END:
+                check_common_comma_end(emission, node);
+                break;
+            case BUSTER_CHECK_EMIT_MARKER:
+                check_common_stmt_marker(emission, node);
+                break;
+            case BUSTER_CHECK_EMIT_MARK:
+                if (node < graph->count)
+                {
+                    emission->emitted[node] = 1;
+                }
+                break;
+            case BUSTER_CHECK_EMIT_DIV_SCAN:
+            case BUSTER_CHECK_EMIT_SIGN_SCAN:
+                if (node < graph->count && (emission->evaluated == NULL || emission->evaluated[node] != 0))
+                {
+                    check_common_emit_push(emission, node,
+                                           kind == BUSTER_CHECK_EMIT_DIV_SCAN ? BUSTER_CHECK_EMIT_DIV_OWN : BUSTER_CHECK_EMIT_SIGN_OWN);
+                    check_common_emit_kids(emission, node, 3, kind);
+                }
+                break;
+            case BUSTER_CHECK_EMIT_DIV_OWN:
+                check_common_div_own(emission, node);
+                break;
+            case BUSTER_CHECK_EMIT_SIGN_OWN:
+                check_common_sign_own(emission, node);
+                break;
+        }
+    }
+}
+
 // The deferred warnings one evaluated expression root produces, in clang's order: divisions first, the
 // deep subtree and the discard marker next, the root's own warning after them, and sign comparisons last.
+// The worklist drains before returning, so each push is the calls it replaces in reverse.
 static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
 {
     const Parser* parser = emission->parser;
     const CheckGraph* graph = &emission->input->graph;
-    check_common_div_scan(emission, node);
     // An expression statement — and a for clause's init and increment — wraps its value in an implicit void
     // cast at the `;` or the `)`: the discarded expression is the cast's operand.
     uint32_t expr = node;
@@ -1240,22 +1330,24 @@ static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
     {
         expr = graph->operand0[node];
     }
+    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_SIGN_SCAN);
+    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_MARK);
+    if (expr < graph->count)
+    {
+        check_common_emit_push(emission, expr, BUSTER_CHECK_EMIT_MARK);
+    }
     if (expr < graph->count && graph->ops[expr] == CHECK_OP_COMMA)
     {
-        check_common_comma_emit(emission, expr);
+        check_common_emit_push(emission, expr, BUSTER_CHECK_EMIT_COMMA);
     }
     else if (expr < graph->count)
     {
-        check_common_emit_children(emission, expr);
-        check_common_stmt_marker(emission, expr);
-        check_common_own(emission, expr);
+        check_common_emit_push(emission, expr, BUSTER_CHECK_EMIT_OWN);
+        check_common_emit_push(emission, expr, BUSTER_CHECK_EMIT_MARKER);
+        check_common_emit_push(emission, expr, BUSTER_CHECK_EMIT_CHILDREN);
     }
-    emission->emitted[node] = 1;
-    if (expr < graph->count)
-    {
-        emission->emitted[expr] = 1;
-    }
-    check_common_signcmp_scan(emission, node);
+    check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_DIV_SCAN);
+    check_common_emit_run(emission);
 }
 
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
@@ -1619,17 +1711,35 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         }
     }
     uint8_t* emitted = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    if (graph->count != 0 && emitted == NULL)
+    uint8_t* arm_effects = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (graph->count != 0 && (emitted == NULL || arm_effects == NULL))
+    {
+        pp->fatal = true;
+    }
+    if (arm_effects != NULL)
+    {
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            arm_effects[node] = check_common_arm_effect(graph, arm_effects, node);
+        }
+    }
+    // The emission worklist: a subtree's frames never outlive the pushes its nodes and edges already made,
+    // so eight entries per node cover every walk with room to spare.
+    const uint32_t work_capacity = graph->count * 8 + 16;
+    uint32_t* work_nodes = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, work_capacity) : NULL;
+    uint8_t* work_kinds = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, work_capacity) : NULL;
+    if (graph->count != 0 && (work_nodes == NULL || work_kinds == NULL))
     {
         pp->fatal = true;
     }
     if (emitted != NULL)
     {
         memset(emitted, 0, graph->count);
-        CheckCommonEmission emission = { parser, pp, input, stream, types, spell, evaluated, parents, emitted, scratch };
+        CheckCommonEmission emission = { parser, pp, input, stream, types, spell, evaluated, parents, emitted,
+                                         arm_effects, work_nodes, work_kinds, work_capacity, 0, scratch };
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order.
-        for (uint32_t node = 0; node < graph->count; node += 1)
+        for (uint32_t node = 0; node < graph->count && !pp->fatal; node += 1)
         {
             if (stream->diagnostics[node] == CHECK_DIAG_NONE && (evaluated == NULL || evaluated[node] != 0) &&
                 parents != NULL && parents[node] == BUSTER_CHECK_NONE && emitted[node] == 0)
@@ -1637,12 +1747,14 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 check_common_emit_root(&emission, node);
             }
         }
-        // Anything a root walk did not reach still reports its own warning at its own place.
-        for (uint32_t node = 0; node < graph->count; node += 1)
+        // Anything a root walk did not reach still reports its own warning at its own place — through the
+        // own frame, so a conditional's arms still emit ahead of it.
+        for (uint32_t node = 0; node < graph->count && !pp->fatal; node += 1)
         {
             if (stream->diagnostics[node] == CHECK_DIAG_NONE && (evaluated == NULL || evaluated[node] != 0) && emitted[node] == 0)
             {
-                check_common_own(&emission, node);
+                check_common_emit_push(&emission, node, BUSTER_CHECK_EMIT_OWN);
+                check_common_emit_run(&emission);
             }
         }
     }
@@ -1981,7 +2093,7 @@ static bool check_common_format_position(const uint8_t* bytes, uint64_t length, 
 // Marks a positional conversion's data argument used, or reports its position as invalid.
 static bool check_common_format_data_position(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
                                               uint64_t percent_offset, uint64_t conversion_offset, uint32_t position, uint32_t data_count,
-                                              uint8_t* used, uint32_t* order, Arena* scratch)
+                                              uint8_t* covered, uint32_t* order, Arena* scratch)
 {
     const bool result = position != 0 && position <= data_count;
     if (position == 0)
@@ -1995,9 +2107,9 @@ static bool check_common_format_data_position(const Parser* parser, Preprocessor
                                                  position, data_count);
         check_common_format_report_offset(parser, pp, input, format_token, conversion_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
     }
-    if (result && used != NULL)
+    if (result && covered != NULL)
     {
-        used[position - 1] = 1;
+        covered[position - 1] = 1;
     }
     return result;
 }
@@ -2063,6 +2175,38 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
     }
 }
 
+// Whether a spine-marked node passes through to operands — a cast, conversion or unary plus passes
+// operand0, and a conditional passes its arms — making it spine interior rather than a leaf. An
+// operand that is not a child index leaves the node a leaf.
+static bool check_common_format_spine(const CheckGraph* graph, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const bool result = ((op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_CAST) &&
+                         graph->operand0[node] < node) ||
+                        (op == CHECK_OP_CONDITIONAL && (graph->operand1[node] < node || graph->operand2[node] < node));
+    return result;
+}
+
+// The conditional `node`'s condition reduced to a compile-time truth value, as clang's
+// EvaluateAsBooleanCondition does before deciding which arm to check: when the condition folds to an
+// integer constant through the same casts the spine passes, only that arm is checked.
+static bool check_common_format_condition(const CheckGraph* graph, const CheckStream* stream, uint32_t node, bool* taken)
+{
+    uint32_t condition = graph->operand0[node];
+    for (uint32_t steps = 0; steps < graph->count && condition < graph->count; steps += 1)
+    {
+        const CheckOp condition_op = graph->ops[condition];
+        if (condition_op != CHECK_OP_CONVERT && condition_op != CHECK_OP_POSITIVE && condition_op != CHECK_OP_CAST)
+        {
+            break;
+        }
+        condition = graph->operand0[condition];
+    }
+    const bool constant = check_common_integer_constant(stream, condition);
+    *taken = constant && check_stream_value(stream, condition).integer != 0;
+    return constant;
+}
+
 static void check_common_format(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                 TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
@@ -2107,31 +2251,104 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         {
             const uint32_t format_node = graph->argument_nodes[offset + format_index];
             const uint32_t format_token = format_node < graph->count ? graph->tokens[format_node] : BUSTER_CHECK_NONE;
-            const uint32_t string = format_token < input->token_count ? check_common_sparse_get(input->string_ids, format_token) : BUSTER_CHECK_NONE;
-            if (string != BUSTER_CHECK_NONE && string < input->string_count && input->strings != NULL)
+            const uint32_t direct_string = format_token < input->token_count ? check_common_sparse_get(input->string_ids, format_token) : BUSTER_CHECK_NONE;
+            // The format expression's literal spine: casts, conversions and unary plus pass operand0
+            // through, and a conditional passes each arm in order — or only the taken arm when the
+            // condition is a compile-time constant. Whatever else the spine reaches is a leaf; the
+            // check walks leaves in arm order and stops at the first leaf that is not a string
+            // literal, the way clang's checkFormatStringExpr returns early on SLCT_NotALiteral.
+            uint8_t* spine = NULL;
+            if (direct_string == BUSTER_CHECK_NONE && format_node < graph->count)
             {
+                spine = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)format_node + 1);
+                if (spine == NULL)
+                {
+                    pp->fatal = true;
+                }
+                else
+                {
+                    memset(spine, 0, (uint64_t)format_node + 1);
+                    spine[format_node] = 1;
+                    for (uint32_t i = format_node + 1; i-- > 0;)
+                    {
+                        if (spine[i] == 0)
+                        {
+                            continue;
+                        }
+                        const CheckOp spine_op = graph->ops[i];
+                        if (spine_op == CHECK_OP_CONVERT || spine_op == CHECK_OP_POSITIVE || spine_op == CHECK_OP_CAST)
+                        {
+                            if (graph->operand0[i] < i)
+                            {
+                                spine[graph->operand0[i]] = 1;
+                            }
+                        }
+                        else if (spine_op == CHECK_OP_CONDITIONAL)
+                        {
+                            bool taken = false;
+                            const bool constant = check_common_format_condition(graph, stream, i, &taken);
+                            const uint32_t true_arm = graph->operand1[i];
+                            const uint32_t false_arm = graph->operand2[i];
+                            if ((!constant || taken) && true_arm < i)
+                            {
+                                spine[true_arm] = 1;
+                            }
+                            if ((!constant || !taken) && false_arm < i)
+                            {
+                                spine[false_arm] = 1;
+                            }
+                        }
+                    }
+                }
+            }
+            // Each literal keeps its own argument coverage: the extra-arguments verdict is the
+            // largest first-uncovered index any finished literal left, while a literal covering —
+            // or needing — every argument suppresses it for the rest, like clang's
+            // UncoveredArgHandler. Specifier, insufficiency and type diagnostics stay per literal.
+            const uint32_t data_count = args_checked ? count - first_argument : 0;
+            uint8_t* covered = data_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, data_count) : NULL;
+            if (data_count != 0 && covered == NULL)
+            {
+                pp->fatal = true;
+            }
+            uint32_t order = 0;
+            uint32_t max_uncovered = BUSTER_CHECK_NONE;
+            bool all_covered = false;
+            bool nonliteral_leaf = false;
+            for (uint32_t leaf = direct_string != BUSTER_CHECK_NONE ? format_node : 0;
+                 leaf < graph->count && leaf <= format_node && !pp->fatal; leaf += 1)
+            {
+                if (direct_string == BUSTER_CHECK_NONE && (spine == NULL || spine[leaf] == 0 || check_common_format_spine(graph, leaf)))
+                {
+                    continue;
+                }
+                const uint32_t format_token = graph->tokens[leaf];
+                const uint32_t string = format_token < input->token_count ? check_common_sparse_get(input->string_ids, format_token) : BUSTER_CHECK_NONE;
+                if (string == BUSTER_CHECK_NONE || string >= input->string_count || input->strings == NULL)
+                {
+                    nonliteral_leaf = true;
+                    break;
+                }
+                if (covered != NULL)
+                {
+                    memset(covered, 0, data_count);
+                }
                 const uint8_t* bytes = input->strings[string].bytes;
                 uint64_t length = input->strings[string].byte_count;
                 uint32_t argument = first_argument;
-                // Diagnostics publish in the literal's scan order: `order` is the furthest source any conversion's
-                // reports have reached, so an in-string report after an argument's keeps sorting behind it.
-                uint32_t order = parser->tokens.sources[format_token];
-                // A `format(printf, N, 0)` callee takes a va_list, not direct arguments: the literal is
-                // scanned as usual but every argument-level verdict — coverage, insufficiency, extras and
-                // type checks — stays off because there are no arguments to check.
-                const uint32_t data_count = args_checked ? count - first_argument : 0;
-                uint8_t* used = data_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, data_count) : NULL;
-                const bool usable = data_count == 0 || used != NULL;
-                if (used != NULL)
+                // Diagnostics publish in the literal's scan order: `order` is the furthest source any
+                // conversion's reports have reached, so an in-string report after an argument's keeps
+                // sorting behind it.
+                if (order == 0)
                 {
-                    memset(used, 0, data_count);
+                    order = parser->tokens.sources[format_token];
                 }
                 bool insufficient = false;
                 bool positional_seen = false;
                 bool plain_seen = false;
                 bool malformed = false;
                 uint64_t insufficient_offset = 0;
-                for (uint64_t at = 0; usable && at < length && !pp->fatal; at += 1)
+                for (uint64_t at = 0; at < length && !pp->fatal; at += 1)
                 {
                     // The literal's storage ends with a NUL terminator at `length - 1`; any earlier zero
                     // came from an escape in the body and ends the format string Clang-side too: warn at
@@ -2333,7 +2550,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const uint32_t cover = value_positioned ? value_position - 1 : 0;
                         if (cover < data_count)
                         {
-                            used[cover] = 1;
+                            covered[cover] = 1;
                         }
                         char spelling[6];
                         if (conversion >= 0x20 && conversion < 0x7f)
@@ -2464,7 +2681,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             else
                             {
                                 width_index = first_argument + width_position - 1;
-                                used[width_position - 1] = 1;
+                                covered[width_position - 1] = 1;
                             }
                         }
                         else if (positional_seen)
@@ -2482,7 +2699,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         else
                         {
                             width_index = argument++;
-                            used[width_index - first_argument] = 1;
+                            covered[width_index - first_argument] = 1;
                         }
                         if (malformed)
                         {
@@ -2517,7 +2734,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             else
                             {
                                 precision_index = first_argument + precision_position - 1;
-                                used[precision_position - 1] = 1;
+                                covered[precision_position - 1] = 1;
                             }
                         }
                         else if (positional_seen)
@@ -2535,7 +2752,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         else
                         {
                             precision_index = argument++;
-                            used[precision_index - first_argument] = 1;
+                            covered[precision_index - first_argument] = 1;
                         }
                         if (malformed)
                         {
@@ -2567,7 +2784,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             else if (args_checked)
                             {
                                 value_valid = check_common_format_data_position(parser, pp, input, format_token, percent, at, value_position,
-                                                                                data_count, used, &order, scratch);
+                                                                                data_count, covered, &order, scratch);
                                 if (value_valid)
                                 {
                                     value_index = first_argument + value_position - 1;
@@ -2587,7 +2804,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         else
                         {
                             value_index = argument++;
-                            used[value_index - first_argument] = 1;
+                            covered[value_index - first_argument] = 1;
                             plain_seen = true;
                         }
                     }
@@ -2661,73 +2878,78 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         }
                     }
                 }
-                if (usable && !malformed)
+                // The finished literal's argument verdict: needing every argument claims them all,
+                // otherwise its first uncovered index joins the call's extra-arguments verdict. A
+                // literal the scan abandoned contributes nothing to either.
+                if (!malformed)
                 {
-                    if (!positional_seen && insufficient)
+                    if (insufficient)
                     {
-                        const uint32_t last_node = count > first_argument ? graph->argument_nodes[offset + count - 1] : BUSTER_CHECK_NONE;
-                        const uint32_t order_token = last_node < graph->count ? graph->tokens[last_node] : format_token;
-                        check_common_format_report_offset_ordered(parser, pp, input, format_token, insufficient_offset, order_token,
-                                                                  &order, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
-                                                                  "more '%' conversions than data arguments", scratch);
+                        if (!positional_seen)
+                        {
+                            const uint32_t last_node = count > first_argument ? graph->argument_nodes[offset + count - 1] : BUSTER_CHECK_NONE;
+                            const uint32_t order_token = last_node < graph->count ? graph->tokens[last_node] : format_token;
+                            check_common_format_report_offset_ordered(parser, pp, input, format_token, insufficient_offset, order_token,
+                                                                      &order, CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS,
+                                                                      "more '%' conversions than data arguments", scratch);
+                        }
+                        all_covered = true;
                     }
                     else
                     {
-                        // The first argument no conversion covered is the extra one: an invalid specifier may mark
-                        // an index without advancing past it, so plain and positional styles share the scan.
+                        uint32_t first_uncovered = BUSTER_CHECK_NONE;
                         for (uint32_t i = 0; i < data_count; i += 1)
                         {
-                            if (used[i] == 0)
+                            if (covered[i] == 0)
                             {
-                                const uint32_t extra_node = graph->argument_nodes[offset + first_argument + i];
-                                const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
-                                const uint32_t natural = extra_token < parser->tokens.count ? parser->tokens.sources[extra_token] : order;
-                                order = natural > order ? natural : order;
-                                check_common_report_published(parser, pp, input, extra_token, order, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
-                                                              "data argument not used by format string", NULL, 0, scratch);
+                                first_uncovered = i;
                                 break;
                             }
+                        }
+                        if (first_uncovered == BUSTER_CHECK_NONE)
+                        {
+                            all_covered = true;
+                        }
+                        else if (max_uncovered == BUSTER_CHECK_NONE || first_uncovered > max_uncovered)
+                        {
+                            max_uncovered = first_uncovered;
                         }
                     }
                 }
             }
-            else if (count == first_argument)
+            if (data_count != 0 && !all_covered && max_uncovered != BUSTER_CHECK_NONE)
             {
-                uint32_t base = format_node;
-                for (uint32_t steps = 0; base < graph->count && steps < graph->count &&
-                     (graph->ops[base] == CHECK_OP_CONVERT || graph->ops[base] == CHECK_OP_POSITIVE); steps += 1)
+                // The extra argument is the first index no finished literal covered — an invalid
+                // specifier may mark an index without advancing past it, so plain and positional
+                // styles share the scan.
+                const uint32_t extra_node = graph->argument_nodes[offset + first_argument + max_uncovered];
+                const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : format_token;
+                const uint32_t natural = extra_token < parser->tokens.count ? parser->tokens.sources[extra_token] : order;
+                order = natural > order ? natural : order;
+                check_common_report_published(parser, pp, input, extra_token, order, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
+                                              "data argument not used by format string", NULL, 0, scratch);
+            }
+            // A format argument that never resolves to a string literal warns under -Wformat-security
+            // when the call passes no data arguments.
+            if (nonliteral_leaf && count == first_argument)
+            {
+                // The warning points where clang points — `Args[format_idx]->getBeginLoc()`, the
+                // argument expression's leading token: the recorded first token of the argument,
+                // extended over the grouping parens that belong to it but not to the call's list.
+                uint32_t report_token = graph->argument_tokens[offset + format_index];
+                for (uint32_t steps = 0; report_token != 0 && steps < parser->tokens.count; steps += 1)
                 {
-                    const uint32_t operand = graph->operand0[base];
-                    if (operand >= graph->count)
+                    const uint32_t before = report_token - 1;
+                    if (parser->tokens.kinds[before] != PARSE_KIND_L_PAREN ||
+                        parser->tree.roles[before] == PARSE_ROLE_OPEN_CALL || parser->tree.roles[before] == PARSE_ROLE_OPEN_FUNCTION)
                     {
                         break;
                     }
-                    base = operand;
+                    report_token = before;
                 }
-                // Any unwrapped non-literal format — a variable, a member, a call result — warns under
-                // -Wformat-security; `va_arg` stays exempt since passing a va_list's argument is the
-                // legitimate escape the `format` attribute's zero index also models.
-                if (base < graph->count && graph->ops[base] != CHECK_OP_VARARGS)
-                {
-                    // The warning points where clang points: at the argument expression's leading
-                    // token, so a call or member chain's postfix tokens step back to its operand.
-                    uint32_t report_node = base;
-                    for (uint32_t steps = 0; steps < graph->count &&
-                         (graph->ops[report_node] == CHECK_OP_CALL || graph->ops[report_node] == CHECK_OP_MEMBER ||
-                          graph->ops[report_node] == CHECK_OP_ARROW || graph->ops[report_node] == CHECK_OP_SUBSCRIPT); steps += 1)
-                    {
-                        const uint32_t operand = graph->operand0[report_node];
-                        if (operand >= graph->count)
-                        {
-                            break;
-                        }
-                        report_node = operand;
-                    }
-                    const uint32_t report_token = graph->tokens[report_node];
-                    const CheckCommonNote note = { report_token, "treat the string as an argument to avoid this" };
-                    check_common_report(parser, pp, input, report_token, CHECK_WARNING_ID_FORMAT_SECURITY, false,
-                                        "format string is not a string literal (potentially insecure)", &note, 1, scratch);
-                }
+                const CheckCommonNote note = { report_token, "treat the string as an argument to avoid this" };
+                check_common_report(parser, pp, input, report_token, CHECK_WARNING_ID_FORMAT_SECURITY, false,
+                                    "format string is not a string literal (potentially insecure)", &note, 1, scratch);
             }
         }
     }
