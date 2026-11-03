@@ -29,7 +29,11 @@ static const char asm_test_common_fixture[] =
     ".text\ncommon: movl got(%rip), %eax\nmovl lc(%rip), %eax\nmovl loc(%rip), %eax\n"
     ".comm got,4,4\n.comm big,200,32\n.comm noalign,24\n.comm one,1\n.comm three,3\n.comm odd,100\n.comm empty,0\n.comm got,4,4\n"
     ".local loc\n.comm loc,8,8\n.local unaligned\n.comm unaligned,5\n.lcomm lc,12\n.lcomm lc2,5\n.lcomm lc3,100\n.lcomm byte,1\n"
-    ".bss\n.zero 3\nafter_bss: .zero 1\n.data\n.long got\n.quad big+8\n";
+    ".bss\n.zero 3\nafter_bss: .zero 1\n.data\n.long got\n.quad big+8\n"
+    // A global's repeated .comm, as GNU as takes it: the first size, the last alignment (its default, by the kept size).
+    ".comm ra,4,4\n.comm ra,4,16\n.comm rb,4,16\n.comm rb,4,4\n.comm rc,4,4\n.comm rc,8,16\n.comm rd,8,8\n.comm rd,4,2\n.comm re,4,8\n.comm re,4\n"
+    ".comm rf,4\n.comm rf,4,32\n.comm rg,24\n.comm rg,24\n.comm rh,4,4\n.comm rh,4,0\n.comm rx,4,4\n.comm rx,100\n.comm ry,100,64\n.comm ry,2\n"
+    ".comm rz,0,8\n.comm rz,0\n";
 static const char asm_test_wide_fixture[] =
     ".section .rodata.str4.8,\"aMS\",@progbits,4\n.align 8\n.LC2:\n.string \"h\"\n.string \"\"\n.string \"\"\n.string \"i\"\n.string \"\"\n.string \"\"\n"
     ".string \"\"\n.string \"\"\n.string \"\"\n.string \"\"\n"
@@ -83,7 +87,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`) or a
     // 64-bit one, @GOTTPOFF without RIP, 64-bit TLS offsets as data, a TLS modifier on a symbol outside a TLS section;
     // .comm's alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined
-    // or weak common symbol, a common declared again otherwise; strings of 8-byte characters; and %st(8).
+    // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
+    // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
+    // characters; and %st(8).
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
@@ -100,7 +106,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".comm x,4,4\n.data\nx: .long 0\n",
         ".lcomm x,4\n.data\nx: .long 0\n",
         ".weak x\n.comm x,4,4\n",
-        ".comm x,4,4\n.comm x,8,4\n",
+        ".local x\n.comm x,4,4\n.comm x,4,16\n",
+        ".comm x,4,4\n.local x\n.comm x,4,4\n",
         ".lcomm x,4\n.lcomm x,4\n",
         ".section .rodata.str8.8,\"aMS\",@progbits,8\n.quad 0\n",
         "fadd %st(8)\n",

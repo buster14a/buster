@@ -2545,8 +2545,10 @@ static uint32_t asm_note_section(const AsmParser* parser, uint32_t end)
 // tentative definitions under -fcommon) is an object of SHN_COMMON, which the linker places: a global OBJECT whose
 // alignment is the third operand, or without one the size's power of two up to 16. A local's .comm and every .lcomm
 // are instead an object of .bss, placed after its other contents (GNU as's subsection 1) in directive order, aligned
-// to the third operand or, for .lcomm, to the size's power of two up to 8 (asm_place_commons). A repeated .comm of the
-// same size and alignment is the same declaration; a name defined otherwise is refused, as is a weak one.
+// to the third operand or, for .lcomm, to the size's power of two up to 8 (asm_place_commons). A global's repeated
+// .comm keeps the first size, as GNU as does (it warns of another), and takes the last alignment: its third operand, or
+// without one (or 0) the kept size's power of two. A local's repeated .comm or .lcomm, or a name defined otherwise, is
+// a duplicate definition, as in GNU as; a weak name, and a common one made local and declared again, are refused.
 static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end)
 {
     const uint32_t location = parser->tokens[token].start;
@@ -2579,7 +2581,9 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
         }
         else if (parser->result.error == 0)
         {
-            const uint32_t bytes = (uint32_t)size;
+            const uint8_t kind = local ? ASM_COMMON_BSS : ASM_COMMON_GLOBAL;
+            const bool repeated = symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_GLOBAL;
+            const uint32_t bytes = repeated ? (uint32_t)symbol->common_size : (uint32_t)size;
             uint32_t power = 1;
             while (power < bytes && power < 16)
             {
@@ -2587,16 +2591,21 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
             }
             const uint32_t placed = lcomm ? (bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1) : alignment != 0 ? (uint32_t)alignment : 1;
             const uint32_t chosen = local ? placed : alignment != 0 ? (uint32_t)alignment : power;
-            const uint8_t kind = local ? ASM_COMMON_BSS : ASM_COMMON_GLOBAL;
-            if (symbol->common != 0 && (symbol->common != kind || symbol->common_size != bytes || symbol->common_alignment != chosen || kind == ASM_COMMON_BSS))
+            if (symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_BSS)
             {
-                asm_fail(parser, location, "common symbol declared again with another size or alignment");
+                // GNU as places it in .bss at its common size past its own alignment's place, a quirk this assembler
+                // doesn't follow.
+                asm_fail(parser, location, "a common symbol made local and declared again");
             }
-            else if (symbol->defined || symbol->absolute)
+            else if ((symbol->common != 0 && !repeated) || symbol->defined || symbol->absolute)
             {
                 asm_fail(parser, location, "duplicate symbol definition");
             }
-            else if (symbol->common == 0)
+            else if (repeated)
+            {
+                symbol->common_alignment = chosen;
+            }
+            else
             {
                 symbol->common = kind;
                 symbol->common_size = bytes;

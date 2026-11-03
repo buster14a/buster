@@ -283,9 +283,13 @@ the C checker refuses a template's. A local's `.comm` (GCC's statics at `-O0`:
 `.local x` / `.comm x,4,4`) and every `.lcomm` are objects of `.bss`, placed
 after its other contents (GNU as's subsection 1) in directive order, aligned to
 the third operand, or for `.lcomm`, whose ELF form takes none, to the size's
-power of two up to 8. A repeated `.comm` of the same size and alignment is the
-same declaration; a weak or defined name, and another size or alignment, are
-refused.
+power of two up to 8. A global's repeated `.comm` keeps the first size, as GNU
+as does (it warns of another), and takes the last directive's alignment, or
+without one (or 0) the kept size's power of two: `.comm x,4,4` then `.comm
+x,4,16` is aligned to 16. A local's repeated `.comm` or `.lcomm` and a defined
+name are duplicate definitions, as in GNU as; a weak name is refused, and so is
+a common symbol made local and declared again, which GNU as places in `.bss` at
+its common size past its alignment's place.
 The writer automatically emits a non-executable-stack note. Both GCC's
 `.section .note.GNU-stack,"",@progbits` and Clang's quoted section name are
 accepted; the note must remain empty and non-executable.
