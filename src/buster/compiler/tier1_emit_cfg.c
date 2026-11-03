@@ -1942,11 +1942,11 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         //   predecessor; in this block, the block would dominate its own one predecessor, reachable only through itself.
         // Any other block starts with no rows.
         Tier1EmitSaves saves;
-        tier1_emit_saves_reset(&saves);
+        tier1_emit_saves_reset(&saves, vector);
         const uint32_t only = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] == 1 ? input->predecessors[input->predecessor_offsets[b]] : BUSTER_TIER1_CFG_NONE;
-        for (uint32_t reg = 0; exit_rows != 0 && only < b && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        if (exit_rows != 0 && only < b)
         {
-            saves.rows[reg] = exit_rows[(uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg];
+            memcpy(saves.rows, &exit_rows[(uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS], sizeof(saves.rows));
         }
         for (uint32_t node = first; error == TIER1_EMIT_OK && node < end; node += 1)
         {
@@ -1956,14 +1956,16 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             const bool selected = !plan->covered[node] && op != IR_PHI && !tier1_select_entry_parameter(function, node);
             const bool calls = op == IR_CALL || op == IR_CALL_INDIRECT;
             code->node_first[node] = buffer.count;
+            // The interval a definition starts, looked up once for its owed loads and its register below.
+            const uint32_t interval = v != BUSTER_TIER1_CFG_NONE && selected ? tier1_cfg_interval_at(cfg, v, use + 1) : BUSTER_TIER1_CFG_NONE;
             // The owed loads this node needs, first. Its definition's register is its interval's first, a call's result's
             // excepted: the call drops the owed values it doesn't save. A return's other owed values are dead.
             const bool leaves = op == IR_RET || op == IR_UNREACHABLE;
             if (saves.owed != 0)
             {
-                const uint32_t defined_interval = selected && !calls && v != BUSTER_TIER1_CFG_NONE && tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_GPR ? tier1_cfg_interval_at(cfg, v, use + 1) : BUSTER_TIER1_CFG_NONE;
-                const uint8_t defined = defined_interval != BUSTER_TIER1_CFG_NONE ? allocation->registers[allocation->fragment_offsets[defined_interval]] : UINT8_MAX;
-                const uint32_t repaid = tier1_emit_owed(plan, &emitted->prepared, allocation, &transitions, node, use, defined, node + 1 == end && !leaves, saves.owed);
+                const bool general = !calls && interval != BUSTER_TIER1_CFG_NONE && tier1_emit_class(&emitted->prepared, node) == BUSTER_TIER1_ALLOCATE_GPR;
+                const uint8_t defined = general ? allocation->registers[allocation->fragment_offsets[interval]] : UINT8_MAX;
+                const uint32_t repaid = tier1_emit_owed(plan, &emitted->prepared, allocation, &transitions, node, use, defined, selected, node + 1 == end && !leaves, saves.owed);
                 error = repaid != 0 ? tier1_emit_repay(emitted, &saves, repaid, &buffer) : error;
             }
             error = error == TIER1_EMIT_OK ? tier1_emit_phase(&emitted->prepared, &view, &emitted->frame, &transitions, use, &buffer, emitted) : error;
@@ -1971,7 +1973,6 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             // them.
             if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected)
             {
-                const uint32_t interval = tier1_cfg_interval_at(cfg, v, use + 1);
                 error = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == use + 1 ? error : TIER1_EMIT_ALLOCATION;
                 // Its class's register, by location: a mask's is the opmask class's (#179).
                 const uint32_t base_location = 32 * tier1_emit_class(&emitted->prepared, node);
@@ -2283,9 +2284,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         }
         // The block's last node took every owed value back, or left the function.
         error = saves.owed == 0 ? error : TIER1_EMIT_INVALID;
-        for (uint32_t reg = 0; exit_rows != 0 && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        if (exit_rows != 0)
         {
-            exit_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg] = saves.rows[reg];
+            memcpy(&exit_rows[(uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS], saves.rows, sizeof(saves.rows));
         }
         // The added entry's single edge: its moves, then it falls through into the IR's entry.
         if (error == TIER1_EMIT_OK && b < added && cfg->edge_placements[0] == TIER1_CFG_EDGE_PREDECESSOR)

@@ -468,6 +468,41 @@ static bool tier1_emit_test_saves_loaded(const Tier1EmitResult* emitted)
     return loaded && pending == 0;
 }
 
+// The call-save rows' helpers (Tier1EmitSaves) by both paths, on random rows, owners and masks: the vector path's
+// compares and blends must give the scalar twin's masks and rows. A third of the rows hold their owners, so `kept` sees
+// both answers, and some owners are none.
+static void tier1_emit_test_saves_twins(Tier1EmitTest* test)
+{
+    uint64_t random = UINT64_C(0x5be2b9d0c41f7a63);
+    bool same = true;
+    for (uint32_t round = 0; round < 4096; round += 1)
+    {
+        Tier1EmitSaves saves[2];
+        Tier1EmitTransitions transitions = { 0 };
+        tier1_emit_saves_reset(&saves[0], false);
+        tier1_emit_saves_reset(&saves[1], true);
+        same &= memcmp(saves[0].rows, saves[1].rows, sizeof(saves[0].rows)) == 0;
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            const uint64_t bits = tier1_emit_test_random(&random);
+            transitions.owners[reg] = (bits & 7) == 7 ? BUSTER_IR_NONE : (uint32_t)(bits >> 8) & 63;
+            const uint32_t row = (bits >> 16) % 3 == 0 ? transitions.owners[reg] : (uint32_t)(bits >> 24) & 63;
+            saves[0].rows[reg] = row;
+            saves[1].rows[reg] = row;
+        }
+        const uint64_t masks = tier1_emit_test_random(&random);
+        const uint32_t saved = (uint32_t)masks & 0xffff;
+        const uint32_t fixed = (uint32_t)(masks >> 16) & 0xffff;
+        same &= tier1_emit_kept(&saves[0], &transitions, saved) == tier1_emit_kept(&saves[1], &transitions, saved);
+        tier1_emit_saved(&saves[0], &transitions, saved);
+        tier1_emit_saved(&saves[1], &transitions, saved);
+        tier1_emit_fixed_rows(&saves[0], fixed);
+        tier1_emit_fixed_rows(&saves[1], fixed);
+        same &= saves[0].owed == saves[1].owed && memcmp(saves[0].rows, saves[1].rows, sizeof(saves[0].rows)) == 0;
+    }
+    tier1_emit_test_expect(test, same, "the call-save rows' vector helpers give their scalar twins' masks and rows");
+}
+
 #include "tier1_call_test.c"
 #include "tier1_narrow_test.c"
 #include "tier1_terminal_test.c"
@@ -1159,6 +1194,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_emit_test_objects(&test);
             tier1_emit_test_lifetimes(&test);
             tier1_emit_test_object_overflow(&test);
+            tier1_emit_test_saves_twins(&test);
             tier1_call_tests(&test);
             tier1_narrow_tests(&test);
             tier1_terminal_tests(&test);

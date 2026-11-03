@@ -669,33 +669,43 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
 // SSA value's bits don't change, so the row still holds them. (A CFG block whose one predecessor comes first starts from
 // that block's rows, tier1_emit_cfg_records.) A register is owed while its owner is unchanged, so
 // whatever would change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
+// The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the vector
+// path compares and blends them whole; `vector` picks it or its scalar twin, which gives the same rows and masks.
 typedef struct Tier1EmitSaves Tier1EmitSaves;
 struct Tier1EmitSaves
 {
     uint32_t owed;
+    bool vector;
     uint32_t rows[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
 };
 
-static void tier1_emit_saves_reset(Tier1EmitSaves* saves)
+_Static_assert(BUSTER_TIER1_EMIT_GENERAL_REGISTERS == 16, "the call-save rows are one vector of 16 lanes");
+
+static void tier1_emit_saves_reset(Tier1EmitSaves* saves, bool vector)
 {
     saves->owed = 0;
-    for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    saves->vector = vector;
+    if (BUSTER_VECTOR_PATH(vector))
     {
-        saves->rows[reg] = BUSTER_IR_NONE;
+        _mm512_storeu_si512(saves->rows, _mm512_set1_epi32((int)BUSTER_IR_NONE));
+    }
+    else
+    {
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            saves->rows[reg] = BUSTER_IR_NONE;
+        }
     }
 }
 
 // The owed registers whose values node needs back before its records: every one at the straight-line code's last node,
-// which jumps, returns or traps, and at a rule that takes x86's fixed registers, whose saves store what the registers
-// hold; otherwise those its uses read, `defined` (the general register its definition writes, UINT8_MAX for none) and
-// those its transitions store from or load into, at its two phases from `use` on.
-static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, uint8_t defined, bool last,
-                                uint32_t owed)
+// which jumps, returns or traps, and at a `selected` node's rule that takes x86's fixed registers, whose saves store what
+// the registers hold; otherwise those its uses read, `defined` (the general register its definition writes, UINT8_MAX for
+// none) and those its transitions store from or load into, at its two phases from `use` on.
+static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, uint8_t defined, bool selected,
+                                bool last, uint32_t owed)
 {
     const IrFunction* function = plan->function;
-    const uint32_t op = function->op[node];
-    // A by-value aggregate's parameter is computed at its node, as a frame object's address is (#789).
-    const bool selected = !plan->covered[node] && op != IR_PHI && !tier1_select_entry_parameter(function, node);
     uint32_t needed = last || (selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0) ? owed : 0;
     needed |= defined < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << defined : 0;
     for (uint32_t u = plan->effective_use_offsets[node]; u < plan->effective_use_offsets[node + 1]; u += 1)
@@ -709,30 +719,28 @@ static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrep
         const uint32_t reg = value < function->instruction_count ? transitions->registers[value] : UINT8_MAX;
         needed |= reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << reg : 0;
     }
-    for (uint32_t position = use; position <= use + 1; position += 1)
+    // The two phases' transitions are adjacent, positions `use` and `use + 1` in order.
+    for (uint32_t e = transitions->offsets[use]; e < transitions->offsets[use + 2]; e += 1)
     {
-        for (uint32_t e = transitions->offsets[position]; e < transitions->offsets[position + 1]; e += 1)
-        {
-            const uint32_t f = transitions->fragments[e];
-            const bool general = tier1_emit_class(prepared, transitions->values[f]) == BUSTER_TIER1_ALLOCATE_GPR;
-            const uint8_t from = allocation->registers[f - 1];
-            const uint8_t to = allocation->registers[f];
-            needed |= general && allocation->kinds[f - 1] == BUSTER_TIER1_ALLOCATE_REGISTER && from < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << from : 0;
-            needed |= general && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && to < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << to : 0;
-        }
+        const uint32_t f = transitions->fragments[e];
+        const bool general = tier1_emit_class(prepared, transitions->values[f]) == BUSTER_TIER1_ALLOCATE_GPR;
+        const uint8_t from = allocation->registers[f - 1];
+        const uint8_t to = allocation->registers[f];
+        needed |= general && allocation->kinds[f - 1] == BUSTER_TIER1_ALLOCATE_REGISTER && from < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << from : 0;
+        needed |= general && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && to < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << to : 0;
     }
     return needed & owed;
 }
 
-// The loads of `repaid`, owed registers, from their rows.
+// The loads of `repaid`, owed registers, from their rows, the lowest register first: an iteration per load.
 static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* saves, uint32_t repaid, Tier1EmitBuffer* buffer)
 {
     bool appended = true;
-    for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    for (uint32_t left = repaid; appended && left != 0; left &= left - 1)
     {
-        appended = ((repaid >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(result, reg, true));
-        result->call_loads += (repaid >> reg) & 1;
+        appended = tier1_emit_append(buffer, tier1_emit_call_save(result, (uint32_t)__builtin_ctz(left), true));
     }
+    result->call_loads += (uint32_t)__builtin_popcount(repaid);
     saves->owed &= ~repaid;
     return appended ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
@@ -741,9 +749,16 @@ static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* 
 static uint32_t tier1_emit_kept(const Tier1EmitSaves* saves, const Tier1EmitTransitions* transitions, uint32_t saved)
 {
     uint32_t kept = 0;
-    for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    if (BUSTER_VECTOR_PATH(saves->vector))
     {
-        kept |= ((saved >> reg) & 1) != 0 && saves->rows[reg] == transitions->owners[reg] ? 1u << reg : 0;
+        kept = _mm512_mask_cmpeq_epi32_mask((__mmask16)saved, _mm512_loadu_si512(saves->rows), _mm512_loadu_si512(transitions->owners));
+    }
+    else
+    {
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            kept |= ((saved >> reg) & 1) != 0 && saves->rows[reg] == transitions->owners[reg] ? 1u << reg : 0;
+        }
     }
     return kept;
 }
@@ -752,9 +767,16 @@ static uint32_t tier1_emit_kept(const Tier1EmitSaves* saves, const Tier1EmitTran
 // didn't save is a value nothing reads past it, dropped.
 static void tier1_emit_saved(Tier1EmitSaves* saves, const Tier1EmitTransitions* transitions, uint32_t saved)
 {
-    for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    if (BUSTER_VECTOR_PATH(saves->vector))
     {
-        saves->rows[reg] = ((saved >> reg) & 1) != 0 ? transitions->owners[reg] : saves->rows[reg];
+        _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)saved, _mm512_loadu_si512(transitions->owners)));
+    }
+    else
+    {
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            saves->rows[reg] = ((saved >> reg) & 1) != 0 ? transitions->owners[reg] : saves->rows[reg];
+        }
     }
     saves->owed = saved;
 }
@@ -762,9 +784,16 @@ static void tier1_emit_saved(Tier1EmitSaves* saves, const Tier1EmitTransitions* 
 // After a fixed registers' sequence, whose saves stored those registers' rows over whatever they held.
 static void tier1_emit_fixed_rows(Tier1EmitSaves* saves, uint32_t fixed)
 {
-    for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+    if (BUSTER_VECTOR_PATH(saves->vector))
     {
-        saves->rows[reg] = ((fixed >> reg) & 1) != 0 ? BUSTER_IR_NONE : saves->rows[reg];
+        _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)fixed, _mm512_set1_epi32((int)BUSTER_IR_NONE)));
+    }
+    else
+    {
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            saves->rows[reg] = ((fixed >> reg) & 1) != 0 ? BUSTER_IR_NONE : saves->rows[reg];
+        }
     }
 }
 
@@ -1139,7 +1168,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     }
     // The calls' saves (Tier1EmitSaves, #1116): the chain is straight-line code from its entry to its end.
     Tier1EmitSaves saves;
-    tier1_emit_saves_reset(&saves);
+    tier1_emit_saves_reset(&saves, vector);
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count; node += 1)
     {
         code->node_first[node] = buffer.count;
@@ -1149,8 +1178,10 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         const bool leaves = op == IR_RET || op == IR_UNREACHABLE;
         if (saves.owed != 0)
         {
+            // A by-value aggregate's parameter is computed at its node, as a frame object's address is (#789).
+            const bool selected = !plan->covered[node] && op != IR_PHI && !tier1_select_entry_parameter(plan->function, node);
             const bool defines = !plan->covered[node] && op != IR_BR && op != IR_PARAM && op != IR_CALL && plan->function->type[node] != IR_VOID;
-            const uint32_t repaid = tier1_emit_owed(plan, &result->prepared, &result->allocation, &transitions, node, node * 2, defines ? transitions.registers[node] : UINT8_MAX, node + 1 == count && !leaves, saves.owed);
+            const uint32_t repaid = tier1_emit_owed(plan, &result->prepared, &result->allocation, &transitions, node, node * 2, defines ? transitions.registers[node] : UINT8_MAX, selected, node + 1 == count && !leaves, saves.owed);
             error = repaid != 0 ? tier1_emit_repay(result, &saves, repaid, &buffer) : error;
         }
         error = error == TIER1_EMIT_OK ? tier1_emit_phase(&result->prepared, &result->allocation, &result->frame, &transitions, node * 2, &buffer, result) : error;
