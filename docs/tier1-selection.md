@@ -241,17 +241,31 @@ patterns are:
 - By-value aggregates (#789): a call or a function with ABI records takes each
   argument and parameter where its record says (`tier1_select_argument_place`,
   `tier1_select_parameter_place`): a scalar in its register or stack slot, and
-  an aggregate, whose IR value is a pointer to its bytes, in registers as parts
-  of up to 8 bytes (`tier1_select_parts`: a general or an xmm register per
-  eightbyte) or on the stack whole (up to 512 bytes). A result in registers comes
-  back as parts in rax and rdx or xmm0 and xmm1, and one of the memory class
-  through the hidden pointer (up to 4,096 bytes for a function's own, which its
-  return copies). An aggregate parameter's value is its copy's address, a frame
-  object past the IR's slots that the entry fills from its registers, or its
-  stack slots in the incoming area, selected as a frame object's address
-  (`TIER1_RULE_STACK_ADDRESS`). Refused: a part LLVM puts in a stack slot
-  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part and a result
-  LLVM demotes to a hidden pointer. Every function and
+  an aggregate, whose IR value is a pointer to its bytes, in parts of up to 8
+  bytes, one per eightbyte (`tier1_select_location_parts`, as Tier 0's
+  `tier0_parts_of`), or on the stack whole (up to 512 bytes). A part is in a
+  general or an xmm register, or (#141) in a stack slot: a `SPLIT` location's
+  other part, after a register clang doesn't count (an `_Atomic` scalar's or
+  `nullptr_t`'s) left LLVM without one for it, and a `STACK` location's high or
+  low eightbyte alone (`HIGH`, `LOW`), the other one padding. In registers, a
+  high eightbyte of padding takes none, and with `HIGH` the only register holds
+  eightbyte 1. A vector register alone of 16 bytes or more holds the aggregate
+  whole, as Tier 0's parts have it: a vector passed by value (SSE then SSEUP), 16
+  bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's
+  registers are that wide, moved by `movups`, `vmovdqu` or `vmovdqu64`
+  (`tier1_select_part_form`); and a struct's whose high eightbyte is padding,
+  which its copy keeps as padding. A result in registers comes back as parts in rax and rdx or xmm0
+  and xmm1 (`tier1_select_result_parts`, eightbyte 1 alone with `HIGH`), and
+  one of the memory class through the hidden pointer (up to 4,096 bytes for a
+  function's own, which its return copies). An aggregate parameter's value is
+  its copy's address, a frame object past the IR's slots that the entry fills
+  from its registers and slots, or its stack slots in the incoming area when it
+  is there whole, selected as a frame object's address
+  (`TIER1_RULE_STACK_ADDRESS`). Refused: an ignored aggregate, a result LLVM
+  demotes to a hidden pointer (`DEMOTED`), which only a vector type makes, and a
+  call whose parts in registers take more than the red zone's 14 staging slots
+  of 8 bytes, a whole vector register's its bytes' (`tier1_select_part_slots`).
+  Every function and
   call with records goes to the CFG consumer. Before a call's moves, it copies
   the call's aggregates from their addresses into their stack slots, or into the
   red zone's staging slots, whose registers it loads after the moves. An address

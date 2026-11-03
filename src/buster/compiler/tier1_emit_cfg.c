@@ -192,8 +192,16 @@ static uint32_t tier1_emit_cfg_x87_object(const IrFunction* function, const Tier
     return tier1_emit_cfg_record_count(function) + (node == UINT32_MAX ? prepared->x87_count : prepared->x87_ranks[node]);
 }
 
+// Whether a by-value aggregate parameter's `record` has its copy in the frame (#789), which the entry stores its parts into
+// (tier1_emit_cfg_entry): in registers, or in a register and a stack slot or in a slot alone (#141), but not on the stack
+// whole, whose copy is its stack slots (tier1_emit_cfg_incoming_object).
+static bool tier1_emit_cfg_record_copied(const IrPassed* record)
+{
+    return record != 0 && record->size != 0 && record->location.kind != BUSTER_ABI_LOCATION_IGNORE && !tier1_select_location_whole(record->location);
+}
+
 // The bytes frame object `object` past the IR's slots takes (#789): a by-value aggregate parameter's copy, which the entry
-// stores its registers into whole, 8 bytes each, so its size rounded up to them, and the hidden pointer's 8 bytes. A
+// stores its parts into whole, 8 bytes each, so its size rounded up to them, and the hidden pointer's 8 bytes. A
 // parameter in registers of its own, or one on the stack whole (whose copy is its stack slots, tier1_emit_cfg_incoming),
 // takes a row of one byte, which nothing reads, as a function without the hidden pointer does for it.
 static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, uint32_t object)
@@ -202,7 +210,7 @@ static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, u
     const bool x87 = object >= tier1_emit_cfg_record_count(function);
     const uint32_t parameter = object - function->slot_count;
     const IrPassed* record = parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
-    const bool copied = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS;
+    const bool copied = tier1_emit_cfg_record_copied(record);
     const bool hidden = parameter == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
     return x87 ? 16 : copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
 }
@@ -215,7 +223,7 @@ static bool tier1_emit_cfg_incoming_object(const IrFunction* function, uint32_t 
 {
     const uint32_t parameter = object - function->slot_count;
     const IrPassed* record = object >= function->slot_count && parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
-    const bool stacked = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_STACK;
+    const bool stacked = record != 0 && record->size != 0 && tier1_select_location_whole(record->location);
     const bool overflow = tier1_emit_cfg_overflow_area(function, object);
     *past = overflow ? function->incoming.stack_bytes : stacked ? record->location.stack_offset : 0;
     return overflow || stacked;
@@ -1289,30 +1297,37 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
     uint32_t count = 0;
     uint32_t vectors = 0;
     Tier1EmitError error = TIER1_EMIT_OK;
-    // A function with its own ABI records (#789): each by-value aggregate parameter in registers into its copy, its parts
-    // stored whole, 8 bytes each (the copy's size is rounded up to them, tier1_emit_cfg_record_object_bytes), a general
-    // register's by mov and an xmm one's by movsd; and the hidden pointer an aggregate result returns through, rdi, into
-    // its object. Before the moves, which may write those registers; the prologue writes none of them.
+    // A function with its own ABI records (#789): each by-value aggregate parameter with a copy into it, its parts stored
+    // whole, 8 bytes each (the copy's size is rounded up to them, tier1_emit_cfg_record_object_bytes), a general
+    // register's by mov, an xmm one's by movsd, and one in an incoming stack slot (#141, tier1_select_location_parts)
+    // through the scratch register; and the hidden pointer an aggregate result returns through, rdi, into its object.
+    // Before the moves, which may write those registers; the prologue writes none of them.
     for (uint32_t p = 0; error == TIER1_EMIT_OK && function->parameter_passed != 0 && p <= function->parameter_count; p += 1)
     {
         const IrPassed* record = p < function->parameter_count ? tier1_select_parameter_record(function, p) : 0;
-        const bool copied = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS;
+        const bool copied = tier1_emit_cfg_record_copied(record);
         const bool hidden = p == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
         Tier1SelectPart parts[2] = { { .reg = BUSTER_ABI_RDI, .offset = 0, .bytes = 8 } };
-        const uint32_t part_count = copied ? tier1_select_parts(record->location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : hidden ? 1 : 0;
+        const uint32_t part_count = copied ? tier1_select_location_parts(record->location, record->size, parts) : hidden ? 1 : 0;
         int32_t offset = 0;
         error = (!copied && !hidden) || (part_count != 0 && tier1_emit_cfg_object(function, emitted, function->slot_count + p, &offset)) ? error : TIER1_EMIT_FRAME;
         for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
         {
-            const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+            const bool slot = parts[k].reg == BUSTER_ABI_REGISTER_NONE;
+            const bool vector = !slot && (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+            uint8_t base = X86_REGISTER_RSP;
+            int32_t incoming = 0;
+            error = !slot || tier1_emit_cfg_incoming(emitted, record->location.stack_offset, &base, &incoming) ? error : TIER1_EMIT_FRAME;
+            const X86Instruction load = { .displacement = incoming, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
+            error = error != TIER1_EMIT_OK || !slot || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
             const X86Instruction store = {
                 .displacement = offset + parts[k].offset,
-                .reg = (uint8_t)(parts[k].reg & 0x1f),
+                .reg = slot ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)(parts[k].reg & 0x1f),
                 .rm = (uint8_t)emitted->frame.base_register,
                 .mode = BUSTER_X86_MEMORY_BASE,
-                .form = vector ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOV_RM64_R64,
+                .form = vector ? tier1_select_part_form(parts[k].bytes, false) : X86_FORM_MOV_RM64_R64,
             };
-            error = tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY;
+            error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY;
         }
     }
     for (uint32_t node = 0; error == TIER1_EMIT_OK && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
@@ -1725,7 +1740,7 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
 {
     const AbiReturn result = function->result_abi;
     Tier1SelectPart parts[2];
-    const uint32_t part_count = result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier1_select_parts(result.registers, function->result_size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
+    const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     // In the x87's registers (#141): each part's 10 bytes loaded from its 16, the last first, so that st0 holds the first.
     const uint32_t x87_parts = tier1_select_x87_parts(result, function->result_size);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
@@ -1737,19 +1752,22 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
         const X86Instruction load = { .form = X86_FORM_FLD_M80, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(16 * k) };
         error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
+    // Each part staged from its slot on, a whole vector register's (#141) in its bytes' slots (tier1_emit_staging_part).
+    const uint32_t second_slot = part_count != 0 ? tier1_select_part_slots(parts[0].bytes) : 0;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
-        error = tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, tier1_emit_staging(k), source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
+        const int32_t staged = tier1_emit_staging_part(k == 0 ? 0 : second_slot, parts[k].bytes);
+        error = tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
     }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const X86Instruction load = {
-            .displacement = tier1_emit_staging(k),
+            .displacement = tier1_emit_staging_part(k == 0 ? 0 : second_slot, parts[k].bytes),
             .reg = (uint8_t)(parts[k].reg & 0x1f),
             .rm = X86_REGISTER_RSP,
             .mode = BUSTER_X86_MEMORY_BASE,
-            .form = vector_part ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOV_R64_RM64,
+            .form = vector_part ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64,
         };
         error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
@@ -2320,20 +2338,24 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         error = tier1_emit_cfg_stack_argument(emitted, value, use, BUSTER_ABI_SLOT_BYTES * place.index, &buffer);
                     }
                     // A by-value aggregate (#789): its bytes from its address now, before the moves, on the stack whole into
-                    // its slots, else each part into the red zone's next staging slot, which tier1_emit_call loads its
-                    // register from after the moves.
+                    // its slots, else each part in a register into the red zone's next staging slot, which tier1_emit_call
+                    // loads its register from after the moves, and a part in a stack slot (#141) into that slot.
                     const IrPassed* record = aggregate ? tier1_select_argument_record(function, called, argument) : 0;
                     Tier1SelectPart parts[2];
-                    const bool whole = record != 0 && record->location.kind == BUSTER_ABI_LOCATION_STACK;
-                    const uint32_t part_count = record != 0 && !whole ? tier1_select_parts(record->location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+                    const bool whole = record != 0 && tier1_select_location_whole(record->location);
+                    const uint32_t part_count = record != 0 && !whole ? tier1_select_location_parts(record->location, record->size, parts) : 0;
                     if (whole && registered && error == TIER1_EMIT_OK)
                     {
                         error = tier1_emit_cfg_aggregate_copy(emitted, value, use, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
                     }
                     for (uint32_t k = 0; registered && error == TIER1_EMIT_OK && k < part_count; k += 1)
                     {
-                        error = staged < BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS ? tier1_emit_cfg_aggregate_copy(emitted, value, use, tier1_emit_staging(staged), parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
-                        staged += 1;
+                        const bool slot = parts[k].reg == BUSTER_ABI_REGISTER_NONE;
+                        // A whole vector register's part (#141) takes its bytes' slots, from the lowest.
+                        const uint32_t slots = slot ? 0 : tier1_select_part_slots(parts[k].bytes);
+                        const int32_t to = slot ? (int32_t)record->location.stack_offset : tier1_emit_staging_part(staged, parts[k].bytes);
+                        error = slot || staged + slots <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS ? tier1_emit_cfg_aggregate_copy(emitted, value, use, to, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
+                        staged += slots;
                     }
                 }
                 error = registered ? error : TIER1_EMIT_ALLOCATION;
