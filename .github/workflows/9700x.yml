@@ -123,15 +123,21 @@ jobs:
 
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
-    needs: changes
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
+    # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
+    # policy checks, which finish within `changes`' time, and don't start when one fails: neither they nor the 9700X job
+    # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
+    # regardless, so that every row reports.
+    needs: [changes, agent-guide-size, dco-hooks]
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     runs-on: ubuntu-26.04
     # The sanitizer rows run the whole inventory on runners whose detectors make it several times slower; the driver's
     # in-process commands take tens of minutes each there. The plain rows took about 80 minutes, so they keep a
     # 120-minute bound rather than the sanitizer rows' 360.
     timeout-minutes: ${{ matrix.sanitizer == 'none' && 120 || 360 }}
     strategy:
-      fail-fast: false
+      # On a pull request, the first failing row cancels the other. Elsewhere every row runs to its end: these rows
+      # are main's sanitizer coverage, and one detector's failure must not hide what the others find.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
         host_arch: [x86-64, native]
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, and pushes

@@ -479,12 +479,14 @@ stack. The command fails such a run, which proves nothing about the templates,
 and a file that neither lowering lowers (with `-march=native` on a host without
 AVX-512 VBMI, `main.c` is refused for its byte shuffles).
 
-It is still slower than the tasks. On this session's host (an Intel Xeon whose
-build is the scalar host path), `sqlite3.c`'s lowering took 54 to 58 ms by the
-tasks and 67 to 72 ms with the templates, 1.24 to 1.25 times (21 passes, 3
-runs, pinned). The first version of the pass, with its two passes and the
-general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
-(a baseline build) counts the pass's instructions:
+It is still slower than the tasks. On this session's host (an Intel Xeon),
+`test-lowering-templates --passes`, whose two lowerings both take the scalar
+path (`check_program_lower`'s and `check_program_lower_templates`'), timed
+`sqlite3.c`'s lowering at 54 to 58 ms by the tasks and 67 to 72 ms with the
+templates, 1.24 to 1.25 times (21 passes, 3 runs, pinned). The first version of
+the pass, with its two passes and the general rules for every node, took 1.30
+to 1.37 times. callgrind on Lua's units (a baseline build) counts the pass's
+instructions:
 
 | pass | instructions | per node of the ranges |
 | --- | ---: | ---: |
@@ -495,15 +497,109 @@ general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
 The splices save about 12.4 M of the tasks' 111.8 M there. The pass's cost is
 spread over its steps (the scatter about a fifth, the fast twin a third, the
 classification step's bookkeeping a quarter) with no one line more than a few
-percent: the scalar steps can't pay by trimming. So no compile takes the
-templates (`CheckLowerShared.templates` is set only by
+percent: the scalar steps can't pay by trimming. Those numbers are the scalar
+path's, without #624's fragments, so #1197 had the vector path's compile take
+the templates (`check_lower_prepare`), for `--time-stages`' `lower.statements`
+and `lower.bodies` rows to weigh the splices against the pass there. Both paths'
+objects were the same, since the templates write what the tasks write:
+`sqlite3.c`, Lua's 34 units and c-testsuite's subset of 220 compiled to the same
+255 objects by both. On the 9700X, `measure-compile`'s medians of 11 runs on
+`sqlite3.c` ([run at `adfbe904`](https://github.com/buster14a/buster/actions/runs/41559073005/job/125670065912);
+the tasks' column is #1181's runs at `4216e4ec`, the next section's, and at
+`09f3c8ff`):
+
+| row | the tasks | with the templates |
+| --- | ---: | ---: |
+| `lower` | 12.485 to 12.684 ms | 18.306 ms (18.198 to 18.358) |
+| `lower.prepare` | 1.356 to 1.374 ms | 1.246 ms |
+| `lower.statements` | 8.339 to 8.490 ms | 5.281 ms |
+| `lower.bodies` | 1.563 to 1.573 ms | 10.453 ms |
+| `lower.validate` | 1.184 to 1.194 ms | 1.228 ms |
+
+The templates took 201,411 of the 266,773 evaluated nodes (75.5%) and 60.9% of
+the entries, most of the nodes #624's fragments took among them: those fell
+from 14,573 to 466. The splices saved about 3.1 ms of the statements, 37%, but
+the pass cost about 8.9 ms in the bodies' row: 44 ns for each node it took,
+against the 15 ns or so its splice saved. `check_lower_template_body` was 6.5% of
+the whole compile's perf samples, its third symbol. This session's Xeon (whose
+default build is the vector path too: it has AVX-512 VBMI) gave the same
+shape, `sqlite3.c` with `-c --time-stages --lanes 1`, pinned, 11 runs of each
+build alternating: `lower` 37.2 against 57.9 ms, the statements 25.8 against
+17.5 ms and the bodies 4.6 against 33.2 ms. A sampling profile there puts the
+pass's time in the fast twin (45%), the scatter (29%) and the classification
+step's bookkeeping and closure (26%).
+
+So no compile takes the templates (`CheckLowerShared.templates` is set only by
 `check_program_lower_templates`), and the default compile's objects are the
-same as before (`sqlite3.c`'s byte for byte). What remains is the issue's
-point: the three steps 64 nodes at a time. The scatter's table is by op
-alone. The fast twin's shapes read the stream's columns and #570's classes and
-facts. The closure can run over prefix sums of the slots' counts. The vector
-pass's results are to be checked against these scalar ones, and the lowering
-against the tasks, by the same command.
+same as before. A pass that pays costs less than a third of this one, below
+about 15 ns a node on the 9700X: what remains is the issue's point, the three
+steps 64 nodes at a time. The scatter's table is by op alone. The fast twin's
+shapes read the stream's columns and #570's classes and facts. The closure can
+run over prefix sums of the slots' counts. The vector pass's results are to be
+checked against these scalar ones, and the lowering against the tasks, by the
+same command. Even a free pass leaves the statements at 5.3 ms of a 9.4 ms
+stage, though, against Tier 0's 4.8: the tasks still expand the quarter of the
+nodes no template takes (calls, `&&`, `||`, `?:`, increments and compound
+assignments among them), so the templates' coverage has to grow as well.
+
+## The preparation's node counts and the branches' targets (#1048)
+
+Before the bodies, `check_lower_prepare` bounds the writers' room by counts
+over every node of the unit's graph: its builtins (the integer ones too, which
+share a recipe pool), the nodes that may lower an atomic access (an atomic
+builtin, or a node whose type or whose update's destination is `_Atomic`), and
+the C library's calls of a vector's libm builtins and strict rounds
+(`__builtin_elementwise_round` under `FENV_ACCESS`), one a lane. Its loop read
+both types' kinds through `type_strip_aligned` for every node. callgrind on
+`sqlite3.c` (#136's options, a baseline build of main at `171d6301`) counts
+49.1 M instructions in `check_lower_prepare`, 19.6 M of them that loop's,
+about 30 for each of the graph's 647,114 nodes.
+
+`check_lower_node_counts` takes the counts from the ops alone, 16 at a time:
+the masks of their compares, which population counts add up. A node's type,
+or its update's destination, is `_Atomic` only where the type table has an
+`_Atomic` kind (an aligned typedef's base is a type of the table too), so a
+unit without one reads no node's type, and a unit with one takes the rules
+for every node. A vector builtin's node takes the rules for its lane calls.
+The loop is the scalar twin (`check_lower_node_counts_scalar`, which
+`--scalar` takes), and `test-checker` compares the two on every boundary
+fixture of its program tests, among them a vector's libm builtins, an
+`_Atomic` global (the rules) and the atomic builtins on plain objects (the
+masks, whose fixture's table the test requires to have no `_Atomic` kind).
+
+After its statements, each body's branches (`BRANCH_FALSE` to `JUMP_VALUE`)
+take their targets: their labels' entries. The loop compared every entry's
+kind and branched on it, a branch whose outcome follows the branches' places
+among the entries: 4.7 M instructions over `sqlite3.c`'s 407,396 entries.
+`check_lower_resolve_labels` compares the kinds 64 at a time, and only the
+branches among them take their targets, in entry order, up to the first label
+without an entry, as its scalar twin (`check_lower_resolve_labels_scalar`)
+does. `test-checker` compares the two on random kinds at a page's end,
+across the masks' tails, with labels that all have entries and with some that
+don't.
+
+On the 9700X (`measure-compile`'s medians of 11 runs on `sqlite3.c`), the
+`lower` stage went from 13.541 ms (13.472 to 13.603, #1143's last run at
+`425f57c7`) to 12.485 ms (12.399 to 12.708) with both, and perf's share of
+`check_lower_prepare`'s own samples from 1.46% to 0.75% of the compile's.
+`--time-stages`' rows (#1048) then split the stage, on one lane (the step pins
+the compile to one CPU; on several lanes the parts' time is the `lanes`
+stage's), each row its own median, so that they add up to 12.508 ms, 0.023 ms
+more than the stage's median. That run's `--time-stages` costs 0.588 ms
+(0.51%) of the default compile's median wall time, against 0.196 ms (0.10%)
+in the compile-time guide's older figure, which later splits compare with:
+
+| row | ms | of `lower` |
+| --- | ---: | ---: |
+| `lower.prepare` | 1.356 | 10.9% |
+| `lower.statements` | 8.339 | 66.8% |
+| `lower.bodies` | 1.573 | 12.6% |
+| `lower.validate` | 1.194 | 9.6% |
+| `lower.rest` | 0.046 | 0.4% |
+
+The statements, the controls and the tasks' loops, are two thirds of the
+stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
+templates' target.
 
 ## Against clang -O0's objects
 
@@ -652,8 +748,11 @@ compare 348 files.
 ./build/compiler benchmark-lowering-source [--passes N] [preprocessor options] file...
 ```
 
-checks each file as the driver does, outside the time, then times in turns the
-two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
+prepares each file as `-c` does (the shared preparation, [the request
+guide](compilation-requests.md): its options refused as the driver refuses
+them, its program for their target and predefines, `-c`'s target-feature check
+of its selection), outside the time, prints its configuration's receipt, then
+times in turns the two selections, lowering, Tier 0, branch sizing, encoding, the link's code,
 the static data's publication, section/symbol preparation and building the
 object in memory. Unwind generation and verification are disabled in this
 benchmark; preprocessing, checking, program/static-data preparation, the outer

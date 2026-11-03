@@ -1953,6 +1953,53 @@ static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_
     return result;
 }
 
+// A body's branches' targets (BRANCH_FALSE to JUMP_VALUE's values), its labels, to their entries through `labels`, in
+// entry order, until the first whose label is out of `label_count` or has no entry: whether every one has one. The
+// scalar twin of check_lower_resolve_labels.
+static bool check_lower_resolve_labels_scalar(const uint8_t* kinds, uint64_t* values, uint32_t count, const uint32_t* labels, uint32_t label_count)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        if (kinds[i] >= BUSTER_TYPED_BRANCH_FALSE && kinds[i] <= BUSTER_TYPED_JUMP_VALUE)
+        {
+            const uint64_t label = values[i];
+            valid = label < label_count && labels[label] != BUSTER_CHECK_NONE;
+            values[i] = valid ? labels[label] : values[i];
+        }
+    }
+    return valid;
+}
+
+_Static_assert(BUSTER_TYPED_BRANCH_FALSE < BUSTER_TYPED_JUMP_VALUE && BUSTER_TYPED_JUMP_VALUE - BUSTER_TYPED_BRANCH_FALSE == 3,
+               "the branches' kinds are four, in a row");
+_Static_assert(BUSTER_TYPED_JUMP_VALUE <= UCHAR_MAX, "the branches' kinds are bytes, as the kinds' compares take them");
+
+// The same, the kinds 64 at a time: a mask of the branches among them, whose entries then take their targets in order,
+// rather than a compare and a branch an entry, which the branches' places in the entries make mispredicted. The loads
+// are masked to the entries.
+static bool check_lower_resolve_labels(const uint8_t* kinds, uint64_t* values, uint32_t count, const uint32_t* labels, uint32_t label_count)
+{
+    const __m512i first_kind = _mm512_set1_epi8((char)BUSTER_TYPED_BRANCH_FALSE);
+    const __m512i kinds_span = _mm512_set1_epi8((char)(BUSTER_TYPED_JUMP_VALUE - BUSTER_TYPED_BRANCH_FALSE));
+    bool valid = true;
+    for (uint32_t first = 0; valid && first < count; first += 64)
+    {
+        const __mmask64 active = count - first < 64 ? (UINT64_C(1) << (count - first)) - 1 : UINT64_MAX;
+        const __m512i some = _mm512_maskz_loadu_epi8(active, kinds + first);
+        uint64_t branches = _mm512_cmple_epu8_mask(_mm512_sub_epi8(some, first_kind), kinds_span) & active;
+        while (valid && branches != 0)
+        {
+            const uint32_t i = first + (uint32_t)__builtin_ctzll(branches);
+            const uint64_t label = values[i];
+            valid = label < label_count && labels[label] != BUSTER_CHECK_NONE;
+            values[i] = valid ? labels[label] : values[i];
+            branches &= branches - 1;
+        }
+    }
+    return valid;
+}
+
 static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
@@ -10985,6 +11032,9 @@ struct CheckLowerShared
     bool templates_allowed;
     bool template_check;
     bool templates;
+    // Whether the parts read the TSC for --time-stages' lowering rows (CheckLowerPart.statement_ticks): the emission sets
+    // it with a clock, after check_lower_prepare.
+    bool timed;
     // The runtime's functions: each one's symbol where the unit declares it (check_lower_runtime), 0 for none, and the
     // first of the provisional symbols the lowering's own take until check_lower_finish numbers them, the helpers' end.
     SymbolId declared_runtimes[CHECK_LOWER_RUNTIMES];
@@ -11030,6 +11080,12 @@ struct CheckLowerPart
     uint64_t template_entries;
     uint64_t template_fast;
     uint64_t template_mismatches;
+    // The TSC's ticks of its bodies' statements (their controls and tasks' loops), of the rest of its bodies' walks, and
+    // of its ABI rows, abi_assign and functions' validation: --time-stages' lower.statements, lower.bodies and
+    // lower.validate (check_clock_lower).
+    uint64_t statement_ticks;
+    uint64_t body_ticks;
+    uint64_t validate_ticks;
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
@@ -11101,6 +11157,104 @@ static bool check_lower_local_declaration(const CheckProgram* program, uint32_t 
            (program->dropped_range_count == 0 || !check_program_token_dropped(program, token));
 }
 
+// The counts of the program's nodes that bound the lowering's room (check_lower_prepare): its builtins (the integer
+// ones too, whose recipes share a pool), the nodes that may lower an atomic access (an atomic builtin, or a node whose type
+// or whose update's destination is _Atomic), and the C library's calls of a vector's libm builtin or strict round
+// (check_lower_strict_round: __builtin_elementwise_round under FENV_ACCESS), one a lane, with their arguments
+// (check_lower_vector_calls).
+typedef struct CheckLowerNodeCounts CheckLowerNodeCounts;
+struct CheckLowerNodeCounts
+{
+    uint32_t builtins;
+    uint32_t integer_builtins;
+    uint32_t atomics;
+    uint64_t lane_calls;
+    uint64_t lane_arguments;
+};
+
+// Node `node`'s part of the counts, by the rules: the scalar twin's step (check_lower_node_counts_scalar).
+static void check_lower_node_count(const CheckProgram* program, uint32_t node, CheckLowerNodeCounts* counts)
+{
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    const CheckOp op = input->graph.ops[node];
+    counts->integer_builtins += op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW;
+    counts->builtins += op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_FLOAT;
+    const uint32_t left = input->graph.operand0[node];
+    const bool update = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    const TypeId type = program->stream != NULL && check_stream_has_values(program->stream) ? check_stream_type(program->stream, node) : 0;
+    const TypeId target = update && left < node && program->stream != NULL ? check_stream_type(program->stream, left) : 0;
+    counts->atomics += op == CHECK_OP_BUILTIN_ATOMIC || (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
+                       (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
+    const uint8_t kind = type != 0 ? type_kind(types, type_strip_aligned(types, type)) : BUSTER_TYPE_KIND_NONE;
+    const CBuiltinId member = (CBuiltinId)input->graph.members[node];
+    if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
+        (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
+    {
+        const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
+        counts->lane_calls += lanes;
+        counts->lane_arguments += lanes * input->graph.argument_counts[node];
+    }
+}
+
+// Every node's counts by the rules, one node at a time: check_lower_node_counts' scalar twin, which --scalar takes.
+static CheckLowerNodeCounts check_lower_node_counts_scalar(const CheckProgram* program)
+{
+    CheckLowerNodeCounts counts = { 0 };
+    const uint32_t nodes = program->input != NULL ? program->input->graph.count : 0;
+    for (uint32_t node = 0; node < nodes; node += 1)
+    {
+        check_lower_node_count(program, node, &counts);
+    }
+    return counts;
+}
+
+_Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the graph's ops load 16 to a vector");
+
+// The same, by 16 nodes' ops at a time. Every term but the atomic types' and the libm builtins' is the op's alone: masks
+// of the ops' compares, which population counts add up. A node's type or its update's destination is _Atomic only where
+// the type table has an _Atomic kind (type_strip_aligned's base is a type of the table too), so a unit without one, which
+// is nearly every unit, reads no node's type; a unit with one takes the rules for every node. A vector builtin's node,
+// rare, takes the rules for its lane calls, of which the masks count no other term. The loads are masked to the graph's
+// nodes.
+static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
+{
+    const TypeTable* types = program->types;
+    const CheckGraph* graph = program->input != NULL ? &program->input->graph : NULL;
+    const uint32_t nodes = graph != NULL ? graph->count : 0;
+    const bool atomic_types = nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_ATOMIC, types->types.count) != NULL;
+    CheckLowerNodeCounts counts = { 0 };
+    if (atomic_types)
+    {
+        counts = check_lower_node_counts_scalar(program);
+    }
+    else
+    {
+        const __m512i unary = _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY);
+        const __m512i overflow = _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW);
+        const __m512i misc = _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC);
+        const __m512i floating = _mm512_set1_epi32(CHECK_OP_BUILTIN_FLOAT);
+        const __m512i atomic = _mm512_set1_epi32(CHECK_OP_BUILTIN_ATOMIC);
+        const __m512i vector = _mm512_set1_epi32(CHECK_OP_BUILTIN_VECTOR);
+        for (uint32_t first = 0; first < nodes; first += 16)
+        {
+            const uint32_t left = nodes - first;
+            const __mmask16 active = left < 16 ? (__mmask16)((1u << left) - 1) : (__mmask16)UINT16_MAX;
+            const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
+            const __mmask16 integer = _mm512_mask_cmpeq_epi32_mask(active, ops, unary) | _mm512_mask_cmpeq_epi32_mask(active, ops, overflow);
+            const __mmask16 builtin = integer | _mm512_mask_cmpeq_epi32_mask(active, ops, misc) | _mm512_mask_cmpeq_epi32_mask(active, ops, floating);
+            counts.integer_builtins += (uint32_t)__builtin_popcount(integer);
+            counts.builtins += (uint32_t)__builtin_popcount(builtin);
+            counts.atomics += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(active, ops, atomic));
+            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector); lanes != 0; lanes &= lanes - 1)
+            {
+                check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
+            }
+        }
+    }
+    return counts;
+}
+
 // Keeps `object`'s local_map entry (CheckLowerShared.locals): marked, and none until a body writes it.
 static void check_lower_local_keep(CheckLowerShared* shared, uint32_t object, uint32_t count)
 {
@@ -11126,38 +11280,16 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const TypeTable* types = program->types;
     const uint32_t count = input != 0 ? input->token_count : 0;
     const uint32_t nodes = input != 0 ? input->graph.count : 0;
-    uint32_t builtin_count = 0;
-    uint32_t atomic_capacity = 0;
-    uint32_t integer_builtin_count = 0;
     // A libm builtin of a vector (check_lower_vector_calls) calls the C library's function once an element, past what the
     // per-node bounds below give a node (#934's review): its lanes' calls and their arguments, and each call's entries, its
     // SET and CALL, an argument's LOAD, and the element addresses of each argument and of the result (up to 13 with two
     // arguments).
-    uint64_t lane_calls = 0;
-    uint64_t lane_arguments = 0;
-    for (uint32_t node = 0; node < nodes; node += 1)
-    {
-        integer_builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW;
-        builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW ||
-                         input->graph.ops[node] == CHECK_OP_BUILTIN_MISC || input->graph.ops[node] == CHECK_OP_BUILTIN_FLOAT;
-        const CheckOp op = input->graph.ops[node];
-        const uint32_t left = input->graph.operand0[node];
-        const bool update = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
-        const TypeId type = program->stream != NULL && check_stream_has_values(program->stream) ? check_stream_type(program->stream, node) : 0;
-        const TypeId target = update && left < node && program->stream != NULL ? check_stream_type(program->stream, left) : 0;
-        atomic_capacity += op == CHECK_OP_BUILTIN_ATOMIC ||
-                           (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
-                           (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
-        const uint8_t kind = type != 0 ? type_kind(types, type_strip_aligned(types, type)) : BUSTER_TYPE_KIND_NONE;
-        const CBuiltinId member = (CBuiltinId)input->graph.members[node];
-        if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
-            (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
-        {
-            const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
-            lane_calls += lanes;
-            lane_arguments += lanes * input->graph.argument_counts[node];
-        }
-    }
+    const CheckLowerNodeCounts node_counts = BUSTER_SCALAR_PATH(scalar) ? check_lower_node_counts_scalar(program) : check_lower_node_counts(program);
+    const uint32_t builtin_count = node_counts.builtins;
+    const uint32_t atomic_capacity = node_counts.atomics;
+    const uint32_t integer_builtin_count = node_counts.integer_builtins;
+    const uint64_t lane_calls = node_counts.lane_calls;
+    const uint64_t lane_arguments = node_counts.lane_arguments;
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
     // no stream, and is refused below without reading one.
@@ -11453,9 +11585,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                           BUSTER_SCALAR_PATH(scalar));
         }
     }
-    // #1048's node templates are verified against the tasks (test-lowering-templates) but no compile takes them yet: this
-    // scalar classification costs about as much as the tasks it saves (docs/c-lowering.md's "Node templates over a body:
-    // the first path"), which a data-parallel one must not.
+    // #1048's node templates are verified against the tasks (test-lowering-templates) but no compile takes them: on the
+    // 9700X, the vector path's compile of sqlite3.c spent 8.9 ms in their scalar pass to save 3.1 ms of its statements
+    // (docs/c-lowering.md's "Node templates over a body: the first path"), which a data-parallel pass must not.
     shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0;
     shared->templates = false;
     shared->template_check = false;
@@ -11712,6 +11844,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->template_spliced_entries = 0;
     writer->template_fast_nodes = 0;
     writer->template_mismatches = 0;
+    // With a clock (CheckLowerShared.timed), two TSC reads a body's statements and three a part
+    // (CheckLowerPart.statement_ticks); without one, none.
+    const bool timed = shared->timed;
+    const uint64_t walk_start = timed ? __rdtsc() : 0;
+    part->statement_ticks = 0;
     for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
@@ -12044,6 +12181,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // Each statement's nodes are prefetched a statement before the tasks' loop expands them, the first two's before the
         // first (check_lower_prefetch).
         uint32_t prefetched = 0;
+        const uint64_t statements_start = timed ? __rdtsc() : 0;
         for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
             if (sources)
@@ -12073,6 +12211,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_drain(writer);
             }
         }
+        part->statement_ticks += timed ? __rdtsc() - statements_start : 0;
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
                                                                             writer->count == 0 || (writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN &&
@@ -12119,19 +12258,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_drain(writer);
             }
         }
-        for (uint32_t i = 0; i < writer->count && status->status == CHECK_PROGRAM_OK; i += 1)
+        // The branches' targets, from their labels to their entries.
+        if (status->status == CHECK_PROGRAM_OK)
         {
-            if (writer->kinds[i] >= BUSTER_TYPED_BRANCH_FALSE && writer->kinds[i] <= BUSTER_TYPED_JUMP_VALUE)
+            const bool resolved = BUSTER_SCALAR_PATH(writer->scalar) ?
+                                      check_lower_resolve_labels_scalar(writer->kinds, writer->values, writer->count, writer->labels, writer->label_count) :
+                                      check_lower_resolve_labels(writer->kinds, writer->values, writer->count, writer->labels, writer->label_count);
+            if (!resolved)
             {
-                const uint64_t label = writer->values[i];
-                if (label >= writer->label_count || writer->labels[label] == BUSTER_CHECK_NONE)
-                {
-                    check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-                }
-                else
-                {
-                    writer->values[i] = writer->labels[label];
-                }
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
             }
         }
         // The labels whose addresses the program takes, from their control entries to their entries, as the targets.
@@ -12276,6 +12411,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             writer->local_map[input->objects[parameter]] = BUSTER_CHECK_NONE;
         }
     }
+    const uint64_t walked = timed ? __rdtsc() : 0;
+    part->body_ticks = walked - walk_start - part->statement_ticks;
     part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_BODY : CHECK_LOWER_STAGE_NONE;
     part->final_token = writer->token;
     AbiLocation* locations = part->stage == CHECK_LOWER_STAGE_NONE ? BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, (uint64_t)abi->argument_count + 1) : 0;
@@ -12355,6 +12492,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_FRAME : CHECK_LOWER_STAGE_NONE;
     }
+    part->validate_ticks = timed ? __rdtsc() - walked : 0;
     part->status = part->stage == CHECK_LOWER_STAGE_ROOM ? CHECK_PROGRAM_RESOURCE : status->status;
     part->token = part->stage == CHECK_LOWER_STAGE_ROOM ? BUSTER_CHECK_NONE : status->token;
     part->backend_node = status->backend_node;
