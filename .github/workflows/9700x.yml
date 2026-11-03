@@ -1288,8 +1288,9 @@ jobs:
           grep -v '^#' "$out/dso.txt" | sed '/^$/d'
           grep -v '^#' "$out/symbol.txt" | sed -n '/^$/d; 1,80p'
           # #1172's temporary A/B of the expressions' walk's literals' pass, removed with its decision: the same compiler with
-          # every literal parsed by its action (--parsed-literals), its walk's parts by measure-compile, then both compilers
-          # as whole processes in a rotating order.
+          # every literal parsed by its action (--parsed-literals) and without, each by measure-compile without a reference
+          # (their walk's parts, like for like), then both compilers as whole processes in a rotating order, which decides.
+          taskset -c 2 ./build/compiler measure-compile --runs 11 -- "${options[@]}"
           taskset -c 2 ./build/compiler measure-compile --runs 11 -- --parsed-literals "${options[@]}"
           taskset -c 2 ./build/compiler time-runs --runs 11 --list "${options[@]}" -o "$out/literals.o" --list --parsed-literals "${options[@]}" -o "$out/parsed.o"
           cmp "$out/literals.o" "$out/parsed.o"

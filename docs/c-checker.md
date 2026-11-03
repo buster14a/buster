@@ -4228,6 +4228,11 @@ the oracle.
   guarded ranges of spellings, and every plain value against
   `check_literal_number`; `test-checker`'s graph comparisons check the walk's
   literals against the scalar walk's, which parses every literal.
+  `--parsed-literals` (`PPOptions.expression_parsed_literals`) is a temporary
+  option for #1172's A/B of the pass on the 9700X: every literal parsed by its
+  action, without the pass. `test-checker-driver` compiles a unit of literals
+  of every form with it and without and compares the objects; the option
+  leaves with the A/B's decision.
   - **What it costs.** Most of a literal's cost is the first read since the
     parser of its preprocessor columns and its source: on the VM the pass
     takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms warm on the
@@ -4239,8 +4244,9 @@ the oracle.
     value would cost little more.
 - **Where the class actions' time goes.** `benchmark-checker-bindings` times
   the walk by class (above). On the 9700X, the frozen corpus's `sqlite3.c`, 5
-  passes, with the literals' pass: the class actions take 3.96 ms, 8.64 ns a
-  token. The timing's own cost, 26.9 TSC ticks (7.1 ns) a token, is taken off
+  passes, at #1172's `fe98b891` (with the literals' pass, and the visits still
+  timed apart inside their classes' ticks, which later runs don't): the class
+  actions take 3.96 ms, 8.64 ns a token. The timing's own cost, 26.9 TSC ticks (7.1 ns) a token, is taken off
   every class's and is the table's resolution: a class whose residual a token
   is below it is marked, and is no measurement.
 
@@ -4267,11 +4273,15 @@ the oracle.
 
   The table is warm, as every pass of the benchmark is; the compile's walk is
   cold, and its `actions` took 8.78 ms of the same head's 13.92 ms walk in the
-  compile-time step. What resolves is that the walk's own visits and the
-  literals, prefixes and calls are most of the warm actions; the operators and
-  lists, about a quarter of them, are each below the timing's resolution. The
-  dispatch that #1038 found the walk's cost in (one long chain of tests a
-  token) is gone with the classes.
+  compile-time step. What resolves is that the walk's own visits (44.3%), the
+  literals (13.6%), the prefixes (9.7%, 913 of whose 8,381 the visit takes) and
+  the calls (4.4%) are most of the warm actions. The operators and lists are
+  about a quarter in all: the prefixes, calls and ternaries (14.2%) resolve,
+  and the others, from the members (4.4%) down to the lists, are each below
+  the resolution, 12.6% together. The identifiers and the terminators (9.5% and
+  5.2%), which are no operators, are below it too. The dispatch that #1038
+  found the walk's cost in (one long chain of tests a token) is gone with the
+  classes.
 - **The graph by passes (stages 2 and 4), probed and not built.** The
   numbering is measured by `benchmark-checker-bindings`' `expression-numbering`
   line (`PPOptions.expression_numbering`, `check_input_expression_numbering`):
@@ -4280,19 +4290,21 @@ the oracle.
   list (the nearest ancestor that isn't a LIST, a GROUP or a SEPARATOR the walk
   didn't visit), each operator's operands are read from its own list, a
   terminator makes a discard a value, and the walk's visits are barriers that
-  take the walk's own nodes and value chains. Each node it numbers is checked
-  against the walk's graph: its token and first operand. On the VM, with
-  sqlite 3.53.2's amalgamation, it numbers all 311,412 nodes of the
-  benchmark's options and checks 306,485 of them with no difference; written
-  plainly it takes 5.5 ms warm, 17.7 ns a node, where the operators and lists
-  it would replace take about a quarter of 12.9 ms. So the numbering is right;
-  it doesn't pay:
+  take the walk's own nodes and value chains. Each node a class numbered is
+  checked against the walk's graph: its token, and but for a VALUE its first
+  operand; the barriers' nodes it only counts. Its time is the whole pass's,
+  from its columns' allocation and clearing to its last token, the check
+  outside it. On the VM, with sqlite 3.53.2's amalgamation, it numbers all
+  311,412 nodes of the benchmark's options and checks 306,485 of them with no
+  difference; written plainly it takes 6.4 ms warm, 20.5 ns a node, where the
+  operators and lists it would replace take about a quarter of 12.9 ms. So the
+  numbering is right; it doesn't pay:
   - it costs more than the per-token actions it would replace;
   - the walk's visits are its barriers: each makes as many nodes as it
     decides, and reads its operands' columns, so the ids after it are known
-    only once it has run. On `sqlite3.c` they are 6,639 to 7,800, one in about
-    58 tokens acted at by class, which cuts the runs a vector numbering would
-    take to about 58 tokens;
+    only once it has run. On `sqlite3.c` they are 6,639 to 7,800, one in 58 to
+    69 tokens acted at by class (the VM's option set, then the 9700X's frozen
+    corpus), which cuts the runs a vector numbering would take to that many;
   - the nodes' recording is no barrier: nothing reads it before
     `check_graph_record_finish`.
 

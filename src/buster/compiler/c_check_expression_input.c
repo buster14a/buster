@@ -1028,9 +1028,10 @@ static void check_input_numbering_append(uint32_t* first, uint32_t* last, uint32
 // actions left, CheckInputReader.expression_declined) is a barrier: it takes the walk's count of nodes at it and the walk's
 // chain of its values. A terminator makes a discard a value of its list; an identifier, a literal or a string a node where
 // the walk made one; a return one where it has a value; and every other class one, whose first operand is its list's
-// first. A condition's and a return's nodes are no values. The numbering, the chunks compacted again, is timed as written
-// plainly (CheckInput.expression_numbering_ticks), and each node it numbers is checked against the walk's: its token, and
-// but for a VALUE its first operand. The caller pops `tokens` and `classes`' scratch.
+// first. A condition's and a return's nodes are no values. The numbering is timed as written plainly, from its columns'
+// allocation and clearing and the walk's counts at each token to its last token, the chunks compacted again
+// (CheckInput.expression_numbering_ticks). Then each node a class numbered is checked against the walk's: its token, and
+// but for a VALUE its first operand; the barriers' nodes it only counts. The caller pops the scratch.
 static void check_input_expression_numbering(CheckInputReader* reader, uint32_t base, uint32_t* tokens, uint32_t* classes)
 {
     CheckInput* input = reader->output;
@@ -1040,6 +1041,8 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
     const uint32_t nodes = graph->count;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     Arena* scratch = reader->scratch;
+    // The numbering's whole cost, from its columns' allocation and clearing to its last token; the check is outside it.
+    const uint64_t start = __rdtsc();
     // Per token: its list's first and last values and their count, and the nodes the walk made at it. Per node: the next
     // value of its list, and the token and first operand the numbering gives it.
     uint32_t* first = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
@@ -1058,7 +1061,6 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
         {
             made[graph->tokens[n] < count ? graph->tokens[n] : count] += 1;
         }
-        const uint64_t start = __rdtsc();
         uint32_t id = base;
         for (uint32_t chunk = 0; chunk < count; chunk += BUSTER_CHECK_EXPRESSION_CHUNK)
         {
