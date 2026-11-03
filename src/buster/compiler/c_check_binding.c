@@ -199,9 +199,12 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
             // Clang publishes a declaration's unused warning when the scope holding it completes — the nearest
             // enclosing `}` — rather than at its function's end, so an inner block's warnings order before the
             // function-level ones. Only block, body and compound braces close a scope: a `struct S { } s`
-            // declaration walks past its type's own braces without stopping.
+            // declaration walks past its type's own braces without stopping. A file-scope entity — an unused
+            // function or a `static` object — waits for the translation unit's end, where every later
+            // declaration could still have used it; sorting there keeps declaration order.
             uint32_t closing = BUSTER_CHECK_NONE;
-            for (uint32_t ancestor = token, steps = 0; ancestor < count && steps < count; steps += 1)
+            const bool scoped = !file_scope && kind != C_BINDING_FUNCTION;
+            for (uint32_t ancestor = token, steps = 0; scoped && ancestor < count && steps < count; steps += 1)
             {
                 const uint32_t parent = parser->tree.parents[ancestor];
                 if (parent == BUSTER_CHECK_NONE || parent >= count || parent == ancestor)
@@ -354,6 +357,11 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             {
                 check_input_unused_events(reader, used, used_tokens, parameters, reported);
             }
+        }
+        else if (used == NULL || (count != 0 && (used_tokens == NULL || parameters == NULL || reported == NULL)))
+        {
+            // A nonempty stream's scratch failure is a resource error, not a quiet skip of the analysis.
+            valid = false;
         }
     }
     return valid && output->report_count == 0;

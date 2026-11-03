@@ -286,7 +286,8 @@ static void check_test_driver_common_output(const char* text, char* filtered, si
 {
     size_t used = 0;
     filtered[0] = 0;
-    for (const char* at = text; at != NULL && *at != 0 && used + 1 < capacity;)
+    // A copied line needs room for its newline and the terminator, so two slots must stay free.
+    for (const char* at = text; at != NULL && *at != 0 && used + 2 < capacity;)
     {
         const char* end = strchr(at, '\n');
         end = end != NULL ? end : at + strlen(at);
@@ -296,7 +297,7 @@ static void check_test_driver_common_output(const char* text, char* filtered, si
                                 check_test_driver_common_contains(at, length, ": note: ");
         if (diagnostic)
         {
-            const size_t copied = length < capacity - used - 1 ? length : capacity - used - 1;
+            const size_t copied = length < capacity - used - 2 ? length : capacity - used - 2;
             memcpy(filtered + used, at, copied);
             used += copied;
             filtered[used++] = '\n';
@@ -630,6 +631,34 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int p(void) { int x = { x && 1 }; return x; }\n"
         "int q(void) { int x = (x = x); return x; }\n"
         "int r(void) { int x; x = (x); x; return 0; }\n";
+    static const char format_shadowed[] =
+        "void f(void (*printf)(const char *, ...)) { printf(\"%d\", \"x\"); }\n"
+        "int printf(const char *, ...);\n"
+        "void g(void) { printf(\"%d\", \"x\"); }\n";
+    static const char format_scanf_archetype[] =
+        "__attribute__((format(scanf, 1, 2))) int myscanf(const char *, ...);\n"
+        "void f(void) { myscanf(\"%d %s\", (int*)0, (char*)0); }\n";
+    static const char format_varargs_index[] =
+        "#include <stdarg.h>\n"
+        "__attribute__((format(printf, 1, 0))) void render(const char *, va_list);\n"
+        "void f(va_list ap) { render(\"%d %s\", ap); render(\"%Q\", ap); }\n";
+    static const char self_assign_members[] =
+        "void f(void) { int x = 0; x = x; union U { int a; int b; } u; u.a = u.b; u.a = u.a; }\n";
+    static const char format_nonliteral_call[] =
+        "const char *get_format(void);\n"
+        "int printf(const char *, ...);\n"
+        "void f(char *s) { printf(get_format()); printf(s); }\n";
+    static const char enum_unary_selectors[] =
+        "enum E { EA, EB };\n"
+        "int f(enum E e) { switch (e) { case EA: return 0; } return 0; }\n"
+        "int g(enum E e) { switch (-e) { case 0: return 0; } return 0; }\n"
+        "int h(enum E e) { switch (~e) { case 0: return 0; } return 0; }\n";
+    static const char format_wide_pointer[] =
+        "int printf(const char *, ...);\n"
+        "void f(void) { printf(\"%ls\", 1); printf(\"%ls\", (int*)0); }\n";
+    static const char boundary_return_uninit[] =
+        "int f(int c) { int x; if (c) return 1; x; }\n"
+        "int g(int c) { int y = 1; if (c) return y; }\n";
     static const struct
     {
         const char* source;
@@ -681,6 +710,14 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { self_init_edges, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
+        { format_shadowed, { "-Wall", NULL, NULL, NULL } },
+        { format_scanf_archetype, { "-Wall", NULL, NULL, NULL } },
+        { format_varargs_index, { "-Wall", NULL, NULL, NULL } },
+        { self_assign_members, { "-Wall", "-Wextra", NULL, NULL } },
+        { format_nonliteral_call, { "-Wall", NULL, NULL, NULL } },
+        { enum_unary_selectors, { "-Wall", NULL, NULL, NULL } },
+        { format_wide_pointer, { "-Wall", NULL, NULL, NULL } },
+        { boundary_return_uninit, { "-Wall", "-Wextra", NULL, NULL } },
     };
     char source_path[512];
     snprintf(source_path, sizeof(source_path), "%s/common-warnings.c", directory);

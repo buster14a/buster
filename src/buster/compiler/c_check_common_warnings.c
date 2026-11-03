@@ -829,7 +829,12 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
             const CheckValue right_value = right < graph->count ? check_stream_value(stream, right) : (CheckValue){ 0 };
             const bool volatile_object = left < graph->count &&
                 (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
-            if (!volatile_object && left < graph->count && right < graph->count && left_value.category == CHECK_LVALUE &&
+            // Clang's -Wself-assign only covers a variable's own name: `x = x` warns, while member,
+            // subscript and indirection lvalues never do — so `u.a = u.b`, `s.m = s.m` and `a[i] = a[i]`
+            // all stay silent regardless of the object and offset they resolve to.
+            const bool plain_lvalues = left < graph->count && right < graph->count &&
+                                       graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
+            if (!volatile_object && plain_lvalues && left_value.category == CHECK_LVALUE &&
                 right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
                 left_value.offset == 0 && right_value.offset == 0)
             {
@@ -1583,6 +1588,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     // allow one past the end, an explicit `(void)` cast discards the lvalue unchecked, and any other operand
     // inside an address-of's subtree — a nested index — is unchecked as well.
     uint32_t* parents = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
+    if (graph->count != 0 && (evaluated == NULL || parents == NULL))
+    {
+        pp->fatal = true;
+    }
     if (parents != NULL)
     {
         memset(parents, 0xff, (uint64_t)graph->count * sizeof(uint32_t));
@@ -1610,6 +1619,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         }
     }
     uint8_t* emitted = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (graph->count != 0 && emitted == NULL)
+    {
+        pp->fatal = true;
+    }
     if (emitted != NULL)
     {
         memset(emitted, 0, graph->count);
@@ -1748,18 +1761,31 @@ static bool check_common_format_floating(TypeTable* types, TypeId type, bool lon
     return result;
 }
 
-static bool check_common_format_attribute(const CheckInputAttributes* attributes, uint32_t* format_index, uint32_t* first_argument)
+static bool check_common_format_attribute(const Parser* parser, Preprocessor* pp, const CheckInputAttributes* attributes,
+                                          uint32_t* format_index, uint32_t* first_argument)
 {
     bool found = false;
     for (uint32_t a = 0; attributes != NULL && a < attributes->count && !found; a += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + a;
-        if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && attribute->argument_count >= 3 && attribute->argument_values != NULL &&
-            attribute->argument_values[1] > 0)
+        if (attribute->kind == CHECK_ATTRIBUTE_FORMAT && !attribute->ignored && attribute->argument_count >= 3 &&
+            attribute->argument_values != NULL && attribute->argument_values[1] > 0 && attribute->argument_first < parser->tokens.count)
         {
-            *format_index = (uint32_t)attribute->argument_values[1] - 1;
-            *first_argument = attribute->argument_values[2] > 0 ? (uint32_t)attribute->argument_values[2] - 1 : *format_index + 1;
-            found = true;
+            // The archetype names the checking family: only printf-family semantics belong in this
+            // scanner, so `format(scanf, ...)` calls stay unchecked rather than failing printf rules.
+            const uint32_t archetype = parser->tokens.names[attribute->argument_first];
+            const String8 name = { .pointer = (char*)intern_bytes(pp->table, archetype), .length = intern_length(pp->table, archetype) };
+            const bool printf_family = (name.length == 6 && memcmp(name.pointer, "printf", 6) == 0) ||
+                                       (name.length == 10 && memcmp(name.pointer, "gnu_printf", 10) == 0) ||
+                                       (name.length == 9 && memcmp(name.pointer, "ms_printf", 9) == 0);
+            if (printf_family)
+            {
+                *format_index = (uint32_t)attribute->argument_values[1] - 1;
+                // A zero first-argument index selects a va_list-taking callee: the literal is still
+                // scanned, but no direct argument can be checked, which UINT32_MAX marks.
+                *first_argument = attribute->argument_values[2] > 0 ? (uint32_t)attribute->argument_values[2] - 1 : UINT32_MAX;
+                found = true;
+            }
         }
     }
     return found;
@@ -2055,22 +2081,29 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         }
         const uint32_t name_id = parser->tokens.names[callee_token];
         const String8 name = { .pointer = (char*)intern_bytes(pp->table, name_id), .length = intern_length(pp->table, name_id) };
-        uint32_t format_index = check_common_format_index(name);
-        uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
         const uint32_t callee_object = callee < graph->count ? check_stream_object(stream, callee) : 0;
-        if (format_index == UINT32_MAX && program != NULL && callee_object != 0 && callee_object <= program->object_count)
+        const uint32_t definition = program != NULL && callee_object != 0 && callee_object <= program->object_count ?
+                                    program->object_declarations[callee_object] : BUSTER_CHECK_NONE;
+        // A spelled printf-family name only applies where the callee resolves to a function declaration
+        // or stays undeclared: a local object — a function pointer named `printf` — can shadow the
+        // library name without its semantics.
+        const bool function_callee = callee_object == 0 ||
+                                     (definition < input->token_count && input->declaration_kinds != NULL &&
+                                      input->declaration_kinds[definition] == C_BINDING_FUNCTION);
+        uint32_t format_index = function_callee ? check_common_format_index(name) : UINT32_MAX;
+        uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
+        if (format_index == UINT32_MAX && definition < input->token_count)
         {
-            const uint32_t definition = program->object_declarations[callee_object];
-            bool found = definition < input->token_count &&
-                         check_common_format_attribute(check_input_attributes_at(input, definition), &format_index, &first_argument);
-            const uint32_t canonical = definition < input->token_count && input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
+            bool found = check_common_format_attribute(parser, pp, check_input_attributes_at(input, definition), &format_index, &first_argument);
+            const uint32_t canonical = input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
             found = found || (canonical < input->token_count &&
-                              check_common_format_attribute(check_input_attributes_at(input, canonical), &format_index, &first_argument));
+                              check_common_format_attribute(parser, pp, check_input_attributes_at(input, canonical), &format_index, &first_argument));
         }
         const uint32_t offset = graph->argument_offsets[node];
         const uint32_t count = graph->argument_counts[node];
-        if (format_index != UINT32_MAX && first_argument != UINT32_MAX && format_index < count && first_argument <= count && offset <= graph->argument_count &&
-            count <= graph->argument_count - offset)
+        const bool args_checked = first_argument != UINT32_MAX;
+        if (format_index != UINT32_MAX && format_index < count && (first_argument == UINT32_MAX || first_argument <= count) &&
+            offset <= graph->argument_count && count <= graph->argument_count - offset)
         {
             const uint32_t format_node = graph->argument_nodes[offset + format_index];
             const uint32_t format_token = format_node < graph->count ? graph->tokens[format_node] : BUSTER_CHECK_NONE;
@@ -2083,7 +2116,10 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 // Diagnostics publish in the literal's scan order: `order` is the furthest source any conversion's
                 // reports have reached, so an in-string report after an argument's keeps sorting behind it.
                 uint32_t order = parser->tokens.sources[format_token];
-                const uint32_t data_count = count - first_argument;
+                // A `format(printf, N, 0)` callee takes a va_list, not direct arguments: the literal is
+                // scanned as usual but every argument-level verdict — coverage, insufficiency, extras and
+                // type checks — stays off because there are no arguments to check.
+                const uint32_t data_count = args_checked ? count - first_argument : 0;
                 uint8_t* used = data_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, data_count) : NULL;
                 const bool usable = data_count == 0 || used != NULL;
                 if (used != NULL)
@@ -2409,7 +2445,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         length_modifier = 'L';
                     }
                     // Resolve the width and precision first: they take their data arguments before the value.
-                    if (width_argument)
+                    if (width_argument && args_checked)
                     {
                         uint32_t width_index = first_argument;
                         if (width_positioned)
@@ -2462,7 +2498,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             break;
                         }
                     }
-                    if (precision_argument)
+                    if (precision_argument && args_checked)
                     {
                         uint32_t precision_index = first_argument;
                         if (precision_positioned)
@@ -2521,14 +2557,24 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     {
                         if (value_positioned)
                         {
-                            value_valid = check_common_format_data_position(parser, pp, input, format_token, percent, at, value_position,
-                                                                            data_count, used, &order, scratch);
-                            if (value_valid)
+                            if (value_position == 0)
                             {
-                                value_index = first_argument + value_position - 1;
+                                // `0$` is a literal error clang reports even for a va_list callee.
+                                check_common_format_report_offset(parser, pp, input, format_token, percent, &order, CHECK_WARNING_ID_FORMAT,
+                                                                  "position arguments in format strings start counting at 1 (not 0)", scratch);
+                                value_valid = false;
+                            }
+                            else if (args_checked)
+                            {
+                                value_valid = check_common_format_data_position(parser, pp, input, format_token, percent, at, value_position,
+                                                                                data_count, used, &order, scratch);
+                                if (value_valid)
+                                {
+                                    value_index = first_argument + value_position - 1;
+                                }
                             }
                         }
-                        else if (positional_seen)
+                        else if (positional_seen || !args_checked)
                         {
                             plain_seen = true;
                         }
@@ -2557,7 +2603,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         malformed = true;
                         break;
                     }
-                    if (conversion_argument && decimal_unsupported)
+                    if (conversion_argument && decimal_unsupported && args_checked)
                     {
                         // `_Decimal32/64/128` name real types the target lacks; clang reports the type at the
                         // argument's position rather than running a type verdict.
@@ -2569,7 +2615,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         order = natural > order ? natural : order;
                         check_common_report_published(parser, pp, input, argument_token, order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
                     }
-                    else if (conversion_argument && value_checked)
+                    else if (conversion_argument && value_checked && args_checked)
                     {
                         const uint32_t argument_node = graph->argument_nodes[offset + value_index];
                         const TypeId type = argument_node < graph->count ? check_stream_type(stream, argument_node) : 0;
@@ -2658,10 +2704,28 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     }
                     base = operand;
                 }
-                if (base < graph->count && graph->ops[base] == CHECK_OP_VALUE)
+                // Any unwrapped non-literal format — a variable, a member, a call result — warns under
+                // -Wformat-security; `va_arg` stays exempt since passing a va_list's argument is the
+                // legitimate escape the `format` attribute's zero index also models.
+                if (base < graph->count && graph->ops[base] != CHECK_OP_VARARGS)
                 {
-                    const CheckCommonNote note = { format_token, "treat the string as an argument to avoid this" };
-                    check_common_report(parser, pp, input, format_token, CHECK_WARNING_ID_FORMAT_SECURITY, false,
+                    // The warning points where clang points: at the argument expression's leading
+                    // token, so a call or member chain's postfix tokens step back to its operand.
+                    uint32_t report_node = base;
+                    for (uint32_t steps = 0; steps < graph->count &&
+                         (graph->ops[report_node] == CHECK_OP_CALL || graph->ops[report_node] == CHECK_OP_MEMBER ||
+                          graph->ops[report_node] == CHECK_OP_ARROW || graph->ops[report_node] == CHECK_OP_SUBSCRIPT); steps += 1)
+                    {
+                        const uint32_t operand = graph->operand0[report_node];
+                        if (operand >= graph->count)
+                        {
+                            break;
+                        }
+                        report_node = operand;
+                    }
+                    const uint32_t report_token = graph->tokens[report_node];
+                    const CheckCommonNote note = { report_token, "treat the string as an argument to avoid this" };
+                    check_common_report(parser, pp, input, report_token, CHECK_WARNING_ID_FORMAT_SECURITY, false,
                                         "format string is not a string literal (potentially insecure)", &note, 1, scratch);
                 }
             }
@@ -2703,10 +2767,12 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t opener = check_common_opener(parser, closer);
         const uint32_t selector = opener != BUSTER_CHECK_NONE && opener + 1 < count ? opener + 1 : BUSTER_CHECK_NONE;
         uint32_t selector_node = input->token_nodes != NULL && selector < input->token_count ? input->token_nodes[selector] : BUSTER_CHECK_NONE;
+        // Unary +, - and ~ apply the integer promotions, so their selector operand is never the
+        // enum expression Clang analyzes: only an implicit enum-to-int conversion unwraps to it.
         for (uint32_t steps = 0; selector_node < stream->count && steps < stream->count; steps += 1)
         {
-            const CheckOp op = stream->graph->ops[selector_node];
-            if (op != CHECK_OP_POSITIVE && op != CHECK_OP_NEGATIVE && op != CHECK_OP_BIT_NOT && op != CHECK_OP_CONVERT)
+            if (stream->graph->ops[selector_node] != CHECK_OP_CONVERT ||
+                (stream->conversions[selector_node].operands[0].flags & BUSTER_CHECK_CONVERT_CAST) != 0)
             {
                 break;
             }
@@ -3419,6 +3485,12 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     bool valid = count == 0 || (first_write != NULL && addressed != NULL && written != NULL && first_read != NULL && first_use_read != NULL &&
                                 parameters != NULL && statement_write != NULL &&
                                 (graph->count == 0 || (nonread != NULL && self_read != NULL && target != NULL && used_value != NULL && evaluated != NULL)));
+    if (!valid)
+    {
+        // An empty token stream legitimately leaves every column null; anything else is a scratch
+        // allocation failure, which the driver treats as a fatal resource error rather than silence.
+        pp->fatal = true;
+    }
     if (valid && count != 0)
     {
         memset(first_write, 0xff, (uint64_t)count * sizeof(uint32_t));
