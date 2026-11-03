@@ -542,6 +542,66 @@ stage, though, against Tier 0's 4.8: the tasks still expand the quarter of the
 nodes no template takes (calls, `&&`, `||`, `?:`, increments and compound
 assignments among them), so the templates' coverage has to grow as well.
 
+## Node templates over a body: the vector steps (#1048)
+
+On the vector host path, two of the pass's three steps take 16 nodes at a time
+(`c_check_program_templates.c`), with the scalar steps as their twins:
+
+- **The scatter** (`check_lower_template_scatter_vector`). Each operator links
+  each operand its rule evaluates, and gives it its target, by scatters in
+  node order, so that an operand two operators link keeps the highest one's
+  (the scalar scatter keeps the highest one's too, its first writer from the
+  last node down). The links read back mark an operand another operator linked
+  shared. Each operand's context is its link's mode. Small scalar steps take
+  the rest from the last node down: an operand inheriting its operator's
+  context (a selection's and a comma's right operand), a comma's right
+  operand's target, and the operands under each operator the tasks fold.
+- **The classification of the fast twin's common shapes**
+  (`check_lower_template_vector`): a VALUE's read of a local or a global, `&x`,
+  `*p`, a cast, a conversion or a unary plus, the negation and the complement,
+  the truth tests, and the scalar binary operators but pointer arithmetic, for
+  nodes of no payload row. Each lane it takes gets its own entries, its
+  conversion's (from #570's packed classes and facts of its type and its
+  target), its total and whether the table takes the conversion; the values go
+  in one 64-byte row store a lane. The fast twin and the general rules take
+  the other nodes.
+
+The closure stays a scalar loop: it is a tree's recurrence over each node's
+operands, which a vector form would serve with about ten gathers an iteration
+of a fixpoint inside each block.
+
+`test-lowering-templates`' check compares the vector steps with the scalar ones
+node by node: the scatter's context and target of every node both leave
+evaluated and unshared, and each vector lane's context, operands, entries,
+conversion and total. On this session's Xeon (whose default build is the vector
+path), `sqlite3.c`, Lua's 34 units and c-testsuite's subset of 220 give no
+mismatch and every function's entries the same as the tasks'. The vector
+classification takes 138,821 of the 259,987 nodes the fast twin and it
+classify on `sqlite3.c` (53%), 34,003 of 63,182 on Lua and 3,210 of 8,572 on
+c-testsuite.
+
+That Xeon's timings vary by more than these steps change (Tier 0's code, the
+same in every build, by 13% between runs), so a sampling profile
+(SIGPROF at 20 kHz, symbolized with inlined frames) weighs the pass's samples
+against Tier 0's in the same runs. The scalar pass was 1.85 times Tier 0's
+time on the 9700X (8.9 ms against 4.82). Here:
+
+| the pass's steps | samples against Tier 0's |
+| --- | ---: |
+| the vector classification, the rest scalar | 1.71 |
+| and the vector scatter | 1.46 |
+| and the vector lanes' conversions | 1.63 |
+
+The classification runs about 27 instructions a node, a seventh of the scalar
+twin's, but takes only about half its time: its 9 gathers, 6 scatters (since
+replaced by row stores) and 95 mask-register operations each 16 nodes stall.
+The pass pays on the 9700X below about 0.64 Tier 0s, the 3.1 ms its splices
+save. The vector steps' cost is the whole range's, and the splices' savings
+only the templates' three quarters of the nodes: at that coverage, even a
+complete vector pass of about 10 ns a node would only break even, so the
+coverage (calls, `&&`, `||`, `?:`, increments and compound assignments) is the
+issue's lever as much as the pass.
+
 ## The preparation's node counts and the branches' targets (#1048)
 
 Before the bodies, `check_lower_prepare` bounds the writers' room by counts

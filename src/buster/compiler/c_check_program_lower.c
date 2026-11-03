@@ -319,6 +319,7 @@ struct CheckProgramLowered
     uint64_t template_nodes;
     uint64_t template_entries;
     uint64_t template_fast;
+    uint64_t template_vector;
     uint64_t template_mismatches;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
@@ -788,12 +789,31 @@ struct CheckLowerWriter
     uint8_t* template_slot_kinds;
     uint8_t* template_slot_classes;
     uint64_t* template_slot_values;
+    // The vector classification's results (check_lower_template_vector) for the nodes it takes, which the state's
+    // BUSTER_CHECK_LOWER_TEMPLATE_FAST marks: each node's evaluated operands, two a node, and their count. The objects that
+    // are compound literals of automatic storage, one bit each (bit `o` for object `o`), and each op's binary operator
+    // (check_lower_binary's, none for ops past 63), which its lanes read, made before the writer's first body that takes
+    // them (`template_vector_ready`).
+    uint32_t* template_children;
+    uint8_t* template_counts;
+    uint32_t* template_compound_bits;
+    uint8_t template_binary[64];
+    bool template_vector_ready;
+    // The vector scatter's (check_lower_template_scatter_vector) columns: each node's link to the operator whose rule
+    // evaluates it, the nodes its scalar steps take in order (those inheriting their operator's context or a comma's
+    // target, the folds' operands), and with `template_check` the scalar scatter's results it is compared with.
+    uint32_t* template_links;
+    uint32_t* template_work;
+    uint8_t* template_check_states;
+    uint8_t* template_check_contexts;
+    TypeId* template_check_targets;
     uint64_t template_spliced_nodes;
     uint64_t template_spliced_entries;
     // The nodes the fast twin classified (check_lower_template_fast), and with `template_check` the nodes where the general
     // rules gave another result.
     bool template_check;
     uint64_t template_fast_nodes;
+    uint64_t template_vector_nodes;
     uint64_t template_mismatches;
 };
 
@@ -11079,6 +11099,7 @@ struct CheckLowerPart
     uint64_t template_nodes;
     uint64_t template_entries;
     uint64_t template_fast;
+    uint64_t template_vector;
     uint64_t template_mismatches;
     // The TSC's ticks of its bodies' statements (their controls and tasks' loops), of the rest of its bodies' walks, and
     // of its ABI rows, abi_assign and functions' validation: --time-stages' lower.statements, lower.bodies and
@@ -11724,6 +11745,15 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         BUSTER_CHECK_LOWER_COLUMN(template_slot_kinds, uint8_t, template_slots);
         BUSTER_CHECK_LOWER_COLUMN(template_slot_classes, uint8_t, template_slots);
         BUSTER_CHECK_LOWER_COLUMN(template_slot_values, uint64_t, template_slots);
+        BUSTER_CHECK_LOWER_COLUMN(template_children, uint32_t, 2 * (uint64_t)template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_counts, uint8_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_compound_bits, uint32_t, ((uint64_t)program->object_count + 32) / 32);
+        BUSTER_CHECK_LOWER_COLUMN(template_links, uint32_t, template_room);
+        BUSTER_CHECK_LOWER_COLUMN(template_work, uint32_t, template_room + 16);
+        BUSTER_CHECK_LOWER_COLUMN(template_check_states, uint8_t, shared->template_check ? template_room : 1);
+        BUSTER_CHECK_LOWER_COLUMN(template_check_contexts, uint8_t, shared->template_check ? template_room : 1);
+        BUSTER_CHECK_LOWER_COLUMN(template_check_targets, TypeId, shared->template_check ? template_room : 1);
+        writer->template_vector_ready = false;
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
@@ -11843,6 +11873,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->template_spliced_nodes = 0;
     writer->template_spliced_entries = 0;
     writer->template_fast_nodes = 0;
+    writer->template_vector_nodes = 0;
     writer->template_mismatches = 0;
     // With a clock (CheckLowerShared.timed), two TSC reads a body's statements and three a part
     // (CheckLowerPart.statement_ticks); without one, none.
@@ -12507,6 +12538,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->template_nodes = writer->template_spliced_nodes;
     part->template_entries = writer->template_spliced_entries;
     part->template_fast = writer->template_fast_nodes;
+    part->template_vector = writer->template_vector_nodes;
     part->template_mismatches = writer->template_mismatches;
     memcpy(part->runtimes, writer->runtimes, (uint64_t)writer->runtime_count * sizeof(uint16_t));
 }
@@ -12580,6 +12612,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         lowered->template_nodes += parts[p].template_nodes;
         lowered->template_entries += parts[p].template_entries;
         lowered->template_fast += parts[p].template_fast;
+        lowered->template_vector += parts[p].template_vector;
         lowered->template_mismatches += parts[p].template_mismatches;
         for (uint32_t i = 0; i < parts[p].runtime_count; i += 1)
         {
@@ -12708,12 +12741,13 @@ static __attribute__((noinline)) bool check_program_lower_owners(CheckProgramLow
     return check_program_lower_body(lowered, program, true, true, owners, 0, output, scratch);
 }
 
-// The lowering with #1048's node templates (c_check_program_templates.c) on any host's path, which the tests compare with
-// the tasks' lowering (check_program_lower's scalar path): every function's entries must be the same. With `check`, every
-// node the fast twin classifies is classified by the general rules too, and CheckProgramLowered.template_mismatches counts
-// the nodes where they disagree.
+// The lowering with #1048's node templates (c_check_program_templates.c) on the host's path, the vector one where it has it
+// (whose vector classification takes nodes), which the tests compare with the tasks' lowering (check_program_lower's scalar
+// path): every function's entries must be the same. With `check`, every node the fast twin classifies is classified by the
+// general rules too, and every node the vector classification takes by the fast twin, and
+// CheckProgramLowered.template_mismatches counts the nodes where they disagree.
 static __attribute__((noinline)) bool check_program_lower_templates(CheckProgramLowered* lowered, const CheckProgram* program, bool check, Arena* output, Arena* scratch)
 {
     const uint32_t templates = BUSTER_CHECK_LOWER_TEMPLATES | (check ? BUSTER_CHECK_LOWER_TEMPLATES_CHECKED : 0);
-    return check_program_lower_body(lowered, program, true, false, NULL, templates, output, scratch);
+    return check_program_lower_body(lowered, program, false, false, NULL, templates, output, scratch);
 }

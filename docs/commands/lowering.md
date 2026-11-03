@@ -64,16 +64,23 @@ own is classified, by the fast twin of the common shapes
 (`check_lower_template_fast`) or the general rules, writes its entries into a
 slot, and is marked closed or not, whose slots the task loop splices when it
 pops their roots in those contexts (`check_lower_template_splice`). The task
-loop stays the exact rules. No compile takes it (`CheckLowerShared.templates`):
-on the 9700X, a compile that took it spent about three times in these scalar
-steps what the splices saved, so they wait for data-parallel ones.
-`./build/compiler test-lowering-templates [--passes N] [preprocessor
+loop stays the exact rules. On the vector host path, the scatter
+(`check_lower_template_scatter_vector`) and the classification of the common
+shapes with their conversions (`check_lower_template_vector`) take 16 nodes at
+a time, and the scalar steps are their twins and take the rest. No compile
+takes the templates (`CheckLowerShared.templates`): on the 9700X, a compile
+that took the scalar steps spent about three times in them what the splices
+saved. `./build/compiler test-lowering-templates [--passes N] [preprocessor
 options] file...` (`c_check_program_templates_test.c`) lowers each file by the
-tasks and with the templates forced (`check_program_lower_templates`), on any
-host, requires every function's entries, locals, calls and arguments to be the
-same and the fast twin to classify every node it takes as the general rules do
-(its `check`), and with `--passes N` times both; `test-checker` runs it on
-fixtures. `--time-stages`' `lowering-nodes` line reports the nodes and entries
+tasks (the scalar path) and with the templates forced, on the host's path
+(`check_program_lower_templates`), and requires every function's entries,
+locals, calls and arguments to be the same. Its `check` requires the fast twin
+to classify every node it takes as the general rules do, the vector scatter to
+give every node it leaves evaluated and unshared the scalar scatter's context
+and target, and the vector classification to give each node it takes the fast
+twin's context, entries, conversion and total (`vector=` counts those nodes;
+on the vector host path the command requires some). With `--passes N` it
+times both lowerings. `test-checker` runs it on fixtures. `--time-stages`' `lowering-nodes` line reports the nodes and entries
 the templates took. A change to `check_lower_expand`'s rules for what the table
 takes changes the templates too: run the command on `sqlite3.c`, Lua and
 c-testsuite. [The lowering guide](../../docs/c-lowering.md)'s "Node templates
