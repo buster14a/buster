@@ -1217,6 +1217,33 @@ process, the transitions took 1.00 to 1.05 times the regions' time on that VM
 same host; a VM host before it had measured the first design 7% faster than the
 regions, the 9700X 4 to 7.5%.
 
+#### On the 9700X, and the real compile
+
+The 9700X jobs of #1198 ([job 125700333685](https://github.com/buster14a/buster/actions/runs/41568611005/job/125700333685),
+[job 125709820070](https://github.com/buster14a/buster/actions/runs/41571004025/job/125709820070)) timed the
+graph run by `benchmark-checker-source`, whose passes run it again and again:
+`sqlite3.c`'s bodies took 32.33 to 34.29 ns a node by the transitions against
+35.18 to 36.58 by the regions (34.01 to 34.36 against 35.99 to 36.49 after
+100 ms of scalar work), and musl's `regcomp.c` 20.52 to 20.65 against 27.59 to
+28.42.
+
+A real compile runs it once, and there the transitions lose. `sqlite3.c -c`
+on CPU 2, `measure-compile`'s medians of 11: `check-expressions` took 15.184 ms
+(14.919 to 15.640) with `--check-transitions` against 14.339 (14.243 to
+14.596) without; `time-runs`' medians of 21 put the compile at 113.66 against
+112.72 ms; `perf stat -r 11` counted 535.9 million user cycles against 531.7,
+though 1,130 million instructions against 1,206, and 2.72 million cache misses
+against 2.48. The table (about 4.5 MB of entries, slots, classes and templates
+for `sqlite3.c`), the class column and the static words are new lines to a
+single run, which the benchmark's repeated runs keep in the caches; their
+misses cost more than the instructions the hits save. Even without them, the
+benchmark's gain is about 1 ms of a 14.3 ms `check-expressions`.
+
+Writing the leaves' and hits' columns later, 16 nodes at a time with gathers
+before an action or a pass needs them, took 6 to 16% more time on the VM than
+writing them in node order, as each output line is then written twice, far
+apart; direct open-addressed 64-byte entries without slots took 10% more.
+
 #### The first design (#1146)
 
 The first design keyed each operand by its type, flags, category and constant
