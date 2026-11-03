@@ -661,6 +661,7 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                     const uint32_t role = roles[i];
                     const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG || role == X86_MATCH_IS4 ? form->reg
                                               : role == X86_MATCH_XMM0                         ? BUSTER_X86_OPERAND_V
+                                              : role == X86_MATCH_ST0                          ? BUSTER_X86_OPERAND_ST
                                                                                                : form->vvvv;
                     const uint64_t bits = asm_test_random(random);
                     operand->width = form->operand_bytes;
@@ -699,8 +700,9 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                             operand->class = role == X86_MATCH_CL ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 1 ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 2 ? BUSTER_X86_CLASS_GPR16 : form->operand_bytes == 4 ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64;
                             operand->reg = role == X86_MATCH_CL ? 1 : 0;
                         }
-                        // XMM0 written out, and every fourth variant another XMM register, which no form takes there.
-                        if (role == X86_MATCH_XMM0)
+                        // XMM0 and ST(0) written out, and every fourth variant another register of the class, which no
+                        // form takes there.
+                        if (role == X86_MATCH_XMM0 || role == X86_MATCH_ST0)
                         {
                             operand->reg = variant % 4 == 1 ? bits & 31 : 0;
                         }
@@ -1292,6 +1294,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 
 #include "assembler_compat_test.c"
 #include "assembler_corpus_test.c"
+#include "assembler_programs_test.c"
 #include "assembler_round_trip_test.c"
 
 static int run_assembler_tests(int count, char** arguments)
@@ -1569,6 +1572,7 @@ static int run_assembler_tests(int count, char** arguments)
             asm_test_reader(&test, directory);
             asm_test_preprocessed(&test, directory);
             asm_test_compatibility(&test, directory, cross_check);
+            asm_test_issue_fixtures(&test, directory, cross_check);
             if (cross_check)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
@@ -1655,6 +1659,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_preprocessing(&test, directory);
                 asm_test_preprocessed_spacing(&test, directory);
                 asm_test_compiler_corpus(&test, directory, keep);
+                asm_test_program_corpus(&test, directory, keep);
             }
             const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)

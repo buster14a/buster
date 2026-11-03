@@ -541,9 +541,15 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
     }
     else if (place->kind == BUSTER_CHECK_ASM_X87)
     {
-        // GCC and clang print %st and %st(1), which the assembler's operand grammar doesn't take: its x87 forms are
-        // those of memory and of the stack's top alone (fsqrt's, fprem's), as musl's templates use them.
-        refused = "x87 registers named in inline assembly templates";
+        // As GCC and clang print them, %st and %st(1), which the assembler reads (#1115: `fmul %1, %0`).
+        if (modifier == 0)
+        {
+            check_asm_emit_text(scratch, place->reg == 0 ? "%st" : "%st(1)", valid);
+        }
+        else
+        {
+            refused = "this inline assembly operand modifier";
+        }
     }
     else if (place->kind == BUSTER_CHECK_ASM_MEMORY)
     {
@@ -1519,6 +1525,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reason = strstr(body.error, "arena exhausted") == NULL ? body.error : NULL;
                 valid = body.error == NULL || reason != NULL;
             }
+            else if (body.common_count != 0)
+            {
+                // A global's .comm is an SHN_COMMON symbol of the assembler's object alone (#1115); the program's Link
+                // would only declare it.
+                reason = "inline assembly's common symbols (.comm)";
+            }
             else if (entry_code && body.ret_first)
             {
                 // The template returns before any branch: its helper would leave its frame reserved, as the record path's
@@ -1781,6 +1793,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             unit_assembled = unit.error == NULL;
             reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
             valid = unit.error == NULL || reason != NULL;
+            reason = reason == NULL && unit_assembled && unit.common_count != 0 ? "inline assembly's common symbols (.comm)" : reason;
             for (uint32_t a = 1; unit_assembled && reason == NULL && a < unit.link.atoms.count; a += 1)
             {
                 reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;

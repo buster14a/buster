@@ -118,6 +118,8 @@ enum
     X86_MATCH_IS4,
     // XMM0, written out (SSE4.1's blends and SHA's rounds read it implicitly; GNU as and clang print it).
     X86_MATCH_XMM0,
+    // The x87's ST(0), written out beside the rm operand's ST(i) (#1115: `fmulp %st, %st(1)`, `fucomip %st(1), %st`).
+    X86_MATCH_ST0,
 };
 
 static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
@@ -267,6 +269,18 @@ static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
         roles[3] = X86_MATCH_RM;
         count = 4;
         break;
+    // The x87's two-register forms (#1115): ST(0) and ST(i) (D8's arithmetic, FCMOVcc and FCOMI), and ST(i) and ST(0)
+    // (DC's and DE's, whose destination is ST(i)).
+    case X86_SYNTAX_ST_RM:
+        roles[0] = X86_MATCH_ST0;
+        roles[1] = X86_MATCH_RM;
+        count = 2;
+        break;
+    case X86_SYNTAX_RM_ST:
+        roles[0] = X86_MATCH_RM;
+        roles[1] = X86_MATCH_ST0;
+        count = 2;
+        break;
     default:
         break;
     }
@@ -319,13 +333,13 @@ static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
 }
 
 // Whether the parser has a grammar for an operand descriptor (#1134): no operand, memory addressed by general registers,
-// or a register of a class it names (general registers, XMM, YMM and ZMM registers, and opmasks). The x87's stack,
-// MMX, bound, control, debug, segment and tile registers, vector-indexed (VSIB) memory, register pairs and blocks and a
-// default flags value aren't the parser's, and neither are the forms that take them.
+// or a register of a class it names (general registers, XMM, YMM and ZMM registers, opmasks, and the x87's stack,
+// #1115's %st(i)). MMX, bound, control, debug, segment and tile registers, vector-indexed (VSIB) memory, register pairs
+// and blocks and a default flags value aren't the parser's, and neither are the forms that take them.
 static bool x86_match_descriptor_parsed(uint16_t descriptor)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
-    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK;
+    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST;
     const uint16_t unparsed = BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK | BUSTER_X86_OPERAND_DFV | BUSTER_X86_OPERAND_TEST;
     return named && (descriptor & unparsed) == 0;
 }
@@ -519,10 +533,10 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 {
                     kinds = 1u << X86_OPERAND_IMMEDIATE;
                 }
-                else if (role == X86_MATCH_XMM0)
+                else if (role == X86_MATCH_XMM0 || role == X86_MATCH_ST0)
                 {
                     kinds = 1u << X86_OPERAND_REGISTER;
-                    class = BUSTER_X86_CLASS_XMM;
+                    class = role == X86_MATCH_XMM0 ? BUSTER_X86_CLASS_XMM : BUSTER_X86_CLASS_ST;
                     fixed = 1;
                 }
                 else if (role == X86_MATCH_ACC || role == X86_MATCH_CL)
@@ -677,6 +691,9 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
             break;
         case X86_MATCH_XMM0:
             result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_XMM && operand->reg == 0;
+            break;
+        case X86_MATCH_ST0:
+            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_ST && operand->reg == 0;
             break;
         default:
             result = false;
@@ -874,13 +891,16 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 const uint32_t chosen = (uint32_t)(x86_form_description(result.instruction.form) - x86_form_descriptions);
                 const uint32_t number = (uint32_t)(x86_form_description(instruction.form) - x86_form_descriptions);
                 const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
+                // And an immediate that fits a sign-extended byte in its imm8 form, not the accumulator's (#1115:
+                // `cmpw $120, %ax` is 66 83 F8 78, not 66 3D 78 00), where the two are as long: AX's 16-bit forms.
+                const bool accumulator = result.found && x86_form_descriptions[chosen].syntax == X86_SYNTAX_ACC_IMM && x86_form_descriptions[number].syntax != X86_SYNTAX_ACC_IMM;
                 // Among the forms that match, a legacy or VEX one before an EVEX one, as GNU as picks them, though an EVEX
                 // form's compressed displacement (disp8*N) can make it shorter: AVX-512 isn't what an AVX instruction needs
                 // (#1134: the C lowering's index has every feature). A VEX form that yields to an EVEX one
                 // (x86_match_yields) comes after both. Then the shortest.
                 const uint32_t attributes = index->attributes[at];
                 const uint8_t rank = (attributes & BUSTER_X86_MATCH_YIELDS) ? 2 : (attributes & BUSTER_X86_MATCH_EVEX) ? 1 : 0;
-                const bool shorter = length < result.length || (length == result.length && movq);
+                const bool shorter = length < result.length || (length == result.length && (movq || accumulator));
                 if (length > 0 && (!result.found || rank < result.rank || (rank == result.rank && shorter)))
                 {
                     result.instruction = instruction;

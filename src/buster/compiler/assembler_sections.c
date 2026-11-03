@@ -174,8 +174,11 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     const bool executable = (object.flags & SHF_EXECINSTR) != 0;
     const bool zero = object.type == SHT_NOBITS;
     const bool tls = (object.flags & SHF_TLS) != 0;
+    // Merged strings take characters of 1, 2 or 4 bytes: GCC's wide literals are `.rodata.str4.4,"aMS",@progbits,4`
+    // (#1115).
+    const bool characters = object.entry_size == 1 || object.entry_size == 2 || object.entry_size == 4;
     if (name.length == 0 || (zero && (executable || (object.flags & SHF_MERGE) != 0)) ||
-        ((object.flags & SHF_STRINGS) != 0 && ((object.flags & SHF_MERGE) == 0 || object.entry_size != 1)))
+        ((object.flags & SHF_STRINGS) != 0 && ((object.flags & SHF_MERGE) == 0 || !characters)))
     {
         asm_fail(parser, location, "unsupported section attributes");
     }
@@ -201,10 +204,12 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         }
         AsmSection* section = &parser->sections[id];
         section->object = object;
+        // The Link's string pools are of bytes: wider characters' strings are read-only data, as the importer classes
+        // them, whose section keeps its merge flags and entry size (the object writer's descriptor).
         section->class = zero ? (tls ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS) :
                          executable ? BUSTER_LINK_CLASS_TEXT : tls ? BUSTER_LINK_CLASS_TDATA :
                          (object.flags & SHF_WRITE) != 0 ? BUSTER_LINK_CLASS_DATA :
-                         (object.flags & SHF_STRINGS) != 0 ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA;
+                         (object.flags & SHF_STRINGS) != 0 && object.entry_size == 1 ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA;
         section->declared = true;
         if (added)
         {
@@ -250,6 +255,44 @@ static void asm_object_options(AsmParser* parser)
             .temporary_symbols = temporary,
             .temporary_symbol_count = link->symbols.count,
         };
+    }
+    // The undefined symbols GNU as lists without a relocation (#1115): the common ones, with their alignments, and the
+    // _GLOBAL_OFFSET_TABLE_ that a GOT or TLS modifier declares.
+    const uint32_t declared_count = parser->common_count + (parser->got_symbol != 0 && parser->symbols[parser->got_symbol].link != 0 ? 1 : 0);
+    if (parser->result.error == 0 && declared_count != 0)
+    {
+        SymbolId* declared = BUSTER_ARENA_PUSH_ARRAY(parser->arena, SymbolId, declared_count);
+        uint32_t* alignments = parser->common_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, link->symbols.count) : 0;
+        if (declared == 0 || (parser->common_count != 0 && alignments == 0))
+        {
+            asm_fail(parser, 0, "arena exhausted publishing object metadata");
+        }
+        else
+        {
+            uint32_t count = 0;
+            if (alignments != 0)
+            {
+                memset(alignments, 0, link->symbols.count * sizeof(uint32_t));
+            }
+            for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+            {
+                const AsmSymbol* symbol = &parser->symbols[i];
+                if (symbol->common == ASM_COMMON_GLOBAL && symbol->link != 0)
+                {
+                    alignments[symbol->link] = symbol->common_alignment;
+                    declared[count++] = symbol->link;
+                }
+            }
+            if (parser->got_symbol != 0 && parser->symbols[parser->got_symbol].link != 0 && parser->symbols[parser->got_symbol].common == 0 &&
+                !parser->symbols[parser->got_symbol].defined)
+            {
+                declared[count++] = parser->symbols[parser->got_symbol].link;
+            }
+            parser->result.object_options.declared_symbols = declared;
+            parser->result.object_options.declared_symbol_count = count;
+            parser->result.object_options.common_alignments = alignments;
+            parser->result.object_options.common_alignment_count = alignments != 0 ? link->symbols.count : 0;
+        }
     }
 }
 

@@ -166,6 +166,14 @@ struct ObjectOptions
     // Optional bytes indexed by SymbolId: discard a marked local unless a relocation needs its own symbol.
     const uint8_t* temporary_symbols;
     uint32_t temporary_symbol_count;
+    // Optional, for an assembler's objects (#1115): undefined symbols the object lists though no relocation refers to
+    // them, after those that do, in this order (GNU as's .comm symbols and the _GLOBAL_OFFSET_TABLE_ it declares); and
+    // indexed by SymbolId, a common symbol's alignment, or 0 for any other symbol. An undefined symbol with an alignment
+    // is a common one: SHN_COMMON, an OBJECT whose st_value is the alignment and st_size its size.
+    const SymbolId* declared_symbols;
+    uint32_t declared_symbol_count;
+    const uint32_t* common_alignments;
+    uint32_t common_alignment_count;
     // The DWARF of each unit's functions, indexed by unit (debug_count of them, the units' count), or null for none:
     // each object takes its unit's entry (in object_write_units too), and an entry without sections or functions gives
     // it none. A unit's entry describes its functions alone: object_build refuses another unit's.
@@ -953,8 +961,9 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
 
     // Room for every fixup to refer to a different undefined symbol; and the object's stamp, after a clear once the
     // stamps have wrapped around.
-    builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, builder->fixup_count);
-    bool result = (builder->undefined != 0 || builder->fixup_count == 0) && builder->symbols->count == symbols->count &&
+    const uint64_t declared_count = builder->options.declared_symbol_count;
+    builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, builder->fixup_count + declared_count);
+    bool result = (builder->undefined != 0 || builder->fixup_count + declared_count == 0) && builder->symbols->count == symbols->count &&
                   (builder->options.temporary_symbols == 0 || builder->local_count == 0 || builder->local_places != 0);
     builder->error = result ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     builder->symbols->stamp += 1;
@@ -1045,6 +1054,18 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     }
                 }
             }
+        }
+    }
+    // The undefined symbols the options declare though no relocation refers to them (ObjectOptions.declared_symbols).
+    for (uint64_t i = 0; result && i < declared_count; i += 1)
+    {
+        const SymbolId target = builder->options.declared_symbols[i];
+        if ((entries[target] & ~(uint64_t)UINT32_MAX) != stamp)
+        {
+            entries[target] = stamp | BUSTER_OBJECT_SYMBOL_UNDEFINED | (uint32_t)undefined_count;
+            undefined[undefined_count] = target;
+            undefined_count += 1;
+            names += symbol_name_bytes[target];
         }
     }
     builder->undefined_count = undefined_count;
@@ -1827,19 +1848,24 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         }
         entry += 1;
     }
-    // The undefined symbols: no type but TLS, as GNU as writes them, with their binding and visibility.
+    // The undefined symbols: no type but TLS, as GNU as writes them, with their binding and visibility; and the common
+    // ones (ObjectOptions.common_alignments), OBJECTs of SHN_COMMON with their alignment and size.
     const SymbolId* undefined = builder->undefined;
+    const uint32_t* common_alignments = builder->options.common_alignments;
     for (uint64_t i = 0; i < builder->undefined_count; i += 1)
     {
         const SymbolId symbol = undefined[i];
         const uint32_t name_bytes_with_nul = symbol_name_bytes[symbol];
         const uint8_t flags = symbol_flags[symbol];
         const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+        const uint32_t alignment = common_alignments != 0 ? common_alignments[symbol] : 0;
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 ? (uint32_t)name : 0,
-            .st_info = (flags & BUSTER_LINK_SYMBOL_BINDING) | (tls ? STT_TLS : STT_NOTYPE),
+            .st_info = (flags & BUSTER_LINK_SYMBOL_BINDING) | (alignment != 0 ? STT_OBJECT : tls ? STT_TLS : STT_NOTYPE),
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
-            .st_shndx = SHN_UNDEF,
+            .st_shndx = alignment != 0 ? SHN_COMMON : SHN_UNDEF,
+            .st_value = alignment,
+            .st_size = alignment != 0 ? symbol_sizes[symbol] : 0,
         };
         if (name_bytes_with_nul != 0)
         {
@@ -1948,7 +1974,12 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
         .error = OBJECT_ERROR_NONE,
     };
     bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
-                 (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count);
+                 (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count) &&
+                 (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count);
+    for (uint32_t i = 0; built && i < options.declared_symbol_count; i += 1)
+    {
+        built = options.declared_symbols[i] != 0 && options.declared_symbols[i] < link->symbols.count && link->symbols.atom[options.declared_symbols[i]] == 0;
+    }
     if (!built)
     {
         builder.error = OBJECT_ERROR_RANGE;

@@ -588,6 +588,16 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "return (int)(c*10000)+(int)(s*10000)*3+(int)(x_yl2x(n*n+1.5L,n+0.5L)*1000)*5+(int)(x_scale(1.5L,n%7)*64)*7+(int)(x_one()*11)+(int)(x_pi()*1e6)+"
         "(int)(x_sqrtf(n*n+2.f)*1000)*13+(int)(x_sqrt(n+5.0)*1e6)%100000+(int)(x_keep(n*0.5L)*4)*17+(int)(x_copy(n*0.75L)*4)*19;}",
         "asm-x87-shapes", clang);
+    // x87 operands named in templates (#1115): t's is %st and u's %st(1), as GCC and clang print them, which the
+    // assembler reads, with AT&T's operations on the stack's top (D8's forms, not reversed) and a comment.
+    check_test_program_source(test,
+        "static long double x_named_multiply(long double x, long double y){__asm__(\"fmul %1, %0\" : \"+t\"(x) : \"u\"(y));return x;}"
+        "static long double x_named_reverse(long double x, long double y){__asm__(\"fsubr %1, %0\" : \"+t\"(x) : \"u\"(y));return x;}"
+        "static long double x_named_divide(long double x, long double y){__asm__(\"fdiv %1, %0\" : \"+t\"(x) : \"u\"(y));return x;}"
+        "static long double x_named_root(long double x){__asm__(\"fsqrt # %0\" : \"+t\"(x));return x;}"
+        "int tested(int n){return (int)(x_named_multiply(n*1.5L,2.25L)*100)+(int)(x_named_reverse(n*0.5L,7.0L)*100)*3+(int)(x_named_divide(n+9.0L,4.0L)*1000)*7+"
+        "(int)(x_named_root(n*n+1.0L)*1000)*5;}",
+        "asm-x87-named", clang);
     // A float's and a double's signaling NaNs through `+t` in templates of no instructions: their helper passes them
     // through the x87's stack as clang's code does, whose fld quiets them and raises the invalid operation (masked). The
     // results' bits and the status word's flag after fnclex, and a long double's value, must be clang's build's.
@@ -645,10 +655,9 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-n-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
     check_test_program_boundary_reason(test, "int tested(int n){_Bool z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
                                        "asm-flag-output", true, false, 0, 0, "inline assembly flag outputs");
-    // The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; shapes off the
-    // stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
-    // top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,
-    // which the assembler doesn't parse.
+    // The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; and shapes off
+    // the stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the
+    // stack's top), and two inputs at st(0), which clang compiles as one register's.
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"f\"(x));return n;}",
                                        "asm-x87-any", true, false, 0, 1, "inline assembly operands in x87 registers the compiler chooses");
     check_test_program_boundary_reason(test, "int tested(int n){int i=n;__asm__(\"\" : \"+t\"(i));return i;}",
@@ -659,8 +668,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-doubled", true, false, 0, 2, "inline assembly's x87 operands and clobbers off the stack's top");
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
                                        "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
-    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__(\"fsqrt # %0\" : \"+t\"(x));return (int)x;}",
-                                       "asm-x87-named", true, false, 0, 1, "x87 registers named in inline assembly templates");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
     // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
