@@ -1,0 +1,539 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+# The Actions API and Git glue of main's nightly measurements (#1207; docs/ci.md, "Nightly main measurements"). jq
+# turns API responses into the facts tools/ci/nightly.c reads; every decision is the C tool's. Hosted runners only.
+#
+#   nightly.sh evidence DIRECTORY     9700x.yml's evidence job: reuse and hardware admission, to GITHUB_OUTPUT
+#   nightly.sh record DIRECTORY       9700x.yml's record job: DIRECTORY/record.tsv and the outcome
+#   nightly.sh coordinate DIRECTORY --phase prepare|window --mode run|dry-run
+#                                     nightly-backfill.yml: harvest, plan and dispatch; DIRECTORY/ledger.tsv and report.md
+#
+# NIGHTLY_GH replaces `gh` and NIGHTLY_NOW the clock for tests/ci/nightly.sh, which runs this against fixtures.
+set -euo pipefail
+shopt -s inherit_errexit
+repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
+[[ "$repository" == buster14a/buster ]]
+command=${1:?usage: nightly.sh evidence|record|coordinate DIRECTORY [OPTIONS]}
+work=${2:?usage: nightly.sh evidence|record|coordinate DIRECTORY [OPTIONS]}
+shift 2
+mkdir -p "$work"
+gh=${NIGHTLY_GH:-gh}
+tool="$work/nightly"
+# The tool beside this script: the evidence and record jobs run in the checkout, tests elsewhere.
+cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "$(dirname "${BASH_SOURCE[0]}")/nightly.c" -o "$tool"
+
+now() { printf '%s\n' "${NIGHTLY_NOW:-$(date +%s)}"; }
+# A failed `gh api` still prints the response's body on standard output: read an answer only from a call that succeeded.
+api() { local answer; if answer=$("$gh" api "$@"); then printf '%s\n' "$answer"; fi; }
+sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+# Whether a line of standard input is exactly the argument. It reads the whole input (unlike grep -q, which would end
+# the writer with SIGPIPE, a failure under pipefail).
+has_line() { grep -Fx -- "$1" > /dev/null; }
+output() { printf '%s=%s\n' "$1" "$2" >> "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"; }
+summary() { cat >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
+
+# Facts: runs and jobs as nightly.c reads them (tools/ci/nightly.c, nightly_facts_parse).
+# Titles and branches are bounded (a commit's subject can be long): a nightly run's name is kept whole, others cut.
+runs_facts()
+{
+    jq -r '.workflow_runs[]? | ["run", .id, .run_attempt, .event, .status, (.conclusion // "-"), .head_sha, (.path // "-"),
+        ((.head_branch // "-")[0:60]), (.created_at | fromdateiso8601), (.updated_at | fromdateiso8601), (.head_repository.id // 0),
+        ((.display_title // "-") | if startswith("Nightly ") then .[0:200] else .[0:40] end)] | @tsv'
+}
+jobs_facts()
+{
+    jq -r --arg run "$1" '.jobs[]? | ["job", $run, .status, (.conclusion // "-"), .name] | @tsv'
+}
+# The jobs of the run's latest attempt, every page.
+fetch_jobs()
+{
+    "$gh" api --paginate "repos/$repository/actions/runs/$1/jobs?per_page=100&filter=latest" | jobs_facts "$1"
+}
+# The run's coverage record for the attempt, at most 64 KiB of its one file, or nothing when it has none: an archive is
+# data, never extracted to paths it names. A failed API call fails, so that a harvest retries it rather than record
+# the run without its record.
+fetch_record()
+{
+    local run=$1 attempt=$2 destination=$3 listing id
+    rm -f "$destination"
+    listing=$("$gh" api "repos/$repository/actions/runs/$run/artifacts?name=coverage-record-$attempt&per_page=10") || return 1
+    id=$(jq -r '[.artifacts[]? | select(.expired == false)] | first | .id // empty' <<< "$listing")
+    if [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
+        "$gh" api "repos/$repository/actions/artifacts/$id/zip" > "$work/record.zip" || return 1
+        unzip -p "$work/record.zip" record.tsv 2> /dev/null | head -c 65536 > "$destination" || true
+        if [ ! -s "$destination" ]; then
+            rm -f "$destination"
+        fi
+    fi
+}
+
+# main's history into a bare repository, partially: commits (and trees, for blob:none) alone. The remote is named, as
+# a partial fetch's promisor must be.
+fetch_main()
+{
+    local history=$1 filter=$2
+    if [ ! -d "$history" ]; then
+        git init -q --bare "$history"
+        git -C "$history" remote add origin "${NIGHTLY_REMOTE:-https://github.com/$repository.git}"
+    fi
+    git -C "$history" fetch -q --no-tags --filter="$filter" origin '+refs/heads/main:refs/heads/main'
+}
+
+# --- 9700x.yml's evidence job ---
+
+evidence()
+{
+    local event=${GITHUB_EVENT_NAME:?} commit=${GITHUB_SHA:?} run=${GITHUB_RUN_ID:?}
+    local scope=full hosted=run hosted_source='' native=run native_source='' measurement=run measurement_source=''
+    local hardware=admit reason=admitted retired=false notes=''
+    case "$event" in
+        pull_request)
+            scope=plain
+            if [ "${EVIDENCE_DRAFT:-false}" = true ]; then
+                hardware=skip
+                reason=draft
+            fi
+            ;;
+        push)
+            local tree parent_tree head='' pulls="$work/pulls.json" facts="$work/reuse.tsv" record="$work/pull-record.tsv"
+            tree=$(git rev-parse 'HEAD^{tree}')
+            parent_tree=$(git rev-parse 'HEAD^1^{tree}')
+            : > "$facts"
+            if "$gh" api "repos/$repository/commits/$commit/pulls" > "$pulls"; then
+                jq -r '.[]? | ["pr", .number, (if .merged_at then 1 else 0 end), .base.ref, (.merge_commit_sha // "-"), .head.sha,
+                    (.head.repo.id // 0)] | @tsv' "$pulls" >> "$facts"
+                head=$(jq -r --arg commit "$commit" '[.[]? | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $commit)
+                    | .head.sha] | if length == 1 then .[0] else empty end' "$pulls")
+            fi
+            if sha "$head"; then
+                # The pull request's run finishes its record job after the merge can happen: wait a little for it.
+                local attempt newest status
+                for attempt in $(seq 1 20); do
+                    "$gh" api "repos/$repository/actions/workflows/9700x.yml/runs?head_sha=$head&event=pull_request&per_page=30" > "$work/pull-runs.json" || break
+                    newest=$(jq -r '[.workflow_runs[]?] | max_by(.id) | .id // empty' "$work/pull-runs.json")
+                    status=$(jq -r '[.workflow_runs[]?] | max_by(.id) | .status // empty' "$work/pull-runs.json")
+                    if [ -z "$newest" ] || [ "$status" = completed ] || [ "${NIGHTLY_NOW:-}" != '' ]; then
+                        break
+                    fi
+                    sleep 15
+                done
+                runs_facts < "$work/pull-runs.json" >> "$facts" || true
+                if [[ "${newest:-}" =~ ^[1-9][0-9]*$ ]]; then
+                    fetch_jobs "$newest" >> "$facts" || true
+                    fetch_record "$newest" "$(jq -r '[.workflow_runs[]?] | max_by(.id) | .run_attempt' "$work/pull-runs.json")" "$record" || true
+                fi
+            fi
+            local verdict
+            if verdict=$("$tool" reuse --commit "$commit" --tree "$tree" --parent-tree "$parent_tree" --now "$(now)" --facts "$facts" --record "$record"); then
+                native=$(awk -F '\t' '$1 == "native" { print $2 }' <<< "$verdict")
+                measurement=$(awk -F '\t' '$1 == "measurement" { print $2 }' <<< "$verdict")
+                notes=$(awk -F '\t' '$1 == "native" { print $4 }' <<< "$verdict")
+                if [ "$native" = reused ]; then
+                    native_source=$(awk -F '\t' '$1 == "native" { print $3 }' <<< "$verdict")
+                fi
+                if [ "$measurement" = reused ]; then
+                    measurement_source=$native_source
+                fi
+            else
+                native=run
+                measurement=run
+                notes='the reuse decision failed; the work runs'
+            fi
+            # Before the nightly mode, a push measures every plain run, after its own native correctness.
+            if [ "${EVIDENCE_NIGHTLY:-}" = on ] && [ "$native" = reused ]; then
+                hardware=skip
+                reason=native-reused
+            fi
+            ;;
+        schedule)
+            if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
+                retired=true
+                hosted=none
+                hardware=skip
+                reason=retired
+                notes='the nightly mode retired the daily run: its comprehensive measurements are the nightly snapshot'"'"'s'
+            fi
+            ;;
+        workflow_dispatch)
+            local purpose=${EVIDENCE_PURPOSE:-full}
+            case "$purpose" in
+                full) ;;
+                backlog|snapshot)
+                    # The commit must be a first-parent state of main, at or before the cycle's pinned snapshot.
+                    local history="$work/history.git" snapshot=${EVIDENCE_SNAPSHOT:-}
+                    fetch_main "$history" tree:0
+                    if [ -z "$snapshot" ]; then
+                        snapshot=$(git -C "$history" rev-parse main)
+                    fi
+                    if ! sha "$snapshot" || ! git -C "$history" rev-list --first-parent main | has_line "$snapshot" ||
+                        ! git -C "$history" rev-list --first-parent "$snapshot" | has_line "$commit"; then
+                        printf '::error title=Nightly dispatch::%s is not a first-parent state of main at or before %s\n' "$commit" "${snapshot:-main}"
+                        exit 1
+                    fi
+                    scope=plain
+                    if [ "${EVIDENCE_HARDWARE:-admit}" = defer ]; then
+                        # The snapshot's deferred run is the day's diagnostic run: every hosted row and fuzzing.
+                        if [ "$purpose" = snapshot ]; then
+                            scope=full
+                        fi
+                        hardware=skip
+                        reason=deferred
+                    else
+                        local facts="$work/hosted.tsv" found
+                        : > "$facts"
+                        if "$gh" api "repos/$repository/actions/workflows/9700x.yml/runs?head_sha=$commit&per_page=50" > "$work/runs.json"; then
+                            runs_facts < "$work/runs.json" >> "$facts"
+                            for found in $(jq -r '.workflow_runs[]? | select(.status == "completed" and (.event == "push" or .event == "workflow_dispatch")) | .id' "$work/runs.json"); do
+                                if [ "$found" != "$run" ]; then
+                                    fetch_jobs "$found" >> "$facts" || true
+                                fi
+                            done
+                        fi
+                        local verdict
+                        verdict=$("$tool" hosted --commit "$commit" --exclude "$run" < "$facts" || printf 'hosted\tnone\t0\n')
+                        if [ "$(cut -f 2 <<< "$verdict")" = reused ]; then
+                            hosted=reused
+                            hosted_source=$(cut -f 3 <<< "$verdict")
+                        fi
+                        local bound=30 window
+                        if [ "$purpose" = backlog ]; then
+                            bound=25
+                        fi
+                        if window=$("$tool" window --now "$(now)" --bound "$((bound * 60))" --override "${EVIDENCE_OVERRIDE:-}"); then
+                            notes="window: $(cut -f 2 <<< "$window")"
+                        else
+                            hardware=skip
+                            reason=window
+                            notes="window: $(cut -f 2 <<< "$window")"
+                        fi
+                    fi
+                    ;;
+                *)
+                    printf '::error::unknown dispatch purpose %s\n' "$purpose"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            printf '::error::unexpected event %s\n' "$event"
+            exit 1
+            ;;
+    esac
+    output scope "$scope"
+    output hosted "$hosted"
+    output hosted_source "$hosted_source"
+    output native "$native"
+    output native_source "$native_source"
+    output measurement "$measurement"
+    output measurement_source "$measurement_source"
+    output hardware "$hardware"
+    output hardware_reason "$reason"
+    output retired "$retired"
+    {
+        printf '### Reuse evidence and hardware admission\n\n| | |\n| --- | --- |\n'
+        printf '| scope | %s |\n| hosted rows | %s %s |\n| native correctness | %s %s |\n| measurements | %s %s |\n| 9700X | %s (%s) |\n' \
+            "$scope" "$hosted" "$hosted_source" "$native" "$native_source" "$measurement" "$measurement_source" "$hardware" "$reason"
+        if [ -n "$notes" ]; then
+            printf '\n%s\n' "$notes"
+        fi
+    } | summary
+    printf 'scope=%s hosted=%s native=%s measurement=%s hardware=%s (%s) %s\n' "$scope" "$hosted" "$native" "$measurement" "$hardware" "$reason" "$notes"
+}
+
+# --- 9700x.yml's record job ---
+
+record()
+{
+    export RECORD_COMMIT RECORD_TREE RECORD_PARENT RECORD_PARENT_TREE RECORD_WORKFLOW RECORD_SELECTOR RECORD_INVENTORY RECORD_TOOLCHAIN RECORD_CORPUS RECORD_GATES
+    RECORD_COMMIT=$(git rev-parse HEAD)
+    RECORD_TREE=$(git rev-parse 'HEAD^{tree}')
+    RECORD_PARENT=$(git rev-parse -q --verify 'HEAD^1' || true)
+    RECORD_PARENT_TREE=$(git rev-parse -q --verify 'HEAD^1^{tree}' || true)
+    RECORD_WORKFLOW=$(git rev-parse HEAD:.github/workflows/9700x.yml)
+    RECORD_SELECTOR=$(git rev-parse HEAD:tools/ci/changes.c)
+    RECORD_INVENTORY=$(git rev-parse HEAD:tools/ci/correctness.tests)
+    RECORD_TOOLCHAIN=$(git rev-parse HEAD:tools/ci/setup-benchpress.sh)
+    RECORD_CORPUS=$(git rev-parse HEAD:tools/ci/fetch-corpus.sh)
+    local outputs=${CHANGES_OUTPUTS:-}
+    if [ -z "$outputs" ]; then
+        outputs='{}'
+    fi
+    RECORD_GATES=$(jq -r '[to_entries[]? | select(.value == "true" and .key != "code") | .key] | join(",")' <<< "$outputs")
+    "$tool" record --output "$work/record.tsv" > "$work/outcome.tsv"
+    local outcome
+    outcome=$(awk -F '\t' '$1 == "outcome" { print $2 }' "$work/outcome.tsv")
+    output outcome "$outcome"
+    {
+        printf '### Coverage record\n\n```text\n'
+        cat "$work/record.tsv"
+        printf '```\n'
+    } | summary
+    printf 'Coverage %s, outcome %s\n' "$(awk -F '\t' '$1 == "coverage" { print $2 }' "$work/outcome.tsv")" "$outcome"
+}
+
+# --- nightly-backfill.yml's coordinator ---
+
+# The ledger this run's prepare job kept, or the newest the previous coordinator runs on main kept (a window job's
+# before a prepare job's), or the one published to buster-performance, or a new one. Artifacts are read only from this
+# workflow's own runs; an invalid ledger is replaced by a new one, which harvest refills from the runs' records.
+ledger_artifact()
+{
+    local run=$1 attempt
+    for attempt in window prepare; do
+        api "repos/$repository/actions/runs/$run/artifacts?per_page=50" \
+            --jq "[.artifacts[]? | select(.expired == false and (.name | startswith(\"nightly-ledger-$attempt-\")))] | max_by(.id) | .id // empty"
+    done | grep -E '^[1-9][0-9]*$' | head -n 1 || true
+}
+
+load_ledger()
+{
+    local ledger=$1 id='' run
+    printf '# buster-nightly-ledger 1\n' > "$ledger"
+    : > "$work/ledger.previous"
+    id=$(ledger_artifact "${GITHUB_RUN_ID:?}")
+    if ! [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
+        for run in $(api "repos/$repository/actions/workflows/nightly-backfill.yml/runs?branch=main&status=completed&per_page=10" \
+            --jq '.workflow_runs[]? | select(.event == "schedule" or .event == "workflow_dispatch") | .id' | grep -E '^[1-9][0-9]*$' || true); do
+            id=$(ledger_artifact "$run")
+            if [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
+                break
+            fi
+        done
+    fi
+    if [[ "$id" =~ ^[1-9][0-9]*$ ]] && "$gh" api "repos/$repository/actions/artifacts/$id/zip" > "$work/ledger.zip"; then
+        unzip -p "$work/ledger.zip" ledger.tsv 2> /dev/null | head -c 67108864 > "$work/ledger.previous" || true
+    elif git -c advice.detachedHead=false clone -q --depth 1 --branch nightly-ledger \
+        "${NIGHTLY_PERFORMANCE_REMOTE:-https://github.com/buster14a/buster-performance.git}" "$work/published" 2> /dev/null &&
+        [ -f "$work/published/nightly/main-coverage.tsv" ]; then
+        head -c 67108864 "$work/published/nightly/main-coverage.tsv" > "$work/ledger.previous"
+    fi
+    if [ -s "$work/ledger.previous" ]; then
+        # The C reader validates it: harvest's list reads the ledger whole and refuses any invalid line.
+        if "$tool" harvest --ledger "$work/ledger.previous" --facts /dev/null --states "$work/states.tsv" --list > /dev/null; then
+            cp "$work/ledger.previous" "$ledger"
+        else
+            printf '::warning title=Nightly ledger::the previous ledger is invalid; starting a new one from the runs'"'"' records\n'
+        fi
+    fi
+}
+
+# main's first-parent states from the epoch (the first-parent commit that added tools/ci/nightly.c, or NIGHTLY_EPOCH),
+# oldest first, each with its first-parent change's paths; main_head is main's head.
+main_head=''
+load_states()
+{
+    local history="$work/history.git" states=$1 epoch
+    fetch_main "$history" blob:none
+    epoch=${NIGHTLY_EPOCH:-$(git -C "$history" log --first-parent --diff-filter=A --format=%H main -- tools/ci/nightly.c | tail -n 1)}
+    sha "$epoch"
+    git -C "$history" rev-list --first-parent main | has_line "$epoch"
+    : > "$states"
+    local commit parent committed started=false
+    while read -r commit parent committed; do
+        if [ "$commit" = "$epoch" ]; then
+            started=true
+        fi
+        if [ "$started" = true ]; then
+            printf 'state\t%s\t%s\t%s\n' "$commit" "$parent" "$committed" >> "$states"
+            if [ "$parent" != - ]; then
+                git -C "$history" diff --no-renames --name-only "$parent" "$commit" | sed 's/^/path\t/' >> "$states"
+            fi
+        fi
+    done < <(git -C "$history" log --first-parent --reverse --format='%H %P %ct' main | awk '{ if (NF == 2) print $1, "-", $2; else print $1, $2, $NF }')
+    main_head=$(git -C "$history" rev-parse main)
+}
+
+# The workflow's runs of the last DAYS days: pushes, the daily run and dispatches, every page, as facts. The first
+# step of a job reads a fortnight's (harvest's horizon), later ones a day's: what is in flight or just completed.
+load_runs()
+{
+    local facts=$1 days=$2 since event
+    since=$(date -u -d "@$(( $(now) - days * 86400 ))" +%Y-%m-%d)
+    : > "$facts"
+    for event in push schedule workflow_dispatch; do
+        "$gh" api --paginate "repos/$repository/actions/workflows/9700x.yml/runs?event=$event&created=%3E%3D$since&per_page=100" | runs_facts >> "$facts"
+    done
+    # A run that changed state between pages appears twice; keep its first line.
+    awk -F '\t' '!seen[$2]++' "$facts" > "$facts.unique"
+    mv "$facts.unique" "$facts"
+}
+
+# The completed runs the ledger lacks, with their jobs and records. A run whose jobs or record the API failed to give
+# is left for the next step: its row, once written, is never revised.
+harvest()
+{
+    local ledger=$1 states=$2 facts=$3 records="$work/records" run attempt
+    mkdir -p "$records"
+    "$tool" harvest --ledger "$ledger" --facts "$facts" --states "$states" --list > "$work/fetch.tsv"
+    : > "$work/jobs.tsv"
+    : > "$work/unfetched"
+    while IFS=$'\t' read -r _ run attempt; do
+        if fetch_jobs "$run" > "$work/run-jobs.tsv" && fetch_record "$run" "$attempt" "$records/$run.tsv"; then
+            cat "$work/run-jobs.tsv" >> "$work/jobs.tsv"
+        else
+            printf '%s\n' "$run" >> "$work/unfetched"
+            printf '::warning title=Nightly harvest::run %s could not be read; it is harvested later\n' "$run"
+        fi
+    done < "$work/fetch.tsv"
+    awk -F '\t' 'FILENAME == ARGV[1] { skip[$1] = 1; next } !($1 == "run" && skip[$2])' "$work/unfetched" "$facts" > "$work/harvest.tsv"
+    cat "$work/jobs.tsv" >> "$work/harvest.tsv"
+    "$tool" harvest --ledger "$ledger" --facts "$work/harvest.tsv" --states "$states" --records "$records" >> "$ledger"
+}
+
+ensure_branch()
+{
+    local commit=$1 found
+    found=$(api "repos/$repository/git/ref/heads/nightly/$commit" --jq '.object.sha' 2> /dev/null)
+    if [ -z "$found" ]; then
+        "$gh" api -X POST "repos/$repository/git/refs" -f "ref=refs/heads/nightly/$commit" -f "sha=$commit" > /dev/null
+    elif [ "$found" != "$commit" ]; then
+        printf '::error title=Nightly branch::nightly/%s points at %s; refusing to dispatch it\n' "$commit" "$found"
+        return 1
+    fi
+}
+
+publish()
+{
+    local cycle=$1
+    if [ -z "${NIGHTLY_PUBLICATION_TOKEN:-}" ]; then
+        printf 'The ledger is not published: no BUSTER_PERFORMANCE_LEDGER_TOKEN in the nightly-ledger environment (docs/ci.md).\n'
+        return 0
+    fi
+    local target="$work/publication" header
+    header=$(printf 'x-access-token:%s' "$NIGHTLY_PUBLICATION_TOKEN" | base64 -w 0)
+    printf '::add-mask::%s\n' "$header"
+    local remote=https://github.com/buster14a/buster-performance.git
+    rm -rf "$target"
+    if ! git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" clone -q --depth 1 --branch nightly-ledger "$remote" "$target" 2> /dev/null; then
+        git init -q -b nightly-ledger "$target"
+    fi
+    mkdir -p "$target/nightly/reports"
+    cp "$work/ledger.tsv" "$target/nightly/main-coverage.tsv"
+    cp "$work/report.md" "$target/nightly/reports/$cycle.md"
+    git -C "$target" add nightly
+    if ! git -C "$target" diff --cached --quiet; then
+        git -C "$target" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Nightly ledger: cycle $cycle (buster run ${GITHUB_RUN_ID:-local})"
+        git -C "$target" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push -q "$remote" HEAD:nightly-ledger
+    fi
+}
+
+coordinate()
+{
+    local phase='' mode=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --phase) phase=$2; shift 2 ;;
+            --mode) mode=$2; shift 2 ;;
+            *) printf 'nightly.sh: unknown option %s\n' "$1" >&2; exit 2 ;;
+        esac
+    done
+    [[ "$phase" == prepare || "$phase" == window ]]
+    [[ "$mode" == run || "$mode" == dry-run ]]
+    local coordinator=${GITHUB_RUN_ID:?} states="$work/states.tsv" facts="$work/facts.tsv" ledger="$work/ledger.tsv"
+    local refs="$work/refs.tsv" pending="$work/pending.tsv" main sequence=1 times cycle start deadline started
+    started=$(now)
+    if [ "$phase" = window ]; then
+        sequence=10001
+    fi
+    load_states "$states"
+    main=$main_head
+    load_ledger "$ledger"
+    : > "$pending"
+    times=$("$tool" window-times --now "$(now)")
+    cycle=$(awk -F '\t' '$1 == "cycle" { print $2 }' <<< "$times")
+    start=$(awk -F '\t' '$1 == "start" { print $2 }' <<< "$times")
+    deadline=$(awk -F '\t' '$1 == "deadline" { print $2 }' <<< "$times")
+    # The prepare job's pin, when its ledger didn't reach this job: the cycle keeps the snapshot it started with.
+    if [ "$phase" = window ] && sha "${NIGHTLY_SNAPSHOT:-}" && ! cut -f 1,2 "$ledger" | has_line "cycle"$'\t'"$cycle"; then
+        printf 'cycle\t%s\t%s\t%s\t%s\n' "$cycle" "$NIGHTLY_SNAPSHOT" "$coordinator" "$(now)" >> "$ledger"
+    fi
+    local action verdict line iterations=0
+    while :; do
+        iterations=$((iterations + 1))
+        # A step's API failure ends a first step, which can't plan without the runs; later, it waits and tries again.
+        if [ "$iterations" -eq 1 ]; then
+            load_runs "$facts" 14
+        elif ! load_runs "$facts" 1; then
+            printf '::warning title=Nightly coordinator::the runs could not be listed; trying again\n'
+            sleep 90
+            continue
+        fi
+        harvest "$ledger" "$states" "$facts"
+        api --paginate "repos/$repository/git/matching-refs/heads/nightly/" --jq '.[].ref' 2> /dev/null |
+            sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
+        "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
+            --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" > "$work/plan.tsv"
+        cat "$work/plan.tsv"
+        verdict=''
+        while IFS= read -r line; do
+            IFS=$'\t' read -r -a action <<< "$line"
+            case "${action[0]}" in
+                pin)
+                    printf '%s\n' "$(cut -f 2- <<< "$line")" >> "$ledger"
+                    ;;
+                dispatch)
+                    local purpose=${action[1]} hardware=${action[2]} commit=${action[3]} request=${action[4]}
+                    sha "$commit"
+                    if ensure_branch "$commit"; then
+                        local override_arguments=()
+                        if [ -n "${NIGHTLY_OVERRIDE:-}" ]; then
+                            override_arguments=(-f "override=$NIGHTLY_OVERRIDE")
+                        fi
+                        "$gh" workflow run 9700x.yml --repo "$repository" --ref "nightly/$commit" -f "purpose=$purpose" \
+                            -f "hardware=$hardware" -f "snapshot=$main" -f "request=$request" "${override_arguments[@]}"
+                        printf 'pending\t%s\t%s\t%s\t%s\t%s\n' "$request" "$purpose" "$hardware" "$commit" "$(now)" >> "$pending"
+                    fi
+                    sequence=$((sequence + 1))
+                    ;;
+                cancel)
+                    "$gh" api -X POST "repos/$repository/actions/runs/${action[1]}/cancel" > /dev/null || true
+                    ;;
+                prune)
+                    "$gh" api -X DELETE "repos/$repository/git/refs/heads/nightly/${action[1]}" > /dev/null || true
+                    ;;
+                alert)
+                    printf '::warning title=Nightly backlog::%s\n' "${action[1]}"
+                    ;;
+                would-dispatch)
+                    sequence=$((sequence + 1))
+                    ;;
+                wait|done)
+                    verdict=${action[0]}
+                    ;;
+            esac
+        done < "$work/plan.tsv"
+        if [ "$verdict" != wait ] || [ "$phase" = prepare ] || [ "$(now)" -ge "$deadline" ] || [ -n "${NIGHTLY_NOW:-}" ]; then
+            break
+        fi
+        sleep 90
+    done
+    summary < "$work/report.md"
+    publish "$cycle"
+    if [ "$phase" = prepare ]; then
+        output snapshot "$(awk -F '\t' -v cycle="$cycle" '$1 == "cycle" && $2 == cycle { print $3 }' "$ledger" | tail -n 1)"
+        # The window job runs when the window is open, or opens before this job's 6 hours end (5 hours 55 minutes from
+        # its start, to leave the job a margin).
+        local current
+        current=$(now)
+        if [ "$mode" = run ] && [ "$current" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
+            printf 'Waiting %s seconds for the window to open.\n' "$((start - current))"
+            if [ -z "${NIGHTLY_NOW:-}" ]; then
+                sleep "$((start - current))"
+            fi
+            output window reachable
+        elif [ "$mode" = run ] && [ "$current" -ge "$start" ] && [ "$current" -lt "$deadline" ]; then
+            output window reachable
+        else
+            output window closed
+        fi
+    fi
+}
+
+case "$command" in
+    evidence) evidence ;;
+    record) record ;;
+    coordinate) coordinate "$@" ;;
+    *) printf 'nightly.sh: unknown command %s\n' "$command" >&2; exit 2 ;;
+esac

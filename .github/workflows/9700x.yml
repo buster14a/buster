@@ -1,5 +1,9 @@
 name: Tests and Zen 5 benchmarks
 
+# A nightly dispatch (.github/workflows/nightly-backfill.yml) runs on a nightly/SHA branch at one first-parent state of
+# main, so that its run, its checks and its definition are that commit's own; its name says what it measures.
+run-name: ${{ github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot') && format('Nightly {0} ({1}) of {2} [{3}]', inputs.purpose, inputs.hardware, github.sha, inputs.request) || '' }}
+
 # This public repository must not execute unreviewed fork code on the host.
 on:
   push:
@@ -7,8 +11,36 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
+  # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
+  # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
+  # against its first parent, or comprehensively, inside 04:00-07:00 Europe/Madrid unless `override` gives a reason.
   workflow_dispatch:
-  # Once a day, the measurements a push to main leaves out (`changes`).
+    inputs:
+      purpose:
+        description: 'full: every hosted row, fuzzing and every measurement of this branch''s head. backlog/snapshot: the nightly coordinator''s'
+        type: choice
+        options: [full, backlog, snapshot]
+        default: full
+      hardware:
+        description: 'backlog/snapshot: admit (measure in the window) or defer (hosted qualification alone)'
+        type: choice
+        options: [admit, defer]
+        default: admit
+      snapshot:
+        description: 'backlog/snapshot: the cycle''s pinned main commit, whose first-parent history must contain this one (empty: main)'
+        type: string
+        default: ''
+      request:
+        description: 'backlog/snapshot: the coordinator''s request token (YYYYMMDD.RUN.SEQUENCE.admit|defer)'
+        type: string
+        default: manual
+      override:
+        description: 'backlog/snapshot with admit: why to measure outside 04:00-07:00 Europe/Madrid (reported); empty enforces the window'
+        type: string
+        default: ''
+  # Once a day, the measurements a push to main leaves out (`changes`), until the nightly mode (vars.BUSTER_NIGHTLY
+  # set to `on`) moves them to nightly-backfill.yml's comprehensive snapshot run: the `evidence` job then retires this
+  # schedule's runs, which run nothing.
   schedule:
     - cron: '23 7 * * *'
   # Every pull request runs the workflow, since its job is a required check: a pull request that changes only
@@ -58,8 +90,10 @@ jobs:
   # The selector is tools/ci/changes.c: the modules' sources (`changes_modules`), the plain benchmarks'
   # (`changes_benchmarks`) and the decision, which its --self-test checks against this workflow and the sources before
   # it decides.
+  # A nightly backlog run decides as a pull request does, on its commit's change against its first parent; with the
+  # nightly mode (vars.BUSTER_NIGHTLY: on), so does a push, whose `code` stays true (the selector's targeted push).
   changes:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -105,24 +139,88 @@ jobs:
           "$RUNNER_TEMP/changes" --self-test
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification" --self-test
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/nightly.c -o "$RUNNER_TEMP/nightly"
+          "$RUNNER_TEMP/nightly" --self-test
 
       - id: files
         shell: bash
+        env:
+          NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: |
           set -euo pipefail
           workflow=.github/workflows/9700x.yml
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$NIGHTLY" != on ]; then
               "$RUNNER_TEMP/changes" --event push --workflow "$workflow" --output "$GITHUB_OUTPUT"
           else
-              # The merge's changes against its base, both names of a file renamed, and the base's workflow, empty
-              # where it has none.
+              # The merge's changes against its base (a push's or a nightly run's commit's against its first parent),
+              # both names of a file renamed, and the base's workflow, empty where it has none.
               git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/files"
               if ! git show "HEAD^1:$workflow" > "$RUNNER_TEMP/base.yml" 2> /dev/null; then
                   : > "$RUNNER_TEMP/base.yml"
               fi
-              "$RUNNER_TEMP/changes" --event pull_request --files "$RUNNER_TEMP/files" \
+              event=pull_request
+              if [ "$GITHUB_EVENT_NAME" = push ]; then
+                  event=push
+              fi
+              "$RUNNER_TEMP/changes" --event "$event" --files "$RUNNER_TEMP/files" \
                   --base-workflow "$RUNNER_TEMP/base.yml" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           fi
+
+  # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
+  # "Nightly main measurements"). A pull request: its draft state alone. A push: its pull request's newest run, when it
+  # qualified the identical tree natively, with the nightly mode, which then skips the 9700X job and leaves its
+  # measurements to the backlog unless that run's (on the identical first-parent tree) are reusable too. A nightly
+  # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
+  # plain hosted rows of the commit's own earlier run, and the 04:00-07:00 Europe/Madrid window. Missing, ambiguous or
+  # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
+  evidence:
+    name: Reuse evidence and hardware admission
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      scope: ${{ steps.decide.outputs.scope }}
+      hosted: ${{ steps.decide.outputs.hosted }}
+      hosted_source: ${{ steps.decide.outputs.hosted_source }}
+      native: ${{ steps.decide.outputs.native }}
+      native_source: ${{ steps.decide.outputs.native_source }}
+      measurement: ${{ steps.decide.outputs.measurement }}
+      measurement_source: ${{ steps.decide.outputs.measurement_source }}
+      hardware: ${{ steps.decide.outputs.hardware }}
+      hardware_reason: ${{ steps.decide.outputs.hardware_reason }}
+      retired: ${{ steps.decide.outputs.retired }}
+    steps:
+      - name: Check out the run's commit and its first parent
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Test the nightly glue and the 9700X's caches against fixtures
+        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, without
+        # network access (tools/ci/nightly.c's own self-test runs in `changes`).
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          bash tests/ci/nightly.sh
+          bash tests/ci/caches.sh
+
+      - name: Decide reuse and hardware admission
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_PURPOSE: ${{ inputs.purpose }}
+          EVIDENCE_HARDWARE: ${{ inputs.hardware }}
+          EVIDENCE_SNAPSHOT: ${{ inputs.snapshot }}
+          EVIDENCE_OVERRIDE: ${{ inputs.override }}
+          EVIDENCE_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+          EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
+        run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
 
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }}, shard ${{ matrix.shard }} of 4)
@@ -130,8 +228,9 @@ jobs:
     # policy checks, which finish within `changes`' time, and don't start when one fails: neither they nor the 9700X job
     # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
     # regardless, so that every row reports.
-    needs: [changes, agent-guide-size, dco-hooks]
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
+    needs: [changes, evidence, agent-guide-size, dco-hooks]
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     runs-on: ubuntu-26.04
     # The sanitizer rows run their shard of the inventory on runners whose detectors make it several times slower; the
     # driver's in-process commands take tens of minutes each there. Unsharded, the plain rows took up to 80 minutes and the
@@ -143,9 +242,10 @@ jobs:
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
         host_arch: [x86-64, native]
-        # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, and pushes
-        # to main, the daily run and dispatched runs the whole matrix.
-        sanitizer: ${{ fromJSON(github.event_name == 'pull_request' && '["none"]' || '["none", "address", "undefined", "thread", "memory"]') }}
+        # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
+        # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and pushes to main, the
+        # daily run, full dispatches and the snapshot's deferred daily run the whole matrix.
+        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "undefined", "thread", "memory"]') }}
         optimization: [3]
         # Each row's inventory runs as 4 shards, a runner each (`parallel --shard K/4`, dealt by
         # tools/ci/correctness.costs): a plain row's test step took about 14.5 minutes on one 4-CPU runner, and its
@@ -153,7 +253,7 @@ jobs:
         # list, which tools/ci/changes.c's self-test checks (changes_shard_policy).
         shard: [1, 2, 3, 4]
         include: >-
-          ${{ fromJSON(github.event_name == 'pull_request' && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 4}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 4}]') }}
+          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 4}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 4}]') }}
     defaults:
       run:
         shell: bash
@@ -338,11 +438,9 @@ jobs:
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
-        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them.
-        run: |
-          git init -q --template= build/c-testsuite
-          git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
-          git -C build/c-testsuite checkout -q FETCH_HEAD
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
+        # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
+        run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
       - name: Check constrained arenas, command diagnostics, and Callgrind
         if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
@@ -427,9 +525,9 @@ jobs:
 
   fuzz:
     name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
-    needs: changes
-    # Like the sanitizer rows, not on pull requests.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
+    needs: [changes, evidence]
+    # Like the sanitizer rows, not on pull requests, nor in the `plain` scope.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
@@ -551,15 +649,25 @@ jobs:
 
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
-    needs: [changes, test, fuzz]
+    needs: [changes, evidence, test, fuzz]
     # Both hosted variants must pass before any hardware work, including native
     # correctness. Drafts keep hosted feedback but cannot occupy the hardware.
-    # This also covers scheduled/manual runs, whose selector is skipped.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}
+    # This also covers scheduled/manual runs, whose selector is skipped. The
+    # `evidence` job must admit it: a push it qualified by reuse, a nightly run
+    # outside the window or deferred, and a draft are not admitted. A nightly
+    # run's plain rows (the `plain` scope, without fuzzing) gate it as a pull
+    # request's do, either run here or, by evidence, by its commit's earlier run.
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 20 }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 25 || 20 }}
+    # For the record job: whether the window closed while the job waited for the lock, whether native correctness
+    # started and passed, and the host's fingerprint.
+    outputs:
+      window: ${{ steps.window.outputs.window }}
+      native: ${{ steps.native.outputs.native }}
+      host: ${{ steps.host.outputs.host }}
     defaults:
       run:
         shell: bash
@@ -569,16 +677,32 @@ jobs:
       # calls share the build's tree.
       BUSTER_DEBUG_INFO: '0'
       # Hosted correctness independently checks both variants of this exact revision before this job can start.
-      # The persistent native cache reuses ordinary runs; daily/manual runs execute and check every oracle again.
-      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}
+      # The persistent native cache reuses ordinary runs and nightly backlog runs; daily/manual runs and the nightly
+      # snapshot's execute and check every oracle again.
+      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
     steps:
       - name: Verify benchmark host
+        id: host
         run: |
           test "$(uname -s)" = Linux
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          # The coverage record's host identity: what the repository doesn't pin (the kernel, the microcode, the
+          # system GCC that some fixtures use as their oracle).
+          microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
+          gcc_version=$(gcc -dumpfullversion 2> /dev/null || echo none)
+          host=$(printf '9700X/%s/%s/gcc-%s' "$(uname -r)" "${microcode:-unknown}" "$gcc_version" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
+          printf 'Host identity: %s\n' "$host"
+          printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
+
+      - name: Use the runner's private cache for verified inputs
+        # The frozen corpus's archive, c-testsuite's commit and the pragma oracle, each kept under what identifies it and
+        # verified on every use (docs/ci.md, on the job's private cache). Measured on 2026-11-03 PR jobs, the corpus and
+        # c-testsuite fetches took 0 to 1 s each and the oracle's 2.3 s overlaps the compiler's build: the cache spares the
+        # host their network dependence more than their time. Hosted runners keep none.
+        run: printf 'BUSTER_CI_CACHE=%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/buster/ci" >> "$GITHUB_ENV"
 
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -588,6 +712,30 @@ jobs:
 
       - name: Stage official Clang 23.1.4 in the private runner cache
         run: bash tools/ci/setup-benchpress.sh
+
+      - name: Admit nightly work inside the Europe/Madrid window, holding the lock
+        # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
+        # may have waited past its window for it: from here, the job's whole bound (its timeout and 5 minutes to clean
+        # up) must still end by 07:00 Europe/Madrid, unless the dispatch gave an override's reason. A refusal fails the
+        # job before any work, which the record reads as a deferral, not a failure; the job's timeout bounds the rest.
+        id: window
+        if: github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')
+        env:
+          OVERRIDE: ${{ inputs.override }}
+          BOUND: ${{ inputs.purpose == 'backlog' && 25 || 30 }}
+        run: |
+          set -euo pipefail
+          clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/nightly.c -o "$RUNNER_TEMP/nightly"
+          status=0
+          verdict=$("$RUNNER_TEMP/nightly" window --now "$(date +%s)" --bound "$((BOUND * 60))" --override "$OVERRIDE") || status=$?
+          printf 'Nightly window: %s\n' "$verdict"
+          if [ "$status" -eq 0 ]; then
+              printf 'window=open\n' >> "$GITHUB_OUTPUT"
+          else
+              printf 'window=closed\n' >> "$GITHUB_OUTPUT"
+              printf '%s\n' '::notice title=Nightly window::The window closed while this job waited; deferred, not failed.'
+              exit 1
+          fi
 
       - name: Require the complete native vector feature set
         run: |
@@ -602,14 +750,10 @@ jobs:
       - name: Build the external Clang pragma oracle and the Zen 5 executable
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
-          # The official libclang-cpp includes its LLVM dependencies. Link directly
-          # to it, avoiding llvm-config's Ubuntu-specific static system-library paths.
-          flags=$(llvm-config --cxxflags --ldflags)
-          read -r -a flags_array <<< "${flags//$'\n'/ }"
           # The oracle builds beside the compiler, whose build ends with its longest unit alone (main_unit_checker.c,
-          # 35 s of 35.3) while the other CPUs idle: built first, the oracle's 2.3 s came before it.
-          taskset -c 0-7 clang++ -O2 -Wall -Werror tools/preprocessor_pragma_oracle.cpp \
-            "${flags_array[@]}" -lclang-cpp -o "$oracle" &
+          # 35 s of 35.3) while the other CPUs idle: built first, the oracle's 2.3 s came before it. It links the
+          # official libclang-cpp directly, and the private cache keeps it under its inputs' key (pragma-oracle-cache.sh).
+          taskset -c 0-7 bash tools/ci/pragma-oracle-cache.sh "$oracle" &
           oracle_build=$!
           taskset -c 0-7 ./build.sh --config Release
           wait "$oracle_build"
@@ -630,18 +774,20 @@ jobs:
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
-        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them.
-        run: |
-          git init -q --template= build/c-testsuite
-          git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
-          git -C build/c-testsuite checkout -q FETCH_HEAD
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
+        # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
+        run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
       - name: Parse the compiler source on the native vector build
         run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c'
 
       - name: Run complete native vector correctness before benchmarks
+        id: native
         run: |
+          # The record tells a correctness failure here (started, never passed) from a measurement's after it.
+          printf 'native=started\n' >> "$GITHUB_OUTPUT"
           taskset -c 0-7 "$BUSTER_COMPILER" parallel --github --jobs 8 --timeout 600 < tools/ci/correctness.tests
+          printf 'native=passed\n' >> "$GITHUB_OUTPUT"
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
               find "$oracle" -type f -mtime +2 -delete
@@ -1651,10 +1797,14 @@ jobs:
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated
-    # 9700X native correctness/benchmark job must pass on the same revision.
+    # 9700X native correctness/benchmark job must pass on the same revision, or,
+    # for a push alone, its pull request's newest run must have qualified the
+    # identical tree natively (the evidence job's reuse). A nightly dispatch
+    # reports through its coverage record instead, and a retired scheduled run
+    # (the nightly mode's) runs nothing, so neither has this context.
     name: Build and execute on Ryzen 7 9700X
-    needs: [changes, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
-    if: always()
+    needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
+    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -1669,12 +1819,96 @@ jobs:
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
           SIZE_RESULT: ${{ needs.agent-guide-size.result }}
           DCO_RESULT: ${{ needs.dco-hooks.result }}
+          EVIDENCE_RESULT: ${{ needs.evidence.result }}
+          HARDWARE: ${{ needs.evidence.outputs.hardware }}
+          HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
+          NATIVE_SOURCE: ${{ needs.evidence.outputs.native_source }}
           TEST_RESULT: ${{ needs.test.result }}
           FUZZ_RESULT: ${{ needs.fuzz.result }}
           BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
           EVENT_NAME: ${{ github.event_name }}
+          PURPOSE: ${{ inputs.purpose }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
         shell: bash
         run: |
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification"
+
+  record:
+    # The run's coverage record (tools/ci/nightly.c's `record`, docs/ci.md): its commit, tree and first parent; the
+    # files that pin its protocol, toolchain and corpus; what the selector chose; what it ran, reused, admitted and
+    # deferred; the 9700X job's window, native correctness and host; and the outcome they add up to. It is the
+    # coverage-record-ATTEMPT artifact, kept 90 days, that the nightly coordinator's ledger harvests and a push reads
+    # from its pull request's run. Hosted, after everything. It fails only a nightly run that correctness blocked or
+    # a measurement failed, so that such a run shows red; every other run's status is the aggregate's.
+    name: Coverage record
+    needs: [changes, evidence, test, fuzz, benchmarks, qualification]
+    if: ${{ always() && github.repository_id == '1421805693' && needs.evidence.outputs.retired != 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the run's commit and its first parent
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Write the coverage record
+        id: record
+        shell: bash
+        env:
+          RECORD_REPOSITORY: ${{ github.repository_id }}
+          RECORD_RUN: ${{ github.run_id }}
+          RECORD_ATTEMPT: ${{ github.run_attempt }}
+          RECORD_EVENT: ${{ github.event_name }}
+          RECORD_DISPATCH_PURPOSE: ${{ inputs.purpose }}
+          RECORD_REQUEST: ${{ inputs.request }}
+          RECORD_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          RECORD_SNAPSHOT: ${{ inputs.snapshot }}
+          RECORD_MODE: ${{ vars.BUSTER_NIGHTLY == 'on' && 'on' || 'off' }}
+          RECORD_CODE: ${{ needs.changes.outputs.code }}
+          RECORD_MEASURE: ${{ needs.changes.outputs.measure }}
+          CHANGES_OUTPUTS: ${{ toJSON(needs.changes.outputs) }}
+          RECORD_CHANGES_RESULT: ${{ needs.changes.result }}
+          RECORD_EVIDENCE_RESULT: ${{ needs.evidence.result }}
+          RECORD_SCOPE: ${{ needs.evidence.outputs.scope }}
+          RECORD_HOSTED: ${{ needs.evidence.outputs.hosted }}
+          RECORD_HOSTED_SOURCE: ${{ needs.evidence.outputs.hosted_source }}
+          RECORD_NATIVE_EVIDENCE: ${{ needs.evidence.outputs.native }}
+          RECORD_NATIVE_SOURCE: ${{ needs.evidence.outputs.native_source }}
+          RECORD_MEASUREMENT_EVIDENCE: ${{ needs.evidence.outputs.measurement }}
+          RECORD_MEASUREMENT_SOURCE: ${{ needs.evidence.outputs.measurement_source }}
+          RECORD_HARDWARE: ${{ needs.evidence.outputs.hardware }}
+          RECORD_HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
+          RECORD_TEST_RESULT: ${{ needs.test.result }}
+          RECORD_FUZZ_RESULT: ${{ needs.fuzz.result }}
+          RECORD_BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
+          RECORD_WINDOW: ${{ needs.benchmarks.outputs.window }}
+          RECORD_NATIVE: ${{ needs.benchmarks.outputs.native }}
+          RECORD_HOST: ${{ needs.benchmarks.outputs.host }}
+          RECORD_QUALIFICATION_RESULT: ${{ needs.qualification.result }}
+          RECORD_OVERRIDE: ${{ inputs.override }}
+        run: bash tools/ci/nightly.sh record "$RUNNER_TEMP/coverage-record"
+
+      - name: Keep the coverage record
+        if: ${{ !cancelled() && steps.record.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-record-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/coverage-record/record.tsv
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail a nightly run that correctness blocked or a measurement failed
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot') }}
+        env:
+          OUTCOME: ${{ steps.record.outputs.outcome }}
+        shell: bash
+        run: |
+          case "$OUTCOME" in
+              complete|not-required|deferred|pending|interrupted) printf 'Nightly outcome: %s\n' "$OUTCOME" ;;
+              *) printf '::error title=Nightly coverage::outcome %s\n' "${OUTCOME:-missing}"; exit 1 ;;
+          esac

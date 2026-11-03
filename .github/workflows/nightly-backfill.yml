@@ -1,0 +1,169 @@
+name: Nightly main measurements
+
+# The coordinator of main's nightly measurement backlog (#1207; docs/ci.md, "Nightly main measurements"). It harvests
+# each run's coverage record into a ledger, pins the cycle's snapshot of main, and dispatches .github/workflows/9700x.yml
+# on nightly/SHA branches: hosted qualifications before the window, then one 9700X run at a time inside 04:00-07:00
+# Europe/Madrid, the snapshot's comprehensive run first and then the oldest first-parent states that lack their
+# targeted measurements. It never holds the shared lock itself: each dispatched run's job takes it, and the job's own
+# timeout and window check keep it inside the window.
+#
+# GitHub starts scheduled runs late, by hours at busy times (the daily run's 07:23 UTC started after 12:39 UTC every
+# day of the week before this): several schedules give the cycle chances, each run prepares and then waits up to 5
+# hours 40 minutes for the window in its `prepare` job, and a later run waits in the concurrency group and, past the
+# window, reports. Until vars.BUSTER_NIGHTLY is `on`, every run is a dry run: it harvests, plans and reports, and
+# dispatches nothing; the old daily run of 9700x.yml keeps its place.
+on:
+  schedule:
+    - cron: '7 22 * * *'
+      timezone: Europe/Madrid
+    - cron: '7 0 * * *'
+      timezone: Europe/Madrid
+    - cron: '7 2 * * *'
+      timezone: Europe/Madrid
+    - cron: '7 4 * * *'
+      timezone: Europe/Madrid
+    - cron: '37 5 * * *'
+      timezone: Europe/Madrid
+    - cron: '17 7 * * *'
+      timezone: Europe/Madrid
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'plan: harvest, plan and report alone. run: dispatch as the nightly mode would, whatever vars.BUSTER_NIGHTLY says'
+        type: choice
+        options: [plan, run]
+        default: plan
+      override:
+        description: 'run: why to admit hardware work outside 04:00-07:00 Europe/Madrid (reported in each run); empty enforces the window'
+        type: string
+        default: ''
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-backfill.yml'
+      - 'tools/ci/nightly.c'
+      - 'tools/ci/nightly.sh'
+      - 'tests/ci/nightly.sh'
+
+permissions:
+  contents: read
+
+# One coordinator at a time: a run that starts while another prepares or measures waits, and GitHub keeps only the
+# newest such waiting run. Pull requests' self-tests are apart.
+concurrency:
+  group: nightly-backfill-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Nightly decisions and glue
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Test the decisions, and the glue against fixtures, without network access
+        run: bash tests/ci/nightly.sh
+
+  # A pull request that changes the coordinator plans against the live repository, read-only, as a dry run.
+  dry-run:
+    name: Dry run against the repository
+    needs: test
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == 1421805693
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Harvest and plan without dispatching
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode dry-run
+      - name: Keep the planned ledger and report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-dry-run-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly/ledger.tsv
+            ${{ runner.temp }}/nightly/report.md
+            ${{ runner.temp }}/nightly/plan.tsv
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Harvest, pin and prepare; then wait for the window when it opens within this job's remaining time. Writing:
+  # nightly/SHA branches (contents) and dispatches and cancellations of 9700x.yml (actions). The ledger's publication
+  # to buster-performance uses the nightly-ledger environment's secret, which only main's runs may read.
+  prepare:
+    name: Prepare the cycle
+    needs: test
+    if: github.event_name != 'pull_request' && github.repository_id == '1421805693' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    environment: nightly-ledger
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      window: ${{ steps.coordinate.outputs.window }}
+      snapshot: ${{ steps.coordinate.outputs.snapshot }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Harvest, pin the snapshot and prepare hosted qualifications
+        id: coordinate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_OVERRIDE: ${{ inputs.override }}
+          NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          MODE: ${{ (github.event_name == 'schedule' && vars.BUSTER_NIGHTLY == 'on') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'run') }}
+        run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode "$([ "$MODE" = true ] && echo run || echo dry-run)"
+      - name: Keep the ledger and the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-ledger-prepare-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly/ledger.tsv
+            ${{ runner.temp }}/nightly/report.md
+          if-no-files-found: warn
+          retention-days: 90
+
+  window:
+    name: Measure inside the window
+    needs: prepare
+    if: needs.prepare.outputs.window == 'reachable'
+    runs-on: ubuntu-26.04
+    # The window's three hours and the last run's end.
+    timeout-minutes: 200
+    environment: nightly-ledger
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Admit one hardware run at a time until 07:00 Europe/Madrid
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_OVERRIDE: ${{ inputs.override }}
+          NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
+          # The snapshot the prepare job pinned, should its ledger not reach this job.
+          NIGHTLY_SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+        run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase window --mode run
+      - name: Keep the ledger and the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-ledger-window-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nightly/ledger.tsv
+            ${{ runner.temp }}/nightly/report.md
+          if-no-files-found: warn
+          retention-days: 90

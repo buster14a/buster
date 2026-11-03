@@ -73,8 +73,11 @@ there at a time, so everything takes one lock:
   or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
   units (the files that define the functions it calls); or the benchmark's own
   step. A change to the build's description (`build.sh`, `CMakeLists.txt`,
-  `cmake/`) runs every one, and so does a push to main, so
-  that main has each benchmark's numbers at every commit. A new benchmark's
+  `cmake/`) runs every one, and so does a push to main before the nightly mode
+  (below), so that main has each benchmark's numbers at every commit; with it,
+  a push measures what its first-parent change selects, as its pull request
+  did (the selector's targeted push), and the nightly backlog measures the
+  states no push measured. A new benchmark's
   step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
   others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
   repeated processes), which cost about 200 ms before each of 21 samples per
@@ -98,9 +101,10 @@ there at a time, so everything takes one lock:
   performance readers' qualification (`tools/performance`, `docs/performance`,
   `web/perf`, their pin; a change to `docs/performance` alone runs the job for
   it). A push
-  to main runs none of them: its pull request's run measured what it changes,
-  and the full set took the job past its 10 minutes. The daily and dispatched
-  runs have 25 minutes.
+  to main runs none of them before the nightly mode: its pull request's run
+  measured what it changes, and the full set took the job past its 10 minutes.
+  The daily and dispatched runs, and the nightly snapshot's, have 25 minutes;
+  a nightly backlog run has a pull request's 20.
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
   before it decides, and fails the job (so that `test` runs everything) when
@@ -125,17 +129,56 @@ there at a time, so everything takes one lock:
   shard's commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
-  benchmark's step, the tables or the shards.
+  benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
+  job's `needs` (`[changes, evidence, test, fuzz]`), its `if:` (the `evidence`
+  job's success and admission, hosted rows skipped only by evidenced reuse on a
+  dispatch, fuzzing only in the plain scope) and the oracle cache's modes, with
+  counterexamples for each.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## Reuse and the nightly backlog
+
+`tools/ci/nightly.c` makes the decisions, `tools/ci/nightly.sh` is their API and
+Git glue, and [the CI guide](../../docs/ci.md#nightly-main-measurements) has
+the policy. In short:
+
+- Every `9700x.yml` run has an `evidence` job, which must succeed. For a push
+  it checks the merged pull request's newest run: the identical tree, its 9700X
+  job, aggregate and plain rows green, within a day, its coverage record
+  agreeing. A push it qualifies that way skips its 9700X job in the nightly
+  mode, and the required context passes, naming the source run. A nightly
+  dispatch's `evidence` job checks that the commit is a first-parent state of
+  main, may reuse the commit's own earlier plain hosted rows, and enforces
+  04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
+  takes the lock.
+- Every run's `record` job writes the `coverage-record-ATTEMPT` artifact. The
+  coordinator, `.github/workflows/nightly-backfill.yml`, harvests those
+  records into its ledger. It pins the cycle's snapshot, prepares hosted
+  qualifications before the window, and dispatches `9700x.yml` on
+  `nightly/SHA` branches with `purpose` `backlog` or `snapshot`. It runs one
+  9700X run at a time, and only work that fits before 07:00.
+- `vars.BUSTER_NIGHTLY` set to `on` is the switch. Before it, the coordinator
+  only harvests, plans and reports; pushes and the daily `23 7 * * *` run work
+  as before. With it, pushes measure targeted, the coordinator dispatches, and
+  the old daily run retires.
+- Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
+  and the glue against a fake `gh` and a merge history) and
+  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
+  the `evidence` job before any hardware; `changes` runs
+  `nightly --self-test`, which also fails if the build or the inventory ever
+  calls `git`, since tree-identity reuse depends on that.
 
 ## Queue and execution timing
 
 The hosted-only `CI latency report` workflow runs at 07:07 Europe/Madrid and on
-manual dispatch. It samples the latest 100 main CI workflow runs, reports median
-and nearest-rank p95 by PR/main/scheduled-manual event class, and retains raw API
-responses plus normalized observations in workflow artifacts. It does not run
-benchmarks, weaken the hardware gate, or change the daily benchmark schedule.
+manual dispatch. It samples the latest 100 main CI workflow runs and reports the
+median and nearest-rank p95 separately for PR, main-push, nightly targeted and
+full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
+run name. Besides queue and execution, it reports the host's occupation, from
+the job's first step (after the runner hook took the lock) to its end. It keeps
+the raw API responses and normalized observations as workflow artifacts. It
+does not run benchmarks, weaken the hardware gate, or change any schedule.
 
 Read `docs/ci.md` for metric definitions and limitations. In particular, runner
 hook duration includes overhead and is not an exact shared-lock wait; missing
