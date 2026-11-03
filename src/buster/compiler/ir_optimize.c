@@ -864,6 +864,13 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
             }
         }
     }
+    // A vector (#141) is never a constant: its lanes aren't the scalar folds' one integer (a v4i32 addition isn't an i128
+    // one), a bitcast of a constant to it included, and IR_CONST has no vector type. Its copies, phis and selects keep the
+    // states of their vector operands, which are never constants either.
+    if ((BUSTER_IR_VECTORS >> f->type[i]) & 1)
+    {
+        result = IROPT_OVERDEFINED;
+    }
     return result;
 }
 
@@ -1266,16 +1273,16 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
     }
 }
 
-// `masks`: whether the caller's passes take a function whose only SIMD values are masks (#179): SCCP, dead code and CFG
-// cleanup, whose folds of and, or, xor, not and bitcast keep a mask's bits as an integer's of its width. GVN, LICM, SROA
-// and the inliner don't, and no pass takes vectors (#141's).
-static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool masks)
+// `simd`: whether the caller's passes take a function with SIMD values: SCCP, dead code and CFG cleanup, whose folds of
+// and, or, xor, not and bitcast keep a mask's bits as an integer's of its width (#179), and which take no vector for a
+// constant (#141, ir_optimize_transfer). GVN, LICM, SROA and the inliner don't.
+static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool simd)
 {
     (void)scalar;
 
     work->function = function;
     IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
-    if (check.error == IR_OK && ir_function_has_simd(function) && (!masks || ir_function_has_vectors(function)))
+    if (check.error == IR_OK && !simd && ir_function_has_simd(function))
     {
         check.error = IR_ERROR_UNSUPPORTED;
     }
@@ -1397,6 +1404,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     }
     IrSizes sizes = {
         .constant_count = f->constant_count,
+        .vector_constant_count = f->vector_constant_count,
         .slot_count = f->slot_count,
         .address_count = f->address_count,
         .call_type_count = f->call_type_count,
@@ -1462,6 +1470,11 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         if (f->constant_count != 0)
         {
             memcpy(candidate.constants, f->constants, (uint64_t)f->constant_count * sizeof(IrConstant));
+        }
+        // A vector constant's payload (#141), which its IR_VCONST indexes as before.
+        if (f->vector_constant_count != 0)
+        {
+            memcpy(candidate.vector_constants, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
         }
         if (f->slot_count != 0)
         {

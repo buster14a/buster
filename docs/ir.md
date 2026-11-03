@@ -39,10 +39,9 @@ The stable printer's text is read back by `ir_parse.c` (#175).
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
-the SSA promoter's transactional refusal of a function with vectors, not
-successful promotion, and promotion of one whose only SIMD values are masks,
-which the promoter takes (#179); ordinary corpus mode continues to require
-promotion. The shared
+promotion of a function with vectors (#141) and of one whose only SIMD values
+are masks (#179), as ordinary corpus mode requires promotion of every
+function. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
 vector/mask calls remain unsupported. Native selection of vectors is

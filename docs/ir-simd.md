@@ -100,9 +100,12 @@ native opmask registers. Step/value limits and scratch rollback remain active.
 First-class vector entry arguments/results and vector/mask call signatures still
 refuse before executing a frame: the 16-byte scalar argument/result API and native
 bridge have no such ABI contract. Existing aggregate-by-pointer machinery is not
-replaced. The SSA promoter and SCCP/DCE/CFG reject a function with vectors before
-rewriting, including vectors in unused ABI/slot metadata, and take one whose only
-SIMD values are masks (`ir_function_has_vectors`, below); GVN, LICM, SROA and the
+replaced. The SSA promoter and SCCP/DCE/CFG take a function with vectors (#141),
+as they take one whose only SIMD values are masks (#179): a slot of a vector type,
+read and written whole at its type, promotes as a scalar's does, the vector
+constants' payloads are copied as the scalar constants are, and SCCP takes no
+vector for a constant (a `v4i32` addition isn't an `i128` one, and `IR_CONST` has
+no vector type), so that it folds none; GVN, LICM, SROA and the
 inliner continue to reject every SIMD function. Native Tier 1 selection rejects a
 function with vectors, which
 are [#141](https://github.com/buster14a/buster/issues/141)'s, and takes masks:
@@ -137,11 +140,12 @@ consumer; the shared interpreter is not routed through it.
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c`
 drives real C through the checker, typed producer, both adapters and both text
-parsers. This explicit mode also requires transactional refusal of a function
-with vectors by both SSA promoters, which it doesn't count as promoted; a
-function whose only SIMD values are masks must promote, as any other does
-(#179): `mask-builtins.c`'s four functions of the `_k*` builtins at every width,
-one of them a loop. Without `--simd`, source-corpus acceptance continues to
+parsers. This explicit mode also requires a function with vectors to promote by
+both SSA promoters (#141), counting them, as a function whose only SIMD values
+are masks must (#179): `mask-builtins.c`'s four functions of the `_k*` builtins
+at every width, one of them a loop. `test-ir-simd` runs a function of each
+vector width through a vector slot, an addition, compares and a selection,
+lowered, promoted and optimized by both paths, on the shared interpreter. Without `--simd`, source-corpus acceptance continues to
 require promotion. Source preparation retains each function's selected
 output-target features rather than inferring them from the host.
 

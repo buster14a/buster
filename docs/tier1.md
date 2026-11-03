@@ -61,10 +61,10 @@ shared IR's interpreter. Neither consumer may reinterpret a mask as an ordinary
 GPR value or infer target permission from the compiler host. SSA promotion and
 SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
 stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
-guide](ir-simd.md)'s "Masks from the typed stream"), and refuse one with vectors;
-GVN, LICM, SROA and the inliner still refuse every SIMD function, and selection
-refuses vectors; this handoff does not claim native Tier 1 vector
-execution, full vector ABI support or a throughput gain.
+guide](ir-simd.md)'s "Masks from the typed stream"), and one with vectors
+(#141), folding no vector; GVN, LICM, SROA and the inliner still refuse every
+SIMD function, and selection refuses vectors; this handoff does not claim
+native Tier 1 vector execution, full vector ABI support or a throughput gain.
 
 ## Required evidence
 
