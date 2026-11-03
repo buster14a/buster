@@ -512,7 +512,7 @@ static bool check_common_void_pointer_cast(const CheckStream* stream, const Type
 }
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                                       Arena* scratch);
+                                       const CheckProgram* program, Arena* scratch);
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, Arena* scratch);
@@ -1289,6 +1289,51 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+// `token`'s line in the file its text spells in — clang's getSpellingLineNumber: a `;` a macro produced
+// spells on its definition's line, never the loop head's call-site one.
+static uint32_t check_common_spelling_line(const Parser* parser, Preprocessor* pp, uint32_t token)
+{
+    uint32_t result = 0;
+    if (pp->output.locations != NULL && token < parser->tokens.count)
+    {
+        const uint32_t source = parser->tokens.sources[token];
+        if (source < pp->output.count && pp->output.locations[source] != 0)
+        {
+            const uint32_t location = pp->output.locations[source];
+            const uint32_t range = pp_find_range(pp, location);
+            result = range != BUSTER_PP_NONE ? pp_line_of(pp, range, location, 0) : 0;
+        }
+    }
+    return result;
+}
+
+// `token`'s line and column at its expansion place — clang's presumed position of a statement's begin or
+// a `)` (its column is its file column; a #line marker changes only the line).
+static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor* pp, uint32_t token, uint32_t* column)
+{
+    uint32_t result = 0;
+    if (pp->output.locations != NULL && token < parser->tokens.count)
+    {
+        const uint32_t source = parser->tokens.sources[token];
+        if (source < pp->output.count && pp->output.locations[source] != 0)
+        {
+            const uint32_t location = pp_expansion_location(pp, source, pp_history_at(pp, source));
+            const uint32_t range = pp_find_range(pp, location);
+            const char* file = NULL;
+            uint32_t file_length = 0;
+            result = range != BUSTER_PP_NONE ? pp_presumed(pp, location, &file, &file_length) : 0;
+            if (column != NULL && range != BUSTER_PP_NONE)
+            {
+                (void)pp_line_of(pp, range, location, column);
+            }
+        }
+    }
+    return result;
+}
+
+// Clang emits an if's or switch's `;`-body warning when the statement parses, but a for's or while's
+// only once its block's `}` is seen — there its elements are known and the next statement's shape or
+// indentation decides. Publishing a loop's at its owner's position replays that later diagnostic order.
 static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
 {
     for (uint32_t token = 0; token < parser->tokens.count; token += 1)
@@ -1304,15 +1349,57 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
                 keyword = opener != 0 && opener < parser->tokens.count ? opener - 1 : BUSTER_CHECK_NONE;
             }
             const uint8_t kind = keyword < parser->tokens.count ? parser->tokens.kinds[keyword] : 0;
-            const char* subject = kind == PARSE_KIND_IF ? "if statement" : kind == PARSE_KIND_WHILE ? "while loop" :
-                                  kind == PARSE_KIND_FOR ? "for loop" : kind == PARSE_KIND_SWITCH ? "switch statement" : NULL;
+            const bool loop = kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR;
             const bool has_else = kind == PARSE_KIND_IF && token + 1 < parser->tokens.count &&
                                   parser->tokens.kinds[token + 1] == PARSE_KIND_ELSE && parser->tree.parents[token + 1] == parent;
-            if (subject != NULL && !has_else)
+            // The `;` must spell on the `)`'s line: `while (x)\n;` is quiet, as is a `;` a macro's body
+            // provides (its spelling line is its definition's).
+            bool warn = kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
+                        kind == PARSE_KIND_SWITCH;
+            warn = warn && !has_else && check_common_spelling_line(parser, pp, token) != 0 &&
+                   check_common_spelling_line(parser, pp, token) == check_common_expansion_point(parser, pp, parent, 0);
+            uint32_t publication = token;
+            if (warn && loop)
             {
+                // A for or while's `;` body warns only where it could be a mistaken block: the loop is a
+                // block's own statement (a label's, a case's or a head's body is none) and a statement
+                // follows it — a compound's, or one indented past the loop's keyword.
+                const uint32_t owner = parent < parser->tokens.count ? parser->tree.parents[parent] : BUSTER_CHECK_NONE;
+                const uint8_t owner_role = owner < parser->tokens.count ? parser->tree.roles[owner] : PARSE_ROLE_NONE;
+                warn = owner_role == PARSE_ROLE_OPEN_BLOCK || owner_role == PARSE_ROLE_CLOSE_BLOCK ||
+                       owner_role == PARSE_ROLE_OPEN_BODY || owner_role == PARSE_ROLE_CLOSE_BODY;
+                uint32_t sibling = BUSTER_CHECK_NONE;
+                for (uint32_t t = warn ? token + 1 : owner; t < owner; t += 1)
+                {
+                    if (parser->tree.parents[t] == owner)
+                    {
+                        sibling = t;
+                        break;
+                    }
+                }
+                if (warn)
+                {
+                    const uint8_t sibling_role = sibling < parser->tokens.count ? parser->tree.roles[sibling] : PARSE_ROLE_NONE;
+                    warn = sibling_role == PARSE_ROLE_OPEN_BLOCK || sibling_role == PARSE_ROLE_CLOSE_BLOCK ||
+                           sibling_role == PARSE_ROLE_OPEN_BODY || sibling_role == PARSE_ROLE_CLOSE_BODY;
+                    if (!warn && sibling != BUSTER_CHECK_NONE)
+                    {
+                        uint32_t body_column = 0;
+                        uint32_t head_column = 0;
+                        (void)check_common_expansion_point(parser, pp, check_common_subtree_start(parser, sibling), &body_column);
+                        (void)check_common_expansion_point(parser, pp, keyword, &head_column);
+                        warn = body_column > head_column;
+                    }
+                    publication = warn ? owner : publication;
+                }
+            }
+            if (warn)
+            {
+                const char* subject = kind == PARSE_KIND_IF ? "if statement" : kind == PARSE_KIND_WHILE ? "while loop" :
+                                      kind == PARSE_KIND_FOR ? "for loop" : "switch statement";
                 const char* message = check_warning_text(scratch, "%s has empty body", subject);
                 const CheckCommonNote note = { token, "put the semicolon on a separate line to silence this warning" };
-                check_common_report(parser, pp, input, token, CHECK_WARNING_ID_EMPTY_BODY, false, message, &note, 1, scratch);
+                check_common_report_at(parser, pp, input, token, publication, CHECK_WARNING_ID_EMPTY_BODY, false, message, &note, 1, scratch);
             }
         }
     }
@@ -1459,12 +1546,12 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
 }
 
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                        TypeTable* types, CheckWarningSpelling* spell, Arena* scratch)
+                                        TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     // Division and subscript warnings apply only to evaluated operands: sizeof and alignof operands, unselected
     // constant ternary arms, short-circuited sides and _Generic's other arms never run.
-    uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, scratch);
+    uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, program, scratch);
     // Each node's parent in the graph, for a subscript's use context: an `&a[i]` spine relaxes the bound to
     // allow one past the end, an explicit `(void)` cast discards the lvalue unchecked, and any other operand
     // inside an address-of's subtree — a nested index — is unchecked as well.
@@ -2537,8 +2624,136 @@ static void check_common_mark_written(const CheckGraph* graph, const CheckStream
 // `&&`, `||` or `?:` are not evaluated. Roots are the nodes no other node reads; a reverse pass carries evaluation
 // through operands and arguments. A node whose value nothing reads is a source root (an expression statement, a
 // return, an initializer or a control condition).
+// The control entries a body's first reaches, by the walk check_program_return_flow's second pass makes for
+// -Wreturn-type: a constant branch reaches only its taken edge, a case the arm its value selects, and an
+// indirect jump or asm goto every label it may enter. `seen` and `queue` hold body->count elements each.
+static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue)
+{
+    const CheckControl* entries = program->controls + body->first;
+    memset(seen, 0, body->count);
+    uint32_t head = 0;
+    uint32_t tail = 1;
+    queue[0] = 0;
+    seen[0] = 1;
+    bool labels = false;
+    while (head < tail)
+    {
+        const uint32_t index = queue[head++];
+        const CheckControl* entry = entries + index;
+        uint32_t targets[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        bool next = entry->kind != CHECK_CONTROL_RETURN && entry->kind != CHECK_CONTROL_END;
+        if (entry->kind >= CHECK_CONTROL_BRANCH_FALSE)
+        {
+            bool truth = false;
+            const bool jump = entry->kind == CHECK_CONTROL_JUMP;
+            const bool known = !jump && check_program_runtime_truth(program, entry->node, entry->node, &truth);
+            const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
+            targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
+            next = !jump && (!known || !taken);
+        }
+        else if (entry->kind == CHECK_CONTROL_CASE)
+        {
+            const CheckProgramCase* item = program->cases + entry->target;
+            const uint32_t condition = program->input->token_nodes[item->owner];
+            CheckProgramCase selected = { .type = item->type };
+            const bool known = condition != BUSTER_CHECK_NONE &&
+                               check_program_case_value(program, condition, item->type, &selected.lower);
+            const unsigned __int128 ordered = known ? check_program_case_order(program, &selected, false) : 0;
+            const bool taken = known && ordered >= check_program_case_order(program, item, false) &&
+                                       ordered <= check_program_case_order(program, item, true);
+            targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
+            next = !known || !taken;
+        }
+        else if (entry->kind == CHECK_CONTROL_ASM || entry->kind == CHECK_CONTROL_JUMP_INDIRECT)
+        {
+            if (entry->kind == CHECK_CONTROL_ASM && program->asm_offsets != NULL && program->asm_targets != NULL)
+            {
+                for (uint32_t l = program->asm_offsets[entry->target]; l < program->asm_offsets[entry->target + 1]; l += 1)
+                {
+                    const uint32_t target = program->asm_targets[l];
+                    if (target < body->count && seen[target] == 0)
+                    {
+                        seen[target] = 1;
+                        queue[tail++] = target;
+                    }
+                }
+            }
+            else if (!labels)
+            {
+                for (uint32_t l = 0; l < body->count; l += 1)
+                {
+                    if (entries[l].kind == CHECK_CONTROL_LABEL && seen[l] == 0)
+                    {
+                        seen[l] = 1;
+                        queue[tail++] = l;
+                    }
+                }
+                labels = true;
+            }
+            next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
+        }
+        targets[1] = next && index + 1 < body->count ? index + 1 : BUSTER_CHECK_NONE;
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+        {
+            const uint32_t target = targets[t];
+            if (target < body->count && seen[target] == 0)
+            {
+                seen[target] = 1;
+                queue[tail++] = target;
+            }
+        }
+    }
+}
+
+// A for's increment evaluates only while control can reach the loop's back edge: a body that always returns
+// or leaves by break or goto never reaches it, while continue and falling through do (clang's reachability,
+// which suppresses the increment's unused results, bounds and divisions alike). The increment's evaluations
+// are the EVALUATEs at the `)` that closes its head, which only that token's task writes; unreachable ones
+// never evaluate their expression.
+static void check_common_dead_increments(const CheckProgram* program, const Parser* parser, const CheckGraph* graph,
+                                         uint8_t* evaluated, Arena* scratch)
+{
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        if (body->count == 0 || body->count != body->entry_count)
+        {
+            continue;
+        }
+        const CheckControl* entries = program->controls + body->first;
+        uint32_t increments = 0;
+        for (uint32_t i = 0; i < body->count; i += 1)
+        {
+            if (entries[i].kind == CHECK_CONTROL_EVALUATE && entries[i].token < parser->tokens.count &&
+                parser->tree.roles[entries[i].token] == PARSE_ROLE_CLOSE_FOR)
+            {
+                increments += 1;
+            }
+        }
+        if (increments == 0)
+        {
+            continue;
+        }
+        uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, body->count);
+        uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, body->count);
+        if (seen == NULL || queue == NULL)
+        {
+            continue;
+        }
+        check_common_body_reached(program, body, seen, queue);
+        for (uint32_t i = 0; i < body->count; i += 1)
+        {
+            if (entries[i].kind == CHECK_CONTROL_EVALUATE && seen[i] == 0 && entries[i].node < graph->count &&
+                entries[i].token < parser->tokens.count && parser->tree.roles[entries[i].token] == PARSE_ROLE_CLOSE_FOR)
+            {
+                evaluated[entries[i].node] = 0;
+            }
+        }
+    }
+}
+
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                                       Arena* scratch)
+                                       const CheckProgram* program, Arena* scratch)
 {
     uint8_t* evaluated = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     uint8_t* referenced = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
@@ -2572,6 +2787,10 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
         for (uint32_t node = 0; node < graph->count; node += 1)
         {
             evaluated[node] = referenced[node] == 0;
+        }
+        if (program != NULL && program->controls != NULL && parser != NULL)
+        {
+            check_common_dead_increments(program, parser, graph, evaluated, scratch);
         }
         // A static selection checks every arm but evaluates only the chosen one; its other arms are otherwise
         // unreferenced roots. The controlling expression is not evaluated either.
@@ -2768,7 +2987,7 @@ static uint32_t check_common_address_root(const CheckGraph* graph, const CheckSt
 }
 
 static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                       TypeTable* types, Arena* scratch)
+                                       TypeTable* types, const CheckProgram* program, Arena* scratch)
 {
     const uint32_t count = input->token_count;
     const CheckGraph* graph = &input->graph;
@@ -2780,7 +2999,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     uint8_t* self_read = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     uint8_t* parameters = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* statement_write = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, scratch);
+    uint8_t* evaluated = check_common_evaluated(graph, stream, types, parser, program, scratch);
     bool valid = count == 0 || (first_write != NULL && addressed != NULL && first_read != NULL && first_use_read != NULL && parameters != NULL &&
                                 statement_write != NULL && (graph->count == 0 || (nonread != NULL && self_read != NULL && evaluated != NULL)));
     if (valid && count != 0)
@@ -3158,8 +3377,8 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, scratch);
-    check_common_graph_warnings(parser, pp, input, stream, types, &spell, scratch);
+    check_common_graph_warnings(parser, pp, input, stream, types, &spell, program, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);
-    check_common_uninitialized(parser, pp, input, stream, types, scratch);
+    check_common_uninitialized(parser, pp, input, stream, types, program, scratch);
     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
 }

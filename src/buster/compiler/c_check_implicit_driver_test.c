@@ -404,6 +404,17 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
     static const char empty_else_body[] =
         "int a(int x) { if (x); else x++; return 0; }\n"
         "int b(int x) { if (x); return 0; }\n";
+    static const char empty_bodies[] =
+        "int a(int x) { while (x) ; x++; return 0; }\n"
+        "int b(int x)\n{\n    for (;;) ;\n    x++;\n    return 0;\n}\n"
+        "int c(int x)\n{\n    while (x) ;\n        x++;\n    return 0;\n}\n"
+        "int d(int x)\n{\n    while (x) ;\n    {\n        x++;\n    }\n    return 0;\n}\n"
+        "int e(int x)\n{\n    if (x) ;\n    while (x) ;\n    return 0;\n}\n"
+        "int f(int x)\n{\n    if (x)\n        while (x) ;\n    return 0;\n}\n"
+        "int g(int x)\n{\n    while (x)\n        ;\n    return 0;\n}\n"
+        "int h(int x)\n{\n    while (x) ;\n}\n"
+        "int i(int x)\n{\n    while (x) ;\n      if (x) ;\n    return 0;\n}\n"
+        "int j(int x)\n{\n    switch (x) {\n    case 1:\n        while (x) ;\n        break;\n    }\n    return 0;\n}\n";
     static const char zero_length_array[] =
         "int a(void) { int x[0]; return x[0]; }\n"
         "int b(void) { int x[0]; return x[1]; }\n";
@@ -630,6 +641,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },
+        { empty_bodies, { "-Wall", NULL, NULL, NULL } },
         { zero_length_array, { "-Wall", NULL, NULL, NULL } },
         { switch_fixed_shadow, { "-Wall", NULL, NULL, NULL } },
         { format_mismatches, { "-Wall", NULL, NULL, NULL } },
