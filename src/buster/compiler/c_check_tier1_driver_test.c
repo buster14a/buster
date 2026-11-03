@@ -671,7 +671,8 @@ static const char check_test_tier1_float_other_source[] =
 // size, a part of each class in one aggregate, _Float16's odd xmm part, and the memory class's on the stack and through
 // the hidden pointer), each made, hashed and passed back by the other unit (clang -O2's) and twisted and returned by this
 // one (Tier 1's), so that aggregates cross between the compilers both ways as arguments and as results; a call of nine
-// arguments whose aggregates run past the registers, each way; and a variadic call of three aggregates.
+// arguments whose aggregates run past the registers, each way; and a variadic call of three aggregates. Its hashes are
+// unsigned, so that the oracle's output is a defined program's: a signed one overflows (#141, as the vectors' fixture).
 static const char check_test_tier1_records_header[] =
     "#include <stdio.h>\n"
     "typedef struct { char c[1]; } S1;\n"
@@ -694,24 +695,24 @@ static const char check_test_tier1_records_header[] =
     "typedef struct { _Float16 h[3]; } H3;\n"
     "typedef struct { long a, b, c; } Big;\n"
     "#define SHAPES(X) X(S1) X(S2) X(S3) X(S5) X(S6) X(S7) X(S8) X(S9) X(S12) X(S15) X(S16) X(S17) X(F1) X(F3) X(D2) X(DI) X(ID) X(H3) X(Big)\n"
-    "#define DECLARE(S) S b_make_##S(int seed); long b_hash_##S(S s); long b_back_##S(int seed); S a_twist_##S(S s, int k);\n"
+    "#define DECLARE(S) S b_make_##S(int seed); unsigned long b_hash_##S(S s); unsigned long b_back_##S(int seed); S a_twist_##S(S s, int k);\n"
     "SHAPES(DECLARE)\n"
-    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
-    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
-    "long b_call_many(int seed);\n"
-    "long b_vsum(int n, ...);\n";
+    "unsigned long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "unsigned long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "unsigned long b_call_many(int seed);\n"
+    "unsigned long b_vsum(int n, ...);\n";
 
 static const char check_test_tier1_records_other_source[] =
     "#include \"tier1-records.h\"\n"
     "#include <stdarg.h>\n"
     "#define DEFINE(S) \\\n"
     "S b_make_##S(int seed) { S s; unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(seed * 7 + i * 13 + 1); return s; } \\\n"
-    "long b_hash_##S(S s) { const unsigned char* p = (const unsigned char*)&s; long h = 0; for (unsigned i = 0; i < sizeof s; i += 1) h = h * 31 + p[i]; return h; } \\\n"
-    "long b_back_##S(int seed) { S s = b_make_##S(seed); S t = a_twist_##S(s, seed); return b_hash_##S(t) * 3 + b_hash_##S(s); }\n"
+    "unsigned long b_hash_##S(S s) { const unsigned char* p = (const unsigned char*)&s; unsigned long h = 0; for (unsigned i = 0; i < sizeof s; i += 1) h = h * 31 + p[i]; return h; } \\\n"
+    "unsigned long b_back_##S(int seed) { S s = b_make_##S(seed); S t = a_twist_##S(s, seed); return b_hash_##S(t) * 3 + b_hash_##S(s); }\n"
     "SHAPES(DEFINE)\n"
-    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return a + b * 2 + c * 3 + d * 4 + b_hash_S16(t) + b_hash_Big(x) * 5 + b_hash_DI(y) * 7 + b_hash_S6(z) * 11 + b_hash_S1(w) * 13; }\n"
-    "long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
-    "long b_vsum(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
+    "unsigned long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return a + b * 2 + c * 3 + d * 4 + b_hash_S16(t) + b_hash_Big(x) * 5 + b_hash_DI(y) * 7 + b_hash_S6(z) * 11 + b_hash_S1(w) * 13; }\n"
+    "unsigned long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
+    "unsigned long b_vsum(int n, ...) { va_list ap; va_start(ap, n); unsigned long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
 
 // The dynamic stack's fixture (#141): variable-length arrays in a loop's body (a save and a restore per iteration), beside
 // calls with stack arguments (each with its outgoing area at its own rsp), in a frame realigned by an object aligned to 64
@@ -763,13 +764,13 @@ static const char check_test_tier1_records_source[] =
     "#include \"tier1-records.h\"\n"
     "#define TWIST(S) S a_twist_##S(S s, int k) { unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(p[i] + k + i); return s; }\n"
     "SHAPES(TWIST)\n"
-    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return b_many(a + 1, b, c, d, t, x, y, z, w) + b_hash_S1(w); }\n"
-    "#define PRINT(S) printf(\"%s %ld %ld %ld\\n\", #S, b_hash_##S(b_make_##S(5)), b_hash_##S(a_twist_##S(b_make_##S(9), 3)), b_back_##S(11));\n"
+    "unsigned long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return b_many(a + 1, b, c, d, t, x, y, z, w) + b_hash_S1(w); }\n"
+    "#define PRINT(S) printf(\"%s %lu %lu %lu\\n\", #S, b_hash_##S(b_make_##S(5)), b_hash_##S(a_twist_##S(b_make_##S(9), 3)), b_back_##S(11));\n"
     "int main(void)\n"
     "{\n"
     "    SHAPES(PRINT)\n"
-    "    printf(\"%ld %ld\\n\", b_call_many(4), a_many(1, 2, 3, 4, b_make_S16(1), b_make_Big(2), b_make_DI(3), b_make_S6(4), b_make_S1(5)));\n"
-    "    printf(\"%ld\\n\", b_vsum(3, b_make_S12(1), b_make_S12(2), b_make_S12(3)));\n"
+    "    printf(\"%lu %lu\\n\", b_call_many(4), a_many(1, 2, 3, 4, b_make_S16(1), b_make_Big(2), b_make_DI(3), b_make_S6(4), b_make_S1(5)));\n"
+    "    printf(\"%lu\\n\", b_vsum(3, b_make_S12(1), b_make_S12(2), b_make_S12(3)));\n"
     "    return 0;\n"
     "}\n";
 
