@@ -10,8 +10,9 @@
 
 #include <stdlib.h>
 
-// IR_FENCE (#1059), the last added, keeps its order and scope in `a`, which the rows' default comparison and mutation take.
-_Static_assert(IR_OP_COUNT == 62, "audit the text round-trip oracle when adding an IR operation");
+// IR_FENCE (#1059) keeps its order and scope in `a`, which the rows' default comparison and mutation take; IR_MULHU
+// (#141), the last added, is a binary operation of two values, as IR_MUL is.
+_Static_assert(IR_OP_COUNT == 63, "audit the text round-trip oracle when adding an IR operation");
 
 typedef struct IrSourceTextCheck IrSourceTextCheck;
 struct IrSourceTextCheck
@@ -537,6 +538,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         "tests/ir/tier0-add.ir",
         "tests/ir/fences.ir",
         "tests/ir/atomics.ir",
+        "tests/ir/wide.ir",
     };
     IrSourceTextTests tests = { 0 };
     for (uint32_t f = 0; f < sizeof(fixtures) / sizeof(fixtures[0]); f += 1)

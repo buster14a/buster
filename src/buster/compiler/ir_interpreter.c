@@ -699,6 +699,8 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     case IR_ADD: result = left + right; break;
     case IR_SUB: result = left - right; break;
     case IR_MUL: result = left * right; break;
+    // An I64's alone (ir.c's row): the product of two 64-bit values fits 128 bits.
+    case IR_MULHU: result = (left * right) >> bits; break;
     case IR_AND: result = left & right; break;
     case IR_OR: result = left | right; break;
     case IR_XOR: result = left ^ right; break;

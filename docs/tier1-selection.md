@@ -171,7 +171,42 @@ patterns are:
   signed conversion's, or, where that is 2^63 (the value is 2^63 or more), 2^63
   ORed with the truncation of the value less 2^63: the negation of the
   truncation of 2^63 less the value. A return moves its value into xmm0. Still
-  refused: `F80` (the x87's) and a select of floating values.
+  refused: a select of floating values.
+- Long double (#141): `F80`, the x87's, whose values the CFG consumer keeps in
+  frame objects of their own, 16 bytes each, one per value, and computes on the
+  x87 stack between them, leaving it empty after each node, as Tier 0 does
+  between its slots (`TIER1_RULE_X87`, its kind in the pattern's `scale`). Its
+  long double operands are no pattern's values, so no allocation sees them: the
+  consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
+  the plan marks them needed as it marks a pattern's values. The values are the
+  other operands alone: a load's and a store's address, a conversion's integer
+  or floating operand. A constant stores its 10 bytes as immediates; a load and a
+  store are `fld` and `fstp` of them through the address; arithmetic loads both
+  operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
+  `fchs`. A comparison is `fucomip` of the operands in the order that makes
+  each condition one unordered operands fail, as `ucomis` has them, `setcc` and
+  `movzx`, `==` and `!=` with the parity flag. A float or a double goes through
+  the x87 scratch object (`fld` or `fstp` of 32 or 64 bits); an integer through
+  it too by `fild` of 32 or 64 bits, a narrow signed one sign-extended and an
+  unsigned 32-bit one zero-extended to 64 first, and an unsigned 64-bit one read
+  as signed with 2^64 added where its top bit is set. To an integer, the control
+  word is saved and loaded with rounding toward zero around `fistp` of 64 bits
+  (`fisttp` is SSE3's, past the baseline), and an unsigned 64-bit result of 2^63
+  or more takes 2^63 away first and sets its top bit after (`fucomi`, `fcmovbe`
+  and `setbe`), as Tier 0's. A phi of long doubles is the edges' copies, every
+  operand loaded onto the x87 stack and then every phi's object stored in
+  reverse (a parallel copy; more than 8 on an edge refuse the function). A call
+  passes a long double in its 16-byte stack slots aligned to 16, its object's
+  bytes copied there by `fld` and `fstp` (`tier1_select_next_place`), and its
+  long double result comes in st0, which the call stores into its own object; a
+  return loads its operand's object into st0 before the epilogue. A function's
+  long double parameters are by-value aggregates, as before, and so is an
+  aggregate returned in the x87's registers (`tier1_select_x87_parts`): a
+  struct of a long double in st0, a `_Complex long double` in st0 and st1, each
+  part 16 bytes of the aggregate. The call stores st0 into the first part and
+  then st1 into the second (`fstp`); the return loads them the last first, so
+  that st0 holds the first (`fld`). A long double argument whose call has ABI
+  records takes its stack slots the same way.
 - Call arguments and parameters take their places by the System V classes
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,
@@ -208,17 +243,33 @@ patterns are:
 - By-value aggregates (#789): a call or a function with ABI records takes each
   argument and parameter where its record says (`tier1_select_argument_place`,
   `tier1_select_parameter_place`): a scalar in its register or stack slot, and
-  an aggregate, whose IR value is a pointer to its bytes, in registers as parts
-  of up to 8 bytes (`tier1_select_parts`: a general or an xmm register per
-  eightbyte) or on the stack whole (up to 512 bytes). A result in registers comes
-  back as parts in rax and rdx or xmm0 and xmm1, and one of the memory class
-  through the hidden pointer (up to 4,096 bytes for a function's own, which its
-  return copies). An aggregate parameter's value is its copy's address, a frame
-  object past the IR's slots that the entry fills from its registers, or its
-  stack slots in the incoming area, selected as a frame object's address
-  (`TIER1_RULE_STACK_ADDRESS`). Refused: a part LLVM puts in a stack slot
-  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part, the x87's
-  registers and a result LLVM demotes to a hidden pointer. Every function and
+  an aggregate, whose IR value is a pointer to its bytes, in parts of up to 8
+  bytes, one per eightbyte (`tier1_select_location_parts`, as Tier 0's
+  `tier0_parts_of`), or on the stack whole (up to 512 bytes). A part is in a
+  general or an xmm register, or (#141) in a stack slot: a `SPLIT` location's
+  other part, after a register clang doesn't count (an `_Atomic` scalar's or
+  `nullptr_t`'s) left LLVM without one for it, and a `STACK` location's high or
+  low eightbyte alone (`HIGH`, `LOW`), the other one padding. In registers, a
+  high eightbyte of padding takes none, and with `HIGH` the only register holds
+  eightbyte 1. A vector register alone of 16 bytes or more holds the aggregate
+  whole, as Tier 0's parts have it: a vector passed by value (SSE then SSEUP), 16
+  bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's
+  registers are that wide, moved by `movups`, `vmovdqu` or `vmovdqu64`
+  (`tier1_select_part_form`); and a struct's whose high eightbyte is padding,
+  which its copy keeps as padding. A result in registers comes back as parts in rax and rdx or xmm0
+  and xmm1 (`tier1_select_result_parts`, eightbyte 1 alone with `HIGH`), and
+  one of the memory class through the hidden pointer (up to 4,096 bytes for a
+  function's own, which its return copies). An aggregate parameter's value is
+  its copy's address, a frame object past the IR's slots that the entry fills
+  from its registers and slots, or its stack slots in the incoming area when it
+  is there whole, selected as a frame object's address
+  (`TIER1_RULE_STACK_ADDRESS`). An aggregate the convention ignores (#141:
+  `IGNORE`, an empty struct or one of unnamed bit-fields) is passed and returned
+  nowhere: a call copies nothing for it, and a parameter's copy keeps no bytes it
+  was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
+  which only a vector type makes, and a call whose parts in registers take more
+  than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
+  bytes' (`tier1_select_part_slots`). Every function and
   call with records goes to the CFG consumer. Before a call's moves, it copies
   the call's aggregates from their addresses into their stack slots, or into the
   red zone's staging slots, whose registers it loads after the moves. An address
@@ -622,10 +673,8 @@ compile-time speedup is claimed for adding this consumer.
 
 The IR's masks, `m8` to `m64` (#732), are the opmask class's, which the CFG
 consumer allocates (the [allocation guide](tier1-allocation.md)'s "The opmask
-class"). The selector takes a function with masks and refuses one with vectors
-(`tier1_select_has_vectors`: a vector type, constant or operation in its
-instructions, parameters, calls or slots), which are #141's: a mask's operations
-need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
+class"). The selector takes a function with masks, and one with vectors ("Vectors",
+below): a mask's operations need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
 
 | IR | Rule | Records |
 | --- | --- | --- |
@@ -688,9 +737,11 @@ integer). Each is parsed by both of `ir_parse.c`'s paths into the same function,
 planned and emitted by both of Tier 1's paths for x86-64-v4, its allocation
 accepted by `tier1_cfg_verify`, its records by the target's allow-list and
 `x86_semantics.c`'s coverage, and encoded by both encoders into the same bytes.
-On a host with AVX512F, BW and DQ, each runs in a child on 16 random buffers (a
-quarter all zeros, a quarter all ones), whose bytes after the run, the ones no
-store writes among them, must be the shared IR interpreter's. The fixtures:
+On a host with every feature of x86-64-v4 (AVX512F, BW, DQ and VL, which the
+vectors' fixtures' 128- and 256-bit EVEX forms need, among them), each runs in a
+child on 16 random buffers (a quarter all zeros, a quarter all ones), whose
+bytes after the run, the ones no store writes among them, must be the shared IR
+interpreter's. The fixtures:
 
 - `and`, `or`, `xor`, `not` and copies at the four widths;
 - constants: zero and every bit at each width, and others through r11;
@@ -715,13 +766,58 @@ and without, and in each no mask may have a recipe or be marked to be recomputed
 with it, some of the general values beside the masks must be recomputed, which
 the division fixture's constants are.
 
-And the refusals, on both paths: a vector at selection, a mask's `select` at
+And the refusals, on both paths: a vector result at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
 masks alone is taken; and each width's `kmov` forms, none for a width no mask
 has. `--print` prints each fixture's records by the vector path, as GNU as reads
 them.
 
+
+## Vectors (#141)
+
+The IR's vectors, `v4i32`, `v8i32` and `v16i32` (#732), are the vector class's,
+as the floating values are: xmm0 to xmm14, xmm15 the class's scratch, a node's
+register its location's low four bits. Their rules (`TIER1_RULE_VECTOR`, its kind
+in the pattern's `scale`) are AVX-512's EVEX forms at the vector's width, 16, 32
+or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
+
+| IR | Kind | Records |
+| --- | --- | --- |
+| `vconst` of zeros, `undef` | `ZERO` | `vpxord x, x, x` |
+| `vconst` of every bit | `ONES` | `vpternlogd x, x, x, 0xff` |
+| `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
+| any other `vconst` | `CONSTANT` | its words into the red zone below rsp (a `mov qword` of a sign-extended imm32, or two `mov dword`) and `vmovdqu32` from there (`tier1_emit_cfg_vector_constant`) |
+| `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
+| `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
+| `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
+| `vcmp` | `COMPARE` | `vpcmpd k, a, b, imm` (`vpcmpud` for an unsigned predicate) into the mask's opmask register |
+| `vselect` | `SELECT` | `vpblendmd x{k}, f, t` |
+| `load`, `store` | `TIER1_RULE_FLOAT_LOAD`, `_STORE` and their `_ADDRESS` folds | `vmovdqu32` at the width, the address folded as a floating value's |
+| `phi` | `TIER1_RULE_PHI` | none: its edges' moves |
+
+Unmasked, a quadword `and` or `or` is the doublewords' bits, and `x86_semantics.c`
+models those forms. A function with a vector constant keeps its frame out of the
+red zone (`tier1_emit_cfg_frame_flags`). Every function with a vector is the CFG
+consumer's. Its vector values' slots are their widths, aligned to 16 at most (their
+accesses are unaligned, and a wider alignment would realign the frame), spilled,
+reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
+the class's call-save rows and temporary slot take the widest vector's bytes,
+which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
+need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
+emission, as any record's. A vector C passes or returns by value is an aggregate
+to the lowering, a pointer to its bytes, in a vector register whole ("By-value
+aggregates"); an IR function whose own parameter or result is a vector value has
+no convention's place of Tier 1's and is refused at selection
+(`tier1_select_vector_signature`), as is a call with a vector argument or
+result. A vector local the checker initializes through its address (as C's vector
+locals) stays in its frame object, as a 128-bit integer's does.
+
+`test-tier1-masks` takes five fixtures of vectors too, natively against the IR's
+interpreter on both paths, with and without rematerialization: every operation
+and all ten predicates at each width; constants of every kind; a loop whose vector
+phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
+and reloaded; and vectors of each width live across two calls of the helper.
 ## Tests and benchmark
 
 `test-tier1-select` checks both original-IR covers, real records and native
@@ -864,7 +960,8 @@ heads and at its merge with main, `cc3387f`:
   scripts against 10,763 M and 4,281 M. Each program's hottest function
   (`sqlite3VdbeExec`, `luaV_execute`) was still Tier 0's then; with floating
   values and blocks' lifetimes (#141) both are Tier 1's, as every function of
-  `sqlite3.c` but the two 128-bit multiplies is.
+  `sqlite3.c` but the two 128-bit multiplies is (and those two too since the
+  128-bit integers' split, #141).
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
   the frozen `sqlite3.c`, since the bottom-up rewrite (medians of five processes
   of both paths interleaved, CPU 2): 225.0 by the vector path and 277.2 by the
@@ -888,6 +985,8 @@ heads and at its merge with main, `cc3387f`:
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-The remaining scalar/ABI/spill consumers and whole-C integration (the
-functions selection refuses whole, as `sqlite3.c`'s `sqlite3Multiply128` and
-`sqlite3Multiply160`, a constant of each) are outstanding.
+The remaining scalar/ABI/spill consumers and whole-C integration are
+outstanding. `sqlite3.c`'s `sqlite3Multiply128` and `sqlite3Multiply160`,
+which selection refused whole for a 128-bit constant each, are Tier 1's since
+the 128-bit integers' split (#141, [the Tier 1 guide](tier1.md)'s "The 128-bit
+integers"): every function of `sqlite3.c` compiles by `--tier1 --tier1-strict`.

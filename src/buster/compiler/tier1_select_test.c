@@ -1466,7 +1466,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                             }
                             else if (refusal == 4 || refusal == 8)
                             {
-                                // A double's result is taken (#141), a long double's x87 one isn't.
+                                // A double's result is taken (#141), and a long double's, in st0 (#141).
                                 const uint8_t floating = refusal == 4 ? IR_F64 : IR_F80;
                                 function.result_type = floating;
                                 function.type[6] = floating;
@@ -1489,10 +1489,11 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                                 uint32_t failed = 0;
                                 const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path != 0, &rejected, &failed);
                                 // A variadic call of integer arguments (its AL zero), a call through a pointer
-                                // (tier1_call_test.c runs both), a call of seven, its last on the stack, and a double's
-                                // result (#141, tier1_stack_test.c and tier1_float_test.c) are taken.
-                                const bool taken = refusal == 0 || refusal == 2 || refusal == 4 || refusal == 7;
-                                const bool unsupported = refusal < 5 || refusal == 8;
+                                // (tier1_call_test.c runs both), a call of seven, its last on the stack, a double's
+                                // result (#141, tier1_stack_test.c and tier1_float_test.c) and a long double's (#141,
+                                // tier1_wide_test.c) are taken.
+                                const bool taken = refusal == 0 || refusal == 2 || refusal == 4 || refusal == 7 || refusal == 8;
+                                const bool unsupported = refusal < 5;
                                 const Tier1SelectError expected = taken ? TIER1_SELECT_OK : unsupported ? TIER1_SELECT_ERROR_UNSUPPORTED : TIER1_SELECT_ERROR_INVALID;
                                 tier1_select_test_expect(test, error == expected && (taken || !unsupported || failed == 6), "unsupported call ABI and invalid IR remain distinct");
                                 tier1_select_test_expect(test, error == TIER1_SELECT_OK || (output.length == mark && scratch.length == 0 && memcmp(&rejected, &before, sizeof(rejected)) == 0), "call refusal preserves result and arena lengths");
