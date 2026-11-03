@@ -15,7 +15,8 @@
 //     only the touched page is committed (mincore); and the page sizes asked for, read back from /proc/self/smaps: base
 //     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there. An arena
 //     of tables (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a
-//     pool for the same tables alone; for random tables, a layout that maps no more than their own arenas.
+//     pool for the same tables alone; for random tables, a layout that maps no more than their own arenas; and tables
+//     refused for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations.
 //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
 //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
 //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
@@ -881,6 +882,50 @@ static bool lane_test_arenas(void)
         }
     }
     lane_test_expect(&tally, bounded, "an arena of tables mapped more than its tables' own arenas, or laid them out wrong");
+    // A mapping of tables refused for its size (#1203's review), in a child whose address space may grow 32 MB past what
+    // it has: tables of 8 MB map; tables of 48 MB can't, which leaves every table null and records the failure without
+    // switching the thread to compact reservations; and tables of 80 MB, past BUSTER_ARENA_COMPACT_BYTES, switch it, so
+    // that pp_initialize retries with smaller tables. A sanitizer build injects the refusal instead
+    // (arena_test_reservation_allowed), which never switches it, as an arena's injected failure doesn't.
+    fflush(stdout);
+    const pid_t refusing = fork();
+    if (refusing == 0)
+    {
+        arena_pool = 0;
+        arena_compact = false;
+        uint64_t pages = 0;
+        FILE* statm = fopen("/proc/self/statm", "r");
+        const bool sized = statm != NULL && fscanf(statm, "%llu", (unsigned long long*)&pages) == 1;
+        if (statm != NULL)
+        {
+            fclose(statm);
+        }
+#if BUSTER_SANITIZER_RESOURCES
+        lane_test_resources.arena_limited = true;
+        lane_test_resources.arena_limit = 32ull << 20;
+        const bool limited = sized;
+#else
+        struct rlimit space;
+        bool limited = sized && getrlimit(RLIMIT_AS, &space) == 0;
+        space.rlim_cur = pages * BUSTER_ARENA_PAGE_BYTES + (32ull << 20);
+        limited = limited && space.rlim_cur <= space.rlim_max && setrlimit(RLIMIT_AS, &space) == 0;
+#endif
+        ArenaTable fits[] = { { .bytes = 4ull << 20, .small = BUSTER_ARENA_SMALL_BYTES }, { .bytes = 4ull << 20, .small = BUSTER_ARENA_SMALL_BYTES } };
+        Arena fitted = limited ? arena_reserve_tables(fits, BUSTER_ARRAY_LENGTH(fits)) : (Arena){ 0 };
+        const bool mapped = fitted.base != 0 && fits[1].base != 0 && !arena_compact;
+        arena_release(&fitted);
+        ArenaTable under[] = { { .bytes = 24ull << 20, .small = BUSTER_ARENA_SMALL_BYTES }, { .bytes = 24ull << 20, .small = BUSTER_ARENA_SMALL_BYTES } };
+        const Arena refused_under = mapped ? arena_reserve_tables(under, BUSTER_ARRAY_LENGTH(under)) : (Arena){ .base = (uint8_t*)1 };
+        const bool kept = refused_under.base == 0 && under[0].base == 0 && under[1].base == 0 && arena_failure.bytes >= (48ull << 20) && !arena_compact;
+        ArenaTable over[] = { { .bytes = 40ull << 20, .small = BUSTER_ARENA_SMALL_BYTES }, { .bytes = 40ull << 20, .small = BUSTER_ARENA_SMALL_BYTES } };
+        const Arena refused_over = kept ? arena_reserve_tables(over, BUSTER_ARRAY_LENGTH(over)) : (Arena){ .base = (uint8_t*)1 };
+        const bool switched = refused_over.base == 0 && over[0].base == 0 && over[1].base == 0 && arena_compact == !BUSTER_SANITIZER_RESOURCES;
+        _exit(switched ? 0 : 1);
+    }
+    int refusing_status = 0;
+    const bool refusals_waited = refusing > 0 && waitpid(refusing, &refusing_status, 0) == refusing;
+    lane_test_expect(&tally, refusals_waited && WIFEXITED(refusing_status) && WEXITSTATUS(refusing_status) == 0,
+                     "an arena of tables refused for its size didn't fail cleanly, or switched to compact reservations wrongly");
     ArenaTable none[] = { { .bytes = 0, .small = 0, .base = (void*)1 } };
     const Arena refused = arena_reserve_tables(none, 1);
     const Arena empty_tables = arena_reserve_tables(tables, 0);
