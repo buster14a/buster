@@ -586,7 +586,11 @@ chain, or a block of a CFG (`Tier1EmitSaves`).
   stores a register only where its owner is now another value. A fixed
   registers' sequence, which stores those rows, forgets them. A CFG block whose
   one predecessor comes before it in layout starts from that block's rows, and
-  any other block starts with none. A row stays its owner's while that SSA
+  any other block starts with none. The rows are one vector of the 16 general
+  registers' lanes, as the owners' first 16 locations are, so a call's kept
+  registers are one compare and its rows one blend (`tier1_emit_kept`,
+  `tier1_emit_saved`), each with a scalar twin that `test-tier1-emit` checks it
+  against on random rows. A row stays its owner's while that SSA
   value's bits don't change, and they change only where the value is defined
   again, an iteration later. Two facts keep a carried row valid:
   - A loop's header has two predecessors at least, its entry and its back edge,
@@ -621,15 +625,17 @@ that poison every caller-saved register (`tier1_call_test.c`):
   float, stack-argument and mask tests check it too.
 
 Measured with #1116's 32-bit moves, after #1117, at `6e1e6121` against main `b70deb47`
-([the record](https://github.com/buster14a/buster-performance/tree/8498be9205a6a96b083d2090dad66b6ee58ef487/docs/measurements/tier1-code-quality-1116-2026-11-03)):
+([the record](https://github.com/buster14a/buster-performance/tree/80215f302ac2486cd290fe92c83feb1d21bf5aba/docs/measurements/tier1-code-quality-1116-2026-11-03)):
 
 - **Lua 5.4.8 by `--tier1 -c`**, all 1,104 functions Tier 1's: `call_stores` go from 5,956 to 3,165, `call_loads` from
   5,956 to 5,207, and `.text` from 289,580 to 260,789 bytes, against clang -O0's 273,461.
 - **The frozen `sqlite3.c`**, 2,666 of 2,668 functions Tier 1's: `call_stores` go from 28,027 to 15,079.
 - **speedtest1 by `--tier1`, on the 9700X:** 3.2% fewer instructions and 1.3% less time. Lua's interpreter runs 3.0%
   and 3.8% fewer instructions on its tables and strings scripts, and as many on the other three.
-- **Compile time:** `--tier1 -c` of `sqlite3.c` takes 0.17% more instructions and 0.77% more time, all of it in the
-  backend. About half is the emitter's own (the scan, `tier1_emit_owed`, and its callers).
+- **Compile time:** `--tier1 -c` of `sqlite3.c`, at `3b195d57` against main `703ae9f5`, each built at six placements of
+  the backend's code and timed over them and fresh copies, takes 0.10% more instructions and 0.33% more user cycles
+  (main against itself: −0.05%). The extra time is in the emitter, `tier1_emit_cfg_records` and the scan for owed
+  loads. Before the definition's interval was looked up once and the rows kept in a vector, it was 0.17% and 0.50%.
 
 An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value
