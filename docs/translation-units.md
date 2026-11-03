@@ -383,7 +383,8 @@ So a units lane does four things:
   section](https://github.com/buster14a/buster-performance/tree/af6767ef8bfc3f1927f4d75d689eabf1f1525324/docs/measurements/arena-tables-1128-2026-11-03/review)),
   Lua's link took 75.0 ms against 76.6 on one lane and 30.2 against 33.3 on 8,
   synth's 428.0 against 449.4 on 8 lanes, and `sqlite3.c`'s `-c` 110.1
-  against 109.7 on the same instructions.
+  against 109.7 on nearly the same instructions (21,368 more of 1,184
+  million).
 - **A small unit's other arenas start with base pages** (`arena_small_floor`,
   which only the units' lanes set): the first 16 MB of each arena that a unit
   of less than 1 MB of source reserves (`BUSTER_CHECK_UNITS_SMALL_BYTES` and
