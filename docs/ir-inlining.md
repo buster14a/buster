@@ -196,6 +196,20 @@ pass 2²⁰ among them), malformed metadata and many arena-failure
 capacities exercise explicit decisions and transactional rollback. Scalar
 and vector outputs must match in every retained body and audit column.
 
+## Reach in `--tier1`
+
+`--tier1` compiles each function alone, so it doesn't run this pass. In #1189's
+measurement, clang -O2 makes 25.62 M of the 76.25 M calls that `--tier1`'s
+speedtest1 makes into its own functions, and 54.2 M of Lua 5.4.8's 106.0 M.
+The callees it inlines run 1,126 M and 975 M of Tier 1's instructions.
+
+The callees this scope takes (single-block leaves without stack objects)
+receive 9.56 M of speedtest1's calls (13.9%) and 1.86 M of Lua's (2.0%), at 2 to
+13 instructions a call. The hot inlined callees have several blocks:
+`index2value`, `luaV_mod`, `prepCallInfo`, `yy_find_shift_action`,
+`sqlite3BtreeCursorHasMoved`. A unit-level stage before the lanes pays
+only once the scope takes callees with control flow and stack objects.
+
 These are local correctness diagnostics. Full source-corpus coverage,
 independent native before/after comparisons, translation-unit driver
 integration, compile-time and generated-code measurements on the locked

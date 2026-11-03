@@ -82,6 +82,14 @@ struct IrTypedPlan
     uint32_t maximum_spill_depth;
     // The depth slots' bytes and alignment: at least 8, 16 for scalar memory classes, or the widest admitted vector.
     uint32_t spill_bytes;
+    // Depth d's values of IR type t are in depth slot depth_slots[d * IR_TYPE_COUNT + t] (of depth_slot_count, after the
+    // locals), each (depth, type) that some block's incoming shape has in a slot of its own, in that order, so that every
+    // depth slot holds one type and promotes (#1189). One slot for all of a depth's values held several types in a
+    // function whose `&&`, `||` and `?:` results differ in type at one depth (luaV_execute's), and stayed in memory: each
+    // truth value a store, a load and the slot's address. Every block is entered with one shape (ir_typed_plan_arrive),
+    // so the stores at a block's end and its successors' loads agree on each depth's type.
+    uint32_t* depth_slots;
+    uint32_t depth_slot_count;
     const IrSimdTypedOperation* operations;
     // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch
     // block (the emitter's last); a jump table's goes to its table's labels from its own block.
@@ -337,11 +345,12 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 
 // Emission algorithm:
 //
-// 1. Create one stack slot per source local, plus maximum_spill_depth slots of size 8
-//    and alignment 8. Source slots keep the typed local's actual size/alignment
-//    (an object's from local_sizes and local_alignments, with type VOID);
-//    expression slots are untyped bytes and may hold different classes in
-//    disjoint regions. Mark all address-taken locals so #134 never promotes them.
+// 1. Create one stack slot per source local, plus a slot of spill_bytes for each
+//    (depth, IR type) that a block's incoming shape has (IrTypedPlan.depth_slots).
+//    Source slots keep the typed local's actual size/alignment (an object's from
+//    local_sizes and local_alignments, with type VOID); expression slots are
+//    untyped temporaries, each of which one type's values reach, so that #134
+//    promotes it. Mark all address-taken locals so #134 never promotes them.
 // 2. In a preheader, materialize each slot address and each PARAM value, then
 //    store parameters into their local slots and branch to source block zero.
 //    The preheader matters when source entry zero is a backedge target: placing
@@ -809,14 +818,50 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSi
     return value;
 }
 
-static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* sink, const uint32_t* stack, const uint8_t* classes, uint32_t depth, uint32_t local_count)
+// Depth d's slot for a value of stack class `class`: the plan's (depth, type) slot after the locals.
+static uint32_t ir_typed_depth_slot(const IrTypedPlan* plan, uint32_t local_count, uint32_t d, uint8_t class)
+{
+    return local_count + plan->depth_slots[d * IR_TYPE_COUNT + ir_typed_stack_type(class)];
+}
+
+static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* sink, const IrTypedPlan* plan, const uint32_t* stack, const uint8_t* classes, uint32_t depth, uint32_t local_count)
 {
     for (uint32_t d = 0; d < depth; d += 1)
     {
         // All slot addresses are emitted first in the preheader, so an address
         // value's instruction ID is exactly its slot ID.
-        ir_typed_emit(sink, IR_STORE, IR_VOID, local_count + d, stack[d], BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_depth_slot(plan, local_count, d, classes[d]), stack[d], BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
     }
+}
+
+// The plan's depth slots (IrTypedPlan.depth_slots): each (depth, type) a block's incoming shape has, depth by depth and
+// each depth's types in IR type order. Returns false if scratch has no room for the map.
+static bool ir_typed_plan_depth_slots(IrTypedPlan* plan, Arena* scratch)
+{
+    const uint64_t cells = (uint64_t)plan->maximum_spill_depth * IR_TYPE_COUNT;
+    plan->depth_slots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, cells + 1);
+    plan->depth_slot_count = 0;
+    const bool ok = plan->depth_slots != 0;
+    if (ok)
+    {
+        memset(plan->depth_slots, 0, (cells + 1) * sizeof(uint32_t));
+        for (uint32_t b = 0; b < plan->block_count; b += 1)
+        {
+            const uint32_t depth = plan->stack_depths[b];
+            const uint8_t* shape = scratch->base + plan->stack_offsets[b];
+            for (uint32_t d = 0; depth != UINT32_MAX && d < depth; d += 1)
+            {
+                plan->depth_slots[d * IR_TYPE_COUNT + ir_typed_stack_type(shape[d])] = 1;
+            }
+        }
+        for (uint64_t cell = 0; cell < cells; cell += 1)
+        {
+            const uint32_t used = plan->depth_slots[cell];
+            plan->depth_slots[cell] = used != 0 ? plan->depth_slot_count : UINT32_MAX;
+            plan->depth_slot_count += used;
+        }
+    }
+    return ok;
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_address(IrTypedSink* sink, uint32_t base_bits, uint32_t index, uint64_t scale)
@@ -1084,9 +1129,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         }
         else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
         {
-            // A frame's address (#148) and a tail call (#147's musttail), which this adapter doesn't lower and the plan
-            // and the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
-            check.error = IR_ERROR_OPCODE;
+            // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
+            // neither reaches the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
         else if (kind == BUSTER_TYPED_X86)
@@ -1147,6 +1192,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     {
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
+        if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
+        {
+            plan.error = "no scratch memory for the depth slots";
+            plan.error_code = IR_ERROR_MEMORY;
+        }
         if (plan.error != 0)
         {
             check.error = plan.error_code;

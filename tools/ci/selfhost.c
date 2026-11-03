@@ -372,7 +372,7 @@ static void check_inventory(void)
         }
         for (size_t i = 0; i < sizeof(found) / sizeof(found[0]); ++i)
         {
-            const char *prefix = "./build/compiler ";
+            const char *prefix = "\"$BUSTER_COMPILER\" ";
             size_t prefix_size = strlen(prefix);
             size_t name_size = strlen(selfhost_smoke[i]);
             if (strncmp(text, prefix, prefix_size) == 0 && strncmp(text + prefix_size, selfhost_smoke[i], name_size) == 0)

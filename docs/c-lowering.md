@@ -595,6 +595,28 @@ and coverage well past three quarters of the nodes, since the pass's cost is
 the range's and the splices' savings only the covered nodes'. Even a free pass
 leaves `lower` at about 9.4 ms against Tier 0's 4.8.
 
+## VALUE tasks on the leaf path (#1048)
+
+On the vector path, the tasks' loop has #624's fast paths for an expression
+task: the leaf path (`check_lower_value`), the wrappers and truth tests, and
+the two- and three-node fragments. A standalone VALUE task takes none of them,
+but the expansion. #1205 sent it to the leaf path, which takes a VALUE's read
+of a local or a global, its address and a proven integer constant, under the
+rules #1048's templates were checked against the tasks with. The 9700X's
+correctness job passed with it. Two separate runs of the 9700X job, on the same
+base and about 35 minutes apart, each with `measure-compile`'s medians of 11 on
+`sqlite3.c` and the same options, gave the stage's aggregate rows; neither
+times the VALUE tasks alone:
+
+| row | the expansion (`92081c4a`, [run](https://github.com/buster14a/buster/actions/runs/41619659912/job/125870648949)) | the leaf path (`e33b7cc5`, [run](https://github.com/buster14a/buster/actions/runs/41609944231/job/125837465257)) |
+| --- | ---: | ---: |
+| `lower` | 12.535 ms (12.454 to 12.565) | 12.676 ms (12.574 to 12.830) |
+| `lower.statements` | 8.525 ms (8.351 to 8.561) | 8.615 ms (8.436 to 8.727) |
+
+These show no improvement in `sqlite3.c`'s lowering, though not a regression
+either, and say nothing of other inputs. So VALUE tasks keep the expansion, which
+the guard's comment in `check_lower_drain_body` records.
+
 ## The preparation's node counts and the branches' targets (#1048)
 
 Before the bodies, `check_lower_prepare` bounds the writers' room by counts

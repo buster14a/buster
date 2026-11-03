@@ -1304,9 +1304,48 @@ report, on standard error after the command, a row per stage.
   `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
   #1038; two TSC reads a unit, with the option or without) and the driver adds
   up. It overlaps the stage, so it is no row of the stages' sum. The report's
-  reader (`check_clock_read`) requires it once, within its stage.
+  reader (`check_clock_read`) requires it once, within its stage. Its parts
+  follow, each a `time-check expressions.PART MILLISECONDS PERCENT` line
+  (`CheckInput.expression_part_ticks`, disjoint and within the walk):
+  - `classes`, the classes' pass;
+  - `prepare`, the coded walk's chunks' compaction and identifiers' leaves;
+  - `actions`, the classes' own actions in the coded walk;
+  - `visits`, the walk's own visits (`check_input_expression_visit`): in a
+    coded unit those of the tokens the classes' actions leave, in a unit the
+    coded walk leaves to the visit throughout all of its chunks' actions, and
+    on the scalar path all of the walk past its classes.
+
+  `prepare` and `actions` are the coded walk's: on the scalar path (`--scalar`)
+  both are `0.000`, which is no measurement, and in a unit the coded walk leaves
+  to the visit `actions` is, while `prepare` is its chunks' compaction. Then
+  comes
+  `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the process's
+  `getrusage(RUSAGE_SELF)` counters across the walk, low-confidence as the
+  stages' are. They count every thread's, which in a one-lane compile (as the
+  9700X step's) are the reader's own; in a command with several units on
+  lanes, other threads' too. The faults are mostly the first touches of the
+  graph's node columns, which `check_graph_initialize` leaves unwritten and the
+  walk writes a node at a time; the reader's per-token columns and the output
+  columns `check_input_output_none` clears are written before the walk, so its
+  faults don't count them. Where a unit's read failed, the line is
+  `-1.000 -1`, latched across the units as the stages' columns are, so a
+  substituted zero cannot read as a measurement. `check_clock_read_walk` reads
+  these lines, each once, the parts nonnegative and adding up to no more than
+  the walk, and the usage numeric or wholly unavailable. `measure-compile`
+  prints their medians under `check-input.expressions`
+  (`check_clock_print_walk`), `-1` where a run's usage was unavailable.
+- **The walk's clock is always on.** The walk's row and parts are read with or
+  without the option: two TSC reads a unit for the walk, two for the classes'
+  pass, three a chunk of 1,024 positions, two a visit in a coded unit, and two
+  `getrusage` calls a unit. On sqlite 3.53.2's amalgamation with the 9700X
+  step's `-D` options (710,061 tokens: 694 chunks and 7,800 visits) that is
+  some 18,000 TSC reads and two system calls, well under a millisecond against
+  a walk of about 30 ms on a 4-CPU VM; the frozen corpus's `sqlite3.c` has
+  6,639 visits, about 15,000 reads. Reading them
+  only under the option would take a flag through the reader for less than the
+  run-to-run noise.
 - **Off by default.** Without the option the driver reads no clock, and each lap
-  is a test of a null pointer. With it, the report and the objects are checked
+  is a test of a null pointer; the reader's walk keeps its own counts, above. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
 
 **The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]
@@ -1555,7 +1594,7 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 ### Baked tables (#590)
 
-build.sh has each executable it links write itself with the backend's tables
+The build's post-link step has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
 and their marked copies, the x86 semantics' tables, Tier 1's selection state
 tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
@@ -1588,7 +1627,7 @@ the page cache, shared with every other process.
   than the file's.
 - **Where it isn't.** PIEs (the sanitizers' builds, whose tables would hold
   their load address if any had a pointer), executables linked without
-  build.sh and builds with `BUSTER_BAKE=0` build the tables when they run, as
+  the build's post-link step and builds with `BUSTER_BAKE=0` build the tables when they run, as
   before. So do the benchmarks' units.
 
 Objects are the same bytes, baked or built: `hello.c` and c-testsuite's 220

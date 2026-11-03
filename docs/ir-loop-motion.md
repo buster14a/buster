@@ -62,9 +62,38 @@ loads, undef dependence, no-loop functions, random arithmetic loops, every
 guarded readiness tail and partial allocation rollback. Whole-pass progress
 fixtures cover thin, wide, mixed and phi-dependent chains at 255/256/257/4096
 lengths, asserting identical output and motion with bounded sweeps, visits
-and fallback. Target-host cost, register-pressure and complete generated-code
-measurements remain pending; the current motion policy has no measured
-profitability model.
+and fallback. The current motion policy has no profitability model, and its
+generated-code measurement says it needs one (below).
+
+## In `--tier1`
+
+`--tier1` doesn't run this pass (#1189). An experiment ran it after promotion,
+before SCCP, DCE and CFG cleanup: `--tier1`'s pipeline with `ir_optimize_licm`
+between `ssa_ir_promote` and `ir_optimize_verified`. It counted user-space
+instructions by callgrind against the same head without it:
+
+| | speedtest1 | Lua 5.4.8, five scripts |
+| --- | ---: | ---: |
+| without LICM | 3,869.8 M | 7,610.3 M |
+| LICM | 5,067.0 M (+30.9%) | 12,130.9 M (+59.4%) |
+| LICM in loops of at most 8 blocks | 4,253.9 M (+9.9%) | 7,928.9 M (+4.2%) |
+| LICM in loops of at most 2 blocks | 3,930.2 M (+1.6%) | 7,744.8 M (+1.8%) |
+
+On speedtest1 it moved 58,205 values out of 1,522 eligible loops in 799
+functions. The moved values are live across their loops, where Tier 1's
+allocation spills them:
+- the records grew from 353,256 to 422,488;
+- spill stores and reloads grew from 15,558 and 18,745 to 27,330 and 28,495;
+- edge moves grew from 49,403 to 73,833.
+
+`--tier1 -c` of speedtest1's unit took twice as long: 1,682 ms against 828 ms,
+on one CPU of a cloud container, so as a ratio only. Outputs and
+speedtest1's verification hash were unchanged throughout.
+
+A motion that pays needs a model of the loop's register pressure. Values Tier 1
+recomputes (constants, symbols' and frame objects' addresses) should stay where
+their users are, so that selection can still fold a constant into an
+immediate.
 
 The implementation is original. LLVM's [loop terminology](
 https://llvm.org/docs/LoopTerminology.html) was consulted for the preheader,

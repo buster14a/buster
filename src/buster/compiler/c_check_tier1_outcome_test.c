@@ -31,6 +31,7 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_EMISSION, TIER1_EMIT_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_STRUCTURE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
+    { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_OPCODE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, IR_ERROR_PHI, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, IR_ERROR_DOMINANCE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_INVALID, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
@@ -169,6 +170,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
     uint8_t* defined_objects = NULL;
     ready = ready && check_program_access(&publication, program, &lowered_arena, &scratch, &defined_objects);
     check_lanes_test_expect(tally, ready, "Tier 1 rollback fixture lowers", NULL);
+    check_lanes_test_expect(tally, ready && lowered.asms.name_count != 0, "failure fixtures retain named assembly before emission", NULL);
     CheckTier1Lane lane = { 0 };
     uint8_t* prefix = ready ? arena_push(&output, 32, 1) : NULL;
     if (prefix != NULL)
@@ -274,7 +276,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
     arena_release(&lowered_arena);
 }
 
-static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp, const InternTable* identifiers, bool scalar, bool mixed)
+static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp, const InternTable* identifiers, bool scalar, bool mixed, bool lowering_refusal)
 {
     static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
     const uint32_t bodies = unit->selected.program.body_count;
@@ -329,6 +331,13 @@ static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUni
             CheckLanesTestEmission refused = check_lanes_test_emit(unit, parser, pp, identifiers, &lanes, scalar, false, true);
             check_lanes_test_expect(tally, refused.rolled_back && refused.tier1_failure.category == CHECK_TIER1_UNSUPPORTED && lanes.tier1_report.fallbacks == 0,
                                     "strict qualification rejects a real capability refusal", NULL);
+            if (lowering_refusal)
+            {
+                check_lanes_test_expect(tally, refused.tier1_failure.stage == CHECK_TIER1_LOWERING && refused.tier1_failure.cause == CHECK_TIER1_CAUSE_IR &&
+                                        refused.tier1_failure.error == IR_ERROR_UNSUPPORTED && refused.tier1_failure.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN &&
+                                        refused.token == unit->selected.program.bodies[bodies - 1].declaration,
+                                        "frame-address and musttail refusals preserve their lowering cause and source declaration", NULL);
+            }
             free(refused.object);
         }
     }
@@ -406,16 +415,25 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
-    for (uint32_t mixed = 0; ready && mixed < 2; mixed += 1)
+    static const char* const last_bodies[] = {
+        "long f7(long x){return x+8;}\n",
+        "long double f7(long double x){return x+1.5L;}\n",
+        "long f7(long x){return __builtin_frame_address(0)!=0?x+8:-1;}\n",
+        "long f7(long x){__attribute__((musttail)) return f6(x+1);}\n",
+    };
+    for (uint32_t variant = 0; ready && variant < BUSTER_ARRAY_LENGTH(last_bodies); variant += 1)
     {
+        const bool mixed = variant != 0;
         FILE* file = fopen(source, "w");
         bool written = file != NULL && fputs("long tier1_global=1;\nlong f0(long x){return x+tier1_global;}\n", file) >= 0;
-        for (uint32_t f = 1; written && f < 7; f += 1)
+        // Named inline assembly makes every injected failure cross the .size scan with an unallocated symbol map.
+        written = written && fputs("long f1(long x){__asm__(\".Lissue1155:\\n\\tnop\");return x+2;}\n", file) >= 0;
+        for (uint32_t f = 2; written && f < 7; f += 1)
         {
             written = fprintf(file, "long f%u(long x){return x+%u;}\n", f, f + 1) > 0;
         }
-        // The mixed fixture's last body is one Tier 1 refuses as unsupported: a long double, whose constant selection refuses.
-        written = written && fputs(mixed ? "long double f7(long double x){return x+1.5L;}\n" : "long f7(long x){return x+8;}\n", file) >= 0;
+        // Real refusals at selection (long double) and lowering (frame-address and musttail), not injected errors.
+        written = written && fputs(last_bodies[variant], file) >= 0;
         const bool closed = file != NULL && fclose(file) == 0;
         check_lanes_test_expect(tally, written && closed, "write original Tier 1 coverage fixture", source);
         for (uint32_t scalar = 0; written && closed && scalar < 2; scalar += 1)
@@ -429,7 +447,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
                 {
                     check_tier1_test_rollback(tally, &unit, scalar != 0);
                 }
-                check_tier1_test_lanes(tally, &unit, &parser, &pp, &identifiers, scalar != 0, mixed != 0);
+                check_tier1_test_lanes(tally, &unit, &parser, &pp, &identifiers, scalar != 0, mixed, variant >= 2);
             }
             check_lanes_test_close(&unit);
             parse_release(&parser);
@@ -438,7 +456,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
         }
         // Exercise the public command, including multi-unit option propagation, independently of the in-process
         // fault control. The native oracle is ordinary original C, compiled externally by Clang.
-        const char* oracle = mixed ? "long f0(long);long double f7(long double);int main(void){return f0(41)!=42||f7(1.25L)!=2.75L;}\n" :
+        const char* oracle = variant == 1 ? "long f0(long);long double f7(long double);int main(void){return f0(41)!=42||f7(1.25L)!=2.75L;}\n" :
                                     "long f0(long);long f7(long);int main(void){return f0(41)!=42||f7(34)!=42;}\n";
         const bool wrote_caller = parse_test_write(caller, oracle, strlen(oracle));
         for (uint32_t scalar = 0; wrote_caller && scalar < 2; scalar += 1)
