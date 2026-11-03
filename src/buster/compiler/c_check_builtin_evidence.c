@@ -76,7 +76,7 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
 // may be less than the type's, or else the type's, at least 16 for an array of 16 bytes or more (x86-64's large arrays).
 static uint32_t check_input_declaration_alignment(const CheckInputReader* reader, uint32_t declaration, TypeId type)
 {
-    const CheckInputAttributes* attributes = reader->output->attributes[declaration];
+    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
     uint32_t result = type_alignment_log2(reader->types, type);
     if (attributes != 0 && attributes->alignment_log2 != 0)
     {

@@ -2055,16 +2055,17 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(weak, 0, (uint64_t)program->symbol_count + 1);
         memset(retained, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
-        // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
+        // Find the tokens with attributes first, 16 at a time, then keep the declaring tokens. This avoids reading every
         // declaration's attributes and keeps parameters' retain obligations as well as static declarations'.
         uint32_t attributed = 0;
-        for (uint32_t first = 0; first < program->input->token_count; first += 8)
+        const uint32_t tokens = program->input->token_count;
+        for (uint32_t first = check_input_attributed_next(program->input, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(program->input, first + 16, tokens, scalar))
         {
-            const uint32_t lanes = check_input_asm_attributed(program->input, first, program->input->token_count, scalar);
+            const uint32_t lanes = check_input_attributed_group(program->input, first, tokens, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                if (program->input->declarations[token] == token && program->input->attributes[token] != NULL)
+                if (program->input->declarations[token] == token && check_input_attributes_at(program->input, token) != NULL)
                 {
                     declared[attributed++] = token;
                 }
@@ -2085,7 +2086,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         for (uint32_t d = 0; valid && d < attributed && declared[d] <= placed; d += 1)
         {
             const uint32_t token = declared[d];
-            const CheckInputAttributes* attributes = program->input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(program->input, token);
             const uint32_t object = program->input->objects[token];
             if (object != 0 && object < program->object_count)
             {

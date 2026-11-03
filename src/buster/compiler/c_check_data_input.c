@@ -184,7 +184,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         }
         const uint32_t at = objects - 1;
         result->declared_latest[at] = token;
-        const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+        const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, token) : 0;
         if (attributes != 0 && attributes->alignment_log2 > alignments[at])
         {
             alignments[at] = attributes->alignment_log2;
@@ -468,7 +468,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
     {
         const uint32_t token = (uint32_t)prepared.declaration_keys[d];
         const uint32_t object = (uint32_t)(prepared.declaration_keys[d] >> 32);
-        const CheckInputAttributes* attributes = input->attributes[token];
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
         if (needed[object] && input->declaration_kinds[token] == C_BINDING_FUNCTION && attributes != NULL)
         {
             for (uint32_t i = 0; valid && i < attributes->count; i += 1)

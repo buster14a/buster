@@ -198,7 +198,7 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
     for (uint32_t k = low; k < count && (uint32_t)(keys[k] >> 32) == object; k += 1)
     {
         const uint32_t token = (uint32_t)keys[k];
-        const CheckInputAttributes* attributes = token < limit ? program->input->attributes[token] : 0;
+        const CheckInputAttributes* attributes = token < limit ? check_input_attributes_at(program->input, token) : 0;
         for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = &attributes->records[i];
@@ -535,7 +535,7 @@ static uint32_t check_target_feature_builtin_token(const CheckInput* input, uint
 // attribute's first token, the scope's of [[gnu::cleanup(f)]], or else its argument.
 static uint32_t check_target_feature_cleanup_token(const CheckInput* input, const CheckInputCleanup* record)
 {
-    const CheckInputAttributes* attributes = record->declaration < input->token_count ? input->attributes[record->declaration] : 0;
+    const CheckInputAttributes* attributes = record->declaration < input->token_count ? check_input_attributes_at(input, record->declaration) : 0;
     uint32_t result = record->argument;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {

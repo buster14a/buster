@@ -1138,7 +1138,7 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
     const CheckValue* value = at < stream->count && graph->ops[at] == CHECK_OP_VALUE ? &leaf : 0;
     const uint32_t declaration = value != 0 && (value->flags & BUSTER_CHECK_REGISTER) != 0 && value->object != 0 && value->object <= input->token_count ?
                                  value->object - 1 : BUSTER_CHECK_NONE;
-    const CheckInputAttributes* attributes = declaration < input->token_count && input->registers[declaration] ? input->attributes[declaration] : 0;
+    const CheckInputAttributes* attributes = declaration < input->token_count && input->registers[declaration] ? check_input_attributes_at(input, declaration) : 0;
     int32_t result = -1;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {

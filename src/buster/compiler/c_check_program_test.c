@@ -317,7 +317,7 @@ static void check_test_program_scans(CheckTest* test)
                 .initializer_nodes = check_sparse_from_values(&sparse, initializer_nodes, count),
                 .body_declarations = check_sparse_from_values(&sparse, body_declarations, count),
                 .declaration_bodies = check_sparse_from_values(&sparse, declaration_bodies, count),
-                .attributes = attributes,
+                .attributes = check_input_attributes_from(&sparse, attributes, count),
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
@@ -1427,7 +1427,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
             if (valid)
             {
                 result->latest_declarations[object] = token;
-                const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+                const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, token) : 0;
                 if (attributes != 0 && attributes->alignment_log2 > alignments[object])
                 {
                     alignments[object] = attributes->alignment_log2;

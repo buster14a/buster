@@ -1155,7 +1155,7 @@ static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t
             *job = (CheckConstantAttributes)
             {
                 .owner = owner,
-                .publish = !input->cached && reader->output->attributes[owner] == 0,
+                .publish = !input->cached && check_input_attributes_at(reader->output, owner) == 0,
             };
             valid = check_input_attributes(reader, cursor, input->end, &job->parsed);
         }
@@ -1306,9 +1306,9 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
         if (valid)
         {
             const CheckInputAttributes empty = { 0 };
-            CheckInputAttributes* previous = reader->output->attributes[job->owner];
+            CheckInputAttributes* previous = check_input_attributes_at(reader->output, job->owner);
             valid = check_input_attribute_merge(reader, previous != 0 ? previous : &empty, &job->parsed, combined);
-            reader->output->attributes[job->owner] = valid ? combined : previous;
+            check_input_set_attributes_at(reader->output, job->owner, valid ? combined : previous);
             job->publish = !valid;
         }
     }
@@ -1898,7 +1898,7 @@ static TypeId check_constant_object_alignment(CheckInputReader* reader, uint32_t
     if (first + 1 == end && end <= parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER)
     {
         const uint32_t declaration = reader->output->declarations[first];
-        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? reader->output->attributes[declaration] : 0;
+        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? check_input_attributes_at(reader->output, declaration) : 0;
         if (attributes != 0 && attributes->alignment_log2 > type_alignment_log2(reader->types, type) + 1 &&
             type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
         {

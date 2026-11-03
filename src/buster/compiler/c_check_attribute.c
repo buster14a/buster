@@ -1847,7 +1847,7 @@ static bool check_input_attribute_alias_definition(const CheckInputAttributes* a
 // A specifier's list is each declarator's: one declarator's is copied before its records are marked.
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
-    const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
+    const CheckInputAttributes* attributes = reader->late_attributes ? check_input_attributes_at(reader->output, token) : 0;
     const bool after = attributes != 0 && reader->definition_origins[previous] && !reader->defined[token];
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
@@ -1871,18 +1871,17 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         if (reader->late_attribute_masks != NULL)
         {
             memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
-            for (uint32_t first = 0; first < token; first += 8)
+            const bool scalar = reader->parser->options.scalar;
+            for (uint32_t first = check_input_attributed_next(reader->output, 0, token, scalar); first < token; first = check_input_attributed_next(reader->output, first + 16, token, scalar))
             {
-                const uint32_t lanes = BUSTER_SCALAR_PATH(reader->parser->options.scalar) ?
-                    (uint32_t)check_input_scan_all(first, token) & 0xff :
-                    check_input_scan_pointers((const void* const*)reader->output->attributes, first, token);
+                const uint32_t lanes = check_input_attributed_group(reader->output, first, token, scalar);
                 for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                     const uint32_t object = reader->objects[d];
                     if (object != 0 && object <= count)
                     {
-                        reader->late_attribute_masks[object] |= check_input_attribute_late_mask(reader->output->attributes[d], reader->output->function_flags[d]);
+                        reader->late_attribute_masks[object] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, d), reader->output->function_flags[d]);
                     }
                 }
             }
@@ -1920,7 +1919,7 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     }
     if (copied)
     {
-        reader->output->attributes[token] = copy;
+        check_input_set_attributes_at(reader->output, token, copy);
     }
 }
 

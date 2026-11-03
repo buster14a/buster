@@ -236,7 +236,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
                 reader->declaration_deduced[group] = deduced_base;
             }
         }
-        CheckInputAttributes* attributes = reader->output->attributes[declaration];
+        CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
         const uint32_t required = attributes != 0 ? attributes->required_alignment_log2 : 0;
         if (deduced != 0 && !type_is_complete(types, deduced))
         {

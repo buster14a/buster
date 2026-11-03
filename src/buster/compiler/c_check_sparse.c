@@ -13,6 +13,11 @@
 // NONE already. The pool has room for a block for each directory entry of each column (check_sparse_reserve), which a
 // write takes once at most, so it never runs out.
 //
+// A wide column (CheckSparseWide) holds 64-bit values the same way, BUSTER_CHECK_SPARSE_WIDE_NONE at most tokens: each of
+// its directory entries names two consecutive blocks of the same pool, 16 values of 8 bytes, and its zero entry blocks 0
+// and 1, both NONEs. CheckInput.attributes is one (#1167), which keeps its pointers complemented, so that a null pointer
+// is its NONE.
+//
 // The lanes that read a unit's deferred bodies (c_check_deferred.c) write their own tokens of the same columns at once,
 // and two lanes' tokens can share 16. Where the pool is shared (CheckSparsePool.shared):
 // - A value's write claims the directory entry it finds empty (BUSTER_CHECK_SPARSE_CLAIMED), takes a block, fills it and
@@ -39,9 +44,10 @@
 typedef struct CheckSparsePool CheckSparsePool;
 struct CheckSparsePool
 {
-    // `capacity` blocks of BUSTER_CHECK_SPARSE_TOKENS values each, 64-byte aligned; block 0 the NONEs.
+    // `capacity` blocks of BUSTER_CHECK_SPARSE_TOKENS values each, 64-byte aligned; block 0 the NONEs, and block 1 too
+    // where the pool has wide columns.
     uint32_t* blocks;
-    // The blocks taken, block 0 among them.
+    // The blocks taken, the NONEs' among them.
     uint32_t count;
     // At most BUSTER_CHECK_SPARSE_CLAIMED, so that no block's index has the claim's bit.
     uint32_t capacity;
@@ -65,6 +71,18 @@ struct CheckSparseColumn
     uint32_t* blocks;
 };
 
+// A wide column's value where it has none.
+#define BUSTER_CHECK_SPARSE_WIDE_NONE UINT64_MAX
+
+typedef struct CheckSparseWide CheckSparseWide;
+struct CheckSparseWide
+{
+    // As a CheckSparseColumn's, but each entry names the first of the two blocks that hold its 16 tokens' values.
+    uint32_t* directory;
+    // The pool's blocks (CheckSparsePool.blocks).
+    uint32_t* blocks;
+};
+
 // The entries of a column's directory for `count` tokens and the unit's count, a token of its own (the reader writes and
 // reads every column at `count`), and the entry past them that check_sparse_vector reads.
 static __attribute__((unused)) uint64_t check_sparse_slots(uint32_t count)
@@ -83,6 +101,20 @@ static __attribute__((unused)) uint32_t check_sparse_get(CheckSparseColumn colum
 {
     const uint32_t block = __atomic_load_n(column.directory + (token >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
     return column.blocks[((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) | (token & (BUSTER_CHECK_SPARSE_TOKENS - 1))];
+}
+
+// Whether the wide column has storage, as check_sparse_present.
+static __attribute__((unused)) bool check_sparse_wide_present(CheckSparseWide column)
+{
+    return column.directory != NULL;
+}
+
+// The wide column's value at `token`, which is at most the unit's count.
+static __attribute__((unused)) uint64_t check_sparse_wide_get(CheckSparseWide column, uint32_t token)
+{
+    const uint32_t block = __atomic_load_n(column.directory + (token >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+    const uint64_t* values = (const uint64_t*)(column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
+    return values[token & (BUSTER_CHECK_SPARSE_TOKENS - 1)];
 }
 
 // The values of tokens `first` to `first` + 15, where `first` is at most the unit's count: the two blocks' of the directory
@@ -127,27 +159,28 @@ static __attribute__((unused)) void check_sparse_region(CheckSparsePool* pool, u
     }
 }
 
-// A new block at `entry`, filled with NONEs, or the block another write published there; 0 where the pool has no room,
-// which the reservation rules out (check_sparse_reserve), with the pool marked exhausted.
-static __attribute__((unused)) uint32_t check_sparse_take(CheckSparsePool* pool, uint32_t* entry)
+// `width` new blocks at `entry` (1, or a wide column's 2), filled with NONEs, or the blocks another write published there;
+// 0 where the pool has no room, which the reservation rules out (check_sparse_reserve_wide), with the pool marked
+// exhausted.
+static __attribute__((unused)) uint32_t check_sparse_take(CheckSparsePool* pool, uint32_t* entry, uint32_t width)
 {
     const bool shared = pool->shared;
     uint32_t found = 0;
     uint32_t block = 0;
     if (!shared || __atomic_compare_exchange_n(entry, &found, BUSTER_CHECK_SPARSE_CLAIMED, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
     {
-        const uint32_t taken = shared ? __atomic_fetch_add(&pool->count, 1, __ATOMIC_RELAXED) : pool->count++;
-        block = taken < pool->capacity ? taken : 0;
-        uint32_t* const values = pool->blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT);
-        if (block != 0 && shared)
+        const uint32_t taken = shared ? __atomic_fetch_add(&pool->count, width, __ATOMIC_RELAXED) : (pool->count += width) - width;
+        block = taken <= pool->capacity - width ? taken : 0;
+        for (uint32_t b = 0; block != 0 && b < width; b += 1)
         {
-            check_sparse_region(pool, values);
-        }
-        if (block != 0)
-        {
+            uint32_t* const values = pool->blocks + ((uint64_t)(block + b) << BUSTER_CHECK_SPARSE_SHIFT);
+            if (shared)
+            {
+                check_sparse_region(pool, values);
+            }
             _mm512_store_si512(values, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
         }
-        else
+        if (block == 0)
         {
             __atomic_store_n(&pool->exhausted, true, __ATOMIC_RELAXED);
         }
@@ -172,7 +205,7 @@ static __attribute__((unused)) void check_sparse_set(CheckSparsePool* pool, Chec
     uint32_t block = pool->shared ? __atomic_load_n(entry, __ATOMIC_ACQUIRE) : *entry;
     if ((block == 0 || block == BUSTER_CHECK_SPARSE_CLAIMED) && value != BUSTER_CHECK_NONE)
     {
-        block = check_sparse_take(pool, entry);
+        block = check_sparse_take(pool, entry, 1);
     }
     if (block != 0 && block != BUSTER_CHECK_SPARSE_CLAIMED)
     {
@@ -180,17 +213,37 @@ static __attribute__((unused)) void check_sparse_set(CheckSparsePool* pool, Chec
     }
 }
 
-// Room in `arena` for `columns` columns of `count` tokens and their pool, into `pool` and `column`s: the directories, and
-// the pool, with block 0's NONEs, and with `shared` its regions' claims. The directories are cleared but where `zero` says
-// the arena's pages past its length are as the kernel mapped them (arena_untouched) and the pool isn't `shared`: a shared
-// pool's are cleared on this thread, so that the lanes find their pages in place. The pool has a block for each directory
-// entry of each column, which a write takes once at most, so it never runs out. Returns whether the arena had room.
-static __attribute__((unused)) bool check_sparse_reserve(Arena* arena, CheckSparsePool** pool, CheckSparseColumn* column, uint32_t columns, uint32_t count, bool zero, bool shared)
+// Writes `value` at `token` of the wide `column`, whose blocks are `pool`'s, as check_sparse_set.
+static __attribute__((unused)) void check_sparse_wide_set(CheckSparsePool* pool, CheckSparseWide column, uint32_t token, uint64_t value)
+{
+    uint32_t* entry = column.directory + (token >> BUSTER_CHECK_SPARSE_SHIFT);
+    uint32_t block = pool->shared ? __atomic_load_n(entry, __ATOMIC_ACQUIRE) : *entry;
+    if ((block == 0 || block == BUSTER_CHECK_SPARSE_CLAIMED) && value != BUSTER_CHECK_SPARSE_WIDE_NONE)
+    {
+        block = check_sparse_take(pool, entry, 2);
+    }
+    if (block != 0 && block != BUSTER_CHECK_SPARSE_CLAIMED)
+    {
+        uint64_t* values = (uint64_t*)(pool->blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
+        values[token & (BUSTER_CHECK_SPARSE_TOKENS - 1)] = value;
+    }
+}
+
+// Room in `arena` for `columns` columns and `wides` wide columns of `count` tokens and their pool, into `pool`, `column`s
+// and `wide`s: the directories, and the pool, with its NONEs' blocks, and with `shared` its regions' claims. The
+// directories are cleared but where `zero` says the arena's pages past its length are as the kernel mapped them
+// (arena_untouched) and the pool isn't `shared`: a shared pool's are cleared on this thread, so that the lanes find their
+// pages in place. The pool has blocks for each directory entry of each column, which a write takes once at most, so it
+// never runs out. Returns whether the arena had room.
+static __attribute__((unused)) bool check_sparse_reserve_wide(Arena* arena, CheckSparsePool** pool, CheckSparseColumn* column, uint32_t columns, CheckSparseWide* wide, uint32_t wides, uint32_t count, bool zero, bool shared)
 {
     const uint64_t slots = check_sparse_slots(count);
-    const uint64_t capacity = slots * columns + 1;
+    const uint64_t entries = slots * ((uint64_t)columns + wides);
+    // A wide column's zero entry reads blocks 0 and 1.
+    const uint32_t nones = wides != 0 ? 2 : 1;
+    const uint64_t capacity = slots * ((uint64_t)columns + 2 * (uint64_t)wides) + nones;
     CheckSparsePool* result = capacity <= BUSTER_CHECK_SPARSE_CLAIMED ? arena_push(arena, sizeof(CheckSparsePool), _Alignof(CheckSparsePool)) : NULL;
-    uint32_t* directories = result != NULL ? arena_push_array(arena, slots * columns, sizeof(uint32_t), 64) : NULL;
+    uint32_t* directories = result != NULL ? arena_push_array(arena, entries, sizeof(uint32_t), 64) : NULL;
     uint32_t* blocks = directories != NULL ? arena_push_array(arena, capacity * BUSTER_CHECK_SPARSE_TOKENS, sizeof(uint32_t), 64) : NULL;
     const uint64_t block_bytes = capacity * BUSTER_CHECK_SPARSE_TOKENS * sizeof(uint32_t);
     const uint64_t region_count = blocks != NULL ? ((uintptr_t)blocks + block_bytes - 1) / BUSTER_ARENA_HUGE_PAGE_BYTES - (uintptr_t)blocks / BUSTER_ARENA_HUGE_PAGE_BYTES + 1 : 0;
@@ -200,21 +253,34 @@ static __attribute__((unused)) bool check_sparse_reserve(Arena* arena, CheckSpar
     {
         if (!zero || shared)
         {
-            memset(directories, 0, slots * columns * sizeof(uint32_t));
+            memset(directories, 0, entries * sizeof(uint32_t));
         }
         if (shared)
         {
             memset(regions, 0, region_count * sizeof(uint32_t));
         }
-        _mm512_store_si512(blocks, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
-        *result = (CheckSparsePool){ .blocks = blocks, .count = 1, .capacity = (uint32_t)capacity, .regions = regions, .shared = shared };
+        for (uint32_t b = 0; b < nones; b += 1)
+        {
+            _mm512_store_si512(blocks + b * BUSTER_CHECK_SPARSE_TOKENS, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+        }
+        *result = (CheckSparsePool){ .blocks = blocks, .count = nones, .capacity = (uint32_t)capacity, .regions = regions, .shared = shared };
         for (uint32_t c = 0; c < columns; c += 1)
         {
             column[c] = (CheckSparseColumn){ .directory = directories + slots * c, .blocks = blocks };
         }
+        for (uint32_t w = 0; w < wides; w += 1)
+        {
+            wide[w] = (CheckSparseWide){ .directory = directories + slots * ((uint64_t)columns + w), .blocks = blocks };
+        }
         *pool = result;
     }
     return valid;
+}
+
+// Room for `columns` columns alone, as check_sparse_reserve_wide.
+static __attribute__((unused)) bool check_sparse_reserve(Arena* arena, CheckSparsePool** pool, CheckSparseColumn* column, uint32_t columns, uint32_t count, bool zero, bool shared)
+{
+    return check_sparse_reserve_wide(arena, pool, column, columns, NULL, 0, count, zero, shared);
 }
 
 // A column of `count` tokens with `values`' entries, for tokens 0 to `count` - 1, and NONE at the unit's count, in its own
@@ -229,6 +295,21 @@ static __attribute__((unused)) CheckSparseColumn check_sparse_from_values(Arena*
         for (uint32_t token = 0; token < count; token += 1)
         {
             check_sparse_set(pool, column, token, values[token]);
+        }
+    }
+    return column;
+}
+
+// A wide column of `count` tokens with `values`' entries, as check_sparse_from_values.
+static __attribute__((unused)) CheckSparseWide check_sparse_wide_from_values(Arena* arena, const uint64_t* values, uint32_t count)
+{
+    CheckSparsePool* pool = NULL;
+    CheckSparseWide column = { 0 };
+    if (values != NULL && check_sparse_reserve_wide(arena, &pool, NULL, 0, &column, 1, count, false, false))
+    {
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            check_sparse_wide_set(pool, column, token, values[token]);
         }
     }
     return column;
@@ -268,6 +349,72 @@ static __attribute__((unused)) uint32_t check_sparse_entries(CheckSparseColumn c
         {
             positions[total] = token;
             total += check_sparse_get(column, token) != BUSTER_CHECK_NONE;
+        }
+    }
+    return total;
+}
+
+// The first token from `first`, a multiple of 16, at which 16 tokens below `end` have a block in the wide `column`, or
+// a token at or past `end` where none has: the vector path tests 16 directory entries, 256 tokens, at a time. The
+// scalar path, the twin of check_sparse_wide_group's, returns `first`, so that its caller visits every 16. For the scans
+// on the reading's own thread: a lane may be writing the directory at once.
+static __attribute__((unused)) uint32_t check_sparse_wide_next(CheckSparseWide column, uint32_t first, uint32_t end, bool vector)
+{
+    uint32_t slot = first >> BUSTER_CHECK_SPARSE_SHIFT;
+    const uint32_t last = (uint32_t)(((uint64_t)end + BUSTER_CHECK_SPARSE_TOKENS - 1) >> BUSTER_CHECK_SPARSE_SHIFT);
+    bool found = !vector;
+    while (!found && slot < last)
+    {
+        const uint32_t entries = last - slot < 16 ? last - slot : 16;
+        const __mmask16 lanes = (__mmask16)(entries == 16 ? 0xffffu : (1u << entries) - 1);
+        const __m512i blocks = _mm512_maskz_loadu_epi32(lanes, column.directory + slot);
+        const uint32_t taken = _mm512_mask_test_epi32_mask(lanes, blocks, _mm512_set1_epi32((int)~BUSTER_CHECK_SPARSE_CLAIMED));
+        found = taken != 0;
+        slot += found ? (uint32_t)__builtin_ctz(taken) : entries;
+    }
+    return slot << BUSTER_CHECK_SPARSE_SHIFT;
+}
+
+// Of the 16 tokens from `first`, a multiple of 16, below `end`, those whose values in the wide `column` aren't NONE, a
+// bit each: the vector path tests their block pair's values 8 at a time, block 0's where they have none; the scalar
+// path, its twin, reads each token's value.
+static __attribute__((unused)) uint32_t check_sparse_wide_group(CheckSparseWide column, uint32_t first, uint32_t end, bool vector)
+{
+    const uint32_t stop = end - first < BUSTER_CHECK_SPARSE_TOKENS ? end - first : BUSTER_CHECK_SPARSE_TOKENS;
+    const uint32_t lanes = (stop == BUSTER_CHECK_SPARSE_TOKENS ? 0x10000u : 1u << stop) - 1;
+    uint32_t set = 0;
+    if (vector)
+    {
+        const __m512i none = _mm512_set1_epi64((long long)BUSTER_CHECK_SPARSE_WIDE_NONE);
+        const uint32_t block = __atomic_load_n(column.directory + (first >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+        const uint64_t* values = (const uint64_t*)(column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
+        const __m512i low = _mm512_maskz_load_epi64((__mmask8)lanes, values);
+        const __m512i high = _mm512_maskz_load_epi64((__mmask8)(lanes >> 8), values + 8);
+        set = (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)lanes, low, none) | (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)(lanes >> 8), high, none) << 8;
+    }
+    else
+    {
+        for (uint32_t t = 0; t < stop; t += 1)
+        {
+            set |= (uint32_t)(check_sparse_wide_get(column, first + t) != BUSTER_CHECK_SPARSE_WIDE_NONE) << t;
+        }
+    }
+    return set;
+}
+
+// The tokens from `begin` to `end` - 1 whose values in the wide `column` aren't NONE, in order into `positions`, which
+// has room for `end` - `begin`: how many, by check_sparse_wide_next's and check_sparse_wide_group's paths.
+static __attribute__((unused)) uint32_t check_sparse_wide_entries(CheckSparseWide column, uint32_t begin, uint32_t end, bool vector, uint32_t* positions)
+{
+    uint32_t total = 0;
+    const uint32_t start = begin & ~(BUSTER_CHECK_SPARSE_TOKENS - 1);
+    for (uint32_t first = check_sparse_wide_next(column, start, end, vector); first < end; first = check_sparse_wide_next(column, first + BUSTER_CHECK_SPARSE_TOKENS, end, vector))
+    {
+        const uint32_t below = begin > first ? begin - first : 0;
+        for (uint32_t set = check_sparse_wide_group(column, first, end, vector) & ~((1u << below) - 1); set != 0; set &= set - 1)
+        {
+            positions[total] = first + (uint32_t)__builtin_ctz(set);
+            total += 1;
         }
     }
     return total;

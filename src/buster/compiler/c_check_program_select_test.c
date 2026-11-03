@@ -174,7 +174,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             }
             for (uint32_t token = 0; emitted && token < input.token_count; token += 1)
             {
-                const CheckInputAttributes* attributes = input.attributes[token];
+                const CheckInputAttributes* attributes = check_input_attributes_at(&input, token);
                 const uint32_t object = input.objects[token];
                 const SymbolId symbol = object < program->object_count ? program->object_symbols[object] : 0;
                 for (uint32_t a = 0; symbol != 0 && attributes != 0 && a < attributes->count; a += 1)
@@ -192,7 +192,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                         bool explicit_name = false;
                         for (uint32_t other = 0; other < input.token_count; other += 1)
                         {
-                            const CheckInputAttributes* retained = input.attributes[other];
+                            const CheckInputAttributes* retained = check_input_attributes_at(&input, other);
                             for (uint32_t j = 0; input.objects[other] == object && retained != 0 && j < retained->count; j += 1)
                             {
                                 explicit_name |= retained->records[j].kind == CHECK_ATTRIBUTE_ASM_LABEL && !retained->records[j].ignored && !input.registers[other];

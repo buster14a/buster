@@ -728,7 +728,7 @@ static void check_test_asm_label_metadata(CheckTest* test)
         uint32_t ignored = 0;
         for (uint32_t token = 0; token < path.input.token_count; token += 1)
         {
-            const CheckInputAttributes* attributes = path.input.attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(&path.input, token);
             for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = attributes->records + i;

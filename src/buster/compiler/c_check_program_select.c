@@ -129,14 +129,14 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
             {
                 const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
                 const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
-                gnu_inline |= check_program_attribute_gnu_inline(input->attributes[token]);
+                gnu_inline |= check_program_attribute_gnu_inline(check_input_attributes_at(input, token));
                 plain_inline |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE;
                 c99_inline_only &= !(function && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE &&
                                      ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0));
             }
             else
             {
-                attribute |= check_program_attribute_eager(input->attributes[token]);
+                attribute |= check_program_attribute_eager(check_input_attributes_at(input, token));
             }
         }
         // The language mode's rules of inline functions matter to an external definition alone.
@@ -400,7 +400,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
             const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
             bool gnu_inline = false;
-            roots[group] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
+            roots[group] |= check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
             inline_rules[group] |= gnu_inline ? 2 : 0;
             const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
             // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself

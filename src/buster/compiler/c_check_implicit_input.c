@@ -133,7 +133,7 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
                 reader->declared_types[token] = type;
                 reader->declaration_kinds[token] = C_BINDING_FUNCTION;
                 input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT | (library ? CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY : 0);
-                input->attributes[token] = attributes;
+                check_input_set_attributes_at(input, token, attributes);
                 reader->objects[token] = token + 1;
                 reader->static_objects[token] = true;
                 reader->linkage[token] = 2;

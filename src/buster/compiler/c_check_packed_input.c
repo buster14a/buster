@@ -379,7 +379,7 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
                 if (!arrow)
                 {
                     const uint32_t natural = type_alignment_log2(types, reader->declared_types[first]);
-                    const CheckInputAttributes* attributes = reader->output->attributes[declaration];
+                    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
                     const uint32_t declared = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1 : 0;
                     complete_alignment = natural > complete_alignment ? natural : complete_alignment;
                     complete_alignment = declared > complete_alignment ? declared : complete_alignment;

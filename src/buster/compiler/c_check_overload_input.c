@@ -55,7 +55,7 @@ static bool check_input_overload_active(const CheckInputReader* reader, uint32_t
     if (reader->overload_candidates != 0 && reader->declaration_kinds[token] == C_BINDING_FUNCTION)
     {
         const uint32_t name = reader->parser->tokens.names[token];
-        active = reader->overload_index.active[name] || (check_input_overload_flags(reader->output->attributes[token]) & BUSTER_CHECK_OVERLOADABLE) != 0;
+        active = reader->overload_index.active[name] || (check_input_overload_flags(check_input_attributes_at(reader->output, token)) & BUSTER_CHECK_OVERLOADABLE) != 0;
     }
     return active;
 }
@@ -78,7 +78,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .previous = head,
             .scope = scope,
             .position = point,
-            .flags = check_input_overload_flags(input->attributes[token]) | (reader->defined[token] ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
+            .flags = check_input_overload_flags(check_input_attributes_at(input, token)) | (reader->defined[token] ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
         };
         const CheckOverloadContext context = {
             .semantic = check_input_context(reader, point, token, false),

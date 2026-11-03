@@ -179,7 +179,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         }
         if (valid)
         {
-            reader->output->attributes[after] = attributes->count != 0 ? attributes : 0;
+            check_input_set_attributes_at(reader->output, after, attributes->count != 0 ? attributes : 0);
         }
         else if (named)
         {
@@ -766,7 +766,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                     check_input_report(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token, CHECK_INPUT_LABEL_UNDECLARED);
                 }
             }
-            else if (kind == PARSE_KIND_SEMI && reader->output->attributes[token] != 0)
+            else if (kind == PARSE_KIND_SEMI && check_input_attributes_at(reader->output, token) != 0)
             {
                 bool enclosed = false;
                 for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && !enclosed; ancestor = parser->tree.parents[ancestor])

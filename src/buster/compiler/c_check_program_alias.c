@@ -100,7 +100,7 @@ static bool check_program_alias_same(String8 a, String8 b)
 // A declaration's asm label (not a register variable's), or an empty one.
 static String8 check_program_alias_label(const CheckInput* input, uint32_t token)
 {
-    const CheckInputAttributes* attributes = input->registers[token] ? NULL : input->attributes[token];
+    const CheckInputAttributes* attributes = input->registers[token] ? NULL : check_input_attributes_at(input, token);
     String8 label = { 0 };
     for (uint32_t i = 0; attributes != NULL && label.length == 0 && i < attributes->count; i += 1)
     {
@@ -455,7 +455,7 @@ static bool check_program_aliases(CheckProgram* program, CheckProgramTargetEvent
         if (e == 0 || keys[e] >> 32 != keys[e - 1] >> 32)
         {
             const uint32_t token = (uint32_t)keys[e];
-            const CheckInputAttributes* attributes = input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
             const CheckInputAttribute* weakref = NULL;
             const CheckInputAttribute* ifunc = NULL;
             const CheckInputAttribute* alias = NULL;

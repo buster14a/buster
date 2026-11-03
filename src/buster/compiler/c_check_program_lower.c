@@ -10325,7 +10325,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint8_t role = control.target < input->token_count ? program->parser->tree.roles[control.target] : 0;
     const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
-    const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? input->attributes[declaration] : 0;
+    const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? check_input_attributes_at(input, declaration) : 0;
     // Its type's alignment, or its declaration's attribute's where larger (the log2 plus one, 0 for none).
     const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
     const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
@@ -11834,7 +11834,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
             const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
             // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
-            const CheckInputAttributes* attributes = named && !promoted ? input->attributes[parameter] : NULL;
+            const CheckInputAttributes* attributes = named && !promoted ? check_input_attributes_at(input, parameter) : NULL;
             // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
             // realigned frame, or where they arrive).
             const bool aggregate = check_lower_aggregate(writer, parameter_type);
@@ -11881,7 +11881,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const TypeId incoming_type = check_input_kr_parameter_type(types, declared_type);
             if (incoming_type != type_unqualified(declared_type))
             {
-                const CheckInputAttributes* attributes = input->attributes[parameter];
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, parameter);
                 const uint32_t requested = attributes != NULL && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
                 const uint32_t natural = type_alignment_log2(types, declared_type);
                 const uint32_t alignment = requested > natural ? requested : natural;
@@ -11958,7 +11958,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 const TypeId local_type = input->declared_types[declaration];
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
-                const CheckInputAttributes* attributes = input->attributes[declaration];
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
                 // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
                 // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
                 // compound literal, which takes its type's.

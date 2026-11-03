@@ -238,8 +238,8 @@ static bool check_test_fresh_columns_equal(const CheckInput* input, const CheckI
                  memcmp(input->graph.warning_suppressed, other->graph.warning_suppressed, input->graph.capacity) == 0;
     for (uint32_t token = 0; equal && token <= count; token += 1)
     {
-        const CheckInputAttributes* a = input->attributes[token];
-        const CheckInputAttributes* b = other->attributes[token];
+        const CheckInputAttributes* a = check_input_attributes_at(input, token);
+        const CheckInputAttributes* b = check_input_attributes_at(other, token);
         equal = (a == NULL) == (b == NULL) && (a == NULL || a->count == b->count);
     }
     return equal;

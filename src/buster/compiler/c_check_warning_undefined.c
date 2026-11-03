@@ -118,7 +118,7 @@ static uint32_t check_warning_undefined_find(const CheckWarningUndefinedFunction
 static bool check_warning_undefined_supplied(const CheckInput* input, uint32_t declaration)
 {
     bool supplied = input->defined[declaration] != 0;
-    const CheckInputAttributes* attributes = input->attributes != NULL ? input->attributes[declaration] : NULL;
+    const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, declaration) : NULL;
     for (uint32_t i = 0; !supplied && attributes != NULL && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;

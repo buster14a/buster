@@ -1116,7 +1116,7 @@ static bool check_control_named(const CheckControlWriter* writer, uint32_t jump)
     const uint8_t result_kind = result != 0 ? type_kind(types, result) : BUSTER_TYPE_KIND_NONE;
     const uint32_t variable = result_kind == BUSTER_TYPE_KIND_STRUCT || result_kind == BUSTER_TYPE_KIND_UNION ? check_control_returned(writer, jump) : BUSTER_CHECK_NONE;
     const TypeId declared = variable < count ? input->declared_types[variable] : 0;
-    const CheckInputAttributes* attributes = variable < count ? input->attributes[variable] : NULL;
+    const CheckInputAttributes* attributes = variable < count ? check_input_attributes_at(input, variable) : NULL;
     const bool aligned = attributes != NULL && attributes->alignment_log2 != 0 && attributes->alignment_log2 - 1u > type_alignment_log2(types, declared);
     bool named = variable > writer->opening && variable < writer->closing && input->declaration_kinds[variable] == C_BINDING_OBJECT &&
                  !input->static_objects[variable] && declared != 0 && (type_qualifiers(declared) & BUSTER_TYPE_VOLATILE) == 0 && !aligned &&
@@ -2744,7 +2744,7 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
     {
         program->object_declarations[object] = token;
         needed[object] |= input->defined[token] || input->tentative[token];
-        const uint32_t attributes = input->attributes[token] != 0 ? check_program_attribute_bits(input->attributes[token]) : 0;
+        const uint32_t attributes = check_input_attributes_at(input, token) != 0 ? check_program_attribute_bits(check_input_attributes_at(input, token)) : 0;
         const uint32_t function_attributes = attributes != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION ? attributes : 0;
         if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0)
         {
@@ -2888,7 +2888,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
         for (uint32_t e = low; e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
         {
             const uint32_t token = (uint32_t)keys[e];
-            const CheckInputAttributes* attributes = input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = &attributes->records[i];

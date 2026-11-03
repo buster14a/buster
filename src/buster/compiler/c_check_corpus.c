@@ -452,7 +452,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
         }
         else
         {
-            for (uint32_t token = 0; path->input.attributes != NULL && token < path->input.token_count; token += 1)
+            for (uint32_t token = 0; check_sparse_wide_present(path->input.attributes) && token < path->input.token_count; token += 1)
             {
                 first = check_corpus_repair_warning(path, repair, token, check_diagnostic_attribute_warnings(&path->input, token), 0, first);
             }
@@ -1189,7 +1189,7 @@ static String8 check_corpus_symbol_spelling(const CheckInput* input, const Parse
 {
     String8 spelling = { .pointer = (char*)intern_bytes(identifiers, parser->tokens.names[declaration]),
                          .length = intern_length(identifiers, parser->tokens.names[declaration]) };
-    const CheckInputAttributes* attributes = input->attributes[declaration];
+    const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
         if (attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored)
@@ -1502,7 +1502,7 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
         const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
         for (uint32_t i = bodies_first; local_function && reason == CHECK_CORPUS_SYMBOL_REASONS && i < bodies_end; i += 1)
         {
-            const CheckInputAttributes* attributes = input->attributes[index->selected->program.bodies[bodies->items[i].item].declaration];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, index->selected->program.bodies[bodies->items[i].item].declaration);
             bool always_inline = false;
             for (uint32_t j = 0; attributes != 0 && j < attributes->count; j += 1)
             {
@@ -2062,7 +2062,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->objects[token] == right->objects[token] &&
                 left->static_objects[token] == right->static_objects[token] && left->registers[token] == right->registers[token] &&
                 left->thread_local[token] == right->thread_local[token] && left->compound_objects[token] == right->compound_objects[token] &&
-                check_corpus_attributes_equal(left->attributes[token], right->attributes[token]) &&
+                check_corpus_attributes_equal(check_input_attributes_at(left, token), check_input_attributes_at(right, token)) &&
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
                 left->tentative[token] == right->tentative[token] && check_sparse_get(left->initializer_nodes, token) == check_sparse_get(right->initializer_nodes, token) &&
                 check_sparse_get(left->initializer_begins, token) == check_sparse_get(right->initializer_begins, token) && check_sparse_get(left->initializer_ends, token) == check_sparse_get(right->initializer_ends, token) &&
@@ -2303,7 +2303,7 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
         column = x->function_flags[token] != y->function_flags[token] ? "function_flags" : x->static_objects[token] != y->static_objects[token] ? "static_objects" :
                  x->registers[token] != y->registers[token] ? "registers" : x->thread_local[token] != y->thread_local[token] ? "thread_local" :
                  x->compound_objects[token] != y->compound_objects[token] ? "compound_objects" :
-                 !check_corpus_attributes_equal(x->attributes[token], y->attributes[token]) ? "attributes" : x->tentative[token] != y->tentative[token] ? "tentative" :
+                 !check_corpus_attributes_equal(check_input_attributes_at(x, token), check_input_attributes_at(y, token)) ? "attributes" : x->tentative[token] != y->tentative[token] ? "tentative" :
                  check_sparse_get(x->initializer_nodes, token) != check_sparse_get(y->initializer_nodes, token) ? "initializer_nodes" :
                  check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
                  check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :

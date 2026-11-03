@@ -338,7 +338,7 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     bool compound = false;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? input->attributes[token] : 0;
+        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? check_input_attributes_at(input, token) : 0;
         for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
         {
             labels += attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
@@ -356,7 +356,7 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     }
     for (uint32_t token = 0; valid && token < count; token += 1)
     {
-        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? input->attributes[token] : 0;
+        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? check_input_attributes_at(input, token) : 0;
         for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + i;
