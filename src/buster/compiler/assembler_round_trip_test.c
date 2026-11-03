@@ -150,6 +150,11 @@ static bool asm_round_trip_same(const X86Instruction* original, const X86Instruc
 static uint32_t asm_round_trip_intel(const X86Instruction* record, char* text, uint32_t capacity, bool gnu)
 {
     char raw[512];
+#if __has_feature(memory_sanitizer)
+    // The stream's writes into raw happen inside libc, which MSan doesn't instrument: its shadow stays poisoned
+    // for the reads below unless it's marked here.
+    memset(raw, 0, sizeof(raw));
+#endif
     FILE* file = fmemopen(raw, sizeof(raw), "w");
     uint32_t length = 0;
     if (file != 0)

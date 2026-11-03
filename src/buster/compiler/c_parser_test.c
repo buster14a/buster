@@ -17,6 +17,10 @@
 //     in the -E text, with spaces kept around the change). With --clang, each is checked against clang: a file clang
 //     accepts must be accepted, and one whose first error is a "Parse Issue" must be rejected with its first error on
 //     the same line. Without, each goes through both paths, which must agree as on any file.
+// The checks that take no input (the snippets, the trees, the workspace, the kernels' tables and the handoff's streams)
+// run with files too, but with --files-only, for a run of files beside one without (the correctness list's): those
+// checks read neither the files nor their options but --seed and the language, which -std and the -f options of its
+// keywords and digraphs give, so a second run with the same would repeat them.
 //
 // main.c includes this file after c_parser.c. Layout: running the parser on a file (ParseTestOutcome,
 // parse_test_parse_file), running clang (parse_test_clang), the snippets, the trees, the kernels, the paths on one
@@ -241,7 +245,12 @@ static bool parse_test_clang_parse(FILE* output, int status, char** paths, uint3
                     char* message = line + length + consumed;
                     char* bracket = strrchr(message, '[');
                     const size_t message_length = bracket != 0 && bracket > message ? (size_t)(bracket - message - 1) : strcspn(message, "\n");
-                    snprintf(results[i].message, sizeof(results[i].message), "%.*s", (int)message_length, message);
+                    // "[-Wflag,Category]": the message keeps the flag, as clang prints it without -fdiagnostics-show-category
+                    // (#1127); "[Category]" alone goes.
+                    const char* comma = bracket != 0 && bracket > message ? strrchr(bracket, ',') : 0;
+                    const int flags = comma != 0 ? (int)(comma - bracket + 1) : 0;
+                    snprintf(results[i].message, sizeof(results[i].message), "%.*s%s%.*s%s", (int)message_length, message, flags != 0 ? " " : "", flags != 0 ? flags - 1 : 0,
+                             flags != 0 ? bracket : "", flags != 0 ? "]" : "");
                 }
                 else if (strstr(line, ": fatal error: ") != 0)
                 {
@@ -670,24 +679,24 @@ static const ParseTestSnippet parse_test_snippets[] =
     // else an unknown type name.
     { "int f(int a, x);\n", "", "c89" },
     { "int f(x y);\n", "1:7: unknown type name 'x'", 0, true },
-    { "int f(int a, x);\n", "1:14: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "int f(int a, x);\n", "1:14: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "x y;\n", "1:1: unknown type name 'x'", 0, true },
     { "struct S { x *y; };\n", "1:12: unknown type name 'x'", 0, true },
     { "struct S { [[deprecated]] x; };\n", "1:27: type name requires a specifier or qualifier", 0 },
     { "x;\n", "1:1: a type specifier is required for all declarations", "c23", true },
-    { "__extension__ x;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "__extension__ x;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "__extension__;\n", "", 0 },
     // A declarator without specifiers is an implicit int, as an identifier is; its group holds the name.
-    { "(x);\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "(x);\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "(x);\n", "", "c89" },
     { "(\"x\");\n", "1:2: expected identifier or '('", 0 },
-    { "static (x);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "static (x);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     // Clang finishes the declarator before diagnosing its missing return/type specifier.
     { "f(A,\n12);\n", "2:1: expected identifier", 0 },
     { "typedef BOOLEAN\n(NTAPI *Fn)(int);\n", "2:2: unknown type name 'NTAPI'", 0, true },
     { "f(a)\nextern int x;\n", "2:1: invalid storage class specifier in function declarator", 0 },
-    { "f(void);\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
-    { "f(a) int a; {return a;}\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "f(void);\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "f(a) int a; {return a;}\n", "1:1: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     // The primary diagnostic belongs to the invocation; macro spelling remains available as an expansion note.
     { "#define TYPE Missing\nTYPE x;\n", "2:1: unknown type name 'Missing'", 0, true },
     { "#define TYPE Missing\n#define OUTER TYPE\nOUTER x;\n", "3:1: unknown type name 'Missing'", 0, true },
@@ -799,11 +808,54 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int x) { switch (x) { case 0: __attribute__((always_inline)) } }\n", "1:69: expected statement", 0 },
     { "void f(int x) { switch (x) { default: __attribute__((__noinline__)) } }\n", "1:69: expected statement", 0 },
     { "void f(void) { __attribute__((__always_inline__, noinline)) }\n", "1:61: expected statement", 0 },
-    { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int", 0, true },
+    { "void f(void) { __attribute__((unknown)) x; }\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "void f(void) { __attribute__((unused)) __extension__ int x; }\n", "1:40: expected identifier or '('", 0 },
     { "void f(void) { L: __attribute__((unused)) __extension__ int x; }\n", "1:57: expected expression", 0 },
     // Attribute applicability belongs to semantic checking; the parser retains even an invalid statement attribute.
     { "void f(void) { __attribute__((unused)); }\n", "", 0, true },
+    // #1127's places and messages. A GNU attribute list's and its arguments' `)` and its second `(` are expected after the
+    // token before (clang's ExpectAndConsume); an argument list that starts with what can't is an expression's error.
+    { "int x __attribute__ ((unused x));\n", "1:29: expected ')'", 0 },
+    { "int x __attribute__ (( (unused)));\n", "1:23: expected ')'", 0 },
+    { "int x __attribute__ ((aligned(4 4)));\n", "1:32: expected ')'", 0 },
+    { "int x __attribute__ ((aligned(;)));\n", "1:31: expected expression", 0 },
+    { "int x __attribute__ ( unused));\n", "1:22: expected '(' after '('", 0 },
+    // A for-statement's missing `;` is at the token clang finds instead.
+    { "void f(int n) { for (int i = 0; i n < ; i++) { } }\n", "1:35: expected ';' in 'for' statement specifier", 0 },
+    { "void f(int n) { for (int i = 0 i < n; i++) ; }\n", "1:32: expected ';' in 'for' statement specifier", 0 },
+    { "void f(int n) { for (; n ) ; }\n", "1:26: expected ';' in 'for' statement specifier", 0 },
+    // A `;` just before a group's closer, where clang's balanced delimiters close it; a few builtins check theirs apart.
+    { "void f(int a) { f(a;); }\n", "1:20: unexpected ';' before ')'", 0 },
+    { "int a[2] = {1;};\n", "1:14: unexpected ';' before '}'", 0 },
+    { "int x[3;];\n", "1:8: unexpected ';' before ']'", 0 },
+    { "void f(__builtin_va_list ap) { int a = __builtin_va_arg(ap, int;); }\n", "1:64: expected ')'", 0 },
+    { "int a = __builtin_offsetof(struct { int a[2]; }, a[1;]);\n", "1:53: unexpected ';' before ']'", 0 },
+    { "void f(int a) { if (a)) ; }\n", "1:23: extraneous ')' after condition, expected a statement", 0 },
+    // A return statement's `;` is expected as any other token; a function declarator's body before its `;`, but after
+    // an asm label.
+    { "int f(void) { return (1)); }\n", "1:25: expected ';' after return statement", 0 },
+    { "int f(void) __attribute__((unused)));\n", "1:36: expected function body after function declarator", 0 },
+    { "int f(void) __attribute__((unused)) (void);\n", "1:37: expected function body after function declarator", 0 },
+    { "int f(void) __asm__(\"f\"));\n", "1:25: extraneous ')' before ';'", 0 },
+    { "int f(int * char p);\n", "1:13: invalid parameter name: 'char' is a keyword", 0 },
+    { "enum E { A 1 };\n", "1:12: expected '= constant-expression' or end of enumerator definition", 0 },
+    { "union;\n", "1:1: declaration of anonymous union must be a definition", 0 },
+    { "enum;\n", "1:5: expected identifier or '{'", 0 },
+    // After a tag's definition, a name that can't be the declarator is the next declaration's type, just after the body.
+    { "struct S { int a; } x y;\n", "1:20: expected ';' after struct", 0 },
+    { "struct S { int a; } __attribute__((packed)) x y;\n", "1:20: expected ';' after struct", 0 },
+    { "struct S { int a; union\n int x; long y; } u;\n", "1:24: expected ';' after union", 0 },
+    { "void f(int a) { f(;); }\n", "1:19: expected expression", 0 },
+    { "void f(int a) { a = a ? ) : 1; }\n", "1:25: expected expression", 0 },
+    { "int a = _Generic(1 2, int: 1);\n", "1:19: expected ','", 0 },
+    { "int a = __builtin_choose_expr(1 2, 3);\n", "1:32: expected ','", 0 },
+    { "int [3] x;\n", "1:10: brackets are not allowed here; to declare an array, place the brackets after the identifier", 0 },
+    { "int x, [2] = { 5, 6 };\n", "1:12: expected identifier or '('", 0 },
+    { "struct P { int c; } p = { . .c = 1 };\n", "1:29: expected a field designator, such as '.field = 4'", 0 },
+    { "void f(int *t, int a) { a = t[[a] + 1]; }\n", "1:30: C++11 only allows consecutive left square brackets when introducing an attribute", 0 },
+    { "void f(int a) { do ; while a; }\n", "1:28: expected '(' after 'do/while'", 0 },
+    // A braced initializer in a list takes no postfix operator, which both paths took before.
+    { "int a[2][1] = { {1}[0] };\n", "1:20: expected '}'", 0 },
 };
 
 // Writes `text` to `path`. Returns false if it can't.
@@ -2766,11 +2818,10 @@ struct ParseTestTally
     uint64_t other_issues;
     uint64_t other_rejected;
     uint64_t mismatches;
-    uint64_t printed;
 };
 
 // Our outcome for a file against clang's: a file clang accepts must parse; one whose first error is a parse issue must
-// fail with its first error on the same line.
+// fail with the same first error, at the same line and column with the same message (#1127).
 static void parse_test_compare(ParseTestTally* tally, const char* label, const ParseTestOutcome* ours, const ParseTestClang* theirs, const char* detail)
 {
     bool match = true;
@@ -2783,7 +2834,7 @@ static void parse_test_compare(ParseTestTally* tally, const char* label, const P
     else if (theirs->parse_issue)
     {
         tally->parse_issues += 1;
-        match = ours->preprocessed && ours->errors != 0 && ours->line == theirs->line;
+        match = ours->preprocessed && ours->errors != 0 && ours->line == theirs->line && ours->column == theirs->column && strcmp(ours->message, theirs->message) == 0;
     }
     else
     {
@@ -2793,12 +2844,8 @@ static void parse_test_compare(ParseTestTally* tally, const char* label, const P
     if (!match)
     {
         tally->mismatches += 1;
-        if (tally->printed < 40)
-        {
-            tally->printed += 1;
-            printf("%s%s: clang: %s%u:%u: %s; ours: %s%u:%u: %s\n", label, detail, theirs->rejected ? "" : "accepted ", theirs->line, theirs->column, theirs->message,
-                   ours->errors != 0 ? "" : "accepted ", ours->line, ours->column, ours->message);
-        }
+        parse_test_report("%s%s: clang: %s%u:%u: %s; ours: %s%u:%u: %s\n", label, detail, theirs->rejected ? "" : "accepted ", theirs->line, theirs->column,
+                          theirs->message, ours->errors != 0 ? "" : "accepted ", ours->line, ours->column, ours->message);
     }
 }
 
@@ -3764,6 +3811,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     uint64_t streams = 2000;
     uint32_t first_line = 0;
     uint32_t last_line = UINT32_MAX;
+    bool files_only = false;
     char** rest = malloc(sizeof(char*) * ((size_t)argument_count + 2));
     int rest_count = 0;
     const char** clang_arguments = malloc(sizeof(char*) * ((size_t)argument_count + 2));
@@ -3793,6 +3841,10 @@ static int run_parser_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argument, "--files-only") == 0)
+        {
+            files_only = true;
         }
         else if (strcmp(argument, "--print-tree") == 0 && i + 1 < argument_count)
         {
@@ -3869,10 +3921,12 @@ static int run_parser_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = oracle_temporary_directory();
     snprintf(directory, sizeof(directory), "%s/buster-test-parser-XXXXXX", temporary);
+    // --files-only leaves out the checks without input, which only a run with files may do without.
+    valid = valid && (!files_only || input_count != 0);
     valid = valid && mkdtemp(directory) != 0;
     if (!valid)
     {
-        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
+        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [--files-only] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
         failures += 1;
     }
     else if (print_tree != 0)
@@ -3884,13 +3938,16 @@ static int run_parser_tests(int argument_count, char** arguments)
     {
         // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
         OracleCache* oracle = oracle_cache();
-        failures += parse_test_check_postorder_self(&arena);
-        failures += parse_test_workspace_budget();
-        failures += parse_test_check_k6_tables();
-        failures += parse_test_check_handoff(options.language, seed);
-        failures += parse_test_check_snippets(directory, clang);
-        failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
-        failures += parse_test_check_fixtures(directory);
+        if (!files_only)
+        {
+            failures += parse_test_check_postorder_self(&arena);
+            failures += parse_test_workspace_budget();
+            failures += parse_test_check_k6_tables();
+            failures += parse_test_check_handoff(options.language, seed);
+            failures += parse_test_check_snippets(directory, clang);
+            failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
+            failures += parse_test_check_fixtures(directory);
+        }
         if (input_count == 0)
         {
             // The generated inputs, with -E's options but no includes.

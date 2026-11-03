@@ -569,6 +569,9 @@ static void check_test_request_parity(CheckTest* test, const char* directory)
         // An always_inline callee whose target attribute its caller lacks: -c reports it at the caller.
         "__attribute__((target(\"avx2\"), always_inline)) static inline int twice(int x)\n{\n    return x * 2;\n}\n"
         "int main(void)\n{\n    return twice(1) - 2;\n}\n",
+        // 32-byte vectors' variable shifts: AVX2's, which SSE2 hasn't to split them into (#1193).
+        "typedef int V8 __attribute__((vector_size(32)));\nV8 shift8(V8 a, V8 b)\n{\n    return a << b;\n}\n"
+        "int main(void)\n{\n    V8 a = { 1, 2, 3, 4, 5, 6, 7, 8 };\n    return shift8(a, a)[3] - 64;\n}\n",
     };
     enum { FIXTURES = BUSTER_ARRAY_LENGTH(fixtures) };
     static const CheckRequestTestParity cases[] = {
@@ -578,9 +581,11 @@ static void check_test_request_parity(CheckTest* test, const char* directory)
         { .label = "scalar code for the baseline by the scalar path", .fixture = 0, .options = { "-nostdinc", 0 }, .scalar = true },
         { .label = "scalar code for AVX-512 by --scalar among the options", .fixture = 0, .options = { "-nostdinc", "-march=znver5", "--scalar", 0 } },
         { .label = "32-byte vectors for AVX2", .fixture = 1, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
-        { .label = "32-byte vectors refused for the baseline", .fixture = 1, .options = { "-nostdinc", 0 }, .outcome = 1 },
+        { .label = "32-byte vectors for the baseline, split across its registers (#1193)", .fixture = 1, .options = { "-nostdinc", 0 } },
         { .label = "64-byte vectors for AVX-512", .fixture = 2, .options = { "-nostdinc", "-march=x86-64-v4", 0 } },
-        { .label = "64-byte vectors refused for AVX2", .fixture = 2, .options = { "-nostdinc", "-march=x86-64-v3", 0 }, .outcome = 1 },
+        { .label = "64-byte vectors for AVX2, split across its registers (#1193)", .fixture = 2, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
+        { .label = "32-byte variable shifts refused for the baseline", .fixture = 6, .options = { "-nostdinc", 0 }, .outcome = 1 },
+        { .label = "32-byte variable shifts for AVX2", .fixture = 6, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
         { .label = "a function's target attribute in a baseline unit", .fixture = 3, .options = { "-nostdinc", 0 } },
         { .label = "a function's target attribute by the scalar path", .fixture = 3, .options = { "-nostdinc", 0 }, .scalar = true },
         { .label = "the default macros", .fixture = 4, .options = { "-nostdinc", 0 } },
