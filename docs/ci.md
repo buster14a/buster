@@ -269,9 +269,12 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   `host-identity` job on the 9700X. It takes the lock for seconds and reads
   the identity with the same step as the 9700X job; the self-test keeps the
   two steps identical. The 9700X job is skipped only when that identity
-  equals the one the pull request's run recorded. A different identity, a
-  record without one, or a failed `host-identity` job runs native
-  correctness after all, and the record then says `host-unconfirmed`.
+  equals the one the pull request's run recorded. A component that can't be
+  read leaves no identity at all, never a placeholder that another unread
+  one would match, and the reuse accepts only an identity with every
+  component present. A different identity, an incomplete one, a record
+  without one, or a failed `host-identity` job runs native correctness after
+  all, and the record then says `host-unconfirmed`.
 
   Measurements are reused too only when the first-parent tree is also
   identical; otherwise they are the backlog's. Missing, ambiguous, stale or

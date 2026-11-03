@@ -210,7 +210,7 @@ write_record()
         printf 'workflow\t%s\nselector\t%s\ninventory\t%s\ntoolchain\t%s\ncorpus\t%s\nmode\toff\ncode\ttrue\nmeasure\t,lexer,\ngates\t-\n' "$other" "$other" "$other" "$other" "$other"
         printf 'changes_result\tsuccess\nevidence_result\tsuccess\nscope\tplain\nhosted\trun\nhosted_source\t-\nnative_evidence\trun\nnative_source\t-\n'
         printf 'measurement_evidence\trun\nmeasurement_source\t-\nhardware\tadmit\nhardware_reason\tadmitted\ntest_result\tsuccess\nfuzz_result\tskipped\n'
-        printf 'benchmark_result\tsuccess\nwindow\t-\nnative\tpassed\nhost\t9700X/6.17/0xb40/gcc-15\nqualification_result\tsuccess\noverride\t-\ncoverage\ttargeted\noutcome\tcomplete\n'
+        printf 'benchmark_result\tsuccess\nwindow\t-\nnative\tpassed\nhost\t9700X/6.17/0xb40/gcc-15/glibc_2.42\nqualification_result\tsuccess\noverride\t-\ncoverage\ttargeted\noutcome\tcomplete\n'
     } > "$record"
 }
 write_record "$work/record.tsv" "$tree" "$parent_tree"
@@ -218,12 +218,18 @@ write_record "$work/record.tsv" "$tree" "$parent_tree"
 GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'native=reused' 'a push reuses its pull request'"'"'s native correctness of the identical tree'
 expect_line "$GITHUB_OUTPUT" 'native_source=700' 'the reuse names its source run'
-expect_line "$GITHUB_OUTPUT" 'native_host=9700X/6.17/0xb40/gcc-15' 'and the host identity its run recorded, for the push to confirm'
+expect_line "$GITHUB_OUTPUT" 'native_host=9700X/6.17/0xb40/gcc-15/glibc_2.42' 'and the host identity its run recorded, for the push to confirm'
 expect_line "$GITHUB_OUTPUT" 'measurement=reused' 'and its measurements on the identical first-parent tree'
 expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'the nightly mode skips the 9700X for it'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=native-reused' 'and says why'
 GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a push still measures every plain run'
+# A host identity with a component its run couldn't read (a placeholder) can't be confirmed: nothing is reused.
+sed -i 's#^host\t.*#host\t9700X/6.17/unknown/gcc-15/glibc_2.42#' "$work/record.tsv"
+(cd "$work" && rm -f "$fixtures/artifact-7001.zip" && zip -q "$fixtures/artifact-7001.zip" record.tsv)
+GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'native=run' 'an incomplete host identity reuses nothing'
+expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and the 9700X job runs'
 # Another first-parent tree: native correctness alone; another tree: nothing.
 write_record "$work/record.tsv" "$tree" "$other"
 (cd "$work" && rm -f "$fixtures/artifact-7001.zip" && zip -q "$fixtures/artifact-7001.zip" record.tsv)
@@ -328,7 +334,7 @@ RECORD_REPOSITORY=1421805693 RECORD_RUN=41 RECORD_ATTEMPT=1 RECORD_EVENT=workflo
     CHANGES_OUTPUTS='{"code":"true","checker":"true","zen5":"false","measure":",lexer,"}' RECORD_CHANGES_RESULT=success \
     RECORD_EVIDENCE_RESULT=success RECORD_SCOPE=plain RECORD_HOSTED=reused RECORD_HOSTED_SOURCE=40 RECORD_HARDWARE=admit \
     RECORD_HARDWARE_REASON=admitted RECORD_TEST_RESULT=skipped RECORD_FUZZ_RESULT=skipped RECORD_BENCHMARK_RESULT=success \
-    RECORD_WINDOW=open RECORD_NATIVE=passed RECORD_HOST=9700X/6.17/0xb40/gcc-15 \
+    RECORD_WINDOW=open RECORD_NATIVE=passed RECORD_HOST=9700X/6.17/0xb40/gcc-15/glibc_2.42 \
     bash tools/ci/nightly.sh record "$work/record-job" > /dev/null
 expect_line "$GITHUB_OUTPUT" 'outcome=complete' 'a backlog run that measured is complete'
 expect_line "$work/record-job/record.tsv" $'gates\tchecker' 'the record names the selector'"'"'s true outputs'
