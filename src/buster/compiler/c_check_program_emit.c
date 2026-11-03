@@ -268,7 +268,7 @@ struct CheckEmitBoard
 // explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
-#define BUSTER_CHECK_TIER1_STEPS 7
+#define BUSTER_CHECK_TIER1_STEPS 8
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
 {

@@ -167,6 +167,9 @@ typedef enum Tier1SelectRule
     // A memory fence (IR_FENCE, #1059) of the order and scope `immediate`: mfence for a thread fence of seq_cst, the one
     // x86-64 needs an instruction for, and no records for the others. No value; no pass moved an access across it.
     TIER1_RULE_FENCE,
+    // The high 64 bits of values[0] times values[1], unsigned (IR_MULHU, #141's 128-bit integers): one operand in rax,
+    // mul of the other, the result in rdx, which the consumers save around it as TIER1_RULE_DIVIDE_RECIPROCAL's.
+    TIER1_RULE_MULTIPLY_HIGH,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -1209,7 +1212,8 @@ static uint32_t tier1_select_fixed_registers(uint32_t rule)
     const uint32_t divide = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX);
     // An unsigned I64's conversion (#141) writes the scratch register alone, which no value lives in: nothing is saved for
     // it, but its sequence takes the path's room.
-    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX : rule == TIER1_RULE_FLOAT_CONVERT_WIDE ? 1u << BUSTER_TIER1_SELECT_SCRATCH : 0;
+    return rule == TIER1_RULE_DIVIDE || rule == TIER1_RULE_DIVIDE_RECIPROCAL || rule == TIER1_RULE_MULTIPLY_HIGH ? divide : rule == TIER1_RULE_SHIFT ? 1u << X86_REGISTER_RCX :
+           rule == TIER1_RULE_FLOAT_CONVERT_WIDE ? 1u << BUSTER_TIER1_SELECT_SCRATCH : 0;
 }
 
 // TIER1_RULE_DIVIDE_RECIPROCAL's records (Tier1SelectReciprocal), the high product in rdx: the multiplier in rax, or in rdx
@@ -1351,6 +1355,22 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
     {
         count = tier1_select_reciprocal_records(holes, records);
+    }
+    else if (holes->rule == TIER1_RULE_MULTIPLY_HIGH)
+    {
+        // The product is commutative: an operand already in rax stays there, and mul reads its other operand, which may
+        // be rdx, before it writes rdx:rax.
+        const uint8_t rax = X86_REGISTER_RAX;
+        const uint8_t multiplier = holes->left == rax ? holes->right : holes->right == rax ? holes->left : holes->right;
+        if (holes->left != rax && holes->right != rax)
+        {
+            records[count++] = tier1_select_move(8, rax, holes->left);
+        }
+        records[count++] = (X86Instruction){ .rm = multiplier, .form = X86_FORM_MUL_RM64 };
+        if (holes->destination != X86_REGISTER_RDX)
+        {
+            records[count++] = tier1_select_move(8, holes->destination, X86_REGISTER_RDX);
+        }
     }
     else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
     {
@@ -3033,6 +3053,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_SYMBOL_ADDRESS;
         base.immediate = a;
         base.intrinsic_cost = 1;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_MULHU && type == IR_I64)
+    {
+        base.rule = TIER1_RULE_MULTIPLY_HIGH;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_LIFETIME)

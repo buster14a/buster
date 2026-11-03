@@ -135,6 +135,9 @@ typedef enum IrOp
     // fence). It reads and writes no value, but no pass moves a load, a store or a call across it, eliminates one past it
     // or drops it: an effect as an unknown call's on memory, without a call's registers. The typed stream's FENCE.
     IR_FENCE,
+    // The high 64 bits of an I64's unsigned product, a times b as 128 bits (#141): the high half of a 128-bit integer's
+    // product, which Tier 1's split of the 128-bit integers into halves makes (ir_wide.c), and x86's mul gives in rdx.
+    IR_MULHU,
     IR_OP_COUNT,
 } IrOp;
 
@@ -476,6 +479,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "vselect",
     "lifetime",
     "fence",
+    "mulhu",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -690,7 +694,8 @@ typedef enum IrRule
     X(IR_VCMP,          3, 7, BUSTER_IR_MASKS, IR_RULE_VECTOR_COMPARE, 0) \
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
-    X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0)
+    X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
+    X(IR_MULHU,         3, 3, 1u << IR_I64, IR_RULE_SAME, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };

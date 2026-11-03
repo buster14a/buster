@@ -259,13 +259,88 @@ selection guide's "By-value aggregates"). So does the dynamic stack (#141):
 variable-length arrays' and `alloca`'s allocations, and the stack's position
 saved and restored around their scopes, in a frame with a frame pointer whose
 places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
-from rsp around it (the selection guide's "The dynamic stack"). Still refused:
-long double and the 128-bit integers (`sqlite3.c`'s `sqlite3Multiply128` and
-`sqlite3Multiply160`), vectors, and the convention's rarer aggregate shapes (a
-part in a stack slot, a high or low eightbyte alone, a vector's or the x87's
-register). The IR's switches and selects of floating values are refused too,
-but the C driver's lowering makes neither: a `switch` comes as compares or a
-jump table, which Tier 1 takes, and `?:` as branches.
+from rsp around it (the selection guide's "The dynamic stack"). So do the
+128-bit integers (#141), as pairs of 64-bit halves ("The 128-bit integers",
+below). Still refused: long double, vectors, and the convention's rarer
+aggregate shapes (a part in a stack slot, a high or low eightbyte alone, a
+vector's or the x87's register). The IR's switches and selects of floating
+values are refused too, but the C driver's lowering makes neither: a `switch`
+comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
+
+### The 128-bit integers
+
+`ir_wide.c` (#141) splits a function's `I128` values into pairs of `I64`
+halves, low and high, between SSA promotion and the optimizer (the driver's
+`wide` stage), so that the optimizer's SCCP, dead code and CFG cleanup,
+selection, both allocations and their certificates see 64-bit values alone.
+Each `I128` instruction becomes its halves' instructions in its place, so that
+blocks keep their numbers and a block's phis stay first:
+
+- a constant, an undef, a copy, a select, `and`, `or`, `xor` and `not`: each
+  half's own;
+- an addition: the low halves' sum, and the high halves' plus its carry, the low
+  sum's unsigned compare below an operand; a subtraction likewise with its
+  borrow; a negation: each half negated, the high one less 1 where the low one
+  isn't zero;
+- a product, modulo 2^128 whatever the signedness: the low halves' product and
+  its high half, the IR's `mulhu` (the high 64 bits of an `I64`s' unsigned
+  product, [the IR guide](ir.md)'s), plus each cross product of a low half by a
+  high one not known to be zero. A product of two zero extensions, C's
+  `(unsigned __int128)a * b`, is `imul` and `mul` alone: selection's
+  `TIER1_RULE_MULTIPLY_HIGH`, one operand in `rax`, `mul` of the other, its
+  `rdx` the result, which both consumers save other values around as they do
+  a division by a constant's reciprocal;
+- a shift by a constant (through the count's extensions, truncations and
+  copies, as the typed stream gives `r >> 64`): shifts of the halves and an
+  `or`, a half alone past 64 bits, or at 64 the other half itself, for no
+  instruction; by a variable count, both halves shifted by its low 6 bits, the
+  bits crossing between them shifted by 1 and then by the complement (so that
+  no count reaches 64), and selects on its bit 6;
+- a comparison: equality from the halves' `xor`s, `or`ed; an order from the high
+  halves' (strict, of the predicate's signedness) where they differ, else the
+  low halves' (unsigned);
+- an extension: the value as the low half (a 64-bit one itself) and zero or its
+  sign as the high half; a truncation, the low half (to 64 bits the half
+  itself); a pointer's conversions, through the low half;
+- a load and a store: two 8-byte accesses, the high half's address 8 bytes on;
+  a phi: one of each half with the same predecessors.
+
+Division and remainder, and conversions to and from floating values, reach the
+IR as libgcc's calls (the checker's lowering), whose 128-bit arguments and
+results are by-value aggregates; an `I128` in a signature, or an operation the
+split doesn't take, refuses the body as unsupported, and Tier 0 compiles it.
+Every function `--tier1` compiles is scanned for an `I128` instruction, 64 type
+bytes a compare on the vector path and one at a time on its scalar twin, and a
+function without one is the promoted function itself. The rewrite is scalar:
+two passes of one body, counting then writing, on the functions with 128-bit
+values alone (two of `sqlite3.c`'s 2,668, none of Lua's), whose cost is below
+measurement on the compile (the record below). With the split, `--tier1
+--tier1-strict` compiles every function of `sqlite3.c` and speedtest1's, whose
+`--verify` hash is unchanged.
+
+The halves showed a constraint of the straight-line consumer: its allocation
+keeps each interval in the registers it allows and moves no value between
+registers, so a parameter bound to its incoming register, once evicted, can
+only reload there, which fails where another operand of the same node holds
+that register. Such a function now goes through the CFG consumer, whose
+allocation moves values (`tier1_emit_function`), rather than stopping the
+build.
+
+A 128-bit local is still a frame object (the checker gives `__int128`'s locals
+Tier 0's memory, initialized through its address), so promotion leaves its
+loads and stores, which the split makes 8-byte accesses: `sqlite3Multiply128`'s
+`r` goes through its frame slot. Promoting such a local is a front-end change
+(the checker's initialization and the IR lowering's slot types) not made here.
+
+`test-tier1-wide` runs hand-written 128-bit IR (every operation the split takes,
+`sqlite3Multiply128`'s product, a shift by an extended constant, phis around a
+loop, unaligned, volatile and indexed accesses), 120 random straight-line
+programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
+`?:`'s blocks, conversions both ways) through the split by both paths, which
+must make the same function, both verifiers, the optimizer and both of Tier 1's
+paths with their certificates, natively, against the IR's interpreter on the
+unsplit function and the programs' stack machine; and the split's refusals and
+its scan's twins.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

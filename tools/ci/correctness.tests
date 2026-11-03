@@ -479,6 +479,10 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 # #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
 # interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
 ./build/compiler test-tier1-masks
+# #141: the 128-bit integers split into 64-bit halves (ir_wide.c): hand-written and random 128-bit IR and Tier 0's random
+# 128-bit programs through the split, the optimizer and Tier 1 natively, against the IR's interpreter and the programs'
+# stack machine.
+./build/compiler test-tier1-wide
 # #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
 ./build/compiler test-mask-spills
 ./build/compiler test-tier1-model

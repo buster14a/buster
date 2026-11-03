@@ -20,8 +20,15 @@ requirements. [Command index](README.md).
   self-loops. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. Long double, the 128-bit integers and the convention's rarer
-  aggregate shapes still refuse explicitly ([the Tier 1
+  edge's stub. A straight line whose allocation can't place a value (an evicted
+  parameter whose incoming register another operand holds) goes through the CFG
+  consumer too. The 128-bit integers are split into 64-bit halves before the
+  optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
+  [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
+  random 128-bit programs, through the split by both paths, the optimizer and
+  both of Tier 1's paths natively, against the IR's interpreter on the unsplit
+  function and the programs' stack machine. Long double and the convention's
+  rarer aggregate shapes still refuse explicitly ([the Tier 1
   guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
   stores, constants and bitcasts to and from integers of every width) and

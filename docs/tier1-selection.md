@@ -862,7 +862,8 @@ heads and at its merge with main, `cc3387f`:
   scripts against 10,763 M and 4,281 M. Each program's hottest function
   (`sqlite3VdbeExec`, `luaV_execute`) was still Tier 0's then; with floating
   values and blocks' lifetimes (#141) both are Tier 1's, as every function of
-  `sqlite3.c` but the two 128-bit multiplies is.
+  `sqlite3.c` but the two 128-bit multiplies is (and those two too since the
+  128-bit integers' split, #141).
 - **Selection's cycles per IR instruction**, `benchmark-tier1-select-source` on
   the frozen `sqlite3.c`, since the bottom-up rewrite (medians of five processes
   of both paths interleaved, CPU 2): 225.0 by the vector path and 277.2 by the
@@ -886,6 +887,8 @@ heads and at its merge with main, `cc3387f`:
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-The remaining scalar/ABI/spill consumers and whole-C integration (the
-functions selection refuses whole, as `sqlite3.c`'s `sqlite3Multiply128` and
-`sqlite3Multiply160`, a constant of each) are outstanding.
+The remaining scalar/ABI/spill consumers and whole-C integration are
+outstanding. `sqlite3.c`'s `sqlite3Multiply128` and `sqlite3Multiply160`,
+which selection refused whole for a 128-bit constant each, are Tier 1's since
+the 128-bit integers' split (#141, [the Tier 1 guide](tier1.md)'s "The 128-bit
+integers"): every function of `sqlite3.c` compiles by `--tier1 --tier1-strict`.

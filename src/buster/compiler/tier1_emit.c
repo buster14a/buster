@@ -1224,7 +1224,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         }
     }
     // A phi-free straight-line chain keeps this consumer; every other function goes through the CFG consumer.
-    const bool chain = error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan);
+    bool chain = error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan);
     if (error == TIER1_EMIT_OK && !chain)
     {
         error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
@@ -1239,11 +1239,28 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     {
         error = tier1_emit_prepare(plan, &emitted.liveness, options, output, &emitted.prepared);
     }
+    Tier1AllocationError allocated = TIER1_ALLOCATION_OK;
     if (error == TIER1_EMIT_OK && chain)
     {
-        const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
+        allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_ALLOCATION, allocated);
         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
+    }
+    // This consumer's allocation keeps each interval in the registers it allows and moves no value from one register to
+    // another (tier1_emit_transitions): a parameter bound to its incoming register, once evicted, reloads there alone,
+    // which fails where another operand of the same node holds that register (#141's 128-bit halves found it). The CFG
+    // consumer, whose allocation moves values between registers, takes such a function whole, from nothing this one made.
+    if (error == TIER1_EMIT_ALLOCATION && chain && allocated == TIER1_ALLOCATION_CONSTRAINT)
+    {
+        arena_pop_to(output, output_mark);
+        arena_pop_to(scratch, scratch_mark);
+        emitted = (Tier1EmitResult){ 0 };
+        if (options->diagnostic != NULL)
+        {
+            *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
+        }
+        chain = false;
+        error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
     }
     if (error == TIER1_EMIT_OK && chain && options->certify)
     {
