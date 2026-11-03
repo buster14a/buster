@@ -64,11 +64,10 @@ own is classified, by the fast twin of the common shapes
 (`check_lower_template_fast`) or the general rules, writes its entries into a
 slot, and is marked closed or not, whose slots the task loop splices when it
 pops their roots in those contexts (`check_lower_template_splice`). The task
-loop stays the exact rules. The vector path's compile takes it
-(`CheckLowerShared.templates`, set by `check_lower_prepare`); the scalar path's
-keeps the tasks alone. Its steps are still scalar, and the 9700X's
-`lower.statements` and `lower.bodies` rows weigh what they cost against what
-the splices save. `./build/compiler test-lowering-templates [--passes N] [preprocessor
+loop stays the exact rules. No compile takes it (`CheckLowerShared.templates`):
+on the 9700X, a compile that took it spent about three times in these scalar
+steps what the splices saved, so they wait for data-parallel ones.
+`./build/compiler test-lowering-templates [--passes N] [preprocessor
 options] file...` (`c_check_program_templates_test.c`) lowers each file by the
 tasks and with the templates forced (`check_program_lower_templates`), on any
 host, requires every function's entries, locals, calls and arguments to be the
