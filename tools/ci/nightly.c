@@ -2035,11 +2035,14 @@ static bool nightly_pending_status(NightlyStatus status)
     return status == NIGHTLY_STATUS_IN_FLIGHT || status == NIGHTLY_STATUS_READY || status == NIGHTLY_STATUS_PREPARING || status == NIGHTLY_STATUS_NEEDS_PREPARATION;
 }
 
+// `dispatch PURPOSE admit|defer SHA REQUEST SNAPSHOT`: the run's state, its request token and the cycle's pinned
+// snapshot, which the worker checks the state's first-parent ancestry against and records (not main's head now, which
+// may have moved on since the pin).
 static void nightly_dispatch(FILE* output, const NightlyPlanInput* input, NightlyCycleState* cycle, uint32_t* sequence, NightlyPurpose purpose, bool admit, const char* sha)
 {
     char date[9];
     snprintf(date, sizeof(date), "%.4s%.2s%.2s", cycle->date, cycle->date + 5, cycle->date + 8);
-    fprintf(output, "%s\t%s\t%s\t%s\t%s.%llu.%u.%s\n", input->run ? "dispatch" : "would-dispatch", nightly_purpose_names[purpose], admit ? "admit" : "defer", sha, date, (unsigned long long)input->coordinator, *sequence, admit ? "admit" : "defer");
+    fprintf(output, "%s\t%s\t%s\t%s\t%s.%llu.%u.%s\t%s\n", input->run ? "dispatch" : "would-dispatch", nightly_purpose_names[purpose], admit ? "admit" : "defer", sha, date, (unsigned long long)input->coordinator, *sequence, admit ? "admit" : "defer", input->states->items[cycle->snapshot].sha);
     *sequence += 1;
 }
 
@@ -3296,9 +3299,9 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_plan(scenario, evening);
     snprintf(line, sizeof(line), "pin\tcycle\t2026-11-04\t%s\t900\t", scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line), "the cycle pins main's head as its snapshot");
-    snprintf(line, sizeof(line), "dispatch\tsnapshot\tdefer\t%s\t20261104.900.1.defer\n", scenario->states.items[5].sha);
+    snprintf(line, sizeof(line), "dispatch\tsnapshot\tdefer\t%s\t20261104.900.1.defer\t%s\n", scenario->states.items[5].sha, scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line), "the snapshot's daily hosted run is prepared first");
-    snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t20261104.900.2.defer\n", scenario->states.items[0].sha);
+    snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t20261104.900.2.defer\t%s\n", scenario->states.items[0].sha, scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 3, "the oldest states' hosted rows are prepared, three at a time");
     nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 04:00");
     nightly_scenario_free(scenario);
@@ -3309,7 +3312,7 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_cycle(scenario, "2026-11-04", 5);
     nightly_scenario_row(scenario, 200, 5, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
     nightly_scenario_plan(scenario, opening);
-    snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t20261104.900.1.admit\n", scenario->states.items[5].sha);
+    snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t20261104.900.1.admit\t%s\n", scenario->states.items[5].sha, scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\t") == 1 && nightly_has(scenario, "\nwait\t"), "the snapshot's comprehensive run is admitted first, alone");
     nightly_expect(test, strstr(scenario->report, "plain satisfies") == NULL && strstr(scenario->report, "| ready | 6 |") != NULL, "every-plain-run pushes don't satisfy targeted coverage");
     // A hardware run in flight: wait, admit nothing.
@@ -3395,6 +3398,16 @@ static void nightly_test_plan(NightlyTest* test)
     scenario->dry_run = true;
     nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 13, 0));
     nightly_expect(test, nightly_count(scenario, "would-dispatch\tsnapshot\tadmit") == 0, "a dry run's override admits nothing");
+    nightly_scenario_free(scenario);
+
+    // Main moved on after the pin: the cycle keeps its snapshot, and every dispatch names it, not main's head.
+    scenario = nightly_scenario(5, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
+    nightly_scenario_plan(scenario, opening);
+    snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t20261104.900.1.admit\t%s\n", scenario->states.items[3].sha, scenario->states.items[3].sha);
+    nightly_expect(test, nightly_has(scenario, line) && !nightly_has(scenario, scenario->states.items[4].sha), "after main moves on, the cycle's pinned snapshot is the one dispatched and named");
     nightly_scenario_free(scenario);
 
     // The prepare job's step inside the window (or under an override) prepares and admits nothing: admission is the

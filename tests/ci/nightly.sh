@@ -353,7 +353,7 @@ GITHUB_RUN_ID=9100 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') run_coordinator "$wo
 expect_line "$work/dry/states.tsv" "state	$epoch	$(git -C "$history" rev-parse "$epoch^1")	1793700100" 'the epoch is the first state'
 expect_no_match "$work/dry/states.tsv" "$inside" 'a merged branch'"'"'s own commits are not states'
 expect_match "$work/dry/report.md" '\| not-required \| 1 \|' 'the documentation change needs nothing'
-expect_match "$work/dry/plan.tsv" "^would-dispatch	snapshot	defer	$head	20261104\.9100\.1\.defer$" 'the dry run would prepare the snapshot'
+expect_match "$work/dry/plan.tsv" "^would-dispatch	snapshot	defer	$head	20261104\.9100\.1\.defer	$head$" 'the dry run would prepare the snapshot'
 expect_match "$work/dry/plan.tsv" "^would-dispatch	backlog	defer	$epoch	" 'and the oldest states'"'"' hosted rows'
 expect_line "$work/dry/plan.tsv" $'done\tdry run' 'and does nothing'
 expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' 'a dry run writes nothing'
@@ -455,4 +455,19 @@ GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$he
 expect_no_match "$fixtures/calls.log" '^workflow run' 'the window job repeats none of the prepare job'"'"'s dispatches the API doesn'"'"'t show yet'
 cmp "$work/handoff-prepare/pending.tsv" "$work/handoff-window/pending.tsv" || fail 'the window job starts from the prepare job'"'"'s pending dispatches'
 rm -f "$fixtures/artifacts-9700.json"
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations and the prepare-to-window handoff checked\n'
+# Main moves on between the prepare job and the window job: the window job's dispatches still name the cycle's pinned
+# snapshot, which the worker checks ancestry against and records, not main's new head.
+rm -f "$fixtures"/count-*
+cat > "$fixtures/runs-workflow_dispatch.json" <<JSON
+{"workflow_runs":[{"id":900,"run_attempt":1,"event":"workflow_dispatch","status":"completed","conclusion":"success","head_sha":"$head","path":".github/workflows/9700x.yml","head_branch":"nightly/$head","created_at":"2026-11-03T21:15:00Z","updated_at":"2026-11-03T22:30:00Z","head_repository":{"id":1421805693},"display_title":"Nightly snapshot (defer) of $head [20261104.9200.1.defer]"}]}
+JSON
+echo more > "$history/src/d.c"
+git -C "$history" add -A
+commit_at 1793700700 commit -q -m later
+later=$(git -C "$history" rev-parse HEAD)
+git -C "$history" -c push.negotiate=false push -q "$remote" main
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') run_coordinator "$work/moved" window run
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
+expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
+printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, the prepare-to-window handoff and a pin that main moved past checked\n'

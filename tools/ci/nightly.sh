@@ -538,15 +538,17 @@ coordinate()
                     printf '%s\n' "$(cut -f 2- <<< "$line")" >> "$ledger"
                     ;;
                 dispatch)
-                    local purpose=${action[1]} hardware=${action[2]} commit=${action[3]} request=${action[4]}
+                    local purpose=${action[1]} hardware=${action[2]} commit=${action[3]} request=${action[4]} pinned=${action[5]:-}
                     sha "$commit"
+                    # The cycle's pinned snapshot, the planner's: main's head may have moved on since the pin.
+                    sha "$pinned"
                     if ensure_branch "$commit"; then
                         local override_arguments=()
                         if [ -n "${NIGHTLY_OVERRIDE:-}" ]; then
                             override_arguments=(-f "override=$NIGHTLY_OVERRIDE")
                         fi
                         "$gh" workflow run 9700x.yml --repo "$repository" --ref "nightly/$commit" -f "purpose=$purpose" \
-                            -f "hardware=$hardware" -f "snapshot=$main" -f "request=$request" "${override_arguments[@]}"
+                            -f "hardware=$hardware" -f "snapshot=$pinned" -f "request=$request" "${override_arguments[@]}"
                         printf 'pending\t%s\t%s\t%s\t%s\t%s\n' "$request" "$purpose" "$hardware" "$commit" "$(now)" >> "$pending"
                     fi
                     sequence=$((sequence + 1))

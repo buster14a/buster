@@ -316,7 +316,9 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    harvests the records of completed runs the ledger lacks. A record that
    disagrees with the API's job conclusions counts as nothing.
 2. **Pin.** The cycle (the night ahead, from noon) pins main's head as its
-   snapshot once.
+   snapshot once. Every dispatch of the cycle names that pin, not main's head
+   at dispatch, which may have moved on. The worker checks the state's
+   first-parent ancestry against the pin and records it.
 3. **Prepare.** Before the window, the coordinator dispatches the snapshot's
    deferred run: every hosted row and the 100,000-input fuzz campaigns, the
    daily diagnostics the old schedule ran. It also dispatches the plain rows of
