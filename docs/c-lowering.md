@@ -185,17 +185,29 @@ definition. Its flags and edges:
   `for` (its first clause such a statement) or a `do` whose constant condition
   is false, or a `switch` of a constant condition without a `case`. A read of
   an object (`n;`), a static declaration, a `return` or `goto` the evaluation
-  reaches, and a loop that runs keep both arms. Some shapes that clang folds
-  keep both arms here, which runs alike: a statement expression with a jump in
-  code its evaluation skips (`if (0) return 0;`, a `return` or `goto` in a
-  loop whose condition is false or in a constant `switch`'s body before any
-  label) or that initializes a `volatile` object, which the checker counts as
-  side effects of the statement expression; a loop that a `break` leaves
-  (`while (1) { break; }`, `do { break; } while (0)`) and a constant `switch`
-  with a `case` or `default` label, which the walk doesn't model; a `const`
-  local's read as its value, which the checker gives no constant; and an
-  address the walk doesn't take (an element's, a variable-length array's
-  decay). The
+  reaches, and a loop that reaches its backedge keep both arms. An emission-only
+  fallback (`c_check_program_fold.c`, #1194) follows statements in source order:
+  a reached `break` leaves only its innermost loop or switch, and skips the
+  remaining body, a for's update and a do's condition. A constant switch starts
+  at its matching case (including signed ranges) or default and follows
+  fallthrough. Code before that label is not evaluated. Jumps in untaken arms
+  and local volatile initialization therefore do not prevent this emission
+  proof. The checker stream, diagnostics and constant-expression results are
+  unchanged. A direct read of a nonvolatile const integer local can supply the
+  result when its constant initializer actually executed; ordinary and volatile
+  reads remain unknown. Constant in-bounds element addresses and VLA decay are
+  accepted without reading their elements.
+  The fallback does not interpret mutable locals, repeat loops, follow
+  `continue`, enter switch cases through other control statements, or bypass
+  cleanup, atomic-initialization or effectful VLA-bound obligations. Such
+  paths, nested regions requiring the fallback, and exhaustion of its bounded
+  128-entry statement stack remain conservative. Existing ordinary expression
+  and VLA proofs still apply first. All listed #1194 shapes compare their actual
+  object symbols with clang and execute against clang's build; there is no
+  wider-emission exemption for them. A separate VM-bound safety regression
+  asserts conservative selection and byte-identical emission, not clang parity:
+  clang 23 drops the bound updates in that fixture, whereas this fallback
+  refuses to discard them. The
   condition and the dead arm are left out with their
   references, their block-scope statics (a `used` one is no root either) and
   their statement expressions, whose regions are written empty

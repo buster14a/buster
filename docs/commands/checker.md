@@ -52,6 +52,9 @@ requirements. [Command index](README.md).
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
+  `--program-selection` selects the emission-selection and constant-if regressions alone, including #1194's
+  statement-expression paths: scalar/vector and eager/lazy objects must agree byte for byte and match Clang's
+  symbols and execution. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
