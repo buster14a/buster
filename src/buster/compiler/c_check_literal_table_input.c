@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #658's bounded file-scope integer tables. Prove the complete literal/comma grammar and every warning-free
+// #658's bounded file-scope integer and float/double tables. Prove the complete literal/comma grammar and every warning-free
 // conversion before changing reader state. One retained bytes part replaces the elements' graph and plans.
 // Unsupported syntax, formats, widths, excess elements and conversions keep the ordinary source path exactly.
 // The SIMD grammar reads bounded 64-token blocks; small literals decode 16 spellings and stores narrow 8 values.
@@ -188,6 +188,158 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
     return valid;
 }
 
+// Keep the ordinary literal parser's rounding and range classification. Same-format real literals need no
+// expression action; other source types use the ordinary unary/initializer actions and must convert exactly.
+// In particular, test an integer in the host's exact 64-bit-significand format, not after rounding it to double.
+// Losing precision, range warnings, imaginary/bit-precise constants and malformed spellings retain dense checking.
+static bool check_literal_table_floating_value(CheckInputReader* reader, const uint8_t* spelling, uint32_t length, bool negative, TypeId element, uint64_t* bits)
+{
+    CheckLiteral literal = { 0 };
+    check_literal_number(spelling, length, reader->scratch, &literal);
+    reader->output->resource |= literal.resource;
+    bool valid = literal.valid && !literal.resource && !literal.imaginary && literal.bit_width == 0 && literal.range == CHECK_LITERAL_RANGE_NONE;
+    long double number = 0;
+    if (valid && literal.real && literal.type == type_unqualified(element))
+    {
+        number = negative ? -literal.floating : literal.floating;
+    }
+    else if (valid)
+    {
+        CheckValue value = check_literal_value(literal);
+        if (negative)
+        {
+            const CheckAction action = {
+                .op = CHECK_OP_NEGATIVE,
+                .operands = { value },
+            };
+            CheckActionResult result = { 0 };
+            check_action_scalar(reader->types, &action, &result);
+            reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
+            valid = result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 && result.value.fault == CHECK_FAULT_NONE;
+            value = result.value;
+        }
+        long double original = 0;
+        if (valid && value.constant_kind == CHECK_CONSTANT_INTEGER)
+        {
+            uint32_t width = 0;
+            bool is_signed = false;
+            valid = check_action_integer_type(reader->types, value.type, &width, &is_signed) && width <= 64;
+            if (valid)
+            {
+                const unsigned __int128 magnitude = value.integer & check_action_mask(width);
+                const __int128 signed_number = is_signed && (magnitude >> (width - 1)) != 0 ?
+                                               (__int128)magnitude - ((__int128)1 << width) : (__int128)magnitude;
+                original = (long double)signed_number;
+            }
+        }
+        else if (valid)
+        {
+            valid = value.constant_kind == CHECK_CONSTANT_FLOATING;
+            original = value.floating;
+        }
+        if (valid)
+        {
+            const CheckAction action = {
+                .op = CHECK_OP_INITIALIZE,
+                .operands = { value },
+                .type = element,
+            };
+            CheckActionResult result = { 0 };
+            check_action_scalar(reader->types, &action, &result);
+            reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
+            valid = result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 && result.value.fault == CHECK_FAULT_NONE &&
+                    result.value.constant_kind == CHECK_CONSTANT_FLOATING && result.value.floating == original;
+            number = result.value.floating;
+        }
+    }
+    if (valid)
+    {
+        *bits = 0;
+        if (type_unqualified(element) == BUSTER_TYPE_FLOAT)
+        {
+            const float converted = (float)number;
+            memcpy(bits, &converted, sizeof(converted));
+        }
+        else
+        {
+            const double converted = (double)number;
+            memcpy(bits, &converted, sizeof(converted));
+        }
+    }
+    return valid;
+}
+
+static bool check_literal_table_floating_batch(CheckInputReader* reader, const uint32_t* tokens, uint32_t count, TypeId element, uint32_t width, uint8_t* destination)
+{
+    uint32_t words[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
+    uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
+    const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    uint32_t decoded[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    uint64_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    const uint64_t mark = reader->scratch->length;
+    // Spelling normalization only grows scratch; the parser's columns/options stay immutable and disjoint from output.
+    const bool scalar = reader->parser->options.scalar;
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    const uint32_t unit = width / 8;
+    bool valid = true;
+    for (uint32_t lane = 0; valid && lane < count; lane += 1)
+    {
+        valid = check_input_spelling(reader, tokens[lane], &spellings[lane], &lengths[lane]);
+        if (valid && lengths[lane] <= sizeof(uint32_t))
+        {
+            memcpy(words + lane, spellings[lane], lengths[lane]);
+        }
+    }
+    const __mmask16 lanes = (__mmask16)((1u << count) - 1);
+    const __mmask16 small = valid && !scalar ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
+    for (uint32_t lane = 0; valid && lane < count; lane += 1)
+    {
+        const bool negative = kinds[tokens[lane] - 1] == PARSE_KIND_MINUS;
+        if ((small & (1u << lane)) != 0)
+        {
+            // These int literals are at most 999, exactly representable in both formats. Negate as an int:
+            // -0 is positive floating zero, unlike the floating literal -0.0.
+            const int32_t number = negative ? -(int32_t)decoded[lane] : (int32_t)decoded[lane];
+            values[lane] = 0;
+            if (width == 32)
+            {
+                const float converted = (float)number;
+                memcpy(values + lane, &converted, sizeof(converted));
+            }
+            else
+            {
+                const double converted = (double)number;
+                memcpy(values + lane, &converted, sizeof(converted));
+            }
+        }
+        else
+        {
+            valid = check_literal_table_floating_value(reader, spellings[lane], lengths[lane], negative, element, values + lane);
+        }
+    }
+    for (uint32_t lane = 0; valid && scalar && lane < count; lane += 1)
+    {
+        memcpy(destination + (uint64_t)lane * unit, values + lane, unit);
+    }
+    for (uint32_t first = 0; valid && !scalar && first < count; first += 8)
+    {
+        const uint32_t left = count - first;
+        const __mmask8 live = (__mmask8)((1u << (left < 8 ? left : 8)) - 1);
+        const __m512i representations = _mm512_maskz_loadu_epi64(live, values + first);
+        uint8_t* bytes = destination + (uint64_t)first * unit;
+        if (width == 32)
+        {
+            _mm512_mask_cvtepi64_storeu_epi32(bytes, live, representations);
+        }
+        else
+        {
+            _mm512_mask_storeu_epi64(bytes, live, representations);
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+    return valid;
+}
+
 static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t assignment)
 {
     CheckInput* input = reader->output;
@@ -203,12 +355,14 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
                     parser->tree.parents[begin] == end - 1 && parser->tokens.kinds[end - 1] == PARSE_KIND_R_BRACE;
     uint32_t width = 0;
     bool is_signed = false;
+    const TypeId element = eligible ? type_element(reader->types, type) : 0;
+    const bool floating = element != 0 && (type_unqualified(element) == BUSTER_TYPE_FLOAT || type_unqualified(element) == BUSTER_TYPE_DOUBLE);
     if (eligible)
     {
-        const TypeId element = type_element(reader->types, type);
-        eligible = (type_qualifiers(element) & BUSTER_TYPE_VOLATILE) == 0 && type_kind(reader->types, element) == BUSTER_TYPE_KIND_INTEGER &&
-                   type_unqualified(element) != BUSTER_TYPE_BOOL && check_action_integer_type(reader->types, element, &width, &is_signed) &&
-                   (width == 8 || width == 16 || width == 32 || width == 64);
+        width = floating ? (type_unqualified(element) == BUSTER_TYPE_FLOAT ? 32 : 64) : 0;
+        eligible = (type_qualifiers(element) & BUSTER_TYPE_VOLATILE) == 0 &&
+                   (floating || (type_kind(reader->types, element) == BUSTER_TYPE_KIND_INTEGER && type_unqualified(element) != BUSTER_TYPE_BOOL &&
+                    check_action_integer_type(reader->types, element, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64)));
     }
     const uint32_t count = eligible ? check_literal_table_shape(parser->tokens.kinds, begin + 1, end - 1, parser->options.scalar) : 0;
     eligible = eligible && count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
@@ -229,7 +383,9 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
             batch += 1;
             if (batch == BUSTER_CHECK_LITERAL_TABLE_BATCH || written + batch == count)
             {
-                accepted = check_literal_table_batch(reader, tokens, batch, width, is_signed, payload + (uint64_t)written * (width / 8));
+                uint8_t* destination = payload + (uint64_t)written * (width / 8);
+                accepted = floating ? check_literal_table_floating_batch(reader, tokens, batch, element, width, destination) :
+                                      check_literal_table_batch(reader, tokens, batch, width, is_signed, destination);
                 written += batch;
                 batch = 0;
             }

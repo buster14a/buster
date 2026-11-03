@@ -105,7 +105,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
                                       check_input(&input, &parser, &pp, &types.table, &output, &scratch)) &&
                 check_graph_run(&types.table, &input.graph, &output, &scratch, &checking, &stream) && stream.report_count == 0 &&
                 check_initializers_run(&plans, &input, &stream, &parser, &types.table, &output, &scratch) && plans.count == 1;
-        check_test_expect(test, ready, "integer table source checks with compact paths and the full-graph reference");
+        check_test_expect(test, ready, "literal table source checks with compact paths and the full-graph reference");
         if (ready)
         {
             const CheckInitializer* plan = plans.plans;
@@ -121,7 +121,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
             {
                 ready = ready && plan->object_size == expected_size && memcmp(bytes, expected, expected_size) == 0;
             }
-            check_test_expect(test, ready, "compact integer table bytes, omitted zero tail and completed type equal ordinary per-element planning");
+            check_test_expect(test, ready, "compact literal table bytes, omitted zero tail and completed type equal ordinary per-element planning");
             check_test_expect(test, input.literal_table_count == (path != 0 && compact ? 1u : 0u) &&
                                    (!compact || path == 0 || (input.graph.count < dense_nodes && dense_nodes - input.graph.count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
                                     plan->count == 1 && plan->parts[0].kind == CHECK_INIT_BYTES)),
@@ -180,7 +180,7 @@ static void check_test_literal_table_shapes(CheckTest* test)
     }
 }
 
-static void check_test_literal_table_contract(CheckTest* test)
+static void check_test_literal_table_contract(CheckTest* test, const char* element)
 {
     char source[8192];
     InternTable identifiers = { 0 };
@@ -194,7 +194,7 @@ static void check_test_literal_table_contract(CheckTest* test)
     const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
     const ParseOptions parsing = { 0 };
     bool ready = output.base != NULL && scratch.base != NULL && rollback.base != NULL &&
-                 check_test_literal_table_source(source, sizeof(source), "unsigned char", 129, 0, true) &&
+                 check_test_literal_table_source(source, sizeof(source), element, 129, 0, true) &&
                  intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
                  parse_initialize(&parser, &parsing, preprocessing.language) &&
                  pp_run_source(&pp, "table-contract.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&
@@ -368,10 +368,14 @@ static void check_test_literal_table_order(CheckTest* test)
     }
 }
 
+#include "c_check_literal_table_floating_test.c"
+
 static void check_test_literal_tables(CheckTest* test, const char* clang)
 {
     check_test_literal_table_shapes(test);
-    check_test_literal_table_contract(test);
+    check_test_literal_table_contract(test, "unsigned char");
+    check_test_literal_table_contract(test, "float");
+    check_test_literal_table_contract(test, "double");
     check_test_literal_table_order(test);
     char source[32768];
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
@@ -393,7 +397,7 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
         check_test_expect(test, made, "typed literal table fixture fits its source buffer");
         if (made)
         {
-            check_test_literal_table_case(test, source, i < 7, false);
+            check_test_literal_table_case(test, source, i < 8, false);
         }
     }
     {
@@ -422,4 +426,5 @@ static void check_test_literal_tables(CheckTest* test, const char* clang)
             check_test_program_source(test, source, "literal-table-native", clang);
         }
     }
+    check_test_literal_floating_tables(test, clang);
 }
