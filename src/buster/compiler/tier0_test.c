@@ -731,11 +731,13 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
     return same;
 }
 
-// A prefix value remains live below the call's arguments. The byte effects wrap at the signed boundary,
-// but their true post-call depths are two (prefix plus result), or an explicit depth refusal at240.
+// Calls whose byte effects cross the signed boundary, with live prefixes across the old 240 limit and byte wrap.
+// Build the pushes as well as the call: the cold selector now derives full depths from the stream, not seeded bytes.
 static void tier0_test_wide_call_depths(Tier0TestTally* tally)
 {
-    static const uint32_t counts[] = { 127, 128, 129, 130, 237, 238 };
+    static const uint32_t counts[] = { 127, 128, 129, 130, 237, 238, 239 };
+    static const uint32_t prefixes[] = { 1, 15, 16, 239, 240, 255, 256, 257, 512 };
+    enum { capacity = 1024 };
     Arena scratch = arena_reserve(UINT64_C(1) << 20);
     const bool ready = tier0_test_expect(tally, scratch.base != NULL, "wide call depths", "no selector scratch");
     for (uint32_t floating = 0; ready && floating < 2; floating += 1)
@@ -744,55 +746,68 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
         {
             for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
             {
-                arena_pop_to(&scratch, 0);
-                const uint32_t arguments = counts[c];
-                const uint8_t kind = BUSTER_TYPED_CALL;
-                const uint8_t class = floating != 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
-                const uint64_t value = 0;
-                const SymbolId target = indirect != 0 ? 0 : 1;
-                uint8_t absorbed = 0;
-                uint16_t template = 0;
-                const uint32_t before_integer = floating != 0 ? indirect : arguments + 1 + indirect;
-                const uint32_t before_floating = floating != 0 ? arguments + 1 : 0;
-                int8_t integer_effect = (int8_t)(floating != 0 ? -(int32_t)indirect : 1 - (int32_t)arguments - (int32_t)indirect);
-                int8_t floating_effect = (int8_t)(floating != 0 ? 1 - (int32_t)arguments : 0);
-                uint8_t integer_depth = (uint8_t)before_integer;
-                uint8_t floating_depth = (uint8_t)before_floating;
-                Tier0Entries entries =
+                for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(prefixes); p += 1)
                 {
-                    .absorbed = &absorbed,
-                    .templates = &template,
-                    .integer_effects = &integer_effect,
-                    .floating_effects = &floating_effect,
-                    .depths = &integer_depth,
-                    .floating_depths = &floating_depth,
-                };
-                const Tier0Function function =
-                {
-                    .count = 1,
-                    .kinds = &kind,
-                    .classes = &class,
-                    .values = &value,
-                    .call_count = 1,
-                    .call_targets = &target,
-                    .call_argument_counts = &arguments,
-                };
-                Tier0Frame frame = { .depth_count = 15 };
-                uint32_t deep_count = 0;
-                const Tier0Error error = tier0_select_deep(&function, &entries, &frame, &scratch, false, &deep_count);
-                const bool refused = before_integer >= BUSTER_TIER0_MAX_DEPTH;
-                bool correct = refused ? error == TIER0_ERROR_DEPTH : error == TIER0_OK;
-                if (correct && !refused)
-                {
-                    const Tier0DeepEntry deep = tier0_deep_entry(&function, &entries, 0);
-                    const uint32_t flags = entries.deep[0];
-                    correct = deep_count == 1 && deep.before[0] == before_integer && deep.before[1] == before_floating &&
-                              deep.exit[0] == (floating != 0 ? 0u : 2u) && deep.exit[1] == (floating != 0 ? 2u : 0u) &&
-                              (flags & (BUSTER_TIER0_DEEP_CALL | BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING)) ==
-                              (BUSTER_TIER0_DEEP_CALL | BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING);
+                    const uint32_t arguments = counts[c];
+                    const uint32_t prefix = prefixes[p];
+                    const uint8_t class = floating != 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
+                    const uint32_t before_integer = floating != 0 ? indirect : arguments + prefix + indirect;
+                    const uint32_t before_floating = floating != 0 ? arguments + prefix : 0;
+                    const uint32_t call = before_integer + before_floating;
+                    const uint32_t after_integer = floating != 0 ? 0 : prefix + 1;
+                    const uint32_t after_floating = floating != 0 ? prefix + 1 : 0;
+                    for (uint32_t vector = 0; vector < 2; vector += 1)
+                    {
+                        arena_pop_to(&scratch, 0);
+                        uint8_t kinds[capacity] = { 0 };
+                        uint8_t classes[capacity] = { 0 };
+                        uint64_t values[capacity] = { 0 };
+                        uint8_t absorbed[capacity] = { 0 };
+                        uint8_t variants[capacity] = { 0 };
+                        uint16_t templates[capacity] = { 0 };
+                        uint64_t words[capacity] = { 0 };
+                        int8_t integer_effects[capacity] = { 0 };
+                        int8_t floating_effects[capacity] = { 0 };
+                        uint8_t integer_depths[capacity] = { 0 };
+                        uint8_t floating_depths[capacity] = { 0 };
+                        for (uint32_t i = 0; i < call; i += 1)
+                        {
+                            kinds[i] = BUSTER_TYPED_CONST;
+                            classes[i] = i < before_integer ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_F64;
+                            integer_effects[i] = i < before_integer ? 1 : 0;
+                            floating_effects[i] = i < before_integer ? 0 : 1;
+                        }
+                        kinds[call] = BUSTER_TYPED_CALL;
+                        classes[call] = class;
+                        integer_effects[call] = (int8_t)((int32_t)after_integer - (int32_t)before_integer);
+                        floating_effects[call] = (int8_t)((int32_t)after_floating - (int32_t)before_floating);
+                        Tier0Entries entries = {
+                            .key_kinds = kinds, .key_classes = classes, .variants = variants, .absorbed = absorbed,
+                            .templates = templates, .words = words, .integer_effects = integer_effects,
+                            .floating_effects = floating_effects, .depths = integer_depths, .floating_depths = floating_depths,
+                        };
+                        const Tier0Function function = {
+                            .count = call + 1, .kinds = kinds, .classes = classes, .values = values,
+                            .call_count = 1, .call_argument_counts = &arguments,
+                        };
+                        Tier0Frame frame = { .depth_count = 15, .save_slots = UINT32_MAX };
+                        uint32_t deep_count = 0;
+                        const Tier0Error error = tier0_select_deep(&function, &entries, &frame, &scratch, vector != 0, &deep_count);
+                        bool correct = error == TIER0_OK;
+                        if (correct)
+                        {
+                            const Tier0DeepEntry deep = tier0_deep_entry(&function, &entries, call);
+                            const uint32_t flags = entries.deep[call];
+                            correct = deep_count != 0 && frame.save_slots == 0 && deep.before[0] == before_integer &&
+                                      deep.before[1] == before_floating && deep.exit[0] == after_integer && deep.exit[1] == after_floating &&
+                                      (flags & BUSTER_TIER0_DEEP_CALL) != 0 &&
+                                      ((flags & BUSTER_TIER0_DEEP_FILL_INTEGER) != 0) == (after_integer <= 15) &&
+                                      ((flags & BUSTER_TIER0_DEEP_FILL_FLOATING) != 0) == (after_floating <= BUSTER_TIER0_FLOATING_DEPTHS);
+                        }
+                        tier0_test_expect(tally, correct, "wide call depths", "%u arguments, prefix %u, floating %u, indirect %u, vector %u: error %u",
+                                          arguments, prefix, floating, indirect, vector, (uint32_t)error);
+                    }
                 }
-                tier0_test_expect(tally, correct, "wide call depths", "%u arguments, %s result, %s target: modulo effects preserve the prefix and result", arguments,
-                                  floating != 0 ? "floating" : "integer", indirect != 0 ? "indirect" : "direct");
             }
         }
     }
@@ -1943,7 +1958,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
 {
     enum
     {
-        capacity = 512,
+        capacity = 2048,
     };
     uint8_t kinds[capacity];
     uint8_t classes[capacity];
@@ -1996,12 +2011,12 @@ static void tier0_test_errors(Tier0TestTally* tally)
                           vector.error, vector.node);
         arena_pop_to(&arena, mark);
     }
-    static const uint32_t deeps[] = { 14, 15, 16, 17, 32, 239, 240, 241, 250 };
+    static const uint32_t deeps[] = { 14, 15, 16, 17, 32, 239, 240, 241, 250, 255, 256, 257, 258, 511, 512, 513, 1000 };
     for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(deeps); d += 1)
     {
         // `deep` constants on the integer stack at once, added up and discarded. The last one is the first add's
-        // immediate, so 16 fit the 15 depths, the next ones go to the deep slots, and a stack of 240 (241 constants) is
-        // refused past BUSTER_TIER0_MAX_DEPTH.
+        // immediate, so 16 fit the 15 registers and the next ones go to dynamically sized deep slots, including
+        // both sides of the old 240 limit and of each byte wrap.
         const uint32_t deep = deeps[d];
         uint32_t count = 0;
         for (uint32_t k = 0; k < deep; k += 1)
@@ -2034,7 +2049,7 @@ static void tier0_test_errors(Tier0TestTally* tally)
         const uint64_t mark = arena.length;
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        const Tier0Error expected = deep - 1 >= BUSTER_TIER0_MAX_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
+        const Tier0Error expected = TIER0_OK;
         tier0_test_expect(tally, scalar.error == expected && vector.error == expected && (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)), "errors",
                           "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
         arena_pop_to(&arena, mark);
