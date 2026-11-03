@@ -420,7 +420,7 @@ So a units lane does five things:
 
 ### The units' memory
 
-[The record](https://github.com/buster14a/buster-performance/tree/a2219181c16d0cc0a355d9ea08a25212f1436d98/docs/measurements/units-memory-1109-2026-11-02)
+[The record](https://github.com/buster14a/buster-performance/tree/a0063f8fcf9c5f09217031719c853e33b73c1ce8/docs/measurements/units-memory-1109-2026-11-02)
 has this section's and the next one's measurements, their scripts and their
 machines.
 
@@ -465,24 +465,24 @@ the lanes still taking units too, but a run without one (its allocation
 failed) would have every lane take itself for the last, and keep its pages
 while the others still take memory. The help waits for the lanes still
 taking units, one of which may wait for that memory, and a lane that kept
-it there deadlocked with such a unit (a 16 MiB unit of comments beside a tiny one, by two
-lanes with one unit's memory, found in review). So a lane holds memory
-only while it takes units, and waits for nothing but its own units' work
-then. What a unit writes doesn't depend on when it ran, so the outputs are
-the same as without the budget. `test-check-units` runs its programs'
-units with `--units-memory=1`, which serializes every unit's parse and
-later stages, into each unit's object alone; reads the budget from files
-of its own for each branch of `check_units_memory_read`; requires one of
-two equal units by two lanes to wait for the other's memory; and compiles
-that slow unit beside the tiny one under two budgets and, under a byte,
-without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands
-for its allocation failing), each object its own alone and the report
-saying that one lane alone kept its pages, where the deadlock would hang
-until the children's alarm.
+it there deadlocked with such a unit (a 16 MiB unit of comments beside a
+tiny one, by two lanes with one unit's memory, found in review). So a lane
+holds memory only while it takes units, and waits for nothing but its own
+units' work then. What a unit writes doesn't depend on when it ran, so the
+outputs are the same as without the budget. `test-check-units` runs its
+programs' units with `--units-memory=1`, which serializes every unit's
+parse and later stages, into each unit's object alone; reads the budget
+from files of its own for each branch of `check_units_memory_read`;
+requires one of two equal units by two lanes to wait for the other's
+memory; and compiles that slow unit beside the tiny one under two budgets
+and, under a byte, without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test
+hook that stands for its allocation failing), each object its own alone
+and the report saying that one lane alone kept its pages, where the
+deadlock would hang until the children's alarm.
 
 The estimate (`check_units_estimate`) is 600 bytes a preprocessed token and
 48 MB a unit. On the laptop, `-c --lanes 1` of each of build.sh's 41
-sources, of `sqlite3.c`, of Lua 5.4.8's 33 files and of an empty file and
+sources, of `sqlite3.c`, of Lua 5.4.8's 34 files and of an empty file and
 one of 45 headers (78 units, whose peaks huge pages round up) added from
 16.9 MB (the empty file) to 3,899 MB (`main_unit_frontend.c`, 8,087,159
 tokens) to the process's resident set. The units of 300,000 tokens or more
@@ -490,28 +490,33 @@ took 446 to 644 bytes a token (`main.c` 534, `sqlite3.c` 460), and the
 estimate is 1.02 to 1.46 times their peaks (1.14 for `main.c`, 1.20 for
 `main_unit_frontend.c`), and 1.17 to 2.85 times the smaller units'.
 
-On the 9700X (64 GB), build.sh's 41 sources at once with `-c` on its 8
-lanes (`-march=native` and build.sh's flags; two interleaved rounds, each
-run its own hold of the lock; the process's peak resident set):
+On the 9700X (64 GB), build.sh's 42 sources at once with `-c` on its 8
+lanes (`-march=native` and build.sh's language flags; the process's peak
+resident set; each run its own hold of the lock), `08cf75ce` against its
+main parent `a4a2182a`, five interleaved rounds by default and two with a
+budget:
 
 | run | wall | peak | units that waited |
 |---|---|---|---|
-| main (`3ce71ec3`) | 8.89, 8.69 s | 27.8, 27.9 GiB | |
-| this budget, by default | 8.66, 8.65 s | 27.8, 28.0 GiB | 0 |
-| `--units-memory`, 12 GiB | 10.73, 10.77 s | 10.8, 10.9 GiB | 9 |
-| `--units-memory`, 6 GiB | 22.11, 22.15 s | 5.6, 5.6 GiB | 21 |
+| main (`a4a2182a`), median of 5 | 6.58 s | 25.3 GiB | |
+| this budget, by default, median of 5 | 6.58 s | 25.4 GiB | 0 |
+| `--units-memory`, 12 GiB | 10.95, 10.97 s | 7.7, 7.6 GiB | 9, 9 |
+| `--units-memory`, 6 GiB | 17.63, 17.66 s | 4.9, 4.9 GiB | 26, 24 |
 
-By default no unit waited, and the run took main's time and memory: its
-28 GiB peak would not fit the 16 GB VM. Under a 16 GB VM's budget (12 GiB)
-the `main.c`-sized units (4.2 GB each by estimate, 4.9 GB for
-`main_unit_frontend.c`) ran at most three at a time beside the small ones,
-and the run took 24% longer and stayed under the budget; under 6 GiB they
-ran one at a time. #1109's own command, the sources linked into one
-executable (`-o selfhost ... -lm -lpthread`, 42 sources by then), peaked at
-27.7 and 28.1 GiB by default and at 10.99 and 10.98 GiB under 12 GiB,
-against 10.86 and 10.92 GiB for `-c` under it: the links the lanes keep
-add 60 to 130 MB, inside the budget's spare eighth, and the self-hosted
-compiler ran.
+By default no unit waited, and the run took main's time and memory (main's
+peaks 24.6 to 25.4 GiB, these 25.1 to 25.5): its 25 GiB peak would not fit
+the 16 GB VM. Under a 16 GB VM's budget (12 GiB) the `main.c`-sized units
+(4.2 GB each by estimate, 4.9 GB for `main_unit_frontend.c`) ran at most
+three at a time beside the small ones, and the run took 67% longer and
+stayed well under the budget; under 6 GiB they ran one at a time, in 2.7
+times main's time. #1109's own command, the sources linked into one
+executable (`-o selfhost ... -lm -lpthread`), measured at `a5f0fbc2`,
+peaked at 27.7 and 28.1 GiB by default and at 10.99 and 10.98 GiB under
+12 GiB, against 10.86 and 10.92 GiB for `-c` under it: the links the lanes
+keep add 60 to 130 MB, inside the budget's spare eighth, and the
+self-hosted compiler ran. At `a4a2182a` that link fails with the budget and
+without it alike: `lane.c` reads `__bss_start` since #652, which buster's
+linker defines only for static executables.
 
 ### Huge pages on a virtual machine
 
@@ -522,8 +527,8 @@ for the process (`PR_SET_THP_DISABLE` before `exec`), the checking of
 `main.c` ran 2 to 4 times as fast (its `check-input` 14.2 and 8.3 s against 3.3 and 4.3 s), and
 Lua's `lvm.c` with huge pages took about 30% longer at the median and up to
 7 times as long at the tail. On the 9700X it goes the other way for large
-units (`--lanes 1` on CPU 2, the medians of interleaved runs, base pages by
-`BUSTER_HUGE_PAGES=0`; the process's peak resident set):
+units (`282c4494`, `--lanes 1` on CPU 2, the medians of interleaved runs,
+base pages by `BUSTER_HUGE_PAGES=0`; the process's peak resident set):
 
 | unit | huge pages | base pages | peak, huge | peak, base |
 |---|---|---|---|---|
