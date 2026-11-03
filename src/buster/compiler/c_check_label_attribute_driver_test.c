@@ -195,6 +195,21 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; if (y) die(); else g(); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         { "a reachable fallthrough after a right operand", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
           "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; (void)(y && fail()); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        // A loop whose breaks can't run never ends, as clang's CFG prunes an if's branch its folded condition doesn't take
+        // (#1126's review): `if (0) break;`, an else of a true condition, a break of a nested loop or switch, and a body
+        // that is an if itself. But a break that can run ends it (each alone, as above).
+        { "unreachable fallthroughs after loops whose breaks can't run",
+          "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: while (1) { if (0) break; } __attribute__((fallthrough)); x++;\n"
+          "case 2: while (1) if (0) break; __attribute__((fallthrough)); x++;\n"
+          "case 3: for (;;) { if (1) ; else break; } __attribute__((fallthrough)); x++;\n"
+          "case 4: do { if (2 - 2) break; } while (1); __attribute__((fallthrough)); x++;\n"
+          "case 5: while (1) { while (y) break; switch (y) { case 1: break; } if (0) { if (y) break; } } __attribute__((fallthrough)); x++;\n"
+          "case 6: return x;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a loop's live break", "int f(int x, int y) {\nswitch (x) {\ncase 1: while (1) { if (y) break; } __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a loop whose if body breaks", "int f(int x, int y) {\nswitch (x) {\ncase 1: while (1) if (y) break; __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a loop's else break", "int f(int x, int y) {\nswitch (x) {\ncase 1: for (;;) if (y) ; else break; __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a false condition's else break", "int f(int x, int y) {\nswitch (x) {\ncase 1: while (1) { if (0) { } else break; } __attribute__((fallthrough)); x++;\ncase 2: return x;\n}\nreturn 0;\n}\n" },
         // Clang's analysis runs at a function's end only where no error came before it.
         { "a misplaced fallthrough after an undeclared identifier",
           "int f(int x) {\nswitch (x) {\ncase 1: undeclared_thing; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },

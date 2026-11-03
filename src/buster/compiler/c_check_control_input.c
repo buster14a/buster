@@ -1010,22 +1010,57 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
     return result;
 }
 
-// Whether a loop's body (`body`, its top token) has a break of its own: one not inside a nested loop or switch.
-static bool check_input_fallthrough_breaks(const CheckInputReader* reader, uint32_t body)
+// Whether `token` lies in the subtree of `root`, before it or after it (a branch after an if's parentheses).
+static bool check_input_fallthrough_inside(const Parser* parser, uint32_t token, uint32_t root)
+{
+    uint32_t at = token;
+    while (at < parser->tokens.count && at != root)
+    {
+        at = parser->tree.parents[at];
+    }
+    return at == root;
+}
+
+// Whether a loop's body (`body`, its top token) has a break of its own that can run: one not inside a nested loop or
+// switch, nor in an if's branch that its condition, folded as clang's CFG builder folds it, never takes (`if (0) break;`,
+// #1126's review), whose block clang's CFG prunes. The body's tokens run from its first to its subtree's last, past its
+// top token where the body is an if.
+static bool check_input_fallthrough_breaks(CheckInputReader* reader, uint32_t body)
 {
     const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
     bool breaks = false;
-    for (uint32_t token = body < parser->tokens.count ? check_input_fallthrough_first(parser, body) : body; token < body && !breaks; token += 1)
+    uint32_t token = body < count ? check_input_fallthrough_first(parser, body) : count;
+    while (token < count && !breaks && (token <= body || check_input_fallthrough_inside(parser, token, body)))
     {
         bool own = parser->tokens.kinds[token] == PARSE_KIND_BREAK;
-        for (uint32_t at = parser->tree.parents[token]; own && at < body; at = parser->tree.parents[at])
+        bool live = own;
+        bool above = false;
+        uint32_t child = token;
+        for (uint32_t at = parser->tree.parents[token]; own && live && !above && at < count; at = parser->tree.parents[at])
         {
             const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? reader->first_child[at] :
                                                                                                                                           BUSTER_CHECK_NONE;
-            const uint8_t kind = keyword < parser->tokens.count ? parser->tokens.kinds[keyword] : 0;
+            const uint8_t kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             own = kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH && parser->tokens.kinds[at] != PARSE_KIND_DO;
+            // An if's then-branch (the child after its parentheses) or else-branch (its `else` token's).
+            const bool otherwise = kind == PARSE_KIND_IF && parser->tokens.kinds[child] == PARSE_KIND_ELSE;
+            const bool branch = kind == PARSE_KIND_IF && child > at && !otherwise;
+            if (branch || otherwise)
+            {
+                uint32_t open = BUSTER_CHECK_NONE;
+                for (uint32_t item = reader->first_child[at]; item != BUSTER_CHECK_NONE; item = reader->next_child[item])
+                {
+                    open = parser->tree.roles[item] == PARSE_ROLE_OPEN_CONDITION ? item : open;
+                }
+                const uint32_t condition = open != BUSTER_CHECK_NONE ? check_input_fallthrough_condition(reader, open + 1, at) : 2;
+                live = !(branch && condition == 0) && !(otherwise && condition == 1);
+            }
+            above = at == body;
+            child = at;
         }
-        breaks = own;
+        breaks = own && live;
+        token += 1;
     }
     return breaks;
 }
