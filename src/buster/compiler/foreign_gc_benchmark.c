@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Whole foreign-input pipeline with optional section GC. Include after foreign_test.c. The fixture and timing
 // pattern adapt this project's original foreign_unwind_dedup_benchmark.c; no pooling/string benchmark is required.
@@ -19,6 +20,7 @@
 // process; acceptance still needs independently started, controlled repetitions. TSC ticks are reference ticks.
 // Printed atom/symbol/fixup counts exclude their null ID; the internal table counts used by the oracle include it.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_FOREIGN_GC_BENCHMARK_MAX_LEAVES 16384
 #define BUSTER_FOREIGN_GC_BENCHMARK_CIE_BYTES 32
 #define BUSTER_FOREIGN_GC_BENCHMARK_FRAME_BYTES 56
@@ -744,7 +746,7 @@ static __attribute__((unused)) int run_foreign_gc_benchmark(int argc, char** arg
     bool interleaved = true;
     bool keep = false;
     bool valid = true;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     for (int i = 0; valid && i < argc; i += 1)
     {
         const bool value = i + 1 < argc;

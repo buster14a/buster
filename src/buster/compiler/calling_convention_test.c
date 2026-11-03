@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The calling convention's tests, for the test-calling-convention command:
 //
@@ -59,6 +60,7 @@
 // Layout, in this order: the tally and helpers; merge; the oracle; fixtures; worlds; assignment; the cross-check;
 // run_calling_convention_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -7591,8 +7593,8 @@ static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clan
 {
     AbiTestTally tally = { 0 };
     char directory[BUSTER_ABI_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-calling-convention-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-calling-convention-XXXXXX", temporary);
     const uint64_t shared_bytes = sizeof(AbiTestTally) * BUSTER_ABI_TEST_CROSS_RUNS;
     AbiTestTally* shared = mmap(0, shared_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (abi_test_expect(&tally, (x86_encoder_initialized || x86_encoder_initialize()) && shared != MAP_FAILED && mkdtemp(directory) != 0, "cross-check", "can't start"))
@@ -7749,8 +7751,8 @@ static bool abi_test_cross_descriptors(void)
 {
     AbiTestTally tally = { 0 };
     char directory[BUSTER_ABI_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    const int length = snprintf(directory, sizeof(directory), "%s/buster-abi-descriptors-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    const int length = snprintf(directory, sizeof(directory), "%s/buster-abi-descriptors-XXXXXX", temporary);
     if (abi_test_expect(&tally, length > 0 && (uint64_t)length < sizeof(directory) && mkdtemp(directory) != 0, "cross-check descriptors", "can't make the test directory"))
     {
         for (uint32_t closed = 0; closed < 8; closed += 1)

@@ -117,7 +117,7 @@ static bool check_program_emit_taken(const Link* link, const CheckProgramNames* 
 static bool check_program_emit_makes_name(const CheckInput* input, uint32_t declaration, String8 renamed)
 {
     return input->compound_objects[declaration] ||
-           (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+           (renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
 }
 
 // Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
@@ -336,6 +336,73 @@ struct CheckTier1Report
     uint64_t red_zones;
 };
 
+// #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
+// family's builtin uses the lowering takes directly (CheckProgramHelpers.direct), the lowered code's calls of its helpers
+// (a builtin's, an implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the
+// helpers planned, the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED:
+// a builtin or a statement no form takes, which -c and the direct path then refuse whole).
+typedef struct CheckHelperReport CheckHelperReport;
+struct CheckHelperReport
+{
+    uint32_t units;
+    uint32_t refused;
+    uint32_t direct[CHECK_PROGRAM_HELPER_FAMILIES];
+    uint32_t helper[CHECK_PROGRAM_HELPER_FAMILIES];
+    uint32_t planned[CHECK_PROGRAM_HELPER_FAMILIES];
+};
+
+// A unit's lowering into `report` (check_program_emit's, once the lowering has finished): where it lowered every body
+// (`lowered_all`), its families' direct uses, its planned helpers, and its `count` bodies' calls of each family's
+// helpers, a call's target a helper's symbol (CheckProgramHelper.symbol: the program's symbols' count, plus one, plus its
+// index); and otherwise a refusal where the lowering refused an operation by name.
+static void check_helper_report_add(CheckHelperReport* report, const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t count, bool lowered_all)
+{
+    report->units += 1;
+    report->refused += !lowered_all && lowered->status == CHECK_PROGRAM_UNSUPPORTED ? 1 : 0;
+    for (uint32_t f = 0; lowered_all && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        report->direct[f] += lowered->helpers.direct[f];
+    }
+    for (uint32_t h = 0; lowered_all && h < lowered->helpers.count; h += 1)
+    {
+        report->planned[check_program_helper_family(&lowered->helpers.items[h])] += 1;
+    }
+    const uint64_t first = (uint64_t)program->symbol_count + 1;
+    for (uint32_t b = 0; lowered_all && b < count; b += 1)
+    {
+        const Tier0Function* function = &lowered->functions[b];
+        for (uint32_t c = 0; c < function->call_count; c += 1)
+        {
+            const uint64_t helper = (uint64_t)function->call_targets[c] - first;
+            if (helper < lowered->helpers.count)
+            {
+                report->helper[check_program_helper_family(&lowered->helpers.items[helper])] += 1;
+            }
+        }
+    }
+}
+
+// --helper-report's lines on `stream`: the totals, then a line per family.
+static void check_helper_print_report(FILE* stream, const CheckHelperReport* report)
+{
+    uint32_t direct = 0;
+    uint32_t helper = 0;
+    uint32_t planned = 0;
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        direct += report->direct[f];
+        helper += report->helper[f];
+        planned += report->planned[f];
+    }
+    fprintf(stream, "helpers\tunits=%" PRIu32 "\trefused=%" PRIu32 "\tdirect=%" PRIu32 "\thelper=%" PRIu32 "\tplanned=%" PRIu32 "\n", report->units, report->refused, direct,
+            helper, planned);
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        fprintf(stream, "helpers.%s\tdirect=%" PRIu32 "\thelper=%" PRIu32 "\tplanned=%" PRIu32 "\n", check_program_helper_contracts[f].name, report->direct[f],
+                report->helper[f], report->planned[f]);
+    }
+}
+
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
 // functions' bytes (`bytes`); and with --tier1, every lane's (the first's too) for Tier 1's pipeline.
@@ -413,6 +480,8 @@ struct CheckProgramLanes
     bool tier1_no_lifetimes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
+    // Every emission's plan of its helpers' operations, summed (#1059, --helper-report).
+    CheckHelperReport helper_report;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
@@ -1162,7 +1231,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
         // The names the source gives (check_program_emit_given_name's): not a literal's, a compound literal's or a
         // block-scope static's, which the emission makes.
         const bool given = declaration != BUSTER_CHECK_NONE && !input->compound_objects[declaration] &&
-                           !(renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+                           !(renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
         const uint32_t identifier = given ? parser->tokens.names[declaration] : 0;
         const String8 spelling = !given ? (String8){ 0 } : renamed.length != 0 ? renamed :
                                  (String8){ .pointer = (char*)intern_bytes(identifiers, identifier), .length = intern_length(identifiers, identifier) };
@@ -1939,6 +2008,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         valid = false;
     }
+    if (lanes != NULL && lowering)
+    {
+        check_helper_report_add(&lanes->helper_report, program, &result->lowered, count, valid && result->lowered.status == CHECK_PROGRAM_OK);
+    }
     if (lowering && result->lowered.status != CHECK_PROGRAM_OK)
     {
         check_lower_failed(&result->lowered, output, mark);
@@ -2408,7 +2481,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const uint32_t identifier = parser->tokens.names[declaration];
             const String8 renamed = symbol_names[s + 1];
-            const uint32_t opening = input->declaration_bodies[declaration];
+            const uint32_t opening = check_sparse_get(input->declaration_bodies, declaration);
             if (input->compound_objects[declaration])
             {
                 name = check_program_emit_made_name(&result->link, &names, (const uint8_t*)".compoundliteral", sizeof(".compoundliteral") - 1, scratch);
@@ -2417,7 +2490,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 // The function's name: its symbol's asm label, or its identifier (--lower-all selects the statics of
                 // an inline-only function, which has no symbol, and then no label).
-                const uint32_t function = opening < input->token_count ? input->body_declarations[opening] : BUSTER_CHECK_NONE;
+                const uint32_t function = opening < input->token_count ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
                 const uint32_t function_object = function != BUSTER_CHECK_NONE ? input->objects[function] : 0;
                 const SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
                 const String8 label = function_symbol != 0 ? symbol_names[function_symbol] : (String8){ 0 };

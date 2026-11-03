@@ -180,6 +180,13 @@ struct CheckClock
     uint64_t expression_faults;
     uint64_t expression_system_us;
     bool expression_usage_failed;
+    // Within `check-expressions`, the graph run's memoized transitions (#1050, CheckStatistics' transition counts): the nodes
+    // an earlier node's answer completed, those probed and not found, and those an operand's payload sent to their actions
+    // (most often a constant to fold), with the table's entries; each a `time-check transitions` line.
+    uint64_t transition_hits;
+    uint64_t transition_misses;
+    uint64_t transition_folds;
+    uint64_t transition_entries;
 };
 
 // The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
@@ -328,6 +335,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-check\texpressions.usage\t%.3f\t%llu\n", (double)stage_clock->expression_system_us / 1e3,
                 (unsigned long long)stage_clock->expression_faults);
     }
+    fprintf(stream, "time-check\ttransition-hits\t%llu\n", (unsigned long long)stage_clock->transition_hits);
+    fprintf(stream, "time-check\ttransition-misses\t%llu\n", (unsigned long long)stage_clock->transition_misses);
+    fprintf(stream, "time-check\ttransition-folds\t%llu\n", (unsigned long long)stage_clock->transition_folds);
+    fprintf(stream, "time-check\ttransition-entries\t%llu\n", (unsigned long long)stage_clock->transition_entries);
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);

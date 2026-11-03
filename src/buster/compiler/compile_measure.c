@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // measure-compile (#518): whole compiles, each a process of its own, and where their time goes.
 //
@@ -19,6 +20,7 @@
 // under --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
 // docs/compile-time.md has the 9700X's numbers for sqlite3.c, against tcc.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_MEASURE_COMPILES 3
 #define BUSTER_MEASURE_MAX_RUNS 1000
 
@@ -313,7 +315,7 @@ static int run_measure_compile_command(int argc, char** argv)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     MeasureCompile m = { .runs = 11, .warmups = 1 };
-    const char* parent = getenv("TMPDIR") != NULL && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* parent = oracle_temporary_directory();
     bool keep = false;
     bool valid = arena.base != 0;
     int i = 1;

@@ -1440,6 +1440,9 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
             (char*)"-L",
             (char*)directory,
             (char*)"-lfdriver_choice",
+            (char*)"-rpath",
+            (char*)"$ORIGIN",
+            (char*)(explicit_loader == 0 ? "--enable-new-dtags" : "--disable-new-dtags"),
             loader_option,
         };
         const char* name = explicit_loader == 0 ? "default_pie_search_and_loader" : "default_pie_search_joined_loader";
@@ -1447,10 +1450,24 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
         const String8 bytes = foreign_driver_test_invoke(tally, directory, name, "-o", arguments, count, true, 42, arena);
         foreign_driver_test_structure(tally, bytes, ET_DYN, interpreter, name);
         const DynamicTestImage image = dynamic_test_image(bytes);
+        uint64_t path_offset = 0;
+        uint64_t other = 0;
+        const Elf64_Shdr* strings = dynamic_test_section(&image, ".dynstr");
+        const bool tagged = dynamic_test_tag(&image, explicit_loader == 0 ? DT_RUNPATH : DT_RPATH, &path_offset);
+        const bool opposite = dynamic_test_tag(&image, explicit_loader == 0 ? DT_RPATH : DT_RUNPATH, &other);
+        foreign_test_expect(tally, tagged && !opposite && strings != NULL && path_offset + sizeof("$ORIGIN") <= strings->sh_size &&
+                                  memcmp(image.file.pointer + strings->sh_offset + path_offset, "$ORIGIN", sizeof("$ORIGIN")) == 0,
+                            "raw linker emits the selected runtime search-path tag", name);
         const char* needed[2] = { 0 };
         const uint32_t found = dynamic_test_needed(&image, needed, BUSTER_ARRAY_LENGTH(needed));
         foreign_test_expect(tally, image.valid && found == 1 && needed[0] != 0 && strcmp(needed[0], "libfdriver_choice.so") == 0,
                             "PIE defaults to shared library with different result from same-name archive", name);
+    }
+    {
+        char* static_arguments[] = { (char*)"-static", (char*)"-rpath", (char*)"$ORIGIN", files->objects[FOREIGN_DRIVER_TEST_CALL] };
+        foreign_driver_test_invoke(tally, directory, "static_rpath_refused", "-o", static_arguments, BUSTER_ARRAY_LENGTH(static_arguments), false, 0, arena);
+        char* file_arguments[] = { (char*)"-pie", (char*)"-R", files->objects[FOREIGN_DRIVER_TEST_CALL] };
+        foreign_driver_test_invoke(tally, directory, "just_symbols_refused", "-o", file_arguments, BUSTER_ARRAY_LENGTH(file_arguments), false, 0, arena);
     }
     for (uint32_t mode = 0; mode < 3; mode += 1)
     {

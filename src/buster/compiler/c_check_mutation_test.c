@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-checker's semantic mutation checks (c_check_mutation.c). check_test_mutation_engine checks the sites a unit
 // of its own gives, counted by hand from its parse, the edits some of them make, and the minimizer's helpers, and
@@ -7,6 +8,8 @@
 // test-checker-corpus --semantic-mutations found, minimized (checker_mutation_N.c) and then fixed in the checker: each
 // is checked as the corpus check checks a file, against clang (which must still give the result recorded with it) and
 // with the scalar and vector paths alike. Include after c_check_corpus.c.
+
+#include "buster/compiler/test_paths.h"
 #ifndef BUSTER_C_CHECK_MUTATION_TEST_INCLUDED
 #define BUSTER_C_CHECK_MUTATION_TEST_INCLUDED
 
@@ -822,8 +825,8 @@ static void check_test_mutation_command(CheckTest* test, const char* directory, 
 static void check_test_mutations(CheckTest* test, const char* clang)
 {
     char directory[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-mutation-XXXXXX", temporary != NULL ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-mutation-XXXXXX", temporary);
     const bool made = mkdtemp(directory) != NULL;
     check_test_expect(test, made, "the mutation checks' directory");
     if (made)

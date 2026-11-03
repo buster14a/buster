@@ -10,8 +10,8 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
 {
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
-    const uint32_t begin = reader->output->initializer_begins[declaration];
-    const uint32_t end = reader->output->initializer_ends[declaration];
+    const uint32_t begin = check_sparse_get(reader->output->initializer_begins, declaration);
+    const uint32_t end = check_sparse_get(reader->output->initializer_ends, declaration);
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
     bool item = true;
@@ -485,8 +485,8 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
 static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t declaration)
 {
     const Parser* parser = reader->parser;
-    const uint32_t begin = reader->output->initializer_begins[declaration];
-    const uint32_t end = reader->output->initializer_ends[declaration];
+    const uint32_t begin = check_sparse_get(reader->output->initializer_begins, declaration);
+    const uint32_t end = check_sparse_get(reader->output->initializer_ends, declaration);
     const uint32_t assignment = reader->output->compound_objects[declaration] ? declaration : begin - 1;
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;

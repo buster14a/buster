@@ -25,9 +25,9 @@ create another pool, workflow, benchmark host or compiler build configuration.
 
 The test generates an original program with 256 externally visible integer
 functions, loops and conditional control flow, and a caller of every function.
-Two constructs keep the fixture mixed: `fallback` reads an unnamed argument
-through its incoming variadic frame, and calls `widen` through a volatile
-function pointer, whose floating conversion Tier 1 also refuses. It compiles
+One construct keeps the fixture mixed: `fallback`, which reads an unnamed
+argument through its incoming variadic frame, calls `widen` through a volatile
+function pointer, and `widen` converts to long double, which Tier 1 refuses. It compiles
 that program as one source and as two sources, into objects and executables,
 through the default and scalar host paths. Each path has its own one-lane
 reference: Tier 1's scalar and vector allocators may legitimately choose
@@ -40,9 +40,9 @@ For every available lane count from one through eight, it requires:
   IDs; multi-source repeats poison the reusable arenas.
 - A successful compiler exit and a report with both Tier 1 and Tier 0
   functions. A regression that refuses the fixture or silently compiles
-  everything at Tier 0 is not a passing test. If a later Tier 1 covers every
-  function, the harness exits 77 with a message naming the fixture to
-  re-anchor, rather than failing a correctness run.
+  everything at Tier 0 is not a passing test, and neither is one where Tier 1
+  covers every function: the harness then fails with a message naming the
+  fixture to re-anchor.
 - `--time-stages` receipts whose `lanes-asked` and actual command `lanes` both
   equal the tested count. These establish the command team, not utilization or
   speedup. The test reports its actual upper count, rather than calling a
@@ -69,14 +69,16 @@ This avoids an accidentally tiny fixture whose useful-work rule never admits the
 requested team. It does not claim that every admitted worker executes the same
 amount of work.
 
-The mixed-tier anchors are deliberate, and the harness does not depend on a
-particular one staying refused. Tier 1's selection refuses variadic definitions
-whole (`tier1_select.c`) and floating-point conversion (`uitofp` among them),
-and [the Tier 1 guide](tier1.md) lists both among the constructs still refused.
-If a later Tier 1 covers every function in the fixture, the harness prints
-`SKIP (Tier 1 covered every function)`, says which file to re-anchor, and exits
-77, which the shared runner reports as skipped. A regression that leaves Tier 1
-with no compiled function still fails.
+The mixed-tier anchor is deliberate. Tier 1's selection refuses long double, the
+x87's values (`widen`'s conversion), and [the Tier 1 guide](tier1.md) lists it
+among the constructs still refused. The fixture's earlier anchors, a variadic
+definition and an SSE floating conversion, are Tier 1's since #789 and #141, and
+with them alone the harness skipped (status 77), which the shared runner
+reports as skipped: so it went stale unnoticed twice. If a later Tier 1 covers
+every function in the fixture, the harness now prints `FAIL (Tier 1 covered
+every function)`, says which file to re-anchor, and exits 1, so that the change
+lifting the refusal re-anchors the fixture. A regression that leaves Tier 1
+with no compiled function fails too.
 
 ## What still constitutes parent-issue acceptance
 
