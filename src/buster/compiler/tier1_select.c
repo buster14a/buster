@@ -1689,12 +1689,6 @@ struct Tier1SelectPlan
     uint64_t arena_bytes;
     // The path that planned it, which the legacy emitter's choice of immediates' forms takes too.
     bool vector;
-    // Whether the function has vectors (#141): selection's one scan of it (ir_function_has_vectors_path), which the CFG
-    // consumer's chain check and its problem read rather than scan the function again.
-    bool vectors;
-    // Whether an instruction of the function is a long double's (#141): selection's one scan of its type column
-    // (ir_function_has_type_path), which gates its x87 rules and the CFG consumer's chain check.
-    bool long_doubles;
 };
 
 typedef struct Tier1SelectCode Tier1SelectCode;
@@ -1736,9 +1730,6 @@ struct Tier1SelectForest
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
     bool vectors;
-    // Whether an instruction of the function is a long double's (#141, Tier1SelectPlan.long_doubles): a function without
-    // one pays no node's x87 checks.
-    bool long_doubles;
 };
 
 static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
@@ -2838,7 +2829,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     }
     // Long double (#141): each value a frame object of its own, which the CFG consumer's x87 records read and write
     // (TIER1_RULE_X87); a phi of them its edges' copies, and a call's result and a return's operand st0.
-    else if (forest->long_doubles && op != IR_PHI && op != IR_CALL && op != IR_CALL_INDIRECT && op != IR_RET && tier1_select_x87_node(function, node))
+    else if (op != IR_PHI && op != IR_CALL && op != IR_CALL_INDIRECT && op != IR_RET && tier1_select_x87_node(function, node))
     {
         const uint32_t operand = a < function->instruction_count ? function->type[a] : IR_VOID;
         base.rule = TIER1_RULE_X87;
@@ -3681,8 +3672,7 @@ static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, 
 // Marks needed the values a needed `node`'s pattern reads: a call's arguments and an indirect call's callee, or its
 // pattern's values. A value the walk back has passed (`walked`, or one past `node`, a later block's value that an
 // earlier block reads, #789) goes on `pending`.
-static uint32_t tier1_select_need_values(const IrFunction* function, bool long_doubles, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending,
-                                         uint32_t pending_count)
+static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count)
 {
     if (pattern->rule == TIER1_RULE_CALL)
     {
@@ -3706,9 +3696,9 @@ static uint32_t tier1_select_need_values(const IrFunction* function, bool long_d
         }
     }
     // A long double operand (#141), which the CFG consumer's records read from its object, no pattern's value: the IR's a
-    // and b of a long double node, and a return's; none in a function without long doubles.
+    // and b of a long double node, and a return's.
     const uint32_t operands[2] = { function->a[node], function->b[node] };
-    for (uint32_t operand = 0; long_doubles && (pattern->rule == TIER1_RULE_X87 || pattern->rule == TIER1_RULE_RETURN) && operand < 2; operand += 1)
+    for (uint32_t operand = 0; (pattern->rule == TIER1_RULE_X87 || pattern->rule == TIER1_RULE_RETURN) && operand < 2; operand += 1)
     {
         const uint32_t value = operands[operand];
         const bool used = (ir_value_mask(function, node) >> operand & 1) != 0 && value < function->instruction_count && function->type[value] == IR_F80;
@@ -3912,10 +3902,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .barriers = barriers,
         .canonical = canonical,
         .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
-        .long_doubles = error == TIER1_SELECT_OK && ir_function_has_type_path(function, IR_F80, vector),
     };
-    plan.vectors = forest.vectors;
-    plan.long_doubles = forest.long_doubles;
     // The vector path's cover is the bottom-up rewrite's (tier1_select_burs.c): each node's class and visible children,
     // its state a depth level at a time, and its rule. The patterns of the nodes whose operators the grammar doesn't cover
     // are munch's, made here in the levels' order, as the scalar path makes every node's, so that a node either path
@@ -4005,7 +3992,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             }
             if (needed[node] != 0 && error == TIER1_SELECT_OK)
             {
-                pending_count = tier1_select_need_values(function, plan.long_doubles, &plan.patterns[node], node, false, needed, pending, pending_count);
+                pending_count = tier1_select_need_values(function, &plan.patterns[node], node, false, needed, pending, pending_count);
             }
         }
         while (error == TIER1_SELECT_OK && pending_count != 0)
@@ -4017,7 +4004,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                 error = TIER1_SELECT_ERROR_UNSUPPORTED;
                 failed_node = node;
             }
-            pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, plan.long_doubles, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
+            pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {

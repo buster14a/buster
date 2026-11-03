@@ -789,34 +789,6 @@ static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
     return found;
 }
 
-// Whether one of a function's instructions is of the type `type` (#141): I128 for the wide split (ir_wide.c), F80 for
-// Tier 1's x87 rules (Tier1SelectPlan.long_doubles). Its type column 64 bytes a compare on the vector path, one at a time on
-// its scalar twin, which must agree.
-static bool ir_function_has_type_path(const IrFunction* function, uint32_t type, bool vector)
-{
-    (void)vector;
-
-    bool found = false;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            found = _mm512_mask_cmpeq_epi8_mask(active, types, _mm512_set1_epi8((char)type)) != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = function->type[i] == type;
-        }
-    }
-    return found;
-}
-
 // Whether a function has vectors (#141's, which the SSA promoter, the optimizers and Tier 1's selector refuse): a vector
 // type anywhere, its constants or its operations, in its instructions, its parameters, calls and slots. A function whose
 // only SIMD values are masks (#179) has none. The instructions 64 at a time on the vector path, one at a time on its

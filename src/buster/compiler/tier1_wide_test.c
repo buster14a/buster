@@ -19,8 +19,8 @@
 // random straight-line programs of every operation on values loaded or computed before. And the
 // refusals: an I128 parameter, a division, a conversion to a floating value, a switch, which the split refuses as
 // unsupported; a function without an I128 instruction, returned as it is; and the scan's vector path against its scalar
-// twin on type columns of every length to 200, each ending at a PROT_NONE page, with an I128 (and an F80) at each place;
-// and nine long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported.
+// twin on type columns of every length to 200, each ending at a PROT_NONE page, with an I128 at each place; and nine
+// long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -1400,39 +1400,33 @@ static void tier1_wide_test_boundaries(Tier1WideTest* test)
         }
         arena_pop_to(&test->output, output_mark);
     }
-    // The scan (ir_function_has_type_path), for the split's I128 and Tier 1's F80: type columns of every length to 200
-    // ending at a PROT_NONE page, without the type and with it at each place.
+    // The scan: type columns of every length to 200 ending at a PROT_NONE page, without an I128 and with one at each place.
     const uint64_t page = 4096;
     uint8_t* pages = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (tier1_wide_test_expect(test, pages != MAP_FAILED && mprotect(pages + page, page, PROT_NONE) == 0, "the scan's guarded page"))
     {
         bool agree = true;
-        static const uint32_t sought[2] = { IR_I128, IR_F80 };
-        for (uint32_t kind = 0; kind < 2; kind += 1)
+        for (uint32_t length = 0; length <= 200; length += 1)
         {
-            const uint32_t type = sought[kind];
-            for (uint32_t length = 0; length <= 200; length += 1)
+            uint8_t* types = pages + page - length;
+            for (uint32_t place = 0; place <= length; place += 1)
             {
-                uint8_t* types = pages + page - length;
-                for (uint32_t place = 0; place <= length; place += 1)
+                for (uint32_t k = 0; k < length; k += 1)
                 {
-                    for (uint32_t k = 0; k < length; k += 1)
-                    {
-                        types[k] = (uint8_t)(1 + (k * 7 + length) % (IR_TYPE_COUNT - 1));
-                        types[k] = types[k] == type ? IR_I64 : types[k];
-                    }
-                    if (place < length)
-                    {
-                        types[place] = (uint8_t)type;
-                    }
-                    const IrFunction function = { .type = types, .instruction_count = length };
-                    const bool vector = ir_function_has_type_path(&function, type, true);
-                    const bool scalar = ir_function_has_type_path(&function, type, false);
-                    agree &= vector == scalar && scalar == (place < length);
+                    types[k] = (uint8_t)(1 + (k * 7 + length) % (IR_TYPE_COUNT - 1));
+                    types[k] = types[k] == IR_I128 ? IR_I64 : types[k];
                 }
+                if (place < length)
+                {
+                    types[place] = IR_I128;
+                }
+                const IrFunction function = { .type = types, .instruction_count = length };
+                const bool vector = ir_wide_present_path(&function, true);
+                const bool scalar = ir_wide_present_path(&function, false);
+                agree &= vector == scalar && scalar == (place < length);
             }
         }
-        tier1_wide_test_expect(test, agree, "the scan's vector path is its scalar twin's, and finds each I128 and F80");
+        tier1_wide_test_expect(test, agree, "the scan's vector path is its scalar twin's, and finds each I128");
     }
     if (pages != MAP_FAILED)
     {

@@ -77,6 +77,33 @@ struct IrWideWork
     uint32_t error_instruction;
 };
 
+// Whether a function has an I128 instruction: its type column 64 bytes a compare on the vector path, one at a time on its
+// scalar twin, which must agree.
+static bool ir_wide_present_path(const IrFunction* function, bool vector)
+{
+    (void)vector;
+
+    bool found = false;
+    if (BUSTER_VECTOR_PATH(vector))
+    {
+        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
+        {
+            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+            found = _mm512_mask_cmpeq_epi8_mask(active, types, _mm512_set1_epi8(IR_I128)) != 0;
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
+        {
+            found = function->type[i] == IR_I128;
+        }
+    }
+    return found;
+}
+
 // Whether the function's signature or a call's has an I128 (by-value 128-bit integers are aggregates, ptrs to their
 // bytes, so none should), which the split refuses.
 static bool ir_wide_signature(const IrFunction* function)
@@ -699,7 +726,7 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     *result = (IrWideResult){ .function = *function };
-    const bool present = output != scratch && ir_function_has_type_path(function, IR_I128, vector);
+    const bool present = output != scratch && ir_wide_present_path(function, vector);
     if (output == scratch)
     {
         check.error = IR_ERROR_STRUCTURE;

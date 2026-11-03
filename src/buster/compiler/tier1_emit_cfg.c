@@ -79,8 +79,8 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     // and so does a variadic definition, whose prologue fills its register save area (tier1_emit_cfg_frame_flags).
     chain &= function->label_count == 0 && !function->variadic && function->parameter_passed == 0;
     // A vector (#141) needs the vector class's allocation at its width: a function with one is the CFG consumer's, which
-    // selection's scan of it says (Tier1SelectPlan.vectors).
-    chain &= !plan->vectors;
+    // one scan of it says.
+    chain &= !ir_function_has_vectors_path(function, true);
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -92,7 +92,7 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         // its comparison the vector class's (#141).
         const bool mask = tier1_select_mask_width(type) != 0 || tier1_select_mask_rule(rule);
         // A long double's (#141) needs the CFG consumer's frame objects of values.
-        const bool floating = tier1_select_float_width(type) != 0 || tier1_select_float_rule(rule) || (plan->long_doubles && tier1_select_x87_node(function, node));
+        const bool floating = tier1_select_float_width(type) != 0 || tier1_select_float_rule(rule) || tier1_select_x87_node(function, node);
         // Arguments past their classes' registers, and parameters past them, which the CFG consumer's entry loads, are its
         // own (#141).
         const bool stacked = (op == IR_CALL && tier1_select_call_stack_bytes(function, &function->calls[function->b[node]]) != 0) ||
@@ -410,9 +410,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     prepared->x87_count = 0;
     prepared->vector_bytes = 0;
     prepared->function = function;
-    // Whether the function has vectors (#141), from selection's scan of it, so that a function without one pays no node's
-    // vector checks.
-    const bool vectors = plan->vectors;
+    // Whether the function has vectors (#141): one scan of it, so that a function without one pays no node's vector checks.
+    const bool vectors = ir_function_has_vectors_path(function, true);
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
         const bool x87 = function->type[node] == IR_F80;
