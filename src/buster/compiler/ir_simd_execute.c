@@ -185,7 +185,7 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
                 constant = function->vector_constants + a;
             }
             action.predicate = op == IR_VCMP ? (IrSimdPredicate)c : IR_SIMD_EQ;
-            action.volatile_memory = (function->flags[node] & BUSTER_IR_VOLATILE) != 0;
+            action.volatile_memory = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0;
             if (op == IR_STORE)
             {
                 operands[0] = operands[1];

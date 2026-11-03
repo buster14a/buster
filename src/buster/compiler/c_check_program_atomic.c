@@ -78,19 +78,52 @@ static void check_lower_atomic_order(CheckLowerWriter* writer, const CheckLowerA
     }
 }
 
+// Whether an atomic plan's `operation` is the typed stream's own (#1059): an implicit _Atomic object's load or store
+// (an update's first load too), not a builtin's, of a native object, whose order is seq_cst. Its leaf is reserved for no
+// such access (check_program_helpers' update_widths).
+static bool check_lower_atomic_direct_plan(bool builtin, bool native, uint8_t operation)
+{
+    return native && !builtin && (operation == BUSTER_CHECK_ATOMIC_LOAD || operation == BUSTER_CHECK_ATOMIC_STORE);
+}
+
 // Emits the load/store/exchange/CAS, from already materialized addresses and value bytes. A native leaf returns raw
-// unsigned long bits, while generic CAS returns C's bool; normalize the latter result to I32 for its branch consumer.
+// unsigned long bits, while generic CAS returns C's bool; normalize the latter result to I32 for its branch consumer. A
+// direct access (check_lower_atomic_direct_plan) is the typed stream's LOAD or SET of its bits' class with the atomic
+// marker of seq_cst, as a direct builtin's (check_lower_atomic_direct), its load's bits zero-extended into the result
+// buffer as a leaf's are, and its store followed by the FENCE of seq_cst.
 static void check_lower_atomic_call(CheckLowerWriter* writer, const CheckLowerAtomic* plan, uint8_t operation)
 {
     const bool compare = operation == BUSTER_CHECK_ATOMIC_COMPARE;
     const bool load = operation == BUSTER_CHECK_ATOMIC_LOAD;
     const bool store = operation == BUSTER_CHECK_ATOMIC_STORE;
+    const bool direct = check_lower_atomic_direct_plan(plan->builtin, plan->native, operation);
     const CBuiltinId id = compare ? CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N
                           : load  ? CBUILTIN_ATOMIC_LOAD_N
                           : store ? CBUILTIN_ATOMIC_STORE_N
                                   : CBUILTIN_ATOMIC_EXCHANGE_N;
-    const CheckProgramHelper* helper = plan->native ? check_lower_atomic_leaf(writer, id, plan->size) : NULL;
-    if (plan->native && helper == NULL)
+    const CheckProgramHelper* helper = plan->native && !direct ? check_lower_atomic_leaf(writer, id, plan->size) : NULL;
+    if (direct)
+    {
+        const uint8_t bits = check_lower_piece_class((uint32_t)plan->size);
+        const uint64_t marker = BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST;
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->address);
+        if (load)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, bits, marker);
+            if (bits != BUSTER_TYPED_CLASS_U64)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, plan->result);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, bits, plan->desired);
+            check_lower_emit(writer, BUSTER_TYPED_SET, bits, marker);
+            check_lower_emit(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SEQ_CST);
+        }
+    }
+    else if (plan->native && helper == NULL)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
@@ -628,14 +661,16 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
     const uint32_t walked = !builtin ? check_graph_atomic_address_alignment(types, graph, stream, target, NULL, true, true) : UINT32_MAX;
     const bool aligned = builtin ? effect != NULL && effect->alignment_known && effect->minimum_alignment >= size
                                  : walked < 64 && (UINT64_C(1) << walked) >= size;
+    // A direct access (check_lower_atomic_direct_plan) is native without a leaf.
+    const bool direct = check_lower_atomic_direct_plan(builtin, true, operation);
     plan->native = operation != BUSTER_CHECK_ATOMIC_LOCK_FREE &&
                    check_builtin_atomic_c11_native(types, CBUILTIN_C11_ATOMIC_LOAD, value, size, aligned) &&
-                   check_lower_atomic_leaf(writer,
+                   (direct || check_lower_atomic_leaf(writer,
                                            operation == BUSTER_CHECK_ATOMIC_LOAD       ? CBUILTIN_ATOMIC_LOAD_N
                                            : operation == BUSTER_CHECK_ATOMIC_STORE    ? CBUILTIN_ATOMIC_STORE_N
                                            : operation == BUSTER_CHECK_ATOMIC_EXCHANGE ? CBUILTIN_ATOMIC_EXCHANGE_N
                                                                                        : CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N,
-                                           size) != NULL;
+                                           size) != NULL);
     check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_ATOMIC, .node = index});
     if (builtin)
     {

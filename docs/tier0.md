@@ -168,6 +168,12 @@ table. The kinds are:
   the scalar validator, as it does a tail call's; the C producer gives a fence of a constant order one
   (`check_program_direct_fence`, [the builtin integration guide](c-builtins-integration.md)'s "Helper contracts and
   direct forms").
+- An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
+  `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
+  bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
+  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
+  the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
+  shape.
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs

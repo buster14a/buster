@@ -372,10 +372,11 @@ struct CheckTier1Report
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
-// family's builtin uses the lowering takes directly (CheckProgramHelpers.direct), the lowered code's calls of its helpers
-// (a builtin's, an implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the
-// helpers planned, the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED:
-// a builtin or a statement no form takes, which -c and the direct path then refuse whole).
+// family's direct forms in the lowered code (an atomic access's LOAD, STORE or SET with its marker, a builtin's or an
+// implicit _Atomic object's; a fence's FENCE, but a seq_cst store's own after it), its helpers' call sites (a builtin's, an
+// implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the helpers planned,
+// the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a
+// statement no form takes, which -c and the direct path then refuse whole).
 typedef struct CheckHelperReport CheckHelperReport;
 struct CheckHelperReport
 {
@@ -387,16 +388,27 @@ struct CheckHelperReport
 };
 
 // A unit's lowering into `report` (check_program_emit's, once the lowering has finished): where it lowered every body
-// (`lowered_all`), its families' direct uses, its planned helpers, and its `count` bodies' calls of each family's
-// helpers, a call's target a helper's symbol (CheckProgramHelper.symbol: the program's symbols' count, plus one, plus its
-// index); and otherwise a refusal where the lowering refused an operation by name.
+// (`lowered_all`), its `count` bodies' direct forms and calls of each family's helpers, a call's target a helper's symbol
+// (CheckProgramHelper.symbol: the program's symbols' count, plus one, plus its index), and its planned helpers; and
+// otherwise a refusal where the lowering refused an operation by name.
 static void check_helper_report_add(CheckHelperReport* report, const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t count, bool lowered_all)
 {
     report->units += 1;
     report->refused += !lowered_all && lowered->status == CHECK_PROGRAM_UNSUPPORTED ? 1 : 0;
-    for (uint32_t f = 0; lowered_all && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    for (uint32_t b = 0; lowered_all && b < count; b += 1)
     {
-        report->direct[f] += lowered->helpers.direct[f];
+        const Tier0Function* function = &lowered->functions[b];
+        bool store = false;
+        for (uint32_t e = 0; e < function->count; e += 1)
+        {
+            const uint8_t kind = function->kinds[e];
+            const uint8_t class = function->classes[e];
+            const bool access = (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && class >= BUSTER_TYPED_CLASS_I8 &&
+                                class <= BUSTER_TYPED_CLASS_U64 && (function->values[e] & BUSTER_TYPED_ACCESS_ATOMIC) != 0;
+            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += access;
+            report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE && !store;
+            store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
+        }
     }
     for (uint32_t h = 0; lowered_all && h < lowered->helpers.count; h += 1)
     {

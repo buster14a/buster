@@ -132,7 +132,13 @@
 //   - NEG and NOT: the operand (of `class`) negated or complemented (NOT for integers alone).
 //   - CONVERT: the operand converted to `class` (by C's rules for the two classes; a conversion to a narrower integer
 //     keeps the low bits).
-//   - LOAD: the value of `class` at the address the operand (U64) holds.
+//   - LOAD: the value of `class` at the address the operand (U64) holds. An integer class's LOAD, STORE and SET take a
+//     `value` (#1059): 0 for an ordinary access, or BUSTER_TYPED_ACCESS_ATOMIC with a C memory order
+//     (BUSTER_TYPED_FENCE_ORDER's bits) for an atomic one, a single access of the class's bytes, naturally aligned. Its
+//     code is an ordinary access's: on x86-64 a naturally aligned access of 1, 2, 4 or 8 bytes is atomic, and the total
+//     store order gives a load's and a release store's orders; a seq_cst store's fence is the FENCE of seq_cst after it,
+//     which its producer writes. The IR keeps the order (BUSTER_IR_ATOMIC), and ir_lower refuses a marker of another
+//     shape; Tier 0, whose code is the same either way, doesn't read it.
 //   - ADD ... SHR: the two operands' sum ... (by `class`, which both operands have, but a shift's count, any integer
 //     class); DIV, MOD and SHR divide and shift right as `class`'s signedness says. The generated code wraps.
 //   - PTR_ADD: the first operand (U64) plus the second (I64 or U64) times `value`, the element's size (nonzero).
@@ -283,6 +289,7 @@
 #define BUSTER_TYPED_FENCE_ORDER 0x07
 #define BUSTER_TYPED_FENCE_SIGNAL 0x08
 #define BUSTER_TYPED_FENCE_SEQ_CST 5
+#define BUSTER_TYPED_ACCESS_ATOMIC 0x10
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each

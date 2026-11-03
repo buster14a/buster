@@ -783,6 +783,12 @@ static void ir_parse_instruction(IrParseState* state)
                     {
                         row.flags = BUSTER_IR_VOLATILE;
                     }
+                    // An atomic access's order (#1059), as a fence's is named.
+                    if (ir_parse_word(state, "atomic"))
+                    {
+                        const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
+                    }
                 }
             } break;
         }
