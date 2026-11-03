@@ -1091,6 +1091,8 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
                 const uint32_t node = 3 + i;
                 tier1_select_test_node(&function, node, shape->op[i], shape->type[i], shape->a[i], shape->b[i], shape->c[i]);
                 function.flags[node] = shape->flags[i];
+                // An atomic access's natural alignment, its i64's, which the verifier requires.
+                function.alignment_log2[node] = (shape->flags[i] & BUSTER_IR_ATOMIC) != 0 ? 3 : 0;
                 const bool pooled = node != shape->consumer && shape->type[i] != IR_VOID;
                 assert(!pooled || next < BUSTER_ARRAY_LENGTH(pool));
                 registers[node] = pooled ? pool[next++] : X86_REGISTER_RAX;

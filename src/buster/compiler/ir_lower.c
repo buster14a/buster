@@ -576,13 +576,15 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink*
 }
 
 // An integer class's typed access's IR flags (#1059) onto its load or store `id`: an atomic access's marker as
-// BUSTER_IR_ATOMIC and its order. The flags column starts zeroed, which an ordinary access keeps.
+// BUSTER_IR_ATOMIC and its order, and its natural alignment, which the checker's direct access has proven and the
+// verifier requires of an atomic access. The flags column starts zeroed, which an ordinary access keeps.
 static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* sink, uint32_t id, uint8_t class, uint64_t value)
 {
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
     if (sink->output != 0 && integer && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0)
     {
         sink->output->flags[id] = (uint8_t)(BUSTER_IR_ATOMIC | (value & BUSTER_TYPED_FENCE_ORDER) << BUSTER_IR_ORDER_SHIFT);
+        sink->output->alignment_log2[id] = (uint8_t)__builtin_ctz(tier0_class_bytes(class));
     }
 }
 

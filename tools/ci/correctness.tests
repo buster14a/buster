@@ -571,6 +571,9 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 # store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
 ./build/compiler test-ir-source --dominators tests/ir-source/atomics.c
 ./build/compiler test-ssa-source --clang clang tests/ir-source/atomics.c
+# The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
+# print their natural alignment.
+test "$(./build/compiler test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
 == Test deferred-body source-position environments
 ./build/compiler test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution

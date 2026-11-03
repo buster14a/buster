@@ -660,7 +660,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 
 | Family | Effects | Requirements | Direct form |
 | --- | --- | --- | --- |
-| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`) |
+| `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`); an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
 | `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | none yet |
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
@@ -752,7 +752,9 @@ to seq_cst), a scoped family's, a floating object's and an unaligned or wider
 one keep their helper or libatomic's call. The planner reserves an implicit
 object's compare-exchange leaf for a width only where a compound assignment,
 increment or decrement updates such an object, and a builtin's width's leaves
-where a builtin takes them; no leaf for a load or a store. The compiler's own
+where a builtin takes them; no leaf for a direct load or store, and a leaf for a
+generic form's or a representation's (a floating or another object's builtin)
+that keeps one. The compiler's own
 `main.c` takes 77 atomic accesses directly and keeps 8 helper calls of them (its
 tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the unit plans no
 helper.

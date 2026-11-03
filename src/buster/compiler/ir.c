@@ -519,10 +519,12 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
     return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
 }
 
-// Whether an atomic access may be of `type`: an integer's of 1, 2, 4 or 8 bytes, or a pointer's.
-static bool ir_atomic_type(uint32_t type)
+// Whether an atomic access may be of `type` aligned to 1 << `alignment_log2` bytes: an integer's of 1, 2, 4 or 8 bytes,
+// or a pointer's, aligned at least to its size, as x86 makes only a naturally aligned access single-copy atomic.
+static bool ir_atomic_access(uint32_t type, uint8_t alignment_log2)
 {
-    return type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
+    const bool sized = type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
+    return sized && alignment_log2 >= (uint32_t)__builtin_ctz(ir_type_bits[type] >> 3);
 }
 
 static bool ir_slice(uint32_t first, uint64_t count, uint32_t total)
@@ -1093,7 +1095,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 valid = ta == IR_PTR && c < f->address_count && (b == BUSTER_IR_NONE || (b < f->instruction_count && f->type[b] == IR_I64));
             } break;
             case IR_RULE_LOAD:
-            case IR_RULE_STORE: valid = ta == IR_PTR && ((f->flags[i] & BUSTER_IR_ATOMIC) == 0 || ir_atomic_type(op == IR_LOAD ? type : tb)); break;
+            case IR_RULE_STORE: valid = ta == IR_PTR && ((f->flags[i] & BUSTER_IR_ATOMIC) == 0 || ir_atomic_access(op == IR_LOAD ? type : tb, f->alignment_log2[i])); break;
             case IR_RULE_CALL:
             {
                 valid = b < f->call_count && (op == IR_CALL ? a != 0 && a < f->symbol_count : ta == IR_PTR);

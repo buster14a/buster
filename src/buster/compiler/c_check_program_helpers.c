@@ -138,9 +138,11 @@ static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PRO
         .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ATOMIC | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER,
         .direct = "a load or a store, GNU's _n or C11's, unscoped, of an integer's, an enumeration's or a pointer's object of 1, 2, 4 or 8 bytes known aligned to "
                   "its size, of a constant order its kind takes evaluated for no effect: the typed stream's LOAD or SET with its atomic marker, and after a "
-                  "seq_cst store the FENCE of seq_cst",
+                  "seq_cst store the FENCE of seq_cst; and an implicit _Atomic object's load or store, and an update's first load, of 1, 2, 4 or 8 bytes "
+                  "known aligned to its size: the LOAD or SET of its bits' class with seq_cst's marker",
         .helper = "every other load and store of 1, 2, 4 or 8 bytes aligned to its size (a dynamic or invalid order, which the helper strengthens to seq_cst, "
-                  "a scoped family's, a floating object's, an implicit _Atomic access's); a misaligned or wider one is refused",
+                  "a scoped family's, a generic form's, a builtin's of a floating or another object that keeps its representation's leaf); a misaligned or "
+                  "wider one is refused",
     },
     [CHECK_PROGRAM_HELPER_ATOMIC_RMW] = {
         .name = "atomic-rmw",

@@ -15,6 +15,8 @@ b0:
   %12 = load.i16 %0 align=2 volatile atomic seq_cst
   %13 = load.ptr %2 align=8 atomic acquire
   %14 = store.void %2, %13 align=8 atomic release
-  %15 = load.i64 %2 align=8 volatile
-  %16 = ret.void %15
+  %15 = load.i64 %2 align=8 atomic seq_cst
+  %16 = store.void %2, %15 align=8 atomic relaxed
+  %17 = load.i64 %2 align=8 volatile
+  %18 = ret.void %17
 }

@@ -449,8 +449,8 @@ round trip and the IR's three forms against clang.
 A `load` or a `store` with `BUSTER_IR_ATOMIC` in its flags is an atomic access
 of a C memory order (`BUSTER_IR_ORDER`'s bits: a load's `relaxed`, `consume`,
 `acquire` or `seq_cst`; a store's `relaxed`, `release` or `seq_cst`), of an
-integer of 1, 2, 4 or 8 bytes or a pointer; printed after `align=N` (and
-`volatile`) as `atomic ORDER`. It is one access of its type's bytes that no pass
+integer of 1, 2, 4 or 8 bytes or a pointer, whose `align=N` is its size at
+least; printed after `align=N` (and `volatile`) as `atomic ORDER`. It is one access of its type's bytes that no pass
 splits, widens, merges, eliminates, forwards or moves past another access, a
 call or a fence: the guarantees of a volatile access (`BUSTER_IR_OBSERVABLE`,
 which promotion, private-field replacement, Tier 1's folding and both
@@ -460,16 +460,19 @@ of 1, 2, 4 or 8 bytes is atomic on x86-64 and its total store order gives a
 load's and a release store's orders, and, for a seq_cst store, the
 `fence.void seq_cst` after it, which the producer writes as its own instruction.
 Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
-any row with flags past `volatile` to the scalar rule) and the type
-(`ir_atomic_type`). The typed stream's producer is the C lowering's direct
+any row with flags past `volatile` to the scalar rule), and the type and the
+alignment (`ir_atomic_access`): an atomic access declared below its natural
+alignment is refused, since the backend emits one access of its size whatever
+the address. The typed stream's producer is the C lowering's direct
 atomic load or store ([the builtin integration guide](c-builtins-integration.md)'s
 "Helper contracts and direct forms"): its marked `LOAD`, `STORE` or `SET`
-(`BUSTER_TYPED_ACCESS_ATOMIC`), which `ir_lower` translates and refuses in
-another shape. `tests/ir/atomics.ir` reads every order back, `test-ir`'s verifier
+(`BUSTER_TYPED_ACCESS_ATOMIC`), which `ir_lower` translates with its class's
+natural alignment, which the checker proved, and refuses in another shape. `tests/ir/atomics.ir` reads every order back, `test-ir`'s verifier
 cases refuse an order a kind doesn't take, an order without the flag and an
-order past `seq_cst`, and `tests/ir-source/atomics.c` runs through both
+order past `seq_cst` and an 8-byte access aligned to 1 or 4 (as `test-ir-parse`
+refuses one written as text), and `tests/ir-source/atomics.c` runs through both
 lowerings, promotion, the text's round trip and the IR's three forms against
-clang.
+clang, its `long`'s accesses printed `align=8`.
 
 ### Dynamic stack contract
 

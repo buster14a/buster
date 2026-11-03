@@ -275,6 +275,9 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = switch.void %0, default b1, [0x1, b1], [0x1, b1]\nb1:\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = br.void b1\nb1:\n%2 = phi.i64 [%0, b0], [%0, b0]\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function (i1) -> i64 {\nb0:\n%0 = param.i1 0\n%1 = cbr.void %0, b1, b2\nb1:\n%2 = const.i64 0x7\n%3 = br.void b3\nb2:\n%4 = br.void b3\nb3:\n%5 = ret.void %2\n}\n", IR_PARSE_VERIFY },
+        // An atomic access aligned below its size (#1059): x86 makes only a naturally aligned one single-copy atomic.
+        { "function (ptr) -> i64 {\nb0:\n%0 = param.ptr 0\n%1 = load.i64 %0 align=1 atomic seq_cst\n%2 = ret.void %1\n}\n", IR_PARSE_VERIFY },
+        { "function (ptr, i32) -> void {\nb0:\n%0 = param.ptr 0\n%1 = param.i32 1\n%2 = store.void %0, %1 align=2 atomic release\n%3 = ret.void\n}\n", IR_PARSE_VERIFY },
     };
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {

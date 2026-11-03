@@ -797,6 +797,18 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         ir_test_pair(tally, &function, scratch, 0, false, "an order without an atomic access accepted");
         function.flags[3] = BUSTER_IR_ATOMIC | 6u << BUSTER_IR_ORDER_SHIFT;
         ir_test_pair(tally, &function, scratch, 0, false, "an atomic access of no C order accepted");
+        // An atomic access aligned to its size at least, which an ordinary one need not be.
+        function.flags[3] = BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT;
+        function.alignment_log2[3] = 2;
+        ir_test_pair(tally, &function, scratch, 0, false, "an 8-byte atomic load aligned to 4 accepted");
+        function.flags[3] = BUSTER_IR_VOLATILE;
+        ir_test_pair(tally, &function, scratch, 0, true, "an 8-byte volatile load aligned to 4 rejected");
+        function.alignment_log2[2] = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "an 8-byte atomic store aligned to 1 accepted");
+        function.alignment_log2[2] = 4;
+        ir_test_pair(tally, &function, scratch, 0, true, "an 8-byte atomic store aligned to 16 rejected");
+        function.alignment_log2[2] = 3;
+        function.alignment_log2[3] = 3;
         function.flags[2] = BUSTER_IR_VOLATILE;
         function.flags[3] = BUSTER_IR_VOLATILE;
         IrUses uses = {
