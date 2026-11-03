@@ -56,6 +56,10 @@
 #define BUSTER_TIER1_EMIT_CFG_STUB 0x80000000u
 // The longest chain of copies and constant displacements a recipe is found through (tier1_emit_cfg_recipes).
 #define BUSTER_TIER1_EMIT_CFG_RECIPE_DEPTH 8
+// The most records tier1_emit_cfg_x87 appends for one long double node (#141): an unsigned 64-bit conversion's 20, its
+// control words' 6 and the 2^63 adjustment's 14. The records' capacity counts it per such node (#1204's review), and the
+// emitter refuses a node past it.
+#define BUSTER_TIER1_EMIT_X87_RECORDS 20
 
 // Whether the function is a straight-line chain without phis, the straight-line consumer's: every block but the last
 // jumps to the next, and the last returns, traps or is an empty self-loop.
@@ -764,6 +768,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                     {
                         const uint32_t source = predecessors[e] - added;
                         uint32_t incoming = BUSTER_IR_NONE;
+                        // The last pair from `source`. Under MSan the scan stays scalar: clang's vector form (znver5's,
+                        // 16 pairs a step) gathers the matching pairs' values into a vector whose other lanes are
+                        // undefined, and MSan checks that whole vector where it takes the last matching lane, so it
+                        // reports lanes the scan never reads (tier1_cfg_ir.c's scan has the same pragma). Release
+                        // builds keep the vector form.
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
                         for (uint32_t pair = 0; pair < function->b[node]; pair += 1)
                         {
                             const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
@@ -2047,6 +2059,7 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
         }
     }
     Tier1EmitError error = valid ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    error = error != TIER1_EMIT_OK || count <= BUSTER_TIER1_EMIT_X87_RECORDS ? error : TIER1_EMIT_INVALID;
     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < count; r += 1)
     {
         error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
@@ -2082,7 +2095,15 @@ static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const 
     for (uint32_t node = ir_edge ? function->block_offsets[target] : 0; error == TIER1_EMIT_OK && ir_edge && node < function->block_offsets[target + 1] && function->op[node] == IR_PHI; node += 1)
     {
         uint32_t incoming = BUSTER_IR_NONE;
-        for (uint32_t pair = 0; function->type[node] == IR_F80 && pair < function->b[node]; pair += 1)
+        // Scalar under MSan, as tier1_emit_cfg_problem's scan of a phi's pairs: MSan reports the undefined lanes of
+        // clang's vector form (main's native MSan job on #1204's merge, through test-tier1-wide's join of 200
+        // predecessors). Whether the phi is a long double's is the trip count's, not the loop condition's: clang
+        // unswitches a loop on an invariant condition, and the copy it vectorizes doesn't keep the pragma.
+        const uint32_t pairs = function->type[node] == IR_F80 ? function->b[node] : 0;
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
+        for (uint32_t pair = 0; pair < pairs; pair += 1)
         {
             const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
             incoming = entry[0] == source ? entry[1] : incoming;
@@ -2146,6 +2167,19 @@ static uint64_t tier1_emit_cfg_x87_copy_records(const IrFunction* function, cons
     return records;
 }
 
+// The long double nodes' records past every node's share (#141, tier1_emit_cfg_x87): up to BUSTER_TIER1_EMIT_X87_RECORDS
+// each, where a node's share is BUSTER_TIER1_SELECT_RECORDS_PER_NODE, so that a block of conversions doesn't live on
+// other nodes' slack (#1204's review). Scalar: it runs only in functions with a long double.
+static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uint32_t x87_count)
+{
+    uint64_t records = 0;
+    for (uint32_t node = 0; x87_count != 0 && node < plan->function->instruction_count; node += 1)
+    {
+        records += !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_X87 ? BUSTER_TIER1_EMIT_X87_RECORDS - BUSTER_TIER1_SELECT_RECORDS_PER_NODE : 0;
+    }
+    return records;
+}
+
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
@@ -2159,7 +2193,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function) +
-                              tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
+                              tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + tier1_emit_cfg_x87_node_records(plan, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
