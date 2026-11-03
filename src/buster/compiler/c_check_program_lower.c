@@ -11606,11 +11606,11 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                           BUSTER_SCALAR_PATH(scalar));
         }
     }
-    // #1048's node templates are verified against the tasks (test-lowering-templates) but no compile takes them: on the
-    // 9700X, the vector path's compile of sqlite3.c spent 8.9 ms in their scalar pass to save 3.1 ms of its statements
-    // (docs/c-lowering.md's "Node templates over a body: the first path"), which a data-parallel pass must not.
+    // #1048's node templates: the vector path's compile takes them where they're allowed, with their vector scatter and
+    // classification, so that the 9700X's lower.statements and lower.bodies rows weigh the splices against the pass
+    // (docs/c-lowering.md's "Node templates over a body: the vector steps"). The scalar path keeps the tasks alone.
     shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0;
-    shared->templates = false;
+    shared->templates = shared->templates_allowed && !BUSTER_SCALAR_PATH(scalar);
     shared->template_check = false;
     return valid;
 }
