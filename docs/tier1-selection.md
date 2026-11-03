@@ -103,8 +103,8 @@ patterns are:
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
-  to the consumer (#141). It moves past the nodes between them that neither write
-  memory, call, access a volatile object, fence nor move rsp (arithmetic,
+  to the consumer (#141). It moves past the nodes between them that don't write
+  memory, call, access a volatile object, fence or move rsp (arithmetic,
   constants, addresses, other nonvolatile loads) and past none that do: a store
   to any address, a call, a volatile load or store, a fence of any order or
   scope (a signal fence's too), an allocation or a restore of the dynamic
@@ -400,9 +400,15 @@ costlier than munch's in the grammar's cost. That cost is each pattern's
 structural bound on its records, not the records the consumer writes: an
 addition of two loads costs 3 as `lea` of the two loads' registers and 4 as a
 load and an `add` from memory, whose records are 3 and 2 (`mov`, `mov`, `lea`
-against `mov`, `add`). In aggregate the vector path writes fewer records: on the
-frozen `sqlite3.c` by `--tier1`, 346,741 against the scalar twin's 348,554, and
-on Lua 5.4.8's 34 sources 76,475 against 76,681 (#1117's post-merge review).
+against `mov`, `add`). In aggregate the vector path writes fewer records. At
+#1190's head, by `--tier1 --tier1-report`: on the frozen `sqlite3.c` with the
+records' flags (`-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0
+-DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`, its 2,668 functions), 346,741
+against the scalar twin's 348,554 (338,926 against 340,658 without the flags,
+its 2,602 functions); on Lua 5.4.8's 34 sources with its Makefile's
+`-std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX`, 76,475 against 76,681 (76,124
+against 76,332 without the two defines). "Remaining acceptance" below compares
+the vector path at two earlier heads (#1117's post-merge review).
 On Lua 5.4.8's 1,081 functions as `--tier1` plans them, 80,411 of 98,565 nodes
 take their rule's candidate and 42 munch's.
 
@@ -869,7 +875,8 @@ heads and at its merge with main, `cc3387f`:
   and 338 and 340 with that verification. `--tier1 -c` of the frozen
   `sqlite3.c` took 475.2 ms against 476.6 (`ab` of `time-runs`, 5 rounds of 21
   runs), 6,345.3 M instructions against 6,438.6 M, and its 2,666 functions'
-  records are 346,741 against 346,753; speedtest1's and Lua's code by `--tier1`
+  records are 346,741 at the bottom-up rewrite's head (`153497c`) against 346,753
+  at `d1e8a5f`, both by the vector path; speedtest1's and Lua's code by `--tier1`
   ran alike (3,865.1 M instructions in speedtest1 by both)
   ([record](https://github.com/buster14a/buster-performance/tree/e73dcc345d67ef236098d29757c7218d0aeb86e8/docs/measurements/tier1-burs-lifetimes-141-2026-11-02),
   with commit 6's blocks' lifetimes and the review's measurements).
