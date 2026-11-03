@@ -199,9 +199,11 @@ and vector outputs must match in every retained body and audit column.
 ## Reach in `--tier1`
 
 `--tier1` compiles each function alone, so it doesn't run this pass. In #1189's
-measurement, clang -O2 makes 25.62 M of the 76.25 M calls that `--tier1`'s
-speedtest1 makes into its own functions, and 54.2 M of Lua 5.4.8's 106.0 M.
-The callees it inlines run 1,126 M and 975 M of Tier 1's instructions.
+measurement, clang -O2 makes 25.62 M of the 77.62 M calls that `--tier1`'s
+speedtest1 makes into its own code, and 54.2 M of Lua 5.4.8's 106.0 M.
+speedtest1's include 1.37 M calls into the unit's atomic load and store helpers,
+which clang does inline. The callees it inlines run 1,129 M and 975 M of Tier 1's
+instructions.
 
 The callees this scope takes (single-block leaves without stack objects)
 receive 9.56 M of speedtest1's calls (13.9%) and 1.86 M of Lua's (2.0%), at 2 to

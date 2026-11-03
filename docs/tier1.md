@@ -297,7 +297,7 @@ compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 ## Where the gap to clang -O2 is (#1189)
 
 #1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
-[the record](https://github.com/buster14a/buster-performance/tree/495d20c4aee49871cc7e9ff794341c0b52818f84/docs/measurements/tier1-gap-1189-2026-11-03)
+[the record](https://github.com/buster14a/buster-performance/tree/6319231319fd237bee4818d7c01a6baf31ec26ca/docs/measurements/tier1-gap-1189-2026-11-03)
 has the tool, the experiment patches and the counts)
 counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
 scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
@@ -317,11 +317,11 @@ The gap by cause, as shares of each program's gap:
 
 | Cause | speedtest1 | Lua | Issue |
 | --- | ---: | ---: | --- |
-| stack loads and stores | 22.5% | 25.8% | #1216 (edge spills and reloads), #1116 (call saves) |
+| stack loads and stores | 23.4% | 27.4% | #1216 (edge spills and reloads), #1116 (call saves) |
 | register moves | 18.8% | 12.9% | #1216 (edge moves), #1116 (call sequences' 32-bit self-moves) |
 | address arithmetic | 14.8% | 18.2% | #1217 |
 | compares and branches | 14.8% | 17.8% | #1218 |
-| other loads and stores | 12.1% | 9.3% | #139 (memory value numbering), #1218 (load folding) |
+| other loads and stores | 11.2% | 7.8% | #139 (memory value numbering), #1218 (load folding) |
 | zero and sign extensions | 9.0% | 12.5% | #1219 |
 | calls, returns and frames | 7.4% | 1.5% | #139 (inlining), #177 (frames) |
 
@@ -341,7 +341,7 @@ instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
 
 On the 9700X, `measure-tier1-programs` ([the command guide](commands/tier1.md))
 ran in #1230's Benchpress job at `eeeafb6d`, with clang 23.1.4
-([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/495d20c4aee49871cc7e9ff794341c0b52818f84/docs/measurements/tier1-gap-1189-2026-11-03),
+([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/6319231319fd237bee4818d7c01a6baf31ec26ca/docs/measurements/tier1-gap-1189-2026-11-03),
 every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
 
 | Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 |
