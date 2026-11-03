@@ -23,7 +23,11 @@ a title that ends with "CPUs]" otherwise is an error. Each script runs in a bash
 of its own, as GitHub Actions runs a step's `run` (`bash --noprofile --norc -e
 -o pipefail`), in a process group of its own, with standard input from
 `/dev/null`, its standard output and errors into one capture, no other
-descriptor, and `BUSTER_PARALLEL_CPUS` set to its CPUs. The commands start in
+descriptor, `BUSTER_PARALLEL_CPUS` set to its CPUs, and `BUSTER_COMPILER` set
+to the runner's own executable (`/proc/self/exe`), which the correctness
+inventory's commands run, so that a configuration's build runs its own
+executable through them whatever path started it ([build](build.md)'s
+CTest). The commands start in
 the list's order, each once the commands running leave it room: their CPUs come
 to at most `--jobs`, and a command of more runs alone, holding all of them; one
 that doesn't fit yet holds back the ones after it, so the list's order is the

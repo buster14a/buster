@@ -376,8 +376,8 @@ typedef struct ChangesBenchmark ChangesBenchmark;
 struct ChangesBenchmark
 {
     const char* name;
-    // A translation unit of its own (build.sh's *_benchmark.c), whose includes it measures; or, for one in main.c's
-    // units, `sources`.
+    // A translation unit of its own (the build's *_benchmark.c, cmake/BusterSettings.cmake), whose includes it
+    // measures; or, for one in main.c's units, `sources`.
     const char* unit;
     // ERE alternatives of the files under src/buster/compiler/ that define the functions it calls, transitively.
     const char* sources;
@@ -1276,10 +1276,15 @@ static ChangesResult changes_decide(const ChangesInput* input)
             }
             result.changed_steps.items[j] = step;
         }
-        // Global compilation inputs affect every plain benchmark. The scalar intrinsic headers are not global
-        // inputs here: the full-vector 9700X build does not include them.
-        result.all = list_contains(files, text_c("build.sh")) ||
+        // Global compilation inputs affect every plain benchmark: the build's description (build.sh, CMakeLists.txt
+        // and cmake/, whose flags, link and post-link step make the executable) and the host ISA header. The scalar
+        // intrinsic headers are not global inputs here: the full-vector 9700X build does not include them.
+        result.all = list_contains(files, text_c("build.sh")) || list_contains(files, text_c("CMakeLists.txt")) ||
                      list_contains(files, text_c("src/buster/compiler/host_isa.h"));
+        for (uint32_t i = 0; i < files->count && !result.all; i += 1)
+        {
+            result.all = text_starts_with(files->items[i], "cmake/");
+        }
         for (uint32_t i = 0; i < BUSTER_CHANGES_BENCHMARK_COUNT && !result.all; i += 1)
         {
             const ChangesBenchmark* benchmark = &changes_benchmarks[i];
@@ -1840,7 +1845,7 @@ static void changes_test_fixtures(ChangesTest* test, Text workflow, const char* 
     }
 }
 
-// Pushes, documentation, build.sh, nothing at all, and a workflow the base doesn't have.
+// Pushes, documentation, the build's description, nothing at all, and a workflow the base doesn't have.
 static void changes_test_events(ChangesTest* test, Text workflow, const char* root)
 {
     ChangesInput push = {
@@ -1869,6 +1874,25 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
     };
     result = changes_decide(&build);
     changes_expect(test, result.code && result.all && !changes_any_gate(&result), "build.sh runs every plain benchmark", (Text){ 0 });
+
+    ChangesInput description = {
+        .files = changes_words("CMakeLists.txt"),
+        .base_workflow = workflow,
+        .head_workflow = workflow,
+        .root = root,
+    };
+    result = changes_decide(&description);
+    changes_expect(test, result.code && result.all && !changes_any_gate(&result), "CMakeLists.txt runs every plain benchmark", (Text){ 0 });
+
+    ChangesInput settings = {
+        .files = changes_words("cmake/BusterSettings.cmake"),
+        .base_workflow = workflow,
+        .head_workflow = workflow,
+        .root = root,
+    };
+    result = changes_decide(&settings);
+    changes_expect(test, result.code && result.all && !changes_any_gate(&result), "cmake/'s files run every plain benchmark", (Text){ 0 });
+    changes_expect(test, strcmp(changes_measure(&result), "all") == 0, "cmake/'s files measure all", (Text){ 0 });
 
     ChangesInput host = {
         .files = changes_words("src/buster/compiler/host_isa.h"),
@@ -2352,7 +2376,7 @@ static bool changes_oracle_policy(Text workflow)
         hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
         hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
         native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test, fuzz]");
-        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}");
         native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}");
         native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
     }
@@ -2362,6 +2386,9 @@ static bool changes_oracle_policy(Text workflow)
 static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
 {
     changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
+    const char* source = text_terminated(workflow);
+    changes_expect(test, strstr(source, "    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]") != NULL, "draft transitions trigger a fresh current-revision run", (Text){ 0 });
+    changes_expect(test, strstr(source, "tools/ci/qualification.c") != NULL && strstr(source, "PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}") != NULL, "aggregate qualification uses the tested draft-aware policy", (Text){ 0 });
     static const struct
     {
         const char* before;
@@ -2375,6 +2402,8 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
         { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
         { " && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'))", "" },
         { "needs.fuzz.result == 'success'", "needs.fuzz.result != 'failure'" },
+        { " && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)", "" },
+        { "github.event.pull_request.draft == false", "github.event.pull_request.draft != true" },
         // Pull requests skip the fuzz campaigns; nothing else may.
         { "github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
         { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",

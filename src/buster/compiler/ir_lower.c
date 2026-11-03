@@ -1126,9 +1126,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         }
         else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
         {
-            // A frame's address (#148) and a tail call (#147's musttail), which this adapter doesn't lower and the plan
-            // and the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
-            check.error = IR_ERROR_OPCODE;
+            // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
+            // neither reaches the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
         else if (kind == BUSTER_TYPED_X86)

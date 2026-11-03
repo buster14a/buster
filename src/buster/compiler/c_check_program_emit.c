@@ -3073,7 +3073,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // A template's `.size` on one of the unit's program symbols, which check_program_sections applies once the static
     // data's atoms exist: a variable's atom is published after this emission.
     bool sized = false;
-    for (uint32_t n = 0; sized == false && n < asms->name_count; n += 1)
+    // An earlier failure can leave asm_symbols unallocated. Keep that failure's diagnostic instead of reading it.
+    for (uint32_t n = 0; valid && sized == false && n < asms->name_count; n += 1)
     {
         const SymbolId symbol = asm_symbols[n];
         sized = symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0;

@@ -1,0 +1,57 @@
+name: CI latency report
+
+on:
+  schedule:
+    - cron: '7 7 * * *'
+      timezone: Europe/Madrid
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ci-timings.yml'
+      - 'tools/ci/timings.c'
+      - 'tools/ci/timings.sh'
+      - 'tests/ci/timings.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Test bounded statistics and API extraction without network calls
+        run: bash tests/ci/timings.sh
+
+  report:
+    needs: test
+    if: github.repository_id == '1421805693' && github.event_name != 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Collect hardware queue and phase durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/timings.sh "$RUNNER_TEMP/ci-timings"
+      - name: Publish summary
+        run: cat "$RUNNER_TEMP/ci-timings/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain timing inputs and report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-timings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ci-timings/*.json
+            ${{ runner.temp }}/ci-timings/*.tsv
+            ${{ runner.temp }}/ci-timings/*.md
+          retention-days: 14
+          if-no-files-found: warn

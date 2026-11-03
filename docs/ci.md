@@ -13,9 +13,9 @@ the host's configured default would otherwise decide the compiler's code and
 its measurements. The owner chose no stack protection for now, which matches
 the official release's default and gives host and CI builds the same canary
 count. The compiler's predefined macros still follow the host driver's
-configured default (`BUSTER_HOST_SSP_DEFAULT`). `build.sh` checks the linked
-executable for a `__stack_chk_fail` reference and fails if the policy did not
-take effect.
+configured default (`BUSTER_HOST_SSP_DEFAULT`). The build's post-link step
+checks each linked executable for a `__stack_chk_fail` reference and fails if
+the policy did not take effect.
 
 The baseline build runs on x86-64 without AVX-512. Native builds select the
 existing scalar twins when the compiler's host target lacks the full SIMD
@@ -89,6 +89,22 @@ fuzzing and the hardware job, including native correctness, so a skipped hardwar
 hosted failure cannot accidentally satisfy the merge gate. Documentation-only
 changes retain their explicit no-code path.
 
+Draft PRs still run hosted correctness, but do not queue the 9700X. Both
+`ready_for_review` and `converted_to_draft` trigger the workflow, using the
+same per-PR concurrency group: marking ready qualifies the current revision,
+and returning to draft cancels the superseded ready run. A code-changing draft
+has a **failing required qualification**, with an explicit withheld-hardware
+message, not a green skipped native job. The selector-confirmed no-code path
+is still allowed, including on drafts; it reports an exemption, not vector
+coverage. Performance-document/harness exceptions remain selector-controlled.
+
+`tools/ci/qualification.c` is the aggregate's fail-closed predicate. It checks
+selector/event consistency as well as every required result; missing, invalid,
+failed or cancelled results cannot pass. Its `--self-test` enumerates 625,000
+result/event/draft/selection combinations against the explicit allowed tuples.
+The hosted selector job runs that test before any hardware admission, and the
+selector's own policy mutants pin the draft guard and ready/draft triggers.
+
 A pull request's run stops at its first failure. Its two test rows fail fast,
 and its tests wait for the agent-guide size and DCO hook checks, which finish
 within the `changes` job's time, and don't start when either fails, so the
@@ -107,6 +123,35 @@ To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
 `BUSTER_HOST_ARCH=x86-64` for `build.sh`; keep Zen 5 performance measurements on
 Benchpress.
+
+## CI latency baseline
+
+`.github/workflows/ci-timings.yml` runs entirely on hosted runners, at 07:07
+Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
+`9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
+median and nearest-rank 95th percentile of successful hardware jobs' queue,
+execution, runner-hook, setup/build, native-test and benchmark-step durations.
+PR, main-push and scheduled/manual event classes stay separate; those classes
+are not claims of targeted/full measurement coverage. The raw API responses,
+normalized observations and summary are retained as 14-day workflow artifacts.
+This adds no benchmark work and changes no hardware scheduling or merge gate.
+
+Missing or inconsistent timestamps contribute no sample; a job or step that
+failed/skipped is not a successful timing observation. No observations means
+unknown, not zero. `runner-hook` includes hook overhead and possible waiting;
+**it is not the exact shared-lock wait**. Exact lock acquisition/release and
+therefore exact lock occupation still require host-hook instrumentation, which
+this report does not pretend to infer from `started_at`.
+
+The collector (`tools/ci/timings.sh`) uses read-only Actions access on the
+hosted runner. `tools/ci/timings.c` validates bounded tab-separated observations,
+rejects duplicates/invalid numbers and computes statistics. The PR path tests
+both without API credentials or network calls:
+
+```sh
+bash tests/ci/timings.sh
+cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o /tmp/qualification && /tmp/qualification --self-test
+```
 
 ## Sanitizer builds and detection policy
 
