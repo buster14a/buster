@@ -20,6 +20,9 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_DOMINANCE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_UNSUPPORTED, 0x12345678, 0x87654321 }, CHECK_TIER1_UNSUPPORTED },
+    { { 3, CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, IR_ERROR_UNSUPPORTED, 0x12345678, 0x87654321 }, CHECK_TIER1_UNSUPPORTED },
+    { { 3, CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, IR_ERROR_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
+    { { 3, CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, IR_ERROR_OPERAND, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 0x12345678, 0x87654321 }, CHECK_TIER1_UNSUPPORTED },
     { { 3, CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
@@ -417,7 +420,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     static Parser parser;
     static const char* const last_bodies[] = {
         "long f7(long x){return x+8;}\n",
-        "long double f7(long double x){return x+1.5L;}\n",
+        "__attribute__((naked)) long f7(long x){__asm__(\"leaq 8(%rdi), %rax\\n\\tret\");}\n",
         "long f7(long x){return __builtin_frame_address(0)!=0?x+8:-1;}\n",
         "long f7(long x){__attribute__((musttail)) return f6(x+1);}\n",
     };
@@ -432,7 +435,9 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
         {
             written = fprintf(file, "long f%u(long x){return x+%u;}\n", f, f + 1) > 0;
         }
-        // Real refusals at selection (long double) and lowering (frame-address and musttail), not injected errors.
+        // Real refusals at admission (a naked function, whose body is its own assembly, which admission leaves to Tier 0:
+        // #141 took long double and its x87 aggregates, which anchored it before) and at lowering (frame-address and
+        // musttail), not injected errors.
         written = written && fputs(last_bodies[variant], file) >= 0;
         const bool closed = file != NULL && fclose(file) == 0;
         check_lanes_test_expect(tally, written && closed, "write original Tier 1 coverage fixture", source);
@@ -455,9 +460,8 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
             intern_release(&identifiers);
         }
         // Exercise the public command, including multi-unit option propagation, independently of the in-process
-        // fault control. The native oracle is ordinary original C, compiled externally by Clang.
-        const char* oracle = variant == 1 ? "long f0(long);long double f7(long double);int main(void){return f0(41)!=42||f7(1.25L)!=2.75L;}\n" :
-                                    "long f0(long);long f7(long);int main(void){return f0(41)!=42||f7(34)!=42;}\n";
+        // fault control. The native oracle is ordinary original C, compiled externally by Clang; every variant's f7 adds 8.
+        const char* oracle = "long f0(long);long f7(long);int main(void){return f0(41)!=42||f7(34)!=42;}\n";
         const bool wrote_caller = parse_test_write(caller, oracle, strlen(oracle));
         for (uint32_t scalar = 0; wrote_caller && scalar < 2; scalar += 1)
         {

@@ -106,6 +106,10 @@ struct Tier1CfgInput
     const uint32_t* phi_values;
     const uint32_t* phi_operand_offsets;
     const uint32_t* phi_operands;
+    // Optional, per edge: whether its consumer copies something along it that the allocation doesn't see (Tier 1's long
+    // doubles' phis, #141): it is placed as an edge with moves, at its predecessor's end, its successor's start or a
+    // split's, though it has none of the allocation's.
+    const uint8_t* edge_copies;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -1104,7 +1108,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                 error = ready ? error : TIER1_CFG_INVALID;
                 if (ready)
                 {
-                    const bool moves = staged_count != candidate.edge_move_offsets[e];
+                    const bool moves = staged_count != candidate.edge_move_offsets[e] || (input->edge_copies != 0 && input->edge_copies[e] != 0);
                     const bool one_successor = input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
                     const bool one_predecessor = input->predecessor_offsets[target + 1] - input->predecessor_offsets[target] == 1;
                     candidate.edge_placements[e] = !moves ? TIER1_CFG_EDGE_EMPTY : one_successor ? TIER1_CFG_EDGE_PREDECESSOR : one_predecessor ? TIER1_CFG_EDGE_SUCCESSOR : TIER1_CFG_EDGE_SPLIT;
@@ -1763,7 +1767,8 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
             const uint32_t out_degree = input->successor_offsets[b + 1] - input->successor_offsets[b];
             const uint32_t in_degree = input->predecessor_offsets[s + 1] - input->predecessor_offsets[s];
             const uint8_t placement = result->edge_placements[e];
-            valid = ((moves == 0) == (placement == TIER1_CFG_EDGE_EMPTY)) || tier1_cfg_fail(check, "an edge's placement disagrees with its moves", b, BUSTER_TIER1_CFG_NONE, s_entry);
+            const bool copies = input->edge_copies != 0 && input->edge_copies[e] != 0;
+            valid = ((moves == 0 && !copies) == (placement == TIER1_CFG_EDGE_EMPTY)) || tier1_cfg_fail(check, "an edge's placement disagrees with its moves", b, BUSTER_TIER1_CFG_NONE, s_entry);
             valid = valid && ((placement != TIER1_CFG_EDGE_PREDECESSOR || out_degree == 1) || tier1_cfg_fail(check, "moves at the end of a block with several successors", b, BUSTER_TIER1_CFG_NONE, s_entry));
             valid = valid && ((placement != TIER1_CFG_EDGE_SUCCESSOR || in_degree == 1) || tier1_cfg_fail(check, "moves at the start of a block with several predecessors", b, BUSTER_TIER1_CFG_NONE, s_entry));
             edge.stamp = state.stamp;

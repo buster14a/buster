@@ -27,7 +27,8 @@ The test generates an original program with 256 externally visible integer
 functions, loops and conditional control flow, and a caller of every function.
 One construct keeps the fixture mixed: `fallback`, which reads an unnamed
 argument through its incoming variadic frame, calls `widen` through a volatile
-function pointer, and `widen` converts to long double, which Tier 1 refuses. It compiles
+function pointer, and `widen` is a naked function whose body is its own
+assembly, which Tier 1's admission leaves to Tier 0. It compiles
 that program as one source and as two sources, into objects and executables,
 through the default and scalar host paths. Each path has its own one-lane
 reference: Tier 1's scalar and vector allocators may legitimately choose
@@ -69,12 +70,14 @@ This avoids an accidentally tiny fixture whose useful-work rule never admits the
 requested team. It does not claim that every admitted worker executes the same
 amount of work.
 
-The mixed-tier anchor is deliberate. Tier 1's selection refuses long double, the
-x87's values (`widen`'s conversion), and [the Tier 1 guide](tier1.md) lists it
-among the constructs still refused. The fixture's earlier anchors, a variadic
-definition and an SSE floating conversion, are Tier 1's since #789 and #141, and
-with them alone the harness skipped (status 77), which the shared runner
-reports as skipped: so it went stale unnoticed twice. If a later Tier 1 covers
+The mixed-tier anchor is deliberate. Tier 1's admission refuses a naked
+function (`widen`), whose body is assembly Tier 0 copies as written, and [the
+Tier 1 guide](tier1.md) lists it among the constructs still refused. The
+fixture's earlier anchors, a variadic definition, an SSE floating conversion,
+long double and an aggregate returned in the x87's registers, are Tier 1's
+since #789 and #141, and with the first two alone the harness skipped
+(status 77), which the shared runner reports as skipped: so it went stale
+unnoticed twice. If a later Tier 1 covers
 every function in the fixture, the harness now prints `FAIL (Tier 1 covered
 every function)`, says which file to re-anchor, and exits 1, so that the change
 lifting the refusal re-anchors the fixture. A regression that leaves Tier 1
