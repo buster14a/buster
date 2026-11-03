@@ -493,7 +493,7 @@ static uint32_t check_input_region_proof(CheckInputReader* reader, const CheckIn
                 }
                 const bool initializer = graph->ops[value] == CHECK_OP_INITIALIZE;
                 const uint32_t declaration = initializer ? reader->initializer_declarations[graph->tokens[value]] : BUSTER_CHECK_NONE;
-                if (!initializer || declaration == BUSTER_CHECK_NONE || !reader->static_objects[declaration])
+                if (!initializer || declaration == BUSTER_CHECK_NONE || !check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC))
                 {
                     // Keep the initializer's checked destination conversion visible, including a volatile
                     // automatic store. The surrounding void cast does not add an initialization effect.

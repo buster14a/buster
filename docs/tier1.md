@@ -208,7 +208,11 @@ the option, each unit's report added to the command's.
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
 frame's layout), symbols' addresses (`lea` from `rip`, or a load of the GOT slot
-where the emission's access column says so; thread-locals are Tier 0's),
+where the emission's access column says so; a thread-local's, as Tier 0's,
+the thread pointer `fs:[0]` plus its offset: a TPOFF32 immediate for the
+image's own, or the offset from its GOT slot for one that may be outside it,
+which `test-checker-driver`'s thread-locals' fixture runs on five threads
+against clang -O0's build),
 parameters anywhere in the entry block and narrow ones (zero-extended into
 their canonical storage at the entry), variadic calls of integer arguments (`al`
 zero), calls through a pointer (the callee moved into `r10` with the
@@ -273,10 +277,20 @@ part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
 register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
 which the lowering makes aggregates in a vector register whole. Still refused: a
-vector result LLVM demotes to a hidden pointer, and naked functions, whose
-bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
+vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
+are assembly Tier 0 copies as written, an address whose offset alone is past 32
+bits, and a call whose aggregates' parts in registers other than 64-byte
+vectors take more than the red zone's 14 staging slots (four 32-byte vectors,
+for one). The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
+Functions with what the IR doesn't represent stop before Tier 1, at the
+lowering to the IR: vectors of elements other than 32-bit integers (floats,
+doubles, 8-, 16- and 64-bit integers, which `__m512i`'s intrinsics are), any
+vector at a target without AVX-512 (#775), and x86 builtins' rows, scalar ones
+among them (BMI2's `pdep`, `pext` and `bzhi`), which #732's subset left to the
+typed stream's adapter. Adding them is the IR's: its type column has 18 of the
+32 types its masks allow.
 
 ### The 128-bit integers
 
@@ -398,7 +412,7 @@ compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 ## Where the gap to clang -O2 is (#1189)
 
 #1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
-[the record](https://github.com/buster14a/buster-performance/tree/caa665509d9c68ce3e0091a360f47400170f71f2/docs/measurements/tier1-gap-1189-2026-11-03)
+[the record](https://github.com/buster14a/buster-performance/tree/6495a438f6a3d3b0c8605e24d16f5da996910dad/docs/measurements/tier1-gap-1189-2026-11-03)
 has the tool, the experiment patches and the counts)
 counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
 scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
@@ -418,11 +432,11 @@ The gap by cause, as shares of each program's gap:
 
 | Cause | speedtest1 | Lua | Issue |
 | --- | ---: | ---: | --- |
-| stack loads and stores | 22.5% | 25.8% | #1216 (edge spills and reloads), #1116 (call saves) |
+| stack loads and stores | 23.4% | 27.4% | #1216 (edge spills and reloads), #1116 (call saves) |
 | register moves | 18.8% | 12.9% | #1216 (edge moves), #1116 (call sequences' 32-bit self-moves) |
 | address arithmetic | 14.8% | 18.2% | #1217 |
 | compares and branches | 14.8% | 17.8% | #1218 |
-| other loads and stores | 12.1% | 9.3% | #139 (memory value numbering), #1218 (load folding) |
+| other loads and stores | 11.2% | 7.8% | #139 (memory value numbering), #1218 (load folding) |
 | zero and sign extensions | 9.0% | 12.5% | #1219 |
 | calls, returns and frames | 7.4% | 1.5% | #139 (inlining), #177 (frames) |
 
@@ -440,7 +454,23 @@ cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
 instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
 -O0 on both programs: 3,870 M against 3,908 M, and 7,610 M against 8,253 M.
 
-Cycles and run time remain to be measured on the 9700X.
+On the 9700X, `measure-tier1-programs` ([the command guide](commands/tier1.md))
+ran in #1230's Benchpress job at `eeeafb6d`, with clang 23.1.4
+([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/6495a438f6a3d3b0c8605e24d16f5da996910dad/docs/measurements/tier1-gap-1189-2026-11-03),
+every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
+
+| Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| speedtest1, ms | 258.2 | 207.0 | 271.0 | 129.3 | 269.7 | 1.60 |
+| speedtest1, user cycles, M | 1,336 | 1,051 | 1,397 | 626 | 1,398 | 1.68 |
+| Lua's scripts, ms | 335.2 | 260.8 | 358.7 | 167.4 | 393.6 | 1.56 |
+| Lua's scripts, user cycles, M | 1,839 | 1,424 | 1,957 | 910 | 2,157 | 1.57 |
+
+The `cc3387f` record had `--tier1` at 1.70× -O2's time on speedtest1 and 1.71×
+on Lua, before #1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1 and
+before the depth slots above. The 9700X job runs the measurement on its daily
+and dispatched runs, and on pull requests that change Tier 1's input or
+pipeline.
 
 ## Current integration boundary
 

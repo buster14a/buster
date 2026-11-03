@@ -652,7 +652,7 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
             {
                 kernel->records[kernel->count++] = records.records[r];
             }
-            kernel->referenced = referenced ? 0 : UINT32_MAX;
+            kernel->referenced = referenced ? kernel->reference.instruction : UINT32_MAX;
         }
         for (uint32_t p = 0; p < 3; p += 1)
         {

@@ -28,8 +28,12 @@ patterns are:
   3, 5 or 9; add/shift and three-operand addition through `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
-  into registers, while stores write exactly one/two bytes. Larger displacements
-  return an unsupported result until materialization is implemented. An
+  into registers, while stores write exactly one/two bytes. An address whose
+  constant index, scaled, and offset don't fit a disp32 (#141: `p[1ull << 30]`,
+  a struct array's element past 2 GB) is its own `lea`, the constant in a
+  register (its node's `mov`) as the index and the offset the displacement,
+  which no user folds; one whose offset alone doesn't fit 32 bits is still
+  refused. An
   access's address is walked (`tier1_select_address`, #140) through the nodes
   only its pattern uses, at most 8 of them: the `inttoptr` and `ptrtoint` the
   typed stream's integers put around every address, addresses (one after
@@ -273,10 +277,14 @@ patterns are:
   was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
   which only a vector type makes, and a call whose parts in registers take more
   than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
-  bytes' (`tier1_select_part_slots`). Every function and
-  call with records goes to the CFG consumer. Before a call's moves, it copies
-  the call's aggregates from their addresses into their stack slots, or into the
-  red zone's staging slots, whose registers it loads after the moves. An address
+  bytes' (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
+  register past xmm15, and only an AVX-512F target passes a zmm one), so that a
+  call takes all eight of its vector registers' 64-byte vectors. Every function
+  and call with records goes to the CFG consumer. Before a call's moves, it
+  copies the call's aggregates from their addresses into their stack slots, or
+  into the red zone's staging slots or a 64-byte part's zmm register, whose
+  argument registers it loads or moves after the moves. An address
   in a slot, or recomputed, goes through the scratch register, with rax saved
   below rsp, so its use needn't be required: a call may pass more aggregates than
   its first allocation gives its uses registers. The consumer stores an
@@ -950,9 +958,10 @@ cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 
-Issue #141 remains open. The 9700X measurements its Done-when asks for are
-recorded in [buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01), at #1001's
-heads and at its merge with main, `cc3387f`:
+Issue #141's Done-when is met; whether it closes is the owner's call. The 9700X
+measurements its Done-when asks for are recorded in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01),
+at #1001's heads and at its merge with main, `cc3387f`:
 
 - **Programs**, by the driver's `--tier1` (each function Tier 1's pipeline
   takes by Tier 1, the others by Tier 0), against Tier 0, clang -O0 and clang
@@ -989,8 +998,15 @@ heads and at its merge with main, `cc3387f`:
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-The remaining scalar/ABI/spill consumers and whole-C integration are
-outstanding. `sqlite3.c`'s `sqlite3Multiply128` and `sqlite3Multiply160`,
-which selection refused whole for a 128-bit constant each, are Tier 1's since
-the 128-bit integers' split (#141, [the Tier 1 guide](tier1.md)'s "The 128-bit
-integers"): every function of `sqlite3.c` compiles by `--tier1 --tier1-strict`.
+Whole C is Tier 1's: every function of `sqlite3.c` compiles by `--tier1
+--tier1-strict` (`sqlite3Multiply128` and `sqlite3Multiply160`, which selection
+refused whole for a 128-bit constant each, since the 128-bit integers' split,
+[the Tier 1 guide](tier1.md)'s "The 128-bit integers"), as does every function
+of Lua 5.4.8 (#1204's runs, at `c1f08986`), and every function of c-testsuite's
+subset. Since #1204's merge, Tier 1 also takes thread-locals' addresses, calls
+of up to eight 64-byte vectors in registers, and addresses whose constant index
+doesn't fit a disp32 (#141); the compiler's own `main.c` by `--tier1
+-march=native` then compiles 983 of its 1,100 functions by Tier 1, and the
+others stop before selection: one naked, and 115 at the lowering to the IR, for
+vectors and x86 builtins it doesn't represent (the Tier 1 guide's list). What
+Tier 1 still refuses is that list's. The run-time gap to clang -O2 is #1189's.

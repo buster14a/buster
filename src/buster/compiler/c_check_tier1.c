@@ -14,7 +14,9 @@
 #include "ir_optimize_verified.c"
 #include "ir_wide.c"
 
-_Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
+_Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
+                   BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
+               "Tier 1 reads Tier 0's access column");
 
 // The emitter's nested cause domains, indexed by Tier1EmitCause. The public emitter error wraps these; the outcome
 // keeps the nested cause and error too, and the full table is regression-tested below (test-check-lanes).

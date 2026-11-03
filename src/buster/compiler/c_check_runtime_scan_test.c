@@ -24,10 +24,11 @@ static void check_test_runtime_scan(CheckTest* test)
             uint32_t* nodes = (uint32_t*)check_test_program_guarded(&maps[1], &sizes[1], (uint64_t)count * sizeof(uint32_t));
             uint32_t* objects = (uint32_t*)check_test_program_guarded(&maps[2], &sizes[2], (uint64_t)count * sizeof(uint32_t));
             IdentId* names = (IdentId*)check_test_program_guarded(&maps[3], &sizes[3], (uint64_t)count * sizeof(IdentId));
-            uint8_t* linkage = check_test_program_guarded(&maps[4], &sizes[4], count);
+            // The declarations' bits: their linkage alone.
+            uint8_t* declaration_bits = check_test_program_guarded(&maps[4], &sizes[4], count);
             SymbolId* object_symbols = (SymbolId*)check_test_program_guarded(&maps[5], &sizes[5], ((uint64_t)count + 1) * sizeof(SymbolId));
             uint32_t* tokens = (uint32_t*)check_test_program_guarded(&maps[6], &sizes[6], ((uint64_t)count + 16) * sizeof(uint32_t));
-            bool ready = declarations != NULL && nodes != NULL && objects != NULL && names != NULL && linkage != NULL && object_symbols != NULL && tokens != NULL;
+            bool ready = declarations != NULL && nodes != NULL && objects != NULL && names != NULL && declaration_bits != NULL && object_symbols != NULL && tokens != NULL;
             IdentId identifiers[CHECK_LOWER_RUNTIMES] = { 0 };
             SymbolId initial[CHECK_LOWER_RUNTIMES];
             for (uint32_t r = 0; r < CHECK_LOWER_RUNTIMES; r += 1)
@@ -53,7 +54,7 @@ static void check_test_runtime_scan(CheckTest* test)
                 nodes[t] = density != 0 && (random >> 4) % 3 == 0 ? 0 : BUSTER_CHECK_NONE;
                 objects[t] = (random >> 6) % (count + 3);
                 names[t] = (random >> 12) % 5 == 0 ? 0 : 100 + (random >> 16) % (CHECK_LOWER_RUNTIMES + 1);
-                linkage[t] = (uint8_t)((random >> 24) % 3);
+                declaration_bits[t] = (uint8_t)((random >> 24) % 3 << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
             }
             for (uint32_t o = 0; ready && o <= count; o += 1)
             {
@@ -61,7 +62,7 @@ static void check_test_runtime_scan(CheckTest* test)
             }
             Parser parser = { 0 };
             parser.tokens.names = names;
-            const CheckInput input = { .token_count = count, .declarations = declarations, .objects = objects, .linkage = linkage };
+            const CheckInput input = { .token_count = count, .declarations = declarations, .objects = objects, .declaration_bits = declaration_bits };
             const CheckProgram program = { .input = &input, .parser = &parser, .object_count = count + 1, .object_symbols = object_symbols };
             SymbolId expected[CHECK_LOWER_RUNTIMES];
             memcpy(expected, initial, sizeof(expected));
@@ -71,7 +72,7 @@ static void check_test_runtime_scan(CheckTest* test)
                 for (uint32_t t = 0; identifiers[r] != 0 && expected[r] == 0 && t < count; t += 1)
                 {
                     const uint32_t object = objects[t];
-                    if (declarations[t] == t && names[t] == identifiers[r] && linkage[t] == 2 && object > 0 && object <= count)
+                    if (declarations[t] == t && names[t] == identifiers[r] && check_input_linkage(declaration_bits, t) == 2 && object > 0 && object <= count)
                     {
                         expected[r] = object_symbols[object];
                     }
@@ -125,11 +126,16 @@ static void check_test_runtime_scan(CheckTest* test)
     uint32_t objects[] = { 1, 1, 0, 4, 2, 1, 3, 3 };
     IdentId names[] = { 77, 77, 77, 77, 77, 77, 77, 0 };
     uint8_t linkage[] = { 2, 0, 2, 2, 2, 2, 2, 2 };
+    uint8_t declaration_bits[BUSTER_ARRAY_LENGTH(linkage)];
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(linkage); t += 1)
+    {
+        declaration_bits[t] = (uint8_t)(linkage[t] << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
+    }
     SymbolId object_symbols[] = { 0, 51, 0, 61 };
     uint32_t tokens[24];
     Parser parser = { 0 };
     parser.tokens.names = names;
-    const CheckInput input = { .token_count = 8, .declarations = declarations, .objects = objects, .linkage = linkage };
+    const CheckInput input = { .token_count = 8, .declarations = declarations, .objects = objects, .declaration_bits = declaration_bits };
     const CheckProgram program = { .input = &input, .parser = &parser, .object_count = 4, .object_symbols = object_symbols };
     const IdentId identifiers[1] = { 77 };
     const uint16_t runtimes[1] = { CHECK_LOWER_RUNTIME_ERRNO + 1 };
