@@ -4,9 +4,8 @@
 # A staged tree's content manifest: `write DIRECTORY` records the SHA-256 of every regular file and the target of every
 # symbolic link (DIRECTORY/.manifest), and `check DIRECTORY` fails unless the tree still has exactly those files, with
 # those contents, and those links; other kinds of file are refused. The 9700X's staged official Clang
-# (setup-benchpress.sh) is checked on every use with it, and the pragma oracle's cache keys on its digest
-# (pragma-oracle-cache.sh), so that nothing built from the tree outlives a change to it. Hashing runs in 8 processes:
-# the staged release is a few hundred megabytes. Nothing is written into the tree but the manifest.
+# (setup-benchpress.sh) is checked on every use with it, so that no tree changed in place is used. Hashing runs in 8
+# processes: the staged release is a few hundred megabytes. Nothing is written into the tree but the manifest.
 set -euo pipefail
 command=${1:?usage: tree-manifest.sh write|check DIRECTORY}
 directory=${2:?usage: tree-manifest.sh write|check DIRECTORY}

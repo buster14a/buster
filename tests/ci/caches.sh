@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# Network-free tests of the 9700X's verified caches (#1207): cached-download.sh, fetch-c-testsuite.sh and
-# pragma-oracle-cache.sh, through a hit, a miss, a corrupted entry and changed inputs each.
+# Network-free tests of the 9700X's verified caches (#1207): cached-download.sh and fetch-c-testsuite.sh, through a
+# hit, a miss and a corrupted entry each, and tree-manifest.sh, through a tree changed in each way it can be.
 set -euo pipefail
 root=$(pwd)
 work=$(mktemp -d)
@@ -85,67 +85,5 @@ if bash tools/ci/tree-manifest.sh check "$tree" 2> /dev/null; then fail 'a remov
 printf 'library\n' > "$tree/lib/libclang-cpp.so"
 bash tools/ci/tree-manifest.sh check "$tree" || fail 'the restored tree matches again'
 
-# pragma-oracle-cache.sh with a stand-in toolchain: a miss builds, a hit doesn't, a corrupted executable is rebuilt,
-# changed flags are another key, a compiler changed in place (its version the same) is refused rather than its old
-# oracle reused, a toolchain staged afresh is another key, and one without a manifest builds without the cache.
-toolchain="$work/toolchain"
-mkdir -p "$toolchain/bin"
-cat > "$toolchain/bin/fake-c++" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "${1:-}" = --version ]; then
-    echo 'fake clang version 23.1.4'
-    exit 0
-fi
-output=''
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = -o ]; then output=$2; shift; fi
-    shift
-done
-printf 'build\n' >> "$FAKE_BUILDS"
-printf '#!/bin/sh\necho "oracle %s"\n' "${FAKE_FLAVOR:-one}" > "$output"
-chmod +x "$output"
-SH
-cat > "$toolchain/bin/fake-llvm-config" <<'SH'
-#!/usr/bin/env bash
-if [ "$1" = --prefix ]; then
-    echo "$FAKE_PREFIX"
-    exit 0
-fi
-echo "-I/fake/include ${FAKE_FLAGS:-}"
-echo '-L/fake/lib'
-SH
-chmod +x "$toolchain/bin/fake-c++" "$toolchain/bin/fake-llvm-config"
-bash tools/ci/tree-manifest.sh write "$toolchain"
-export CXX="$toolchain/bin/fake-c++" LLVM_CONFIG="$toolchain/bin/fake-llvm-config" FAKE_BUILDS="$work/builds" FAKE_PREFIX="$toolchain"
-: > "$FAKE_BUILDS"
-entries() { find "$BUSTER_CI_CACHE/pragma-oracle" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l; }
-bash tools/ci/pragma-oracle-cache.sh "$work/oracle-1" > /dev/null
-bash tools/ci/pragma-oracle-cache.sh "$work/oracle-2" > "$work/log"
-grep -q 'reusing' "$work/log" || fail 'a matching oracle is reused'
-test "$(wc -l < "$FAKE_BUILDS")" -eq 1 || fail 'one build for two uses'
-entry=$(find "$BUSTER_CI_CACHE/pragma-oracle" -mindepth 1 -maxdepth 1 -type d ! -name '.*')
-printf '#!/bin/sh\necho tampered\n' > "$entry/oracle"
-FAKE_FLAVOR=two bash tools/ci/pragma-oracle-cache.sh "$work/oracle-3" > "$work/log"
-grep -q 'oracle two' "$work/log" || fail 'a corrupted oracle is rebuilt'
-test "$(wc -l < "$FAKE_BUILDS")" -eq 2 || fail 'the rebuild is a build'
-FAKE_FLAGS=-DOTHER bash tools/ci/pragma-oracle-cache.sh "$work/oracle-4" > /dev/null
-test "$(wc -l < "$FAKE_BUILDS")" -eq 3 || fail 'other flags are another key'
-test "$(entries)" -eq 2 || fail 'two keys, two entries'
-# The compiler replaced at the same path, reporting the same version but building another oracle.
-sed -i 's/FAKE_FLAVOR:-one/FAKE_FLAVOR:-three/' "$toolchain/bin/fake-c++"
-if bash tools/ci/pragma-oracle-cache.sh "$work/oracle-5" > "$work/log" 2>&1; then
-    fail 'a toolchain changed in place reused an oracle another compiler built'
-fi
-grep -q 'differ from its manifest' "$work/log" || fail 'and says why'
-# Staged afresh (a new manifest), it is another key, and its own build.
-bash tools/ci/tree-manifest.sh write "$toolchain"
-bash tools/ci/pragma-oracle-cache.sh "$work/oracle-6" > "$work/log"
-grep -q 'oracle three' "$work/log" || fail 'a toolchain staged afresh builds its own oracle'
-test "$(entries)" -eq 3 || fail 'the new toolchain is a third key'
-rm "$toolchain/.manifest"
-bash tools/ci/pragma-oracle-cache.sh "$work/oracle-7" > "$work/log"
-grep -q 'without the cache' "$work/log" || fail 'a toolchain without a manifest builds without the cache'
-test "$(entries)" -eq 3 || fail 'and keeps nothing'
 cd "$root"
-printf 'caches: downloads, c-testsuite mirror, tree manifests and pragma oracle hit, miss, corruption and changed inputs checked\n'
+printf 'caches: downloads, c-testsuite mirror and tree manifests through hits, misses, corruption and changes checked\n'

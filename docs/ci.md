@@ -112,10 +112,12 @@ on every use, published atomically, and replaced when stale or corrupt:
 - **c-testsuite:** a bare mirror holding the pinned commit
   (`tools/ci/fetch-c-testsuite.sh`). The checkout fetches it through Git's pack
   protocol, which checks every object's hash.
-- **Pragma oracle:** the executable (`tools/ci/pragma-oracle-cache.sh`), under
-  a key made of its source's SHA-256, the toolchain's content manifest, the
-  compiler's path and version, llvm-config's flags and the command. It is
-  checked against its recorded SHA-256 and must answer `--version`.
+
+The pragma oracle is not cached. Its 2.3 s build finishes while the compiler
+build's longest unit (35 s) still runs, so a cached oracle would save no time.
+And a key exact enough to reuse it safely would have to cover everything the
+build reads outside the staged tree: the system C++ headers, the linker and
+its inputs, and environment variables such as `CPLUS_INCLUDE_PATH`.
 
 The staged Clang release itself has a content manifest
 (`tools/ci/tree-manifest.sh`): the SHA-256 of every file and the target of

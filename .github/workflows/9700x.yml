@@ -980,10 +980,11 @@ jobs:
           # The identity's end.
 
       - name: Use the runner's private cache for verified inputs
-        # The frozen corpus's archive, c-testsuite's commit and the pragma oracle, each kept under what identifies it and
-        # verified on every use (docs/ci.md, on the job's private cache). Measured on 2026-11-03 PR jobs, the corpus and
-        # c-testsuite fetches took 0 to 1 s each and the oracle's 2.3 s overlaps the compiler's build: the cache spares the
-        # host their network dependence more than their time. Hosted runners keep none.
+        # The frozen corpus's archive and c-testsuite's commit, each kept under what identifies it and verified on every
+        # use (docs/ci.md, on the job's private cache). Measured on 2026-11-03 PR jobs, their fetches took 0 to 1 s each:
+        # the cache spares the host their network dependence more than their time. The pragma oracle is built every
+        # time: its 2.3 s finish beside the compiler build's longest unit, so no cache of it saves any. Hosted runners
+        # keep none.
         run: printf 'BUSTER_CI_CACHE=%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/buster/ci" >> "$GITHUB_ENV"
 
       - name: Check out triggering commit
@@ -1008,10 +1009,14 @@ jobs:
       - name: Build the external Clang pragma oracle and the Zen 5 executable
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
+          # The official libclang-cpp includes its LLVM dependencies. Link directly
+          # to it, avoiding llvm-config's Ubuntu-specific static system-library paths.
+          flags=$(llvm-config --cxxflags --ldflags)
+          read -r -a flags_array <<< "${flags//$'\n'/ }"
           # The oracle builds beside the compiler, whose build ends with its longest unit alone (main_unit_checker.c,
-          # 35 s of 35.3) while the other CPUs idle: built first, the oracle's 2.3 s came before it. It links the
-          # official libclang-cpp directly, and the private cache keeps it under its inputs' key (pragma-oracle-cache.sh).
-          taskset -c 0-7 bash tools/ci/pragma-oracle-cache.sh "$oracle" &
+          # 35 s of 35.3) while the other CPUs idle: built first, the oracle's 2.3 s came before it.
+          taskset -c 0-7 clang++ -O2 -Wall -Werror tools/preprocessor_pragma_oracle.cpp \
+            "${flags_array[@]}" -lclang-cpp -o "$oracle" &
           oracle_build=$!
           taskset -c 0-7 ./build.sh --config Release
           wait "$oracle_build"
