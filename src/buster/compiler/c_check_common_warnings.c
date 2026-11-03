@@ -40,38 +40,15 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
     return severity;
 }
 
+static void check_common_report_published(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication_source,
+                                          uint32_t id, bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch);
+
 // A warning at a parser token, with its optional notes. The suffix is clang's: -Werror's promotion names the group.
 static void check_common_report_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
                                    uint32_t id, bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
 {
-    if (token >= parser->tokens.count || pp->fatal)
-    {
-        return;
-    }
-    const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
-    if (severity != CHECK_WARNING_IGNORE)
-    {
-        const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
-        const bool error = severity >= CHECK_WARNING_ERROR;
-        const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
-        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
-                                       error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-        PPOutputDiagnosticNote attached[8];
-        const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
-        for (uint32_t i = 0; i < used; i += 1)
-        {
-            attached[i] = (PPOutputDiagnosticNote)
-            {
-                .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : parser->tokens.sources[token],
-                .message = notes[i].message,
-            };
-        }
-        if (suffix != NULL)
-        {
-            pp_diagnose_output_notes_at(pp, disposition, parser->tokens.sources[token], parser->tokens.sources[publication],
-                                        used != 0 ? attached : NULL, used, "%s%s", message, suffix);
-        }
-    }
+    const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
+    check_common_report_published(parser, pp, input, token, publication_source, id, default_ignored, message, notes, note_count, scratch);
 }
 
 // A function-end warning: its location is the declaration, but it completes with the function's closing brace, after
@@ -102,6 +79,41 @@ static void check_common_report(const Parser* parser, Preprocessor* pp, const Ch
                                 bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
 {
     check_common_report_at(parser, pp, input, token, token, id, default_ignored, message, notes, note_count, scratch);
+}
+
+// `check_common_report_at` with the publication already a source position: a diagnostic published past its
+// function's `}` needs the next boundary's source, or the past-end one when the `}` is the last token.
+static void check_common_report_published(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication_source,
+                                          uint32_t id, bool default_ignored, const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
+{
+    if (token >= parser->tokens.count || pp->fatal)
+    {
+        return;
+    }
+    const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
+        const bool error = severity >= CHECK_WARNING_ERROR;
+        const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
+        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        PPOutputDiagnosticNote attached[8];
+        const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
+        for (uint32_t i = 0; i < used; i += 1)
+        {
+            attached[i] = (PPOutputDiagnosticNote)
+            {
+                .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : parser->tokens.sources[token],
+                .message = notes[i].message,
+            };
+        }
+        if (suffix != NULL)
+        {
+            pp_diagnose_output_notes_at(pp, disposition, parser->tokens.sources[token], publication_source,
+                                        used != 0 ? attached : NULL, used, "%s%s", message, suffix);
+        }
+    }
 }
 
 // A type's spelling with clang's decayed type for a format argument: an array prints as a pointer to its element.
@@ -3328,8 +3340,9 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     const char* message = check_warning_text(scratch, "variable '%.*s' is uninitialized when used within its own initialization",
                                                               (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
-                    const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : read_token;
-                    check_common_report_at(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message, NULL, 0, scratch);
+                    const uint32_t brace = body < parser->tokens.count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
+                    const uint32_t publication = brace < parser->tokens.count ? check_driver_publication_position(parser, pp, brace + 1, pp->output.count) : pp->output.count;
+                    check_common_report_published(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message, NULL, 0, scratch);
                 }
                 continue;
             }
@@ -3347,9 +3360,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     check_warning_text(scratch, "initialize the variable '%.*s' to silence this warning",
                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name)) };
                 const uint32_t body = check_common_sparse_get(input->declaration_bodies, declaration);
-                const uint32_t publication = body < parser->tokens.count ? parser->tree.parents[body] : read_token;
-                check_common_report_at(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
-                                       self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
+                const uint32_t brace = body < parser->tokens.count ? parser->tree.parents[body] : BUSTER_CHECK_NONE;
+                const uint32_t publication = brace < parser->tokens.count ? check_driver_publication_position(parser, pp, brace + 1, pp->output.count) : pp->output.count;
+                check_common_report_published(parser, pp, input, read_token, publication, CHECK_WARNING_ID_UNINITIALIZED, true, message,
+                                              self_initialization ? NULL : &note, self_initialization ? 0u : 1u, scratch);
             }
             else if (parameter && scalar && !addressed[declaration] && first_use_read[declaration] == BUSTER_CHECK_NONE &&
                      first_write[declaration] != BUSTER_CHECK_NONE && statement_write[declaration] != 0)
