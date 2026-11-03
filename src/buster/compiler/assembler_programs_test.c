@@ -372,6 +372,40 @@ static bool asm_test_program_padding(AsmTest* test, String8 source, X86Architect
     return valid;
 }
 
+// Every section of ours that isn't GNU as's of its name, with where their bytes first differ: the comparator names only
+// the first (an object lists .eh_frame before .text, whose different length then shows in .eh_frame first).
+static void asm_test_program_sections(const ObjectView* ours, const ObjectView* theirs, const char* name)
+{
+    for (uint64_t i = 1; i < ours->section_count; i += 1)
+    {
+        const Elf64_Shdr* a = &ours->sections[i];
+        const uint64_t j = object_test_compared_section(ours, i) ? object_test_section_named(theirs, object_view_section_name(ours, i), false) : 0;
+        const Elf64_Shdr* b = j != 0 ? &theirs->sections[j] : 0;
+        const bool contents = b != 0 && a->sh_type != SHT_NOBITS && b->sh_type != SHT_NOBITS;
+        uint64_t first = 0;
+        while (contents && first < a->sh_size && first < b->sh_size && ours->file[a->sh_offset + first] == theirs->file[b->sh_offset + first])
+        {
+            first += 1;
+        }
+        if (b != 0 && (a->sh_size != b->sh_size || a->sh_flags != b->sh_flags || a->sh_addralign != b->sh_addralign || (contents && first < a->sh_size)))
+        {
+            printf("assembler program section %s: %s: size %llu against GNU as's %llu, first difference at %#llx:", name, object_view_section_name(ours, i),
+                   (unsigned long long)a->sh_size, (unsigned long long)b->sh_size, (unsigned long long)first);
+            for (uint32_t side = 0; contents && side < 2; side += 1)
+            {
+                const ObjectView* view = side == 0 ? ours : theirs;
+                const Elf64_Shdr* header = side == 0 ? a : b;
+                printf(" %s", side == 0 ? "ours" : "GNU as's");
+                for (uint64_t k = first; k < first + 16 && k < header->sh_size; k += 1)
+                {
+                    printf(" %02x", view->file[header->sh_offset + k]);
+                }
+            }
+            printf("\n");
+        }
+    }
+}
+
 static bool asm_test_program_link(const char* compiler, const char* object, const char* executable, const char* output, const char* errors)
 {
     char* link[] = { (char*)compiler, (char*)object, "-o", (char*)executable, "-pthread", 0 };
@@ -493,8 +527,13 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                                 snprintf(difference, sizeof(difference), "the source with its code padding filled with int3 doesn't assemble");
                                 same = false;
                             }
+                            const bool viewed = same;
                             same = same && object_test_same_as(&ours, &theirs, difference, sizeof(difference));
                             asm_test_check(test, same, name, difference);
+                            if (viewed && !same)
+                            {
+                                asm_test_program_sections(&ours, &theirs, name);
+                            }
                         }
                         // The program runs as GNU as's does, even where its objects differ (in an older GNU as's code padding).
                         bool ran = assembled && reference && asm_test_program_link(compilers[compiler], vector_path, program_path, program_output, error_path);
@@ -531,6 +570,13 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                         fprintf(stderr, "assembler program corpus %s: %s%s%.*s\n", name, why, diagnostic.length != 0 ? ": " : "", (int)diagnostic.length,
                                 diagnostic.pointer != 0 ? diagnostic.pointer : "");
                         printf("assembler program artifacts: %s\n", stem);
+                        // The compilers' output differs by version, and a CI runner's artifacts are gone with it: the
+                        // source itself, where it is small enough, says what failed.
+                        if (source.length != 0 && source.length <= 65536)
+                        {
+                            printf("assembler program source %s (%llu bytes):\n%.*s\nassembler program source end\n", name, (unsigned long long)source.length, (int)source.length,
+                                   source.pointer);
+                        }
                     }
                     passed += okay;
                     for (uint32_t path = 0; okay && !keep && path < BUSTER_ARRAY_LENGTH(suffixes); path += 1)
