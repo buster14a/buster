@@ -1211,7 +1211,9 @@ host was a Xeon VM without a PMU, and the 9700X wasn't reachable.
 
 BOLT can't follow `check_input_run`'s jump tables in the PIE code build.sh compiles: their base is hoisted out of the
 block. A `-fno-pie` build of the same source lets it. That build counted the same taken branches as the PIE one in
-every other function, to within 1.3%. The counts below are its, and they don't include calls, returns or glibc's code.
+every other function, to within 1.3%. The counts below are its. A taken branch here is a taken conditional, an
+unconditional jump, a jump table's or a tail call's: BOLT's own dyno-stats total leaves the last two out. Calls, returns
+and glibc's code aren't counted.
 
 They agree with #880's 9700X samples: `check_input_resolve_range` 8.3 M (the samples: 8.4 M), `check_graph_run` 8.0 M
 (8.6 M), `check_input_run` 6.2 M (6.5 M), `check_graph_region_postorder` 2.4 M (2.5 M). Clang's source coverage of the
@@ -1278,9 +1280,9 @@ its iterations ran 2.76 M fewer instructions in both modes below, a run of the h
 
 | sqlite3.c | | main | this change | change |
 | --- | --- | ---: | ---: | ---: |
-| `-fsyntax-only` | taken branches | 61.42 M | 46.46 M | -24.4% |
+| `-fsyntax-only` | taken branches | 61.46 M | 46.50 M | -24.3% |
 | | instructions | 888.5 M | 876.8 M | -1.32% |
-| `-c --lanes 1` | taken branches | 78.06 M | 61.80 M | -20.8% |
+| `-c --lanes 1` | taken branches | 80.01 M | 63.74 M | -20.3% |
 | | instructions | 1,174.4 M | 1,162.2 M | -1.04% |
 
 `-c`'s objects of sqlite3.c and main.c were byte for byte main's. The 9700X's cycles over placements (`time-runs
@@ -1308,7 +1310,7 @@ Each of these is a dispatch or a test without a bias. What's left needs a restru
 `check_graph_constant_contexts`' marks, rather than a hint.
 
 The record ([buster-performance#237](https://github.com/buster14a/buster-performance/pull/237),
-[`layout-hints-1175-2026-11-03`](https://github.com/buster14a/buster-performance/tree/ebf2cd0ea2f5c4f95c95bd6d98dd54e0f3624b75/docs/measurements/layout-hints-1175-2026-11-03))
+[`layout-hints-1175-2026-11-03`](https://github.com/buster14a/buster-performance/tree/3c266c52c7379d1950a019c39508c51fb1c55206/docs/measurements/layout-hints-1175-2026-11-03))
 has the harness, BOLT's raw counts of main and of this change, the variants' patches, the coverage counts, the hint probe
 and the receipts.
 
