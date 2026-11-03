@@ -1258,7 +1258,9 @@ sequences need a separate compact conversion representation.
 ### Built-in macros and the predefines
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
-`__FILE_NAME__`, `__FLT_EVAL_METHOD__` (0 on x86-64, as clang gives it), and
+`__FILE_NAME__` (the presumed name's last component, as clang's
+`llvm::sys::path::filename` takes it: `pp_path_file_name`), `__FLT_EVAL_METHOD__`
+(0 on x86-64, as clang gives it), and
 `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
 `SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
 `__has_attribute`, `__has_builtin`, `__has_constexpr_builtin`, `__has_feature`,

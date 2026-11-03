@@ -54,10 +54,11 @@ struct CheckBuiltinMiscAction
     bool string_known;
     const uint8_t* string_bytes;
     uint32_t string_length;
-    // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and whether the
-    // first argument is a function's name alone past parentheses, casts, `&` and `*` (CheckBuiltinCall's, #1126's review).
+    // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and the objects of
+    // the functions the first argument names (CheckBuiltinCall's, #1126's review).
     bool string_cast;
-    bool function_named;
+    const uint32_t* function_objects;
+    uint32_t function_object_count;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -834,11 +835,17 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
     else
     {
         // addressof and function_start take their operand as it is, before any conversion, as the & operator does; and
-        // function_start a function's address too (&f, (void *)&f, a cast of f), as clang's getAsBuiltinConstantDeclRef
-        // evaluates its operand to a function at offset 0 (#1126's review): the source names the function alone.
+        // function_start an address constant too, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a
+        // function at offset 0 (#1126's review): one of the functions the operand names (&f, (void *)&f, a cast of f,
+        // `1 ? f : g`, `f + 0`), not an object's, a string's or a null pointer.
         const CheckValue operand = input->arguments[0];
         const bool start = id == CBUILTIN_FUNCTION_START;
-        const bool designator = operand.category == CHECK_FUNCTION || (start && input->function_named && operand.category == CHECK_RVALUE && operand.offset == 0);
+        bool named = false;
+        for (uint32_t i = 0; start && i < input->function_object_count; i += 1)
+        {
+            named |= operand.object != 0 && input->function_objects[i] == operand.object;
+        }
+        const bool designator = operand.category == CHECK_FUNCTION || (named && operand.category == CHECK_RVALUE && operand.offset == 0 && operand.object_bit_offset == 0);
         if (start && (!designator || operand.constant_kind != CHECK_CONSTANT_ADDRESS || operand.object == 0))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);

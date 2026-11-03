@@ -106,6 +106,16 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void g(void);\nvoid* a = __builtin_function_start((char*)g + 1);\n", .rejected = true },
         { .name = "generic: function_start of an offset address", .source =
           "void g(void);\nvoid* f(void)\n{\nreturn __builtin_function_start((void*)&g + 1);\n}\n", .rejected = true },
+        { .name = "generic: function_start of folded addresses", .source =
+          "void g(void);\nvoid k(void);\nvoid* a = __builtin_function_start(1 ? g : g);\nvoid* b = __builtin_function_start(g + 0);\n"
+          "void* c = __builtin_function_start(0 ? g : k);\nvoid* d = __builtin_function_start((g, k));\nvoid* e = __builtin_function_start(&g + 1 - 1);\n"
+          "void* f(void)\n{\nreturn __builtin_function_start(1 ? (char*)g + 0 : 0);\n}\n" },
+        { .name = "generic: function_start of an object's address", .source =
+          "int v;\nvoid* a = __builtin_function_start((void (*)(void))&v);\n", .rejected = true },
+        { .name = "generic: function_start of a folded object's address", .source =
+          "int v;\nvoid g(void);\nvoid* a = __builtin_function_start(1 ? (void (*)(void))&v : g);\n", .rejected = true },
+        { .name = "generic: function_start of a folded string", .source =
+          "void g(void);\nvoid* a = __builtin_function_start(0 ? g : (void (*)(void))\"abc\");\n", .rejected = true },
         { .name = "generic: function_start of a cast pointer", .source =
           "void* f(void (*q)(void))\n{\nreturn __builtin_function_start((void*)q);\n}\n", .rejected = true },
         { .name = "generic: addressof of an rvalue", .source =
@@ -343,12 +353,29 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
     check_test_program_source(test,
         "static int callee(int x){return x*5+1;}"
         "static void* const starts[]={__builtin_function_start(&callee),__builtin_function_start((&callee)),"
-        "__builtin_function_start((int(*)(void))callee),__builtin_function_start((void*)&callee),__builtin_function_start(*&callee)};"
-        "int tested(int n){unsigned r=(unsigned)n;for(int i=0;i<5;i++)r=r*31+(starts[i]==(void*)callee);"
+        "__builtin_function_start((int(*)(void))callee),__builtin_function_start((void*)&callee),__builtin_function_start(*&callee),"
+        "__builtin_function_start(1?callee:callee),__builtin_function_start(callee+0)};"
+        "int tested(int n){unsigned r=(unsigned)n;for(int i=0;i<7;i++)r=r*31+(starts[i]==(void*)callee);"
         "r=r*31+(__builtin_function_start(&callee)==(void*)&callee);r=r*31+(__builtin_function_start((void(*)(void))&callee)==(void*)callee);"
         "r=r*31+(__builtin_function_start((&callee))==starts[n&3]);int (*f)(int)=(int(*)(int))__builtin_function_start(&callee);"
         "r=r*31+(unsigned)f(n);return (int)r;}",
         "generic-function-start-of-addresses", clang);
+    // __builtin_FILE_NAME's and __FILE_NAME__'s component of presumed names, as clang's llvm::sys::path::filename takes it
+    // (#1126's review): a root's, a trailing separator's ".", a network root name's, an empty name's and a plain path's.
+    check_test_program_source(test,
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "static void mixs(const char* s){while(*s)mix((unsigned char)*s++);mix(0);}\n"
+        "int tested(int n){h=(unsigned)n;\n"
+        "#line 20 \"/\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 30 \"/foo/\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 40 \"a/\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 50 \"//\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 60 \"//net\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 70 \"\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 80 \"../\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);\n"
+        "#line 90 \"/dir/name.c\"\nmixs(__builtin_FILE_NAME());mixs(__FILE_NAME__);mixs(__builtin_FILE());\n"
+        "return (int)(h^(h>>32));}\n",
+        "generic-file-name-components", clang);
     // The builtins of a place (#148): __builtin_LINE's and __builtin_COLUMN's, through a macro, in an enumerator, an
     // _Static_assert and a static initializer; __builtin_FILE's, __builtin_FILE_NAME's and __builtin_FUNCTION's strings, at
     // file scope ("" for the function) and in one, after a #line that names the file; and the queries of a type,

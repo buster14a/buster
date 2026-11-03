@@ -599,14 +599,10 @@ static const CheckInitString* check_input_source_string(CheckInputReader* reader
             uint32_t column = 0;
             const char* file = 0;
             valid = check_input_source_place(reader, keyword, &line, &column, &file, &length);
-            bytes = (const uint8_t*)file;
-            uint32_t start = length;
-            while (valid && name == C_NAME_BUILTIN_FILE_NAME && start > 0 && bytes[start - 1] != '/')
-            {
-                start -= 1;
-            }
-            bytes = valid && name == C_NAME_BUILTIN_FILE_NAME ? bytes + start : bytes;
-            length = valid && name == C_NAME_BUILTIN_FILE_NAME ? length - start : length;
+            // __builtin_FILE_NAME's component, as the preprocessor's __FILE_NAME__ takes it (pp_path_file_name).
+            const char* component = file;
+            length = valid && name == C_NAME_BUILTIN_FILE_NAME ? pp_path_file_name(file, length, &component) : length;
+            bytes = (const uint8_t*)component;
         }
         uint8_t* copy = valid ? arena_push(reader->arena, (uint64_t)length + 1, 1) : 0;
         reader->output->resource |= valid && copy == 0;

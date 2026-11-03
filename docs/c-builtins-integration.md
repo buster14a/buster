@@ -1290,9 +1290,11 @@ to 0x3fb (`check_builtin_misc_more`):
 - `function_start(f)` is f's address, a `void*`, an address constant, of an
   operand that evaluates to a function at offset 0, as clang's
   `getAsBuiltinConstantDeclRef` reads it: a function designator that names a
-  function, or the function's name alone past parentheses, casts, `&` and `*`
-  (`&f`, `(void*)&f`, `(void (*)(int))f`; `CheckBuiltinCall.function_named`).
-  A pointer variable, a conditional, a null pointer and an offset are refused.
+  function, or an address constant at offset 0 of one of the functions the
+  operand names (`&f`, `(void*)&f`, `(void (*)(int))f`, `1 ? f : g`, `f + 0`;
+  `CheckBuiltinCall.function_objects`). A pointer variable, a conditional that
+  doesn't fold, an object's or a string's address, a null pointer and an offset
+  are refused.
 
 `__builtin_complex(re, im)`, catalog code 0x3fc (`check_builtin_misc_complex`),
 is the complex number re + im·i, of type `_Complex T`, where re and im are of
@@ -1471,7 +1473,10 @@ takes, code, static initializers, enumerators and `_Static_assert` alike.
 - `__builtin_FILE()`, `__builtin_FILE_NAME()` and `__builtin_FUNCTION()` are
   `char *` constants, the addresses of strings the walk makes
   (`check_input_source_string`): the presumed file's name as written (after
-  `#line`), its last component, and the enclosing function's name, `""` outside
+  `#line`), its last component as clang's `llvm::sys::path::filename` takes it
+  (`pp_path_file_name`, which `__FILE_NAME__` shares: `"/"` for a root, `"."`
+  for a name that ends in `/`, a `//net` root name whole, the whole name where
+  that is empty), and the enclosing function's name, `""` outside
   one. Each is a private string object of its keyword's token, as `__func__`'s
   array is, which the emission names `.Lbuster_string_N`.
 - `__builtin_vectorelements(T)`, of a vector type or of an expression of one,

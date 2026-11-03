@@ -137,14 +137,21 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
             leading = false;
         }
     }
-    // The name alone past them (but the groups' closing parentheses) of a function: __builtin_function_start's operand.
-    bool alone = base < end && parser->tokens.kinds[base] == PARSE_KIND_IDENTIFIER;
-    for (uint32_t token = base + 1; alone && token < end; token += 1)
+    // The functions the argument names, by their objects (the first four distinct): __builtin_function_start's operand.
+    for (uint32_t token = first; token < end; token += 1)
     {
-        alone = parser->tokens.kinds[token] == PARSE_KIND_R_PAREN && parser->tree.roles[token] == PARSE_ROLE_CLOSE_GROUP;
+        const uint32_t declaration = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[token] : BUSTER_CHECK_NONE;
+        const uint32_t function = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION ? reader->objects[declaration] : 0;
+        bool known = function == 0;
+        for (uint32_t i = 0; i < evidence->function_object_count; i += 1)
+        {
+            known |= evidence->function_objects[i] == function;
+        }
+        if (!known && evidence->function_object_count < BUSTER_ARRAY_LENGTH(evidence->function_objects))
+        {
+            evidence->function_objects[evidence->function_object_count++] = function;
+        }
     }
-    const TypeId named = alone ? reader->declared_types[base] : 0;
-    evidence->function_named = named != 0 && type_kind(reader->types, type_strip_aligned(reader->types, named)) == BUSTER_TYPE_KIND_FUNCTION;
     const uint32_t object = base < end ? check_input_evidence_object(reader, base) : BUSTER_CHECK_NONE;
     if (object != BUSTER_CHECK_NONE)
     {

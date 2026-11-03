@@ -11787,6 +11787,62 @@ static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* 
 
 // Expands a builtin macro whose name was just read, from the context it was read in (`expansion_end` from
 // pp_expansion_end, for __LINE__ and __FILE__ in a token a macro made).
+// The last component of presumed file name `path` (`length` bytes), as clang's processPathToFileName takes it for
+// __FILE_NAME__ and __builtin_FILE_NAME (llvm::sys::path::filename, POSIX style): the bytes past its last '/'; "." for a
+// name that ends in '/' past its root directory ("/foo/", "a/"); the root directory for a name that is only that ("/",
+// "//"), and a "//net" root name whole; and the whole name where the component is empty. Its bytes are `*component`.
+static __attribute__((unused)) uint32_t pp_path_file_name(const char* path, uint32_t length, const char** component)
+{
+    // The root directory's position (root_dir_start): a "//net" root name's separator after it, or a leading '/'.
+    uint32_t root = UINT32_MAX;
+    if (length > 3 && path[0] == '/' && path[1] == '/' && path[2] != '/')
+    {
+        for (uint32_t i = length; i-- > 2;)
+        {
+            root = path[i] == '/' ? i : root;
+        }
+    }
+    else if (length > 0 && path[0] == '/')
+    {
+        root = 0;
+    }
+    // The component's end, past trailing separators but the root directory's.
+    uint32_t end = length;
+    while (end > 0 && end - 1 != root && path[end - 1] == '/')
+    {
+        end -= 1;
+    }
+    const char* bytes = path;
+    uint32_t size = 0;
+    if (length != 0 && path[length - 1] == '/' && (root == UINT32_MAX || end == 0 || end - 1 > root))
+    {
+        bytes = ".";
+        size = 1;
+    }
+    else
+    {
+        // The component's start (filename_pos): the separator a name ends in, or past its last one, but a "//net"'s.
+        uint32_t start = 0;
+        if (end > 0 && path[end - 1] == '/')
+        {
+            start = end - 1;
+        }
+        else
+        {
+            uint32_t separator = UINT32_MAX;
+            for (uint32_t i = 0; i + 1 < end; i += 1)
+            {
+                separator = path[i] == '/' ? i : separator;
+            }
+            start = separator == UINT32_MAX || (separator == 1 && path[0] == '/') ? 0 : separator + 1;
+        }
+        bytes = path + start;
+        size = end - start;
+    }
+    *component = size != 0 ? bytes : path;
+    return size != 0 ? size : length;
+}
+
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     const uint32_t saved_history = pp->history_current;
@@ -11809,12 +11865,9 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
         case PP_BUILTIN_FILE_NAME:
         {
             pp_presumed(pp, where, &file_name, &file_name_length);
-            uint32_t skip = 0;
-            for (uint32_t i = 0; builtin == PP_BUILTIN_FILE_NAME && i < file_name_length; i += 1)
-            {
-                skip = file_name[i] == '/' ? i + 1 : skip;
-            }
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)file_name + skip, file_name_length - skip, flags));
+            const char* component = file_name;
+            const uint32_t component_length = builtin == PP_BUILTIN_FILE_NAME ? pp_path_file_name(file_name, file_name_length, &component) : file_name_length;
+            pp_emit(pp, pp_string_token(pp, (const uint8_t*)component, component_length, flags));
             break;
         }
         case PP_BUILTIN_BASE_FILE:
