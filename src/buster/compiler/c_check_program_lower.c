@@ -320,6 +320,8 @@ struct CheckProgramLowered
     uint64_t template_entries;
     uint64_t template_fast;
     uint64_t template_mismatches;
+    // The evaluated nodes #1048's lean steps took (c_check_program_lean.c).
+    uint64_t lean_nodes;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
     // (Tier0Code.label_records). A jump table's labels are among them, at its dispatch (check_lower_switch_dispatch).
@@ -728,6 +730,10 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
+    // Whether the tasks' loop takes #1048's lean steps (c_check_program_lean.c, CheckLowerShared.lean), and the nodes
+    // they took.
+    bool lean;
+    uint64_t lean_nodes;
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
@@ -9612,6 +9618,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 
 #include "c_check_program_batch.c"
 #include "c_check_program_templates.c"
+#include "c_check_program_lean.c"
 
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
@@ -9700,19 +9707,37 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
 {
     uint64_t expression_nodes = 0;
+    uint64_t lean_nodes = 0;
+    // #1048's lean steps (c_check_program_lean.c), in the plain loop alone, where the writer takes them.
+    const bool lean = !sources && !bit_ints && !templates && writer->lean;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTaskPacked* task = writer->tasks + --writer->depth;
         // The x86 host word has node bytes 0..3, kind 4, flags 5 and instruction class 6.
         const uint8_t* control = (const uint8_t*)&task->control;
-        const uint8_t flags = control[5];
+        uint8_t flags = control[5];
         const CheckLowerTaskKind kind = (CheckLowerTaskKind)control[4];
-        const uint32_t node = (uint32_t)task->control;
+        uint32_t node = (uint32_t)task->control;
         const TypeId type = (uint32_t)task->payload;
         const uint64_t value = task->payload;
         if (sources)
         {
             check_lower_task_source(writer, check_lower_task_unpack(*task));
+        }
+        // An EXPRESSION task's lean steps: each one takes its node, and continues with the operand the node evaluates first
+        // (the task the expansion would push last and this loop pop next), until a node no step takes, which the expansion
+        // below takes as if it had been popped, or a node without such an operand.
+        uint32_t step = BUSTER_CHECK_LOWER_LEAN_NONE;
+        if (lean && kind == CHECK_LOWER_EXPRESSION)
+        {
+            step = check_lower_lean_step(writer, node, flags, &node, &flags);
+            while (step == BUSTER_CHECK_LOWER_LEAN_NEXT && writer->output->status == CHECK_PROGRAM_OK)
+            {
+                lean_nodes += 1;
+                step = check_lower_lean_step(writer, node, flags, &node, &flags);
+            }
+            // The last step's node, unless no step took it: then `node` and `flags` are the expansion's.
+            lean_nodes += step != BUSTER_CHECK_LOWER_LEAN_NONE;
         }
         // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
@@ -9722,16 +9747,20 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             {
                 // A closed subtree of #1048's node templates: its entries copied from the body's pass (c_check_program_templates.c).
             }
+            else if (kind == CHECK_LOWER_EXPRESSION && step != BUSTER_CHECK_LOWER_LEAN_NONE)
+            {
+                // The lean steps took the node and the ones they continued with.
+            }
             else if (kind == CHECK_LOWER_EXPRESSION)
             {
                 // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
                 // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
-                const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
-                                    check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
-                const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
-                                     check_lower_batch_expression(writer, node);
+                // Where the lean steps run, #624's paths aren't tried: their shapes are the steps', and what the steps leave
+                // the expansion lowers alike (sqlite3.c's fragments took none of it).
+                const bool tried = !lean && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->program->input->graph.ops[node] != CHECK_OP_VALUE;
+                const bool simple = tried && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 && check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
+                const bool plain = tried && !simple && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = tried && !plain && !simple && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 && check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
                     if (!simple && !plain)
@@ -9832,7 +9861,8 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             check_lower_complex_task(writer, check_lower_task_unpack(*task));
         }
     }
-    writer->expression_nodes += expression_nodes;
+    writer->expression_nodes += expression_nodes + lean_nodes;
+    writer->lean_nodes += lean_nodes;
 }
 
 static void check_lower_drain(CheckLowerWriter* writer)
@@ -11086,6 +11116,10 @@ struct CheckLowerShared
     uint32_t integer_builtin_count;
     bool terminal;
     bool scalar;
+    // Whether the writers take #1048's lean steps (c_check_program_lean.c): on the vector path (--scalar's lowering, and the
+    // baseline host's, take the expansion, whose rules they follow), not with -g's sources, and only for a stream of
+    // columns, which they read.
+    bool lean;
     // #1048's node templates (c_check_program_templates.c): whether the program may take them (no -g tokens, _BitInt
     // type or overloaded address), and whether its writers do: on the vector path, or where the caller asks
     // (check_program_lower_templates).
@@ -11140,6 +11174,7 @@ struct CheckLowerPart
     uint64_t template_entries;
     uint64_t template_fast;
     uint64_t template_mismatches;
+    uint64_t lean_nodes;
     // The TSC's ticks of its bodies' statements (their controls and tasks' loops), of the rest of its bodies' walks, and
     // of its ABI rows, abi_assign and functions' validation: --time-stages' lower.statements, lower.bodies and
     // lower.validate (check_clock_lower).
@@ -11336,6 +11371,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
 
     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
     *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = BUSTER_SCALAR_PATH(scalar) };
+    shared->lean = !scalar && !sources && program->stream != NULL && program->stream->dense_values == NULL && program->stream->value_types != NULL &&
+                   program->stream->payload_rows != NULL;
     const CheckInput* input = program->input;
     const TypeTable* types = program->types;
     const uint32_t count = input != 0 ? input->token_count : 0;
@@ -11695,6 +11732,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .local_capacity = local_capacity,
         .scalar = BUSTER_SCALAR_PATH(shared->scalar),
         .sources = sources,
+        .lean = shared->lean && !sources,
         .x87_constant_capacity = shared->x87_constant_capacity,
         .label_symbol_capacity = shared->label_symbol_capacity,
         .class_limit = BUSTER_TYPED_CLASSES,
@@ -11900,6 +11938,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->expression_nodes = 0;
     writer->batch_nodes = 0;
     writer->classified_nodes = 0;
+    writer->lean_nodes = 0;
     writer->template_spliced_nodes = 0;
     writer->template_spliced_entries = 0;
     writer->template_fast_nodes = 0;
@@ -12561,6 +12600,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->runtime_count = writer->runtime_count;
     part->expression_nodes = writer->expression_nodes;
     part->batch_nodes = writer->batch_nodes;
+    part->lean_nodes = writer->lean_nodes;
     part->classified_nodes = writer->classified_nodes;
     part->template_nodes = writer->template_spliced_nodes;
     part->template_entries = writer->template_spliced_entries;
@@ -12634,6 +12674,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         lowered->entries += parts[p].entries;
         lowered->expression_nodes += parts[p].expression_nodes;
         lowered->batch_nodes += parts[p].batch_nodes;
+        lowered->lean_nodes += parts[p].lean_nodes;
         lowered->classified_nodes += parts[p].classified_nodes;
         lowered->template_nodes += parts[p].template_nodes;
         lowered->template_entries += parts[p].template_entries;

@@ -78,3 +78,19 @@ the templates took. A change to `check_lower_expand`'s rules for what the table
 takes changes the templates too: run the command on `sqlite3.c`, Lua and
 c-testsuite. [The lowering guide](../../docs/c-lowering.md)'s "Node templates
 over a body: the first path (#1048)" has the coverage and the measurements.
+
+## Lean steps (#1048)
+
+`c_check_program_lean.c` (`check_lower_lean_step`) takes the tasks' loop's
+EXPRESSION tasks of the expansion's ordinary shapes on the vector path's
+compile of a program without a `_BitInt` type. It pushes and writes what
+`check_lower_expand` would, through the same helpers, and continues with each
+node's first-evaluated operand instead of pushing it. `--scalar` and the
+baseline host take the expansion, the steps' exact rules. `test-checker`
+compares the two lowerings' functions on its program fixtures. A change to the
+steps or to `check_lower_expand`'s cases needs one more check: the default
+compile's objects and `--scalar`'s must be the same on `sqlite3.c`, Lua's units
+and c-testsuite's subset. `--time-stages`' `lowering-nodes` line reports the
+nodes the steps took (`lean`, `lean-share`). [The lowering
+guide](../../docs/c-lowering.md)'s "Lean steps in the tasks' loop (#1048)" has
+the coverage and the measurements.
