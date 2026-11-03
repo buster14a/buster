@@ -197,8 +197,8 @@ static void check_lower_batch_write(CheckLowerWriter* writer, uint32_t kinds, ui
     writer->count += count;
 }
 
-// Scalar leaf templates share their payload rule with joined nodes. Standalone VALUE tasks retain
-// the original expression handler; the hot loop uses this helper for proven constants of other ops.
+// Scalar leaf templates share their payload rule with joined nodes. The hot loop uses this helper for VALUE tasks
+// (#1048) and for proven constants of other ops; the original expression handler takes the rest.
 static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized)
 {
     const CheckProgram* program = writer->program;
