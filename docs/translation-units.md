@@ -131,50 +131,56 @@ Its control, the units' two processes at once, was waited for without checking
 the processes' statuses or outputs, and its comparison with them qualifies
 nothing.
 
-The control that does ([the record](https://github.com/buster14a/buster-performance/tree/80a072d39c48468ed7f1895cef8fdf37e3ab9587/docs/measurements/units-control-777-2026-11-02)): at `3ce71ec3`, and with the
-lanes' release of #777 (below), the one command against its units' two
-processes at once by the same executable, each process's exit status checked
-and every output removed before each run and required after it, the whole
-processes' medians of 31 runs (`time-runs`) in four rounds (two for the link
-of the lanes' release, whose `-c` is the same in all four), every object its
-unit's alone and every executable main's:
+The control that does ([the record](https://github.com/buster14a/buster-performance/tree/4745e2bdceac469c1b3557ce012255fb0c9a8186/docs/measurements/units-control-777-2026-11-02)):
+the one command against its units' two processes at once by the same
+executable, each process's exit status checked and every output removed
+before each run and required after it, the whole processes' medians of 31
+runs (`time-runs`), every object its unit's alone and every executable main's.
+At `3ce71ec3` the one command took 114.37 ms with `-c` against 113.79 for the
+processes, and 116.34 linked against 129.84 with `cc`'s link (21 runs). With
+the lanes' release of #777 (below), at `8dad76a2`, against main at `b70deb47`,
+which has the pool of #1128 (#1158) that the release goes through, in two
+rounds:
 
 | ms | main | the lanes' release | two processes at once |
 | --- | ---: | ---: | ---: |
-| `-c` | 114.23 to 114.70 | 113.35 to 114.11 | 113.82 to 114.20 |
-| linked | 119.52 to 119.84 | 119.01, 119.20 | 122.25 to 122.36 with mold's link, 130.56 to 131.01 with `cc`'s |
+| `-c` | 111.63, 111.33 | 110.62, 111.29 | 111.48, 111.22 |
+| linked | 116.09, 117.05 | 116.08, 116.03 | 119.10, 119.45 with mold's link; 128.40, 128.95 with `cc`'s |
 
-- **The units grow alike in one process and in two.** Beside each other,
-  `sqlite3.c`'s preprocessing takes 11.9 ms against 9.9 alone, its
-  `check-input` 52.8 against 48.7, and `shell.c`'s `check-input` 23.8 against
-  15.8, in the one command (medians of 7 runs of a trace of its lanes, in the
-  record's `experiment/`) as in the two processes (11.8, 52.4 and 23.7 by
-  `--time-stages`): what the units share is the machine's memory, not an
-  address space. So the one command can match its processes, and beat them
-  only where it does less.
-- **The one command's tail.** The lanes' run ended 1.4 to 1.7 ms after
-  `sqlite3.c`'s unit, 110.7 ms into it: lane 0 released its memory (1.0 to
-  1.4 ms), and `shell.c`'s lane, done 45 ms in, released its own (0.9 to
-  1.7 ms) only then, last in 6 of the 7 runs. A lane now releases its memory as
-  soon as it has no unit left to take, and without a link the last lane leaves
-  its memory to the exit ("Memory" below): the one command is 0.3% to 1.0% faster
-  than main's in each round, from 0.7% faster to 0.3% slower than its
-  processes, and its peak is 421 MB rather than 471 (426 linked, rather than
-  480). The two processes peak at 368 MB, the larger one's.
-- **Linked**, the one command is 2.6% to 2.7% faster than its processes and
-  mold's link of their objects, and 9% faster than with `cc`'s.
-- The large unit's emission shares its parts with the seven other lanes,
-  which take 1,019 of them: its `lanes` stage takes 4.1 ms, against 4.5 to 6.7
-  in a process of its own.
+- **The units grow alike in one process and in two.** At `3ce71ec3`, beside
+  each other, `sqlite3.c`'s preprocessing takes 11.9 ms against 9.9 alone,
+  its `check-input` 52.8 against 48.7, and `shell.c`'s `check-input` 23.8
+  against 15.8, in the one command (medians of 7 runs of a trace of its
+  lanes, in the record's `experiment/`) as in the two processes (11.8, 52.4
+  and 23.7 by `--time-stages`): what the units share is the machine's memory,
+  not an address space. So the one command can match its processes, and beat
+  them only where it does less.
+- **The one command's tail.** At `3ce71ec3`, the lanes' run ended 1.4 to
+  1.7 ms after `sqlite3.c`'s unit, 110.7 ms into it: lane 0 released its
+  memory (1.0 to 1.4 ms), and `shell.c`'s lane, done 45 ms in, released its
+  own (0.9 to 1.7 ms) only then, last in 6 of the 7 runs. A lane now releases
+  its memory into its pool as soon as it has no unit left to take, and
+  without a link the last lane leaves its memory to the exit ("Memory"
+  below): the one command is 0.8% faster and 0.1% slower than its processes
+  in the two rounds, and 0.9% and 0.03% faster than main, which was 0.1%
+  slower than the processes in both. Its peak is 381 MB rather than 435
+  (386 linked, rather than 444); the two processes peak at 337 MB, the larger
+  one's. Before #1158, in six rounds at earlier mains (the record), it ranged
+  from 0.7% faster to 0.3% slower than its processes.
+- **Linked**, the one command is 2.5% and 2.9% faster than its processes and
+  mold's link of their objects, and 9.6% and 10.0% faster than with `cc`'s.
+- At `3ce71ec3`, the large unit's emission shares its parts with the seven
+  other lanes, which take 1,019 of them: its `lanes` stage takes 4.1 ms,
+  against 4.7 in a process of its own beside `shell.c`'s and 4.9 alone
+  (medians).
 - Its lanes without units sleep on the board's futex at once: waiting with
   `lane_wait`'s spin and its millisecond in `mwaitx` took 192 ms of user time
   against 164 to 171, with no difference in wall time (#834's record).
-- Lua's, synth's and musl's commands run as main's (whose many units' lanes
-  #1128 has slower than #763's record): by 8 lanes, Lua's link takes 41.12 ms
-  against 42.32, synth's 621.8 against 626.2 and musl's `-c` (its 1,309 units)
-  678.5 and 675.9 against 674.4 and 677.2 in two measurements; by one lane,
-  80.93 against 81.67, 1,732.3 against 1,729.3 and 1,041.6 against 1,043.8.
-  Their peaks are main's but 0.8 to 3.4 MB.
+- Lua's, synth's and musl's commands run as main's at `b70deb47`: by 8 lanes,
+  Lua's link takes 33.06 ms against 34.14, synth's 467.7 against 471.6 and
+  musl's `-c` (its 1,309 units) 215.2 against 216.3; by one lane, 75.58
+  against 76.42, 1,656.7 against 1,661.3 and 862.6 against 865.0. Their peaks
+  are main's, from 0.6 MB below to 2.9 MB above.
 
 ## What the units share
 
