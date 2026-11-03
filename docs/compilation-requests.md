@@ -284,8 +284,10 @@ What these inputs show, and no more:
   single files, up to 5,299 for Lua's), so it is the change's own work, and on
   inputs from a tiny file to `sqlite3.c` it doesn't grow with their size: no
   added work per token on them.
-- Time: the merge costs slightly more user cycles though it runs fewer
-  instructions. With one executable per tree, every wall-time median is
+- Time: the merge costs slightly more user cycles, while its retired
+  instructions fall for the tiny file, `changes.c` and Lua's units and rise
+  slightly for `sqlite3.c` (397 more by `-c`, 587 by `-fsyntax-only`). With
+  one executable per tree, every wall-time median is
   within 1.22% of the base's, but the merge is slower in most paired runs on
   several rows (Lua's user cycles in 11 of 11). Over six placements of the
   checker's code, three copies each, in three rounds, as `docs/profiling.md`'s
@@ -296,8 +298,9 @@ What these inputs show, and no more:
   1.8%: beyond the floor in every round for Lua's `-c` and the tiny file, in
   two of three for Lua's `-fsyntax-only` and `sqlite3.c`. The cost doesn't
   grow with the input (`sqlite3.c`'s 526 million cycles show no more of it
-  than Lua's), and its cause, which isn't the instructions run, is open: the
-  placements move only the checker's unit.
+  than Lua's). Its cause is open: retired-instruction totals don't explain it
+  and can't rule out a change in instruction mix, dependencies or execution
+  cost, and the placements move only the checker's unit.
 - Every `-c` object is byte for byte the base's, Lua's 33 included.
 - Both source benchmarks report the same counts and timed regions, with the
   receipt line the only addition. Their processes differ outside the timed
