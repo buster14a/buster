@@ -311,6 +311,42 @@ static const CheckAsmFixture check_asm_fixtures[] =
         "int f(int x){int c;asm(\"test %1,%1\":\"=@ccz\"(c):\"r\"(x));return c;}",
     },
     {
+        "flag-output-float",
+        "float f(int x){float c;asm(\"test %1,%1\":\"=@ccs\"(c):\"r\"(x));return c;}",
+    },
+    {
+        "flag-output-record",
+        "struct S{char c[3];};void f(int x){struct S s;asm(\"test %1,%1\":\"=@ccz\"(s):\"r\"(x));}",
+    },
+    {
+        "flag-output-pointer-and-complex",
+        "void f(int x){int*p;_Complex double z;asm(\"test %2,%2\":\"=@ccz\"(p),\"+@ccnz\"(z):\"r\"(x));}",
+    },
+    {
+        "flag-output-unknown-condition",
+        "int f(int x){int c;asm(\"test %1,%1\":\"=@ccpo\"(c):\"r\"(x));return c;}",
+    },
+    {
+        "flag-output-alternative",
+        "int f(int x){int c;asm(\"test %1,%1\":\"=@ccz,r\"(c):\"r\"(x));return c;}",
+    },
+    {
+        "bit-precise-flag-output",
+        "int f(int x){_BitInt(32) c;asm(\"test %1,%1\":\"=@ccz\"(c):\"r\"(x));return (int)c;}",
+    },
+    {
+        "bit-precise-output",
+        "void f(void){unsigned _BitInt(7) c;asm(\"\":\"=r\"(c));}",
+    },
+    {
+        "bit-precise-input",
+        "void f(_BitInt(128) x){asm(\"\"::\"m\"(x));}",
+    },
+    {
+        "bit-precise-converted-input",
+        "void f(_BitInt(32) x){asm(\"\"::\"r\"((int)x), \"r\"(x+1));}",
+    },
+    {
         "goto-forward",
         "int f(int x){asm goto(\"test %0,%0; jz %l[zero]\"::\"r\"(x):\"cc\":zero);return 1;zero:return 0;}",
     },

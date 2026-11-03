@@ -20,9 +20,9 @@
 // that either promotion refuses, or whose text changes meaning: the report names each failure. --print NAME prints the IR of the
 // function of that name, as lowered and as promoted. Before the files, the first is prepared again in a child whose
 // address space can't grow by the preparation's arena, which must fail it as the memory's, touching nothing it couldn't
-// allocate (ir_source_exhausted). --simd instead checks the bounded vector adapter and text forms, and requires
-// transactional refusal of a function with vectors at the SSA promoter's boundary, never counting that refusal as
-// promotion; a function whose only SIMD values are masks, which the promoter takes (#179), must promote.
+// allocate (ir_source_exhausted). --simd instead checks the bounded vector adapter and text forms, and requires a
+// function with vectors to promote (#141) as a function whose only SIMD values are masks does (#179), counting the
+// former: a file of vectors none of which promote fails.
 // --dominators additionally checks each form against #174's scalar/vector/AUTO analysis and its independent
 // definition oracle; unlike the ordinary command, no excluded file is a pass. --dominators-cfg NEW_FILE implies
 // that check and exports the qualified CFGs to an exclusively created file. Only a complete successful corpus
@@ -313,7 +313,7 @@ struct IrSourceTotals
     uint64_t refused;
     uint64_t disagreed;
     uint64_t unpromoted;
-    uint64_t simd_refused;
+    uint64_t simd_promoted;
     // Representations checked through both text parser paths, and representations whose round trip failed.
     uint64_t text_forms;
     uint64_t text_failed;
@@ -370,18 +370,11 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
         const IrCheck promotion = agree ? ssa_ir_promote(&vector, promoted_output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         const IrCheck promotion_twin = agree ? ssa_ir_promote_scalar(&scalar, promoted_output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         const bool promotes = agree && promotion.error == IR_OK && promotion_twin.error == IR_OK && promotion.dominance_checked && promotion_twin.dominance_checked;
-        // --simd explicitly tests the unsupported optimizer boundary, a function with vectors (masks alone promote, #179);
-        // ordinary scalar corpus acceptance still requires promotion. Refusal must preserve the output arena and leave
-        // both candidate objects untouched.
-        const IrFunction untouched = {0};
-        const bool simd_refused = allow_simd && agree && ir_function_has_vectors(&vector) &&
-                                  promotion.error == IR_ERROR_UNSUPPORTED && promotion_twin.error == IR_ERROR_UNSUPPORTED &&
-                                  promoted_output->length == promoted_mark && memcmp(&promoted, &untouched, sizeof(promoted)) == 0 &&
-                                  memcmp(&promoted_twin, &untouched, sizeof(promoted_twin)) == 0;
-        totals->simd_refused += simd_refused;
+        // --simd counts the functions with vectors that promote (#141), as every function must.
+        totals->simd_promoted += allow_simd && promotes && ir_function_has_vectors(&vector);
         totals->refused += !lowered;
         totals->disagreed += lowered && !agree;
-        totals->unpromoted += agree && !promotes && !simd_refused;
+        totals->unpromoted += agree && !promotes;
         entries += source->function->count;
         if (agree)
         {
@@ -455,8 +448,8 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
                 dataflow_valid = dataflow_valid && measured;
             }
         }
-        failures += (!promotes && !simd_refused) || !text_valid || !dominators_valid || !dataflow_valid;
-        if (!promotes && !simd_refused)
+        failures += !promotes || !text_valid || !dominators_valid || !dataflow_valid;
+        if (!promotes)
         {
             const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
             printf("ir-source: file=%s function=%s %s error=%s instruction=%u detail=%u\n", name, source->name,
@@ -651,18 +644,18 @@ static int run_ir_source_tests(int count, char** arguments)
     {
         printf("ir-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " entries=%" PRIu64 " tokens=%" PRIu64
                " instructions=%" PRIu64 " bytes=%" PRIu64 " (%.2f per token) promoted_instructions=%" PRIu64 " promoted_bytes=%" PRIu64
-               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " simd_refused=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64
+               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " simd_promoted=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64
                " dataflow_forms=%" PRIu64 " dataflow_failed=%" PRIu64 " dataflow_checks=%" PRIu64 " dataflow_benchmark_failed=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.entries, totals.tokens, totals.instructions, totals.bytes,
                totals.tokens != 0 ? (double)totals.bytes / (double)totals.tokens : 0.0, totals.promoted_instructions, totals.promoted_bytes, totals.refused,
-               totals.disagreed, totals.unpromoted, totals.simd_refused, totals.text_forms, totals.text_failed, totals.dataflow_forms,
+               totals.disagreed, totals.unpromoted, totals.simd_promoted, totals.text_forms, totals.text_failed, totals.dataflow_forms,
                totals.dataflow_failed, totals.dataflow_checks, totals.dataflow_benchmark_failed);
     }
     else
     {
         fprintf(stderr, "usage: compiler test-ir-source [--simd] [--print NAME] [--dominators] [--dominators-cfg NEW_FILE] [--dataflow-benchmark] [preprocessor options] file... | --dataflow-self-test\n");
     }
-    bool passed = valid && exhausted && text_oracle && dominator_oracle && dataflow_oracle && (!simd || (totals.simd_refused != 0 && totals.left_out == 0)) &&
+    bool passed = valid && exhausted && text_oracle && dominator_oracle && dataflow_oracle && (!simd || (totals.simd_promoted != 0 && totals.left_out == 0)) &&
                   totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 &&
                   totals.dataflow_failed == 0 && totals.dataflow_benchmark_failed == 0 && (dataflow_self_test || totals.functions != 0) &&
                   (!benchmark_dataflow || totals.left_out == 0);

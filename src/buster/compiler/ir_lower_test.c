@@ -1821,6 +1821,42 @@ struct IrLowerTestStream
 // Narrow integers at a call's boundary (#141): f(signed char a, unsigned short b) returns g(a, b, (unsigned char)200,
 // (short)-3). Each narrow parameter arrives as an i32, truncated to its type before its slot's store, and each narrow
 // argument crosses its call as an i32, sign- or zero-extended by its class, with i32 call types, by both lowering paths.
+// ir_typed_ignored_arguments' twins (#141): random call argument locations of every kind, none, one or several of them
+// IGNORE, at every count from 0 to 40 and so at each of the vector path's 8 lanes and its partial tails, must agree.
+static void ir_lower_test_ignored_scan(IrLowerTestTally* tally)
+{
+    AbiLocation locations[40];
+    uint64_t random = 141;
+    uint32_t agreed = 0;
+    for (uint32_t trial = 0; trial < 2000; trial += 1)
+    {
+        const uint32_t count = trial % 41;
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            random = random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t bits = (uint32_t)(random >> 33);
+            locations[a] = (AbiLocation){
+                .stack_offset = bits & 0xff,
+                .registers = { (uint8_t)(bits >> 8), (uint8_t)(bits >> 16) },
+                .kind = (uint8_t)(1 + (bits >> 24) % 3),
+                .flags = (uint8_t)(bits >> 28),
+            };
+        }
+        // None, one at a random place, or one in each eighth of the trials' further ones.
+        random = random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        const uint32_t place = count != 0 ? (uint32_t)(random >> 33) % count : 0;
+        const uint32_t shape = trial % 3;
+        for (uint32_t a = 0; count != 0 && shape != 0 && a < count; a += 1)
+        {
+            locations[a].kind = (shape == 1 && a == place) || (shape == 2 && a % 8 == place % 8) ? BUSTER_ABI_LOCATION_IGNORE : locations[a].kind;
+        }
+        const Tier0Function function = { .argument_locations = count != 0 ? locations : NULL, .argument_count = count };
+        const bool expected = count != 0 && shape != 0;
+        agreed += ir_typed_ignored_arguments(&function, true) == expected && ir_typed_ignored_arguments(&function, false) == expected;
+    }
+    ir_lower_test_expect(tally, agreed == 2000, "ir_typed_ignored_arguments' paths find an ignored argument where there is one", 141, 0);
+}
+
 static void ir_lower_test_narrow(IrLowerTestTally* tally)
 {
     Arena output = arena_reserve(1ull << 20);
@@ -3449,6 +3485,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);
         ir_lower_test_aggregates(&tally);
+        ir_lower_test_ignored_scan(&tally);
         ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);

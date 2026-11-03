@@ -1098,9 +1098,10 @@ static void tier1_call_failures(Tier1EmitTest* test)
     }
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->input, 0);
-    // Past the most arguments a call passes, and I128 and F80 results; variadic calls, calls through a pointer, narrow
-    // results, arguments past the registers and F32 and F64 results and arguments (#141, tier1_float_test.c) are taken.
-    static const uint32_t failures[] = { 0, 4, 5 };
+    // Past the most arguments a call passes, and an I128 result (which the 128-bit integers' split refuses before
+    // selection); variadic calls, calls through a pointer, narrow results, arguments past the registers, F32 and F64
+    // results and arguments (#141, tier1_float_test.c), and an F80 result, in st0 (#141, the CFG consumer's), are taken.
+    static const uint32_t failures[] = { 0, 4 };
     for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
         const uint32_t failure = failures[index];

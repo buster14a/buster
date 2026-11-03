@@ -24,6 +24,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     const uint32_t dispatch_block = plan->block_count + 1;
     IrTypedSink sink = {
         .output = output,
+        .ignored_arguments = plan->ignored_arguments,
         .sizes = {
             .block_count = (uint64_t)plan->block_count + 1 + dispatch,
             .slot_count = (uint64_t)dispatch_slot + dispatch,

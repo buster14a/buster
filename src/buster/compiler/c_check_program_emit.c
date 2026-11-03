@@ -268,7 +268,7 @@ struct CheckEmitBoard
 // explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
-#define BUSTER_CHECK_TIER1_STEPS 7
+#define BUSTER_CHECK_TIER1_STEPS 8
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
 {
@@ -797,6 +797,53 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
     run->tier1_outcomes[b] = outcome;
     return outcome;
+}
+
+// What a symbol's declarations make of it for GNU's common attribute (#147, check_program_emit's commons): the attribute,
+// a section attribute, which keeps it a definition of its own, an initializer's definition, which clang's
+// isVarDeclStrongDefinition makes a strong one, a tentative definition, without which the unit defines none, and the
+// nocommon attribute, which keeps -fcommon's from it. Its symbol is a common one where a tentative definition is all
+// that defines it, without a section, the attribute or -fcommon without nocommon make it one, and its flags have it
+// global (not weak or of internal linkage), of an object (not a thread-local) and no alias's
+// (check_program_emit_common).
+#define BUSTER_CHECK_EMIT_COMMON 0x01u
+#define BUSTER_CHECK_EMIT_COMMON_SECTION 0x02u
+#define BUSTER_CHECK_EMIT_COMMON_DEFINED 0x04u
+#define BUSTER_CHECK_EMIT_COMMON_TENTATIVE 0x08u
+#define BUSTER_CHECK_EMIT_NOCOMMON 0x10u
+
+// The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
+// tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
+// scalar path, `scalar`, takes every token), which only a unit with a common attribute, or compiled with -fcommon, pays
+// for.
+static void check_program_emit_commons(const CheckProgram* program, uint8_t* commons, bool scalar)
+{
+    (void)scalar;
+    const CheckInput* input = program->input;
+    for (uint32_t first = 0; first < input->token_count; first += 64)
+    {
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
+                                        check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const bool defined = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+            const bool declares = input->declarations[token] == token &&
+                                  (defined || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE));
+            const uint32_t object = declares ? input->objects[token] : 0;
+            const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+            commons[symbol] |= symbol == 0 ? 0 : defined ? BUSTER_CHECK_EMIT_COMMON_DEFINED : BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
+        }
+    }
+}
+
+// Whether a symbol's declarations (`bits`, check_program_emit_commons') make it a common one, with -fcommon's `all`.
+static bool check_program_emit_common(uint8_t bits, bool all)
+{
+    const bool asked = (bits & BUSTER_CHECK_EMIT_COMMON) != 0 || (all && (bits & BUSTER_CHECK_EMIT_NOCOMMON) == 0);
+    return asked && (bits & (BUSTER_CHECK_EMIT_COMMON_SECTION | BUSTER_CHECK_EMIT_COMMON_DEFINED | BUSTER_CHECK_EMIT_COMMON_TENTATIVE)) ==
+                        BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
 }
 
 // A part of the bodies on lane `lane`: their lowering (check_lower_part), then each one's Tier 0 code, the lane's
@@ -2049,7 +2096,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t* symbol_aliases = valid && program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     bool retaining = false;
-    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0;
+    // Each symbol's common attribute (#147) and what keeps it from being a common one: BUSTER_CHECK_EMIT_COMMON and the
+    // others' bits (check_program_emit_commons).
+    uint8_t* commons = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    bool common = false;
+    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0 &&
+            commons != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
@@ -2062,6 +2114,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(weak, 0, (uint64_t)program->symbol_count + 1);
         memset(retained, 0, (uint64_t)program->symbol_count + 1);
+        memset(commons, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find the tokens with attributes first, 16 at a time, then keep the declaring tokens. This avoids reading every
         // declaration's attributes and keeps parameters' retain obligations as well as static declarations'. The input's
@@ -2140,16 +2193,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     // definition), and makes it one of its own (check_program_sections).
                     retained[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_RETAIN;
                     retaining |= retained[symbol];
-                    if (!attribute->ignored && symbol != 0 && kind == CHECK_ATTRIBUTE_COMMON)
-                    {
-                        // The typed source contract retains this obligation. Until common symbols (SHN_COMMON), which
-                        // neither the link representation nor the object writer has, are published, refusing code
-                        // emission is required. A dropped definition has no object-format obligation of its own.
-                        result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (common)";
-                        result->token = attribute->name_token;
-                        valid = false;
-                    }
+                    // A common attribute makes its object's tentative definition a common symbol, and a section
+                    // attribute keeps it a definition of its own (check_program_emit_commons).
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_COMMON ? BUSTER_CHECK_EMIT_COMMON : 0;
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SECTION ? BUSTER_CHECK_EMIT_COMMON_SECTION : 0;
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_NOCOMMON ? BUSTER_CHECK_EMIT_NOCOMMON : 0;
+                    common |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_COMMON;
                 }
             }
         }
@@ -2206,6 +2255,32 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, attributes_mark);
+    common |= program->input->common_tentatives;
+    if (valid && common)
+    {
+        check_program_emit_commons(program, commons, BUSTER_SCALAR_PATH(scalar));
+    }
+    // An alias of a variable whose definition is a common symbol (#147, #1126's review): clang's integrated assembler
+    // refuses it ("Common symbol 'x' cannot be used in assignment expr"), and a common's storage is the linker's, which no
+    // symbol of -c's object can be placed in. It is refused at its attribute, as -c's output would be wrong.
+    for (uint32_t k = 0; valid && common && k < program->alias_count; k += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + k;
+        const uint32_t base = alias->kind == CHECK_PROGRAM_ALIAS && alias->error == CHECK_PROGRAM_ALIAS_OK ? alias->base : 0;
+        const SymbolId taken = base != 0 && base < program->object_count ? program->object_symbols[base] : 0;
+        const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == base ? taken : 0;
+        const uint32_t declaration = symbol != 0 ? program->object_declarations[base] : BUSTER_CHECK_NONE;
+        const CheckInput* input = program->input;
+        const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] != C_BINDING_FUNCTION &&
+                              !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) && check_input_linkage(input->declaration_bits, declaration) == 2 && !weak[symbol] && (symbol_aliases == 0 || symbol_aliases[symbol] == 0);
+        if (variable && check_program_emit_common(commons[symbol], input->common_tentatives))
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "an alias of a common symbol, which clang's assembler refuses";
+            result->token = alias->attribute;
+            valid = false;
+        }
+    }
     // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
     // retain attribute for the counting pass to look for.
     uint32_t retained_count = 0;
@@ -2550,12 +2625,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     alias->kind == CHECK_PROGRAM_WEAKREF ? (uint8_t)(kind | BUSTER_LINK_SYMBOL_WEAK) :
                     alias->kind == CHECK_PROGRAM_IFUNC ? (uint8_t)(BUSTER_LINK_SYMBOL_IFUNC | BUSTER_LINK_SYMBOL_GLOBAL | (flags & BUSTER_LINK_SYMBOL_VISIBILITY)) :
                                                          (uint8_t)(alias->type | (flags & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)));
+            // A common attribute's object (#147), or with -fcommon any, a tentative definition of external linkage that
+            // nothing else makes a definition of its own (check_program_emit_common): no initializer, section, weak
+            // attribute, alias or thread-local storage.
+            const bool is_common = check_program_emit_common(commons[s + 1], program->input->common_tentatives) && alias == NULL &&
+                                   kind == BUSTER_LINK_SYMBOL_OBJECT && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
+            flags = is_common ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON) : flags;
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
-                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
+                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1) ||
+                  parser->tokens.names[object - 1] == C_NAME_BUILTIN_FILE || parser->tokens.names[object - 1] == C_NAME_BUILTIN_FILE_NAME ||
+                  parser->tokens.names[object - 1] == C_NAME_BUILTIN_FUNCTION))
         {
-            // A string literal's, or a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__), which clang
-            // makes a private constant as it makes a literal's.
+            // A string literal's, a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__) or the string a
+            // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
+            // it makes a literal's.
             char spelling[48];
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
@@ -2605,7 +2689,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const CheckLowerRuntime runtime = (CheckLowerRuntime)result->lowered.runtime_order[r];
         const char* spelling = check_lower_runtime_names[runtime];
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
-        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) ==
+        // libgcc's CPU model's objects are data, every other runtime entry a function (check_lower_runtime_object).
+        const uint8_t kind = check_lower_runtime_object(runtime) ? BUSTER_LINK_SYMBOL_NOTYPE : BUSTER_LINK_SYMBOL_FUNCTION;
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | kind, BUSTER_LINK_SOURCE_NONE) ==
                                  result->lowered.runtime_symbols[runtime];
     }
     // The jump tables' symbols, then their labels' (CheckProgramLowered.case_symbol_base): local, with names a source

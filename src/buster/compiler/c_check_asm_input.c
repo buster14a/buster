@@ -957,6 +957,37 @@ static void check_input_asm_labels(CheckInputReader* reader)
     arena_pop_to(reader->scratch, mark);
 }
 
+// Whether the unit has an asm goto with a label (check_input_vla_finish's jumps).
+static bool check_input_asm_gotos(const CheckInput* input)
+{
+    bool found = false;
+    for (uint32_t a = 0; a < input->asm_count; a += 1)
+    {
+        found |= input->asm_statements[a].is_goto && input->asm_statements[a].label_count != 0;
+    }
+    return found;
+}
+
+// Whether the asm goto whose keyword is `token` jumps where clang's JumpScopeChecker refuses (#147, #1126's review): to
+// a label of its own in a variable-length array's or a cleanup's scope it isn't in (check_input_vla_finish's scope
+// marks), or out of `innermost`, the innermost cleanup's scope that holds it, if any.
+static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_t token, const CheckInputCleanup* innermost)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t id = check_input_asm_id(reader->output, token);
+    const CheckInputAsm* assembly = id != 0 ? reader->output->asm_statements + id - 1 : NULL;
+    bool refused = false;
+    for (uint32_t l = 0; assembly != NULL && assembly->token == token && assembly->is_goto && l < assembly->label_count; l += 1)
+    {
+        const uint32_t label = assembly->labels[l].target;
+        const uint32_t declaration = label < parser->tokens.count && reader->scope_marks[label] != 0 ? reader->scope_marks[label] - 1 : BUSTER_CHECK_NONE;
+        const bool enters = declaration != BUSTER_CHECK_NONE && (token < declaration || token >= reader->vla_scope_ends[declaration]);
+        const bool exits = innermost != NULL && label < parser->tokens.count && (label <= innermost->declaration || label >= innermost->end);
+        refused |= enters || exits;
+    }
+    return refused;
+}
+
 static void check_input_asm_finish(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
@@ -1047,12 +1078,9 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
                     check_action_source_complete(types, value.type, &action);
         }
         valid &= !memory || (original.flags & BUSTER_CHECK_BIT_FIELD) == 0;
-        if (valid && (source->flags & CHECK_ASM_FLAG) != 0)
-        {
-            uint32_t width = 0;
-            bool sign = false;
-            valid = check_action_integer_type(types, original.type, &width, &sign);
-        }
+        // clang refuses a _BitInt operand of any constraint ("invalid type in asm input", #147), and takes a flag
+        // output of any other type, whose size its code generation (and the lowering, by name) limits.
+        valid &= check_action_kind(types, type_strip_aligned(types, original.type)) != BUSTER_TYPE_KIND_BIT_INT;
         if (valid && (source->flags & CHECK_ASM_MATCH) != 0)
         {
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;

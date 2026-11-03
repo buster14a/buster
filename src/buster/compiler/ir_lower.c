@@ -94,6 +94,8 @@ struct IrTypedPlan
     // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch
     // block (the emitter's last); a jump table's goes to its table's labels from its own block.
     uint32_t indirect;
+    // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
+    bool ignored_arguments;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -534,6 +536,8 @@ struct IrTypedSink
 {
     IrFunction* output;
     IrSizes sizes;
+    // The plan's ignored_arguments: whether a call's arguments' locations need reading (ir_typed_aggregate_call).
+    bool ignored_arguments;
 };
 
 // Keep constructor updates visible in both replay instantiations: count erases column writes and fill erases null
@@ -942,14 +946,47 @@ static bool ir_typed_own_records(const Tier0Function* input)
     return own;
 }
 
+// Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes), whose
+// call then has ABI records (ir_typed_aggregate_call): once a function, so that no call reads its arguments' locations
+// where none is. The vector path tests the kinds of 8 locations a load (AbiLocation's byte 6, IGNORE 0); its scalar twin
+// one at a time, which must agree.
+static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
+{
+    (void)vector;
+
+    const uint32_t count = input->argument_locations != 0 ? input->argument_count : 0;
+    bool ignored = false;
+    if (BUSTER_VECTOR_PATH(vector))
+    {
+        for (uint32_t first = 0; !ignored && first < count; first += 8)
+        {
+            const uint32_t lanes = count - first < 8 ? count - first : 8;
+            const __mmask8 active = (__mmask8)((1u << lanes) - 1);
+            const __m512i locations = _mm512_maskz_loadu_epi64(active, input->argument_locations + first);
+            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0);
+        }
+    }
+    else
+    {
+        for (uint32_t a = 0; !ignored && a < count; a += 1)
+        {
+            ignored = input->argument_locations[a].kind == BUSTER_ABI_LOCATION_IGNORE;
+        }
+    }
+    return ignored;
+}
+
 // Whether call `call` passes or returns an aggregate by value (Tier0Function.argument_sizes, call_result_objects): its
-// IR call then has ABI records.
-static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call)
+// IR call then has ABI records. So does one that passes an aggregate the convention ignores (#141: an empty struct, of
+// no bytes), which a call without records would place by its type, in a register of its own; only a function with one
+// (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
+static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
-    for (uint32_t a = 0; input->argument_sizes != 0 && a < input->call_argument_counts[call]; a += 1)
+    for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
-        aggregate |= input->argument_sizes[input->call_first[call] + a] != 0;
+        const uint32_t argument = input->call_first[call] + a;
+        aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || (ignored && input->argument_locations[argument].kind == BUSTER_ABI_LOCATION_IGNORE);
     }
     return aggregate;
 }
@@ -965,7 +1002,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     const uint32_t count = input->call_argument_counts[call];
     const uint32_t first = (uint32_t)sink->sizes.extra_count;
     const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
-    const bool aggregate = ir_typed_aggregate_call(input, call);
+    const bool aggregate = ir_typed_aggregate_call(input, call, sink->ignored_arguments);
     const uint32_t abi = aggregate ? (uint32_t)sink->sizes.abi_call_count : BUSTER_IR_NONE;
     const uint32_t passed = (uint32_t)sink->sizes.passed_count;
     const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
@@ -1101,6 +1138,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
+    if (check.error == IR_OK && input->unwind_init)
+    {
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), is Tier 0's:
+        // ordinary Tier 1 falls back to it.
+        check.error = IR_ERROR_UNSUPPORTED;
+    }
     if (check.error == IR_OK)
     {
         const Tier0Check typed = tier0_validate(input);
@@ -1192,6 +1235,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     {
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
+        plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
         if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
         {
             plan.error = "no scratch memory for the depth slots";

@@ -592,6 +592,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_FROB_RETURN_ADDR:
         case CBUILTIN_LAUNDER:
         case CBUILTIN_ALLOCA:
+        case CBUILTIN_ALLOCA_WITH_ALIGN:
         case CBUILTIN_STRLEN: minimum = maximum = 1; result_class = BUSTER_TYPED_CLASS_U64; break;
         case CBUILTIN_MEMCPY:
         case CBUILTIN_MEMMOVE:
@@ -694,6 +695,27 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
             // return (or an enclosing variable-length array scope's restore, where clang's stackrestore is) releases.
             cbuiltin_lower_local(&recipe, call->arguments[0]);
             cbuiltin_lower_emit(&recipe, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (call->id == CBUILTIN_ALLOCA_WITH_ALIGN)
+        {
+            // An alignment of `constant_size` bytes, a power of 2 (alloca_with_align's bits over 8): past 16, as an
+            // over-aligned variable-length array's, the size grown by the alignment less 16, allocated, and the address
+            // rounded up, as clang -O0's code rounds rsp down past the size.
+            const uint64_t alignment = call->constant_size;
+            cbuiltin_lower_local(&recipe, call->arguments[0]);
+            if (alignment > 16)
+            {
+                cbuiltin_lower_constant(&recipe, alignment - 16);
+                cbuiltin_lower_operation(&recipe, BUSTER_TYPED_ADD);
+            }
+            cbuiltin_lower_emit(&recipe, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+            if (alignment > 16)
+            {
+                cbuiltin_lower_constant(&recipe, alignment - 1);
+                cbuiltin_lower_operation(&recipe, BUSTER_TYPED_ADD);
+                cbuiltin_lower_constant(&recipe, ~(alignment - 1));
+                cbuiltin_lower_operation(&recipe, BUSTER_TYPED_AND);
+            }
         }
         else if (call->id == CBUILTIN_DWARF_CFA)
         {

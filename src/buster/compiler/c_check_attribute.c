@@ -104,6 +104,8 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_ALIGN_VALUE,
     CHECK_ATTRIBUTE_NO_BUILTIN,
     CHECK_ATTRIBUTE_MUSTTAIL,
+    CHECK_ATTRIBUTE_NOMERGE,
+    CHECK_ATTRIBUTE_SUPPRESS,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -327,6 +329,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     // clang's, on a return statement alone (check_input_statement_attributes, c_check_musttail.c): GNU's spelling and
     // clang::'s scope.
     { "musttail", CHECK_ATTRIBUTE_MUSTTAIL, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // clang's too, which a statement's attributes take and ignore (check_input_statement_attribute_kinds): nomerge, which
+    // only keeps calls from merging, and suppress, the static analyzer's, of string literals. A declaration's are refused.
+    { "nomerge", CHECK_ATTRIBUTE_NOMERGE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "suppress", CHECK_ATTRIBUTE_SUPPRESS, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
     { "unsequenced", CHECK_ATTRIBUTE_UNSEQUENCED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "reproducible", CHECK_ATTRIBUTE_REPRODUCIBLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
 };
@@ -885,6 +891,61 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
     return valid;
 }
 
+// The GNU attributes clang 23's Sema refuses on a label (#147), each with the end of its message, "'name' attribute ...":
+// those whose subjects clang lists without a label among them, and fallthrough, which can't be applied to a declaration.
+// clang takes the others there: unused, the ones it ignores without a word (aligned, deprecated, vector_size and the
+// like), and those it ignores with a warning that they apply to other subjects (hot, cold, noreturn and the like), which
+// the checker doesn't model. musttail's error is its own (check_input_attribute_musttail).
+typedef struct CheckInputLabelRefusal CheckInputLabelRefusal;
+struct CheckInputLabelRefusal
+{
+    const char* name;
+    const char* message;
+};
+
+static const CheckInputLabelRefusal check_input_label_refusals[] = {
+    { "alias", "only applies to functions and global variables" },
+    { "assume", "cannot be applied to a declaration" },
+    { "btf_decl_tag", "only applies to variables, functions, structs, unions, classes, non-static data members, and typedefs" },
+    { "counted_by", "only applies to non-static data members" },
+    { "error", "only applies to functions" },
+    { "fallthrough", "cannot be applied to a declaration" },
+    { "flatten", "only applies to functions" },
+    { "lifetimebound", "only applies to parameters and implicit object parameters" },
+    { "min_vector_width", "only applies to functions" },
+    { "minsize", "only applies to functions and Objective-C methods" },
+    { "mode", "only applies to variables, enums, typedefs, and non-static data members" },
+    { "no_address_safety_analysis", "only applies to functions and global variables" },
+    { "no_sanitize", "only applies to functions, Objective-C methods, and global variables" },
+    { "no_sanitize_address", "only applies to functions and global variables" },
+    { "no_sanitize_memory", "only applies to functions" },
+    { "no_sanitize_thread", "only applies to functions" },
+    { "no_split_stack", "only applies to functions" },
+    { "nomerge", "only applies to functions, statements and variables" },
+    { "overloadable", "only applies to functions" },
+    { "preferred_type", "only applies to bit-field data members" },
+    { "section", "only applies to functions, global variables, Objective-C methods, and Objective-C properties" },
+    { "suppress", "only applies to variables, functions, structs, interfaces, and namespaces" },
+    { "target", "only applies to functions" },
+    { "target_clones", "only applies to functions" },
+    { "tls_model", "only applies to thread-local variables" },
+    { "warning", "only applies to functions" },
+    { "weakref", "only applies to variables and functions" },
+    { "zero_call_used_regs", "only applies to functions" },
+};
+
+// The end of clang's error for attribute `name` (its spelling without a GNU keyword's underscores) on a label, or null for
+// an attribute clang takes there.
+static const char* check_input_label_refusal(String8 name)
+{
+    const char* result = NULL;
+    for (uint32_t i = 0; result == NULL && i < sizeof(check_input_label_refusals) / sizeof(check_input_label_refusals[0]); i += 1)
+    {
+        result = check_input_attribute_equal(name, check_input_label_refusals[i].name) ? check_input_label_refusals[i].message : NULL;
+    }
+    return result;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;
@@ -927,6 +988,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // musttail is clang's own: GNU's spelling and clang::'s, but no gnu::musttail, which clang ignores as an unknown
         // attribute and this refuses as one.
         rule = rule != 0 && rule->kind == CHECK_ATTRIBUTE_MUSTTAIL && scoped && !clang_scope ? 0 : rule;
+        // So are nomerge and suppress, which a statement's attributes alone take.
+        const bool statement_only = rule != 0 && (rule->kind == CHECK_ATTRIBUTE_NOMERGE || rule->kind == CHECK_ATTRIBUTE_SUPPRESS);
+        rule = statement_only && ((scoped && !clang_scope) || !reader->statement_attributes) ? 0 : rule;
         attribute.argument_first = i;
         attribute.argument_end = i;
         if (i < end && parser->tokens.kinds[i] == PARSE_KIND_L_PAREN)
