@@ -637,6 +637,9 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   payload rows, as the stream's values have, would take about 8 MB less.
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
   8.3 MB, written at declarations, most of whose bits would fit one byte.
+- **The `attributes` column.** A pointer a token, 5.7 MB, for 2,457 tokens'
+  attributes, and four passes read it whole. It is a wide sparse column now
+  ("The attributes column", below).
 
 ### The sparse output columns (#628)
 
@@ -736,6 +739,62 @@ has the raw outputs, the receipts and the scripts):
   89.3 M, peak 323,608 → 296,856 KiB, objects the same bytes. User
   instructions are 0.75 M more than `67f7bf51`'s: the directories' acquire loads
   and the exhaustion test.
+
+### The attributes column (#1167)
+
+On main `b70deb47`, `CheckInput.attributes` held a pointer a token: 5.7 MB on
+`sqlite3.c`, for the 2,457 tokens that have attributes, whose entries lie on 219
+of its 1,399 base pages and so, in the output arena's huge pages, on all of
+them. Four passes read it whole, 8 pointers at a time: the asm labels' list of
+attributed tokens (`check_input_asm_attributed_tokens`, 0.81% of `-c`'s
+cycles), the late attributes' masks, the driver's attribute warnings and the
+emission's attributed declarations.
+
+It is a wide column of the sparse pool now (`CheckSparseWide`):
+- **The layout.** A directory entry for each 16 tokens names two consecutive
+  blocks of the pool, which hold the 16 tokens' values of 8 bytes, and the zero
+  entry blocks 0 and 1, both NONEs, which a pool with a wide column keeps. The
+  column holds each pointer complemented, so that a null pointer is its NONE:
+  a token without attributes takes no block, and a fresh arena's directory
+  needs no fill. Reads and writes go through `check_input_attributes_at` and
+  `check_input_set_attributes_at`.
+- **Lanes.** The deferred reader's lanes take its blocks by the pool's claims,
+  as the other columns' are taken (`check_sparse_take`, of two blocks here).
+- **The scans.** Each of the four skips 256 tokens without attributes with a
+  load of their 16 directory entries (`check_sparse_wide_next`) and tests a
+  group's values 8 at a time (`check_sparse_wide_group`); the scalar path, their
+  twin, visits every group and reads each token's value.
+
+`test-checker`'s scans test checks wide columns against columns of a 64-bit
+value a token at every count to 200, beside a column of the same pool: every
+token's value, every group's bits and the next group from every start, and the
+entries' lists, by both paths, with the directory ending at a `PROT_NONE` page.
+Its lanes test writes a wide column of the shared pool at once too.
+
+On the 9700X, main `b70deb47` against the change on it (`ebd8cf4e`), measured as
+the sparse output columns were above, with every object the same bytes by both
+paths, on 8 lanes and with `-g` ([the
+record](https://github.com/buster14a/buster-performance/tree/41457e6769eff22baa23243b55a0787f707f3d74/docs/measurements/attributes-column-1167-2026-11-03)):
+
+| measure | main | wide `attributes` |
+| --- | ---: | ---: |
+| task clock | 114.26 ms | 113.30 ms |
+| user cycles | 546.0 M | 541.3 M |
+| user instructions | 1,276.4 M | 1,275.8 M |
+| kernel cycles | 87.3 M | 87.2 M |
+| peak RSS (`wait4`) | 291,208 KiB | 287,104 KiB |
+| `check-input` | 45.73 ms | 44.96 ms |
+
+- **The time.** Every round of the 8 has the change 0.6 to 1.4 ms faster. The
+  4.7 M fewer user cycles are about the asm labels' 0.81%, but this is one
+  placement each.
+- **The peak** is 4.1 MB lower. It isn't the reader's end any more: a map of
+  each push's resident pages on the laptop puts `VmRSS` at 290.9 MB there and at
+  260.5 MB once the reader's arena of rare columns is released, and
+  `check-expressions` and `check-declarations` take it to the peak, 297.6 MB.
+  What the reader keeps to the peak lowers it; the rare columns, which their
+  few writes spread over about 30 MB of huge pages, cost that much clearing
+  instead (in base pages, the reader's reads of them take 6,800 more faults).
 
 ## The checker's graph and program passes (#530)
 
@@ -1048,7 +1107,8 @@ Every change keeps both paths' objects and diagnostics byte for byte.
     identifier's declaration is one of a labelled object's: a bitset over the tokens
     (`check_input_asm_labelled_tokens`), which a gather of 16 tokens' words reads (`check_input_asm_labelled_uses`).
   - **Twins.** Each kernel's scalar path tests every token.
-  - The emission's own sweep of `attributes` and the column itself (#628) are unchanged.
+  - The emission's own sweep of `attributes` and the column itself (#628) are unchanged. Both are sparse since #1167
+    ("The attributes column", below).
 
 `test-checker` checks the selections' kernel against a reading of random forests of up to 1,100 tokens, and the asm
 labels' three kernels against a reading of random columns. Every column ends at a `PROT_NONE` page, and both paths
