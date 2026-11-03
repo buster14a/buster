@@ -286,7 +286,9 @@ function's size. An `.lcomm` object's alias is OBJECT, and the alias's own
 symbol's section end (`.size` beyond it, or an alias of `object+2`, which takes
 the object's size). A `Link` symbol lies within its atom, so it holds the bytes
 that remain, and `ObjectOptions.symbol_sizes` gives the object GNU as's
-`st_size`.
+`st_size`. The C checker's merge of a whole-unit inline-assembly Link into a
+program (`c_check_program_emit.c`) doesn't read that table, so such a symbol
+keeps the clipped size there.
 
 `.comm name, size[, alignment]` and `.lcomm name, size` (#1115) are GNU as's
 for ELF. A global's `.comm` (C's tentative definitions under `-fcommon`) is a
