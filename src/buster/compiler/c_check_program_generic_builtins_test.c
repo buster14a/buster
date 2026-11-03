@@ -197,6 +197,11 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void *b[5];\nvoid f(void)\n{\n__builtin_longjmp(b, 1);\n}\nint g(void)\n{\nreturn __builtin_setjmp(b);\n}\n"
           "_Static_assert(_Generic(__builtin_setjmp(b), int: 1, default: 0), \"\");\n" },
         { .name = "generic: longjmp of 2", .source = "void *b[5];\nvoid f(int n)\n{\n__builtin_longjmp(b, 2);\n}\n", .rejected = true },
+        // A builtin's name in parentheses is its call's callee, which clang's call looks through (#1242's review): in a
+        // constant expression and in code.
+        { .name = "generic: a builtin's name in parentheses", .source =
+          "_Static_assert((__builtin_popcount)(7) == 3, \"\");\n_Static_assert(((__builtin_clz))(1) == 31, \"\");\n"
+          "enum { E = (__builtin_ctz)(8) };\nint f(unsigned x)\n{\nreturn (__builtin_popcount)(x) + ((__builtin_ffs))((int)x) + E;\n}\n" },
         { .name = "generic: longjmp of a variable", .source = "void *b[5];\nvoid f(int n)\n{\n__builtin_longjmp(b, n);\n}\n", .rejected = true },
         { .name = "generic: longjmp of 0 where it can't run", .source = "void *b[5];\nvoid f(void)\n{\nif (0) __builtin_longjmp(b, 0);\n}\n",
           .rejected = true },
@@ -456,6 +461,25 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "static int frames(void){void* f[5];int r=__builtin_setjmp(f);return r==0&&f[0]==__builtin_frame_address(0);}\n"
         "int tested(int n){h=(unsigned)n;depth=0;for(int i=0;i<4;i++)mix((unsigned)jumps(n+i));mix((unsigned)depth);mix((unsigned)frames());return (int)(h^(h>>32));}\n",
         "generic-setjmp-longjmp", clang);
+    // A value an expression holds across __builtin_setjmp's call, which a longjmp's resumption finds, though calls after it
+    // saved values of their own below their arguments (#1242's review): an int's, a double's beside an int's, and nested
+    // operands of a call, each resumed once; and a control that holds none.
+    check_test_program_source(test,
+        "static void* buf[5];static volatile int sink;static volatile double dsink;static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "__attribute__((noinline)) static int side(int x){return x+5;}__attribute__((noinline)) static double dside(double x){return x+0.5;}\n"
+        "__attribute__((noinline)) static void jump(void){__builtin_longjmp(buf,1);}\n"
+        "__attribute__((noinline)) static int run(int n){int result=n+100+__builtin_setjmp(buf);if(result==n+100){sink=12345+side(8);jump();}return result;}\n"
+        "__attribute__((noinline)) static double drun(int k){double result=(double)k*1.5+__builtin_setjmp(buf);if(result==k*1.5){dsink=7.25+dside(1.0)+side(1);jump();}return result;}\n"
+        "__attribute__((noinline)) static int nested(int a){int r=a+(a*3+(side(a)+__builtin_setjmp(buf)));if(r==a+a*3+side(a)){sink=1+(2+(3+side(4)));jump();}return r;}\n"
+        "__attribute__((noinline)) static int control(void){if(__builtin_setjmp(buf)==0){sink=99+side(1);jump();}return sink;}\n"
+        "int tested(int n){h=(unsigned)n;mix((unsigned)run(n));mix((unsigned)sink);mix((unsigned long long)(drun(n&7)*4));mix((unsigned long long)(dsink*4));\n"
+        "mix((unsigned)nested(n&15));mix((unsigned)control());return (int)(h^(h>>32));}\n",
+        "generic-setjmp-held-values", clang);
+    // Builtins called through their names in parentheses (#1242's review), whose arguments run once.
+    check_test_program_source(test,
+        "static int calls;static unsigned next(unsigned v){calls++;return v;}\n"
+        "int tested(int n){unsigned u=(unsigned)n|1u;return (int)((__builtin_popcount)(next(u))+((__builtin_clz))(u)*100+(__builtin_bswap32)(u)%1000*10000)+calls*7;}\n",
+        "generic-builtin-names-in-parentheses", clang);
     // clang's type traits of C (#148), their values in code: of complete, incomplete and variably modified types.
     check_test_program_source(test,
         "struct T{int x;};\n"

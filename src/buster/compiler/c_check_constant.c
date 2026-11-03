@@ -1333,6 +1333,33 @@ static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t i
     return builtin;
 }
 
+// The last token of a call's callee written as `token` in parentheses (`(name)(...)`, `((name))(...)`), which clang's call
+// takes through them (CallExpr's IgnoreParens), or `token` itself; `*first` gets the outermost '(' (`token` without one).
+static uint32_t check_input_callee_end(const Parser* parser, uint32_t token, uint32_t* first)
+{
+    uint32_t low = token;
+    uint32_t high = token;
+    while (low > 0 && high + 1 < parser->tokens.count && parser->tree.roles[low - 1] == PARSE_ROLE_OPEN_GROUP &&
+           parser->tree.roles[high + 1] == PARSE_ROLE_CLOSE_GROUP && parser->tree.parents[low - 1] == high + 1)
+    {
+        low -= 1;
+        high += 1;
+    }
+    *first = low;
+    return high;
+}
+
+// The name of a builtin's call and the parentheses around it (check_input_callee_end), within the input: its syntax.
+static void check_constant_callee_syntax(CheckConstantInput* input, uint32_t token)
+{
+    uint32_t group = token;
+    const uint32_t end = check_input_callee_end(input->reader->parser, token, &group);
+    for (uint32_t t = group >= input->first ? group : token; t <= end && t < input->end; t += 1)
+    {
+        input->syntax[t - input->first] = true;
+    }
+}
+
 // Whether the identifier at `token`, bound to the declaration of binding `handle`, is a call of C23's <stdbit.h> function
 // `builtin` as clang's library builtin (#148, cbuiltin_stdc_library): the name a builtin of the unit (pp_library_builtin:
 // C23's, unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise), its declaration a function of external
@@ -1343,10 +1370,12 @@ static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t i
 static bool check_input_stdc_library_call(CheckInputReader* reader, uint32_t token, uint32_t handle, uint16_t builtin)
 {
     const Parser* parser = reader->parser;
-    const uint32_t close = token < parser->tokens.count ? parser->tree.parents[token] : parser->tokens.count;
-    const bool call = handle != 0 && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && token + 1 < close &&
-                      parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL && token + 2 < close &&
-                      check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA) == close;
+    uint32_t group = token;
+    const uint32_t end = token < parser->tokens.count ? check_input_callee_end(parser, token, &group) : token;
+    const uint32_t close = end < parser->tokens.count ? parser->tree.parents[end] : parser->tokens.count;
+    const bool call = handle != 0 && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && end + 1 < close &&
+                      parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL && end + 2 < close &&
+                      check_constant_punctuation(parser, end + 2, close, PARSE_KIND_COMMA) == close;
     const uint32_t declaration = call ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
     const IdentId name = parser->tokens.names[token];
     bool result = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
@@ -1370,7 +1399,10 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
-    const uint32_t open = token + 1;
+    // A name in parentheses calls its builtin too (check_input_callee_end), within the input.
+    uint32_t group = token;
+    const uint32_t end = check_input_callee_end(parser, token, &group);
+    const uint32_t open = group >= input->first ? end + 1 : token + 1;
     const uint32_t close = open < input->end ? parser->tree.parents[open] : input->end;
     uint16_t builtin = CBUILTIN_NONE;
     const bool called = open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
@@ -1652,7 +1684,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
             if (builtin != CBUILTIN_NONE)
             {
-                input->syntax[index] = true;
+                check_constant_callee_syntax(input, token);
             }
             else if (input->cached || intrinsic != 0)
             {
@@ -3674,7 +3706,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
             if (builtin != CBUILTIN_NONE)
             {
-                input->syntax[index] = true;
+                check_constant_callee_syntax(input, token);
             }
             else
             {

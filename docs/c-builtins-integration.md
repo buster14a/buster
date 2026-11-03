@@ -1657,10 +1657,16 @@ features. Their prototypes are clang's metadata's:
   local in one and no value of its stacks either (its integer depths are the
   nine caller-saved registers'), and a realigned frame whose base is r15 (an
   over-aligned object beside `alloca` or a VLA) is refused. A value of an
-  enclosing expression pending across the call is reloaded from its call save
-  slot after the second return, which a later call with values pending at that
-  depth may have reused; C's contexts for setjmp (a condition, compared with a
-  constant) have none. Ordinary Tier 1 leaves such a function to Tier 0.
+  enclosing expression that a call holds (`100 + __builtin_setjmp(buf)`'s 100)
+  is saved in a region of the call's own in such a function
+  (`tier0_layout_frame`), so the second return finds it whatever calls ran
+  before the longjmp. Before #1242's review the regions were shared, so a later
+  call could overwrite the value. A value held in its depth's frame slot can't
+  be saved that way, since later expressions share the slot: a long double, an
+  `__int128`, a vector, a mask, or any value of a function with deep entries.
+  Such a call is refused by name (`tier0_returns_twice_saves`). C's contexts
+  for setjmp (a condition, compared with a constant) hold none. Ordinary Tier 1
+  leaves such a function to Tier 0.
   longjmp's second argument must be a constant 1, wherever the call is, with
   clang's two errors at the call (`check_input_longjmp_argument`).
 

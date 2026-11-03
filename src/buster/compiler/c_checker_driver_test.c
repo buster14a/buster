@@ -443,6 +443,45 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // bytes, whose naked function has a label another template takes the address of, and whose template calls libc's puts
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
+// A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
+// review): a long double's, in its depth's slot, which later expressions share. Both paths refuse it by name, and compile
+// the same function with no value held across its setjmp.
+static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char* const sources[2] = {
+        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
+        "long double run(long double x) { long double r = x + __builtin_setjmp(buf); if (r == x) jump(); return r; }\n",
+        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
+        "long double run(long double x) { if (__builtin_setjmp(buf) == 0) { x = x * 2; jump(); } return x; }\n",
+    };
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/setjmp_held.c", directory);
+    snprintf(object, sizeof(object), "%s/setjmp_held.o", directory);
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            const bool refused = status == 1 && text != NULL &&
+                                 strstr(text, "unsupported: a long double, __int128, vector or mask value, or a deep expression's, held across a call in a function "
+                                              "that calls __builtin_setjmp") != NULL;
+            const bool compiled = status == 0;
+            check_test_expect(test, s == 0 ? refused : compiled,
+                              s == 0 ? (path == 0 ? "a long double held across __builtin_setjmp is refused by name" : "the same, scalar")
+                                     : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
+            free(text);
+        }
+        check_test_expect(test, written, "setjmp's held-value sources written");
+    }
+    unlink(source);
+    unlink(object);
+}
+
 static void check_test_driver_asm_symbols(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] =
@@ -7152,6 +7191,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_symbols(&test, executable, directory);
+                check_test_driver_setjmp_held(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

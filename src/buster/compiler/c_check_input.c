@@ -7082,17 +7082,24 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
             if (builtin != CBUILTIN_NONE && role == PARSE_ROLE_OPERAND && claimed)
             {
-                const uint32_t close = parser->tree.parents[i];
+                // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
+                // are dropped with it.
+                uint32_t group = i;
+                const uint32_t end = check_input_callee_end(parser, i, &group);
+                const uint32_t close = parser->tree.parents[end];
                 const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
-                                  i + 1 < close && parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_CALL;
+                                  end + 1 < close && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
                 if (call)
                 {
                     check_input_rare_claim(reader, &reader->builtins[close]);
                     reader->builtins[close] = builtin;
-                    reader->ignored[i] = true;
+                    for (uint32_t t = group; t <= end; t += 1)
+                    {
+                        reader->ignored[t] = true;
+                    }
                     if (check_input_vararg_id(builtin))
                     {
-                        check_input_vararg_prepare(reader, i, builtin);
+                        check_input_vararg_prepare(reader, end, builtin);
                     }
                 }
                 else
