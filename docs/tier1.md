@@ -253,7 +253,11 @@ phis, parameters, arguments and results ([the selection guide](tier1-selection.m
 "Floating values" and [the allocation guide](tier1-allocation.md)'s "The vector
 class's floating values"). So do by-value aggregates' ABI records (#789): a call
 passes each aggregate's bytes where its record says, in registers or in its
-stack slots, and stores an aggregate result into its object; a function stores
+stack slots, and stores an aggregate result into its object. Where a call's
+stack slots need rsp aligned past 16 bytes (a 32- or 64-byte vector's, an
+over-aligned aggregate's), the frame realigns itself to the most any call needs,
+and a dynamic frame rounds its allocations and calls' areas to it (#1204's
+review); a function stores
 each aggregate parameter's registers into a frame object at its entry, and
 returns an aggregate's parts or copies it through the hidden pointer (the
 selection guide's "By-value aggregates"). So does the dynamic stack (#141):

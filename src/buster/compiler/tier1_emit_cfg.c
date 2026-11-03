@@ -450,14 +450,19 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             {
                 tier1_select_next_place(&places, tier1_select_argument_type(function, call, argument));
             }
-            // A call with ABI records (#789): its records' totals.
+            // A call with ABI records (#789): its records' totals, and the alignment its outgoing area needs at rsp, past
+            // 16 bytes for an argument on the stack aligned past them (a 32- or 64-byte vector, an over-aligned aggregate).
+            // The frame takes the most of them (Tier1FrameRequest.calls): it realigns itself to it, and a dynamic frame
+            // rounds its allocations and calls' areas to it (tier1_emit_cfg_stack_alignment; #1204's review).
             const AbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1].call : 0;
             const uint32_t general = abi != 0 ? abi->integer_registers : places.general;
             const uint32_t vectors = abi != 0 ? abi->vector_registers : places.vector;
             const uint32_t stacked = tier1_select_call_stack_bytes(function, call);
+            const uint8_t aligned = abi != 0 ? abi->stack_alignment_log2 : BUSTER_ABI_STACK_ALIGNMENT_LOG2;
             prepared->call_abi.integer_registers = prepared->call_abi.integer_registers > general ? prepared->call_abi.integer_registers : (uint8_t)general;
             prepared->call_abi.vector_registers = prepared->call_abi.vector_registers > vectors ? prepared->call_abi.vector_registers : (uint8_t)vectors;
             prepared->call_abi.stack_bytes = prepared->call_abi.stack_bytes > stacked ? prepared->call_abi.stack_bytes : stacked;
+            prepared->call_abi.stack_alignment_log2 = prepared->call_abi.stack_alignment_log2 > aligned ? prepared->call_abi.stack_alignment_log2 : aligned;
         }
     }
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
@@ -465,7 +470,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     emitted->reference_capacity = prepared->call_count + symbols;
     emitted->symbol_access = options->symbol_access;
     emitted->symbol_access_count = options->symbol_access != 0 ? options->symbol_count : 0;
-    prepared->call_abi.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    prepared->call_abi.stack_alignment_log2 = prepared->call_abi.stack_alignment_log2 > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? prepared->call_abi.stack_alignment_log2 : BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     prepared->call_abi.integer_registers = prepared->call_abi.integer_registers < BUSTER_ABI_INTEGER_ARGUMENTS ? prepared->call_abi.integer_registers : BUSTER_ABI_INTEGER_ARGUMENTS;
     prepared->call_save_mask = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);

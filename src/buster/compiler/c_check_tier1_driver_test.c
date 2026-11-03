@@ -2515,8 +2515,121 @@ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, con
                                   NULL, true);
 }
 
+// Stack-passed vectors' alignment (#1204's review). A call whose 32- or 64-byte vector argument goes on the stack (its
+// eight vector registers already taken by doubles) needs rsp aligned to 32 or 64 bytes at the call, past the ABI's 16:
+// Tier 1's frame realigns itself to it, in a fixed frame and in one with an alloca, whose allocations and calls' areas
+// keep it, whatever rsp its own caller gives it. Each sink (clang's, naked) returns its first stack argument's address
+// modulo the vector's size, and each Tier 1 function is called from rsp 64-aligned and 16, 32 and 48 bytes below that,
+// with allocas of several sizes: the expected output is the ABI's, all zeros. clang's own build can't be the oracle:
+// clang 23 rounds an alloca to 16 bytes in a realigned frame, misplacing the same call's argument (by 16 at -O0; at -O2
+// its vmovaps there faults).
+static const char check_test_tier1_stack_vectors_source[] =
+    "typedef float V8 __attribute__((vector_size(32)));\n"
+    "typedef float V16 __attribute__((vector_size(64)));\n"
+    "unsigned long b_sink8(double, double, double, double, double, double, double, double, V8);\n"
+    "unsigned long b_sink16(double, double, double, double, double, double, double, double, V16);\n"
+    "unsigned long b_sink8_after(double, double, double, double, double, double, double, double, V8, char*);\n"
+    "unsigned long b_sink16_after(double, double, double, double, double, double, double, double, V16, char*);\n"
+    "unsigned long a_fixed8(V8* p, int n, double d) { return b_sink8(d, d + 1, d + 2, d + 3, d + 4, d + 5, d + 6, d + n, *p); }\n"
+    "unsigned long a_fixed16(V16* p, int n, double d) { return b_sink16(d, d + 1, d + 2, d + 3, d + 4, d + 5, d + 6, d + n, *p); }\n"
+    "unsigned long a_dynamic8(V8* p, int n, double d) { char* q = __builtin_alloca(n); q[0] = (char)n; return b_sink8_after(d, d, d, d, d, d, d, d, *p, q); }\n"
+    "unsigned long a_dynamic16(V16* p, int n, double d) { char* q = __builtin_alloca(n); q[0] = (char)n; return b_sink16_after(d, d, d, d, d, d, d, d, *p, q); }\n";
+
+static const char check_test_tier1_stack_vectors_other_source[] =
+    "#include <stdio.h>\n"
+    "typedef float V8 __attribute__((vector_size(32)));\n"
+    "typedef float V16 __attribute__((vector_size(64)));\n"
+    "typedef unsigned long (*F)(void*, int, double);\n"
+    "unsigned long a_fixed8(V8* p, int n, double d);\n"
+    "unsigned long a_fixed16(V16* p, int n, double d);\n"
+    "unsigned long a_dynamic8(V8* p, int n, double d);\n"
+    "unsigned long a_dynamic16(V16* p, int n, double d);\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink8(double a, double b, double c, double d, double e, double f, double g, double h, V8 x)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $31, %eax\\n\\tret\"); }\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink16(double a, double b, double c, double d, double e, double f, double g, double h, V16 x)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $63, %eax\\n\\tret\"); }\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink8_after(double a, double b, double c, double d, double e, double f, double g, double h, V8 x, char* q)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $31, %eax\\n\\tret\"); }\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink16_after(double a, double b, double c, double d, double e, double f, double g, double h, V16 x, char* q)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $63, %eax\\n\\tret\"); }\n"
+    "// f(p, n, d) from rsp 64-aligned less `below` bytes (a multiple of 16, as the ABI keeps it).\n"
+    "__attribute__((naked, noinline)) unsigned long b_call(F f, void* p, int n, double d, long below)\n"
+    "{ __asm__(\"push %rbp\\n\\tmov %rsp, %rbp\\n\\tand $-64, %rsp\\n\\tsub %r8, %rsp\\n\\tmov %rdi, %rax\\n\\tmov %rsi, %rdi\\n\\tmov %edx, %esi\\n\\t\"\n"
+    "          \"call *%rax\\n\\tmov %rbp, %rsp\\n\\tpop %rbp\\n\\tret\"); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    V8 x = { 1, 2, 3, 4, 5, 6, 7, 8 };\n"
+    "    V16 y = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };\n"
+    "    unsigned long r[4] = { 0, 0, 0, 0 };\n"
+    "    for (long below = 0; below < 64; below += 16)\n"
+    "    {\n"
+    "        for (int n = 1; n < 100; n += 13)\n"
+    "        {\n"
+    "            r[0] |= b_call((F)a_fixed8, &x, n, 0.5, below);\n"
+    "            r[1] |= b_call((F)a_fixed16, &y, n, 0.5, below);\n"
+    "            r[2] |= b_call((F)a_dynamic8, &x, n, 0.5, below);\n"
+    "            r[3] |= b_call((F)a_dynamic16, &y, n, 0.5, below);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lu %lu %lu %lu\\n\", r[0], r[1], r[2], r[3]);\n"
+    "    return 0;\n"
+    "}\n";
+
+// The stack-passed vectors' check (above): its unit by --tier1 -march=x86-64-v4, every function Tier 1's, by each path
+// with and without rematerialization, linked with its other unit (clang -O2's), prints zeros where the host can run it.
+static void check_test_driver_tier1_stack_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory, bool host)
+{
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-stack-vectors.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-stack-vectors-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-stack-vectors-other.o", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_stack_vectors_source, strlen(check_test_tier1_stack_vectors_source)) &&
+                         parse_test_write(other, check_test_tier1_stack_vectors_other_source, strlen(check_test_tier1_stack_vectors_other_source));
+    char* other_arguments[] = { (char*)clang, "-O2", "-march=x86-64-v4", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, other_built, "clang builds the stack-passed vectors' other unit");
+    for (uint32_t rematerialize = 0; other_built && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            char message[256];
+            snprintf(object, sizeof(object), "%s/tier1-stack-vectors-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-stack-vectors-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, "-march=x86-64-v4", &build);
+            snprintf(message, sizeof(message), "the stack-passed vectors' unit compiles by --tier1, every function Tier 1's (rematerialize %u, path %u)", rematerialize, path);
+            check_test_expect(test, compiled, message);
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &text) == 0;
+            free(text);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "Tier 1's calls place 32- and 64-byte vectors on the stack at their alignment, in fixed and dynamic frames (rematerialize %u, path %u)",
+                     rematerialize, path);
+            const bool aligned = linked && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, "0 0 0 0\n") == 0));
+            check_test_expect(test, aligned, message);
+            if (linked && host && !aligned)
+            {
+                fprintf(stderr, "check: stack-passed vectors' residues: %s", actual);
+            }
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
+}
+
 // The vectors' fixture (#141), for x86-64-v4, run where the host has every feature of it: both compilers' code is
-// x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review).
+// x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review). Then
+// the stack-passed vectors' check, on the same hosts.
 static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     X86Target v4 = { 0 };
@@ -2524,6 +2637,7 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
                                   check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
+    check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
 }
 
 // The convention's rarer shapes' fixture (#141).
