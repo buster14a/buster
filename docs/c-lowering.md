@@ -603,17 +603,19 @@ the two- and three-node fragments. A standalone VALUE task takes none of them,
 but the expansion. #1205 sent it to the leaf path, which takes a VALUE's read
 of a local or a global, its address and a proven integer constant, under the
 rules #1048's templates were checked against the tasks with. The 9700X's
-correctness job passed, and `measure-compile` on `sqlite3.c` (medians of 11)
-paired the change with the same tree without it, on the same base:
+correctness job passed with it. Two separate runs of the 9700X job, on the same
+base and about 35 minutes apart, each with `measure-compile`'s medians of 11 on
+`sqlite3.c` and the same options, gave the stage's aggregate rows; neither
+times the VALUE tasks alone:
 
-| row | the expansion (`92081c4a`) | the leaf path (`e33b7cc5`) |
+| row | the expansion (`92081c4a`, [run](https://github.com/buster14a/buster/actions/runs/41619659912/job/125870648949)) | the leaf path (`e33b7cc5`, [run](https://github.com/buster14a/buster/actions/runs/41609944231/job/125837465257)) |
 | --- | ---: | ---: |
 | `lower` | 12.535 ms (12.454 to 12.565) | 12.676 ms (12.574 to 12.830) |
 | `lower.statements` | 8.525 ms (8.351 to 8.561) | 8.615 ms (8.436 to 8.727) |
 
-The leaf path is no faster for VALUE tasks: it builds the node's value as the
-expansion does, then decides. So they keep the expansion, which the guard's
-comment in `check_lower_drain_body` records.
+These show no improvement in `sqlite3.c`'s lowering, though not a regression
+either, and say nothing of other inputs. So VALUE tasks keep the expansion, which
+the guard's comment in `check_lower_drain_body` records.
 
 ## The preparation's node counts and the branches' targets (#1048)
 
