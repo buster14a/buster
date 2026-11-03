@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The object writer's tests, for the test-object-writer command:
 //
@@ -57,6 +58,7 @@
 // llvm_readobj_listing and object_compare_listing); the checks (objects, many sections, lanes, files, cross-check,
 // with the comparison with GNU as's objects); and run_object_writer_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -3321,8 +3323,8 @@ static int run_object_writer_tests(int argc, char** argv)
     }
     int result = 1;
     char directory[BUSTER_OBJECT_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-object-writer-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-object-writer-XXXXXX", temporary);
     Arena arena = arena_reserve(BUSTER_OBJECT_TEST_ARENA_BYTES);
     if (!valid)
     {

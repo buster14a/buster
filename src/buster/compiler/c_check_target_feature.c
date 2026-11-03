@@ -965,7 +965,7 @@ static bool check_target_feature_columns(CheckProgram* program, CheckTargetFeatu
                 uint32_t first = token;
                 uint8_t bits = role == PARSE_ROLE_LABEL ? BUSTER_CHECK_TARGET_FEATURE_LABEL :
                                role == PARSE_ROLE_DO ? BUSTER_CHECK_TARGET_FEATURE_DO : 0;
-                uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? input->control_owners[token] : BUSTER_CHECK_NONE;
+                uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? check_sparse_get(input->control_owners, token) : BUSTER_CHECK_NONE;
                 for (uint32_t child = emission->first_child[token]; child != BUSTER_CHECK_NONE; child = emission->next_child[child])
                 {
                     first = emission->extent_first[child] < first ? emission->extent_first[child] : first;

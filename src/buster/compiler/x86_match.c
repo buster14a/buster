@@ -3,7 +3,8 @@
 //
 // External operands to selected encoder records (#221/#222). This is deliberately separate from X86Instruction:
 // a mathematical immediate is not the same thing as bits in an encoding field. The catalogue supplies encodings,
-// operand roles and widths; this consumer admits a documented subset. An immediate that is a value (an integer
+// operand roles and widths, and the admitted forms (#1134): every form of 64-bit mode whose operands the parser reads
+// (x86_match_supported), not a list of families. An immediate that is a value (an integer
 // operand) takes the forms #221's rule gives it (x86_immediate_encodes): a value of the operation's width whose
 // pattern the field's sign extension gives back, so that `add eax, 0xffffffff` takes the imm8 (-1), as GNU as has it.
 // Any other immediate (a count, a control byte) takes the field's bits, signed or unsigned, as GNU as takes them.
@@ -12,7 +13,7 @@
 // the scalar path. Candidate operand templates and immediate ranges are compared sixteen at a time, with an exact
 // scalar twin. Both paths run x86_validate at the frontend boundary. No compiler expression optimization is done here.
 
-#define BUSTER_X86_MATCH_BUCKETS 512
+#define BUSTER_X86_MATCH_BUCKETS 4096
 #define BUSTER_X86_MATCH_OPERANDS 4
 
 typedef enum X86OperandKind
@@ -54,17 +55,19 @@ typedef struct X86MatchIndex X86MatchIndex;
 struct X86MatchIndex
 {
     // Open-addressed mnemonic dictionary. Each occupied slot owns exactly one canonical name's contiguous forms.
-    // More slots than the admitted spelling lists can name; aliases movabs/pushw share mov/push's slot.
+    // More slots than the about 1,900 names the syntax admits (x86_match_supported); aliases movabs/pushw share mov/push's
+    // slot.
     String8 names[BUSTER_X86_MATCH_BUCKETS];
     uint32_t begin[BUSTER_X86_MATCH_BUCKETS + 1];
     uint32_t forms[X86_FORM_COUNT];
     uint32_t counts[X86_FORM_COUNT];
     // Per-operand matching templates, contiguous within each bucket: kinds in bits 0..3, register class in 4..7,
-    // memory width in 8..15, role in 16..23, and a required register plus one in 24..31 (zero means any).
+    // memory width in 8..15, role in 16..23, and a required register plus one in 24..31 (zero means any): the
+    // accumulator, CL and XMM0.
     uint32_t operands[4][X86_FORM_COUNT];
     uint8_t allowed[X86_FORM_COUNT];
     uint32_t broadcast[X86_FORM_COUNT];
-    // Width (including implicit qword) in bits 0..7; spelling, family and EVEX predicates above it.
+    // The AT&T suffix's width (x86_match_suffix_width) in bits 0..7; spelling, family and EVEX predicates above it.
     uint32_t attributes[X86_FORM_COUNT];
     // The values an immediate takes (x86_match_immediate's, as intervals): from immediate_min (signed) to immediate_max
     // (unsigned), and for a value whose field is narrower than its width, the unsigned spellings of its negative
@@ -72,6 +75,10 @@ struct X86MatchIndex
     int64_t immediate_min[X86_FORM_COUNT];
     uint64_t immediate_max[X86_FORM_COUNT];
     uint64_t immediate_spelling[X86_FORM_COUNT];
+    // Per bucket, whether the name has forms the syntax admits but the index leaves out (#1134's diagnostics):
+    // BUSTER_X86_MATCH_EXCLUDED_TARGET for forms whose features the target lacks, _UNCLASSIFIED for forms the target
+    // table doesn't classify (fail-closed: no target allows them).
+    uint8_t excluded[BUSTER_X86_MATCH_BUCKETS];
 };
 
 #define BUSTER_X86_MATCH_MOVABS (1u << 8)
@@ -80,6 +87,10 @@ struct X86MatchIndex
 #define BUSTER_X86_MATCH_ROUNDING (1u << 11)
 #define BUSTER_X86_MATCH_FORBIDDEN (1u << 12)
 #define BUSTER_X86_MATCH_PUSHW_NAME (1u << 13)
+// A VEX form chosen only where no EVEX form of its mnemonic matches (x86_match_yields).
+#define BUSTER_X86_MATCH_YIELDS (1u << 14)
+#define BUSTER_X86_MATCH_EXCLUDED_TARGET 1
+#define BUSTER_X86_MATCH_EXCLUDED_UNCLASSIFIED 2
 
 typedef struct X86Match X86Match;
 struct X86Match
@@ -88,6 +99,9 @@ struct X86Match
     uint32_t length;
     bool found;
     bool ambiguous;
+    // The chosen form's rank, which a match of a lower one replaces: 0 for a legacy or VEX form, 1 for an EVEX one and 2
+    // for a VEX form that yields to its EVEX siblings (x86_match_yields).
+    uint8_t rank;
 };
 
 enum
@@ -100,6 +114,10 @@ enum
     X86_MATCH_ACC,
     X86_MATCH_CL,
     X86_MATCH_ONE,
+    // A register in the immediate's bits 7 to 4 (/is4: VEX's four-operand blends), of the reg operand's class.
+    X86_MATCH_IS4,
+    // XMM0, written out (SSE4.1's blends and SHA's rounds read it implicitly; GNU as and clang print it).
+    X86_MATCH_XMM0,
 };
 
 static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
@@ -192,6 +210,63 @@ static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
         roles[3] = X86_MATCH_IMM;
         count = 4;
         break;
+    // The orders of #1134's other forms: BMI2's shifts and bextr (reg, rm, vvvv), BMI's bit operations and the vector
+    // shifts by an immediate, whose destination is vvvv, the masked stores, CMPccXADD, the accumulator exchange, SSE4.1's
+    // blends with XMM0 and the /is4 forms.
+    case X86_SYNTAX_REG_RM_VVVV:
+        roles[0] = X86_MATCH_REG;
+        roles[1] = X86_MATCH_RM;
+        roles[2] = X86_MATCH_VVVV;
+        count = 3;
+        break;
+    case X86_SYNTAX_VVVV_RM:
+        roles[0] = X86_MATCH_VVVV;
+        roles[1] = X86_MATCH_RM;
+        count = 2;
+        break;
+    case X86_SYNTAX_VVVV_RM_IMM:
+        roles[0] = X86_MATCH_VVVV;
+        roles[1] = X86_MATCH_RM;
+        roles[2] = X86_MATCH_IMM;
+        count = 3;
+        break;
+    case X86_SYNTAX_RM_VVVV_REG:
+        roles[0] = X86_MATCH_RM;
+        roles[1] = X86_MATCH_VVVV;
+        roles[2] = X86_MATCH_REG;
+        count = 3;
+        break;
+    case X86_SYNTAX_RM_REG_VVVV:
+        roles[0] = X86_MATCH_RM;
+        roles[1] = X86_MATCH_REG;
+        roles[2] = X86_MATCH_VVVV;
+        count = 3;
+        break;
+    case X86_SYNTAX_RM_ACC:
+        roles[0] = X86_MATCH_RM;
+        roles[1] = X86_MATCH_ACC;
+        count = 2;
+        break;
+    case X86_SYNTAX_REG_RM_XMM0:
+        roles[0] = X86_MATCH_REG;
+        roles[1] = X86_MATCH_RM;
+        roles[2] = X86_MATCH_XMM0;
+        count = 3;
+        break;
+    case X86_SYNTAX_REG_VVVV_RM_IS4:
+        roles[0] = X86_MATCH_REG;
+        roles[1] = X86_MATCH_VVVV;
+        roles[2] = X86_MATCH_RM;
+        roles[3] = X86_MATCH_IS4;
+        count = 4;
+        break;
+    case X86_SYNTAX_REG_VVVV_IS4_RM:
+        roles[0] = X86_MATCH_REG;
+        roles[1] = X86_MATCH_VVVV;
+        roles[2] = X86_MATCH_IS4;
+        roles[3] = X86_MATCH_RM;
+        count = 4;
+        break;
     default:
         break;
     }
@@ -243,361 +318,59 @@ static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
     return at;
 }
 
-// Syntax and immediate semantics understood by this frontend. ISA eligibility is a separate intersection with
-// x86_target_forms at initialization. Adding an encoder form does not automatically admit its frontend syntax.
+// Whether the parser has a grammar for an operand descriptor (#1134): no operand, memory addressed by general registers,
+// or a register of a class it names (general registers, XMM, YMM and ZMM registers, and opmasks). The x87's stack,
+// MMX, bound, control, debug, segment and tile registers, vector-indexed (VSIB) memory, register pairs and blocks and a
+// default flags value aren't the parser's, and neither are the forms that take them.
+static bool x86_match_descriptor_parsed(uint16_t descriptor)
+{
+    const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
+    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK;
+    const uint16_t unparsed = BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK | BUSTER_X86_OPERAND_DFV | BUSTER_X86_OPERAND_TEST;
+    return named && (descriptor & unparsed) == 0;
+}
+
+// Whether a mnemonic is one the parser spells (#1134). The catalogue names an instruction with its prefixes as one
+// mnemonic, which the parser composes from the prefix's token and the instruction's: `lock` before any instruction
+// (asm_lock_mnemonic), `notrack` and `bnd` before a near call or jmp (asm_prefixed_mnemonic), `rep`, `repe` and
+// `repne` before a string instruction or ret (asm_string_mnemonic). The other prefixed spellings (data16, rex.w, the
+// branch hints cs and ds, xacquire and xrelease, bnd before a jcc or ret, rep before ins, outs and VIA's instructions)
+// have no such composition, so they aren't admitted.
+static bool x86_match_spelled(const char* name)
+{
+    static const char* const branches[] = { "notrack call", "notrack jmp", "bnd call", "bnd jmp", "notrack bnd call", "notrack bnd jmp", "rep ret", "repne ret" };
+    static const char* const strings[] = { "movs", "stos", "lods", "cmps", "scas" };
+    const char* space = strchr(name, ' ');
+    bool spelled = space == 0 || (strncmp(name, "lock ", 5) == 0 && strchr(name + 5, ' ') == 0);
+    for (uint32_t i = 0; !spelled && i < BUSTER_ARRAY_LENGTH(branches); i += 1)
+    {
+        spelled = strcmp(name, branches[i]) == 0;
+    }
+    const bool repeated = space != 0 && (strncmp(name, "rep ", 4) == 0 || strncmp(name, "repe ", 5) == 0 || strncmp(name, "repne ", 6) == 0);
+    const char* base = repeated ? space + 1 : "";
+    for (uint32_t i = 0; !spelled && repeated && i < BUSTER_ARRAY_LENGTH(strings); i += 1)
+    {
+        const char size = strlen(base) == 5 ? base[4] : 0;
+        spelled = strncmp(base, strings[i], 4) == 0 && (size == 'b' || size == 'w' || size == 'd' || size == 'q');
+    }
+    return spelled;
+}
+
+// The forms this frontend admits (#1134): those of 64-bit mode whose operands the parser has a grammar for, from the
+// form table itself rather than a list of families. A form is admitted when its operand roles are ones the matcher
+// knows (x86_match_roles), every operand descriptor is one the parser reads (x86_match_descriptor_parsed), its
+// mnemonic is one the parser spells (x86_match_spelled), and its EVEX features aren't ones the parser has no syntax
+// for (suppressed exceptions, APX's new data destination and no flags, and source conditions). The far call and jmp
+// through memory aren't near branches' syntax. ISA eligibility is a separate intersection with x86_target_forms at
+// initialization, so an admitted form whose features the target lacks, or which the target table doesn't classify,
+// still never matches.
 static bool x86_match_supported(const X86FormDescription* form)
 {
-    static const char* const integer[] =
-        {
-            "mov",
-            "movabs",
-            "lea",
-            "movzx",
-            "movsx",
-            "movsxd",
-            "add",
-            "adc",
-            "sub",
-            "sbb",
-            "and",
-            "or",
-            "xor",
-            "cmp",
-            "test",
-            "inc",
-            "dec",
-            "neg",
-            "not",
-            "mul",
-            "imul",
-            "div",
-            "idiv",
-            "shl",
-            "shr",
-            "sar",
-            "sal",
-            "rol",
-            "ror",
-            "shld",
-            "shrd",
-            "push",
-            "pushw",
-            "pop",
-            "call",
-            "jmp",
-            "ret",
-            "rep ret",
-            "repne ret",
-            "leave",
-            "nop",
-            "int3",
-            "ud2",
-            "endbr64",
-            "syscall",
-            "pause",
-            "lfence",
-            "mfence",
-            "sfence",
-            "rdtsc",
-            "rdtscp",
-            "clc",
-            "stc",
-            "cmc",
-            "cld",
-            "std",
-            "cbw",
-            "cwde",
-            "cdqe",
-            "cwd",
-            "cdq",
-            "cqo",
-            "loop",
-            "loope",
-            "loopne",
-            "jrcxz",
-            "notrack jmp",
-            "notrack call",
-            "bnd jmp",
-            "bnd call",
-            "notrack bnd jmp",
-            "notrack bnd call",
-            // What C's inline assembly reaches the processor's state with (#147): the CPU's identity and XCR0, the x87's
-            // control and status words, MXCSR, the x87's, MMX's and SSE's state of 512 bytes (main.c's test of DAZ
-            // reads MXCSR's mask from fxsave's), and the exchange that cpuid.h's rbx saving takes; the byte swap of
-            // <linux/swab.h>'s helpers; and SSE2's compare, in its legacy forms alone.
-            "xchg",
-            "bswap",
-            "cpuid",
-            "xgetbv",
-            "fnstcw",
-            "fldcw",
-            "fnstsw",
-            "fnclex",
-            "stmxcsr",
-            "ldmxcsr",
-            "fxsave",
-            "fxrstor",
-            "fxsave64",
-            "fxrstor64",
-            "pcmpeqd",
-            // And naked functions' (#147): the flags pushed and popped, SSE2's movq to and from an XMM register (which
-            // the AT&T parser chooses over mov's suffix by its operands), and the x87's loads and stores.
-            "pushfq",
-            "popfq",
-            "movq",
-            "fld",
-            "fstp",
-            // And musl's inline assembly (#147): the bit scans of its a_ctz_64 and a_clz_64, a_crash's hlt, the atomic
-            // exchanges (alone, and with lock as `lockable` below has them), and the x87's: the operations of no operands
-            // its long double functions and other math code run on the stack's top (fsqrt, fprem, frndint, fscale and the
-            // rest), the integer loads and stores (fistpll), and fnstsw into %ax (its accumulator form, which
-            // x86_match_roles names). And the counts of leading and trailing zeros, which `rep bsr` and `rep bsf` spell
-            // (dr_flac's, asm_string_mnemonic).
-            "bsf",
-            "bsr",
-            "lzcnt",
-            "tzcnt",
-            "hlt",
-            "cmpxchg",
-            "xadd",
-            "fsqrt",
-            "fabs",
-            "fchs",
-            "frndint",
-            "fprem",
-            "fprem1",
-            "fscale",
-            "fxtract",
-            "f2xm1",
-            "fyl2x",
-            "fyl2xp1",
-            "fpatan",
-            "fptan",
-            "fsin",
-            "fcos",
-            "fsincos",
-            "fld1",
-            "fldz",
-            "fldpi",
-            "fldl2e",
-            "fldl2t",
-            "fldlg2",
-            "fldln2",
-            "fxam",
-            "ftst",
-            "fild",
-            "fist",
-            "fistp",
-            "fisttp",
-    };
-    // The instructions a lock prefix takes (`lock cmpxchg`, the catalogue's mnemonic for the prefixed forms, whose
-    // operand is memory): the exchanges and the arithmetic of musl's atomics and of GCC's and clang's.
-    static const char* const lockable[] = { "cmpxchg", "xadd", "add", "or", "adc", "sbb", "and", "sub", "xor", "inc", "dec", "not", "neg" };
-    // SSE's and SSE2's scalar and logic instructions musl's math takes (sqrtsd, cvtsd2si, andps, psrlq), with their
-    // siblings, in their legacy forms on XMM registers alone (no VEX forms, and none of MMX's for the shifts).
-    static const char* const scalar[] = {
-        "sqrtss",
-        "sqrtsd",
-        "cvtss2si",
-        "cvtsd2si",
-        "cvttss2si",
-        "cvttsd2si",
-        "andps",
-        "andpd",
-        "andnps",
-        "andnpd",
-        "orps",
-        "orpd",
-        "psrld",
-        "psrlq",
-        "pslld",
-        "psllq",
-    };
-    // The string instructions, which take no operands, alone or with the prefixes the catalogue spells with them: rep
-    // for the moves, stores and loads, repe and repne for the compares and scans. Each takes a size letter (b, w, d or
-    // q; the AT&T parser spells GNU as's l so).
-    static const char* const strings[] = { "movs", "stos", "lods", "cmps", "scas", "rep movs", "rep stos", "rep lods", "repe cmps", "repne cmps", "repe scas", "repne scas" };
-    static const char* const sse[] =
-        {
-            "movaps",
-            "movups",
-            "movapd",
-            "movupd",
-            "movdqa",
-            "movdqu",
-            "addps",
-            "addpd",
-            "subps",
-            "subpd",
-            "mulps",
-            "mulpd",
-            "divps",
-            "divpd",
-            "xorps",
-            "xorpd",
-            "pxor",
-            "paddd",
-            "psubd",
-    };
-    // #808: SSE2's packed integer instructions are baseline but their mnemonics end in the AT&T suffix letters. They
-    // stay out of the VEX list: the AVX catalogue has its own, wider rows and syntax.
-    static const char* const legacy_integer[] =
-        {
-            "paddb",
-            "paddw",
-            "paddq",
-            "paddsb",
-            "paddsw",
-            "paddusb",
-            "paddusw",
-            "psubb",
-            "psubw",
-            "psubq",
-            "psubsb",
-            "psubsw",
-            "psubusb",
-            "psubusw",
-            "pavgb",
-            "pavgw",
-            "pcmpeqb",
-            "pcmpeqw",
-            "pcmpgtb",
-            "pcmpgtw",
-            "pcmpgtd",
-            "pmaddwd",
-            "pmaxsw",
-            "pminsw",
-            "pminub",
-            "pmaxub",
-            "pmulhuw",
-            "pmulhw",
-            "pmullw",
-            "pmuludq",
-            "psadbw",
-            "packsswb",
-            "packssdw",
-            "packuswb",
-            "punpcklbw",
-            "punpcklwd",
-            "punpckldq",
-            "punpcklqdq",
-            "punpckhbw",
-            "punpckhwd",
-            "punpckhdq",
-            "punpckhqdq",
-            "psllw",
-            "pslld",
-            "psllq",
-            "psrlw",
-            "psrld",
-            "psrlq",
-            "psraw",
-            "psrad",
-            "pand",
-            "pandn",
-            "por",
-    };
-    static const char* const conditions[] =
-        {
-            "o",
-            "no",
-            "b",
-            "ae",
-            "e",
-            "ne",
-            "be",
-            "a",
-            "s",
-            "ns",
-            "p",
-            "np",
-            "l",
-            "ge",
-            "le",
-            "g",
-    };
-    const char* name = form->mnemonic;
-    bool allowed = false;
-    if (form->family == BUSTER_X86_FAMILY_LEGACY)
-    {
-        for (uint32_t i = 0; !allowed && i < BUSTER_ARRAY_LENGTH(integer); i += 1)
-        {
-            allowed = name[0] == integer[i][0] && strcmp(name, integer[i]) == 0;
-        }
-        // Of movq, SSE2's forms alone, and of fld and fstp the memory ones: MMX's registers and the x87's stack aren't
-        // the parser's.
-        allowed &= strcmp(name, "movq") != 0 || form->reg == BUSTER_X86_OPERAND_V;
-        allowed &= (strcmp(name, "fld") != 0 && strcmp(name, "fstp") != 0) || form->rm == BUSTER_X86_OPERAND_M;
-        for (uint32_t i = 0; !allowed && i < BUSTER_ARRAY_LENGTH(sse); i += 1)
-        {
-            allowed = name[0] == sse[i][0] && strcmp(name, sse[i]) == 0;
-        }
-        for (uint32_t i = 0; !allowed && strncmp(name, "lock ", 5) == 0 && i < BUSTER_ARRAY_LENGTH(lockable); i += 1)
-        {
-            allowed = strcmp(name + 5, lockable[i]) == 0;
-        }
-        const bool mmx = (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_MMX || (form->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_MMX;
-        for (uint32_t i = 0; !allowed && !mmx && i < BUSTER_ARRAY_LENGTH(scalar); i += 1)
-        {
-            allowed = name[0] == scalar[i][0] && strcmp(name, scalar[i]) == 0;
-        }
-        for (uint32_t i = 0; !allowed && i < BUSTER_ARRAY_LENGTH(legacy_integer); i += 1)
-        {
-            const uint16_t descriptors = form->reg | form->rm;
-            allowed = name[0] == legacy_integer[i][0] && strcmp(name, legacy_integer[i]) == 0 && (descriptors & BUSTER_X86_OPERAND_REGISTER) != 0 &&
-                      (descriptors & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_XMM;
-        }
-        const char* suffix = strncmp(name, "cmov", 4) == 0 ? name + 4 : strncmp(name, "set", 3) == 0 ? name + 3
-                                                                    : name[0] == 'j'                 ? name + 1
-                                                                                                     : "";
-        for (uint32_t i = 0; !allowed && suffix[0] != 0 && i < BUSTER_ARRAY_LENGTH(conditions); i += 1)
-        {
-            allowed |= strcmp(suffix, conditions[i]) == 0;
-        }
-        const uint64_t length = strlen(name);
-        for (uint32_t i = 0; !allowed && form->syntax == X86_SYNTAX_NONE && length > 1 && i < BUSTER_ARRAY_LENGTH(strings); i += 1)
-        {
-            const char size = name[length - 1];
-            allowed = length == strlen(strings[i]) + 1 && strncmp(name, strings[i], length - 1) == 0 && (size == 'b' || size == 'w' || size == 'd' || size == 'q');
-        }
-    }
-    else if (form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'v')
-    {
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sse); i += 1)
-        {
-            allowed |= name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
-        }
-        allowed |= strcmp(name, "vzeroupper") == 0;
-        // FMA3's scalar forms (#147: musl's fma and fmaf take vfmadd132sd and vfmadd132ss where the target has FMA):
-        // vfmadd, vfmsub, vfnmadd and vfnmsub, each in its three operand orders, of a float or a double.
-        static const char* const fused[] = { "vfmadd", "vfmsub", "vfnmadd", "vfnmsub" };
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fused); i += 1)
-        {
-            const uint64_t prefix = strlen(fused[i]);
-            const char* rest = strncmp(name, fused[i], prefix) == 0 ? name + prefix : "";
-            const bool order = strncmp(rest, "132", 3) == 0 || strncmp(rest, "213", 3) == 0 || strncmp(rest, "231", 3) == 0;
-            allowed |= order && (strcmp(rest + 3, "ss") == 0 || strcmp(rest + 3, "sd") == 0);
-        }
-    }
-    else if (form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'k')
-    {
-        // Mask moves use VEX without a leading v. The ordinary operand templates already distinguish their mask,
-        // general-register and memory forms; the target table supplies each width's AVX-512 requirement.
-        allowed = strcmp(name, "kmovb") == 0 || strcmp(name, "kmovw") == 0 || strcmp(name, "kmovd") == 0 || strcmp(name, "kmovq") == 0;
-    }
-    else if (form->family == BUSTER_X86_FAMILY_EVEX && form->vector_length == 2 && name[0] == 'v')
-    {
-        // 512-bit floating arithmetic/moves and dword integer arithmetic are AVX-512F. No implicit VL/BW/DQ.
-        for (uint32_t i = 0; i < 14; i += 1)
-        {
-            allowed |= i != 4 && i != 5 && name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
-        }
-        allowed |= strcmp(name, "vpaddd") == 0 || strcmp(name, "vpsubd") == 0 || strcmp(name, "vpxord") == 0;
-        allowed |= strcmp(name, "vmovdqa32") == 0 || strcmp(name, "vmovdqu32") == 0 || strcmp(name, "vmovdqa64") == 0 || strcmp(name, "vmovdqu64") == 0;
-    }
-    // Near call/jump syntax must never select a far-pointer memory form merely because its memory width fits.
-    allowed &= !((strcmp(name, "call") == 0 || strcmp(name, "jmp") == 0) && (form->encoding == BUSTER_X86_ENCODING_D3 || form->encoding == BUSTER_X86_ENCODING_D5));
-    return allowed;
+    uint8_t roles[4];
+    const bool far = (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0) && (form->encoding == BUSTER_X86_ENCODING_D3 || form->encoding == BUSTER_X86_ENCODING_D5);
+    const uint16_t forbidden = BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION;
+    return x86_match_roles(form->syntax, roles) <= 4 && x86_match_descriptor_parsed(form->reg) && x86_match_descriptor_parsed(form->rm) &&
+           x86_match_descriptor_parsed(form->vvvv) && x86_match_spelled(form->mnemonic) && (form->evex & forbidden) == 0 && !far;
 }
 
 // Whether a form sign-extends its immediate into a wider operand: the imm8 of 83, 6B and 6A (one-byte opcodes: 0F 83 is
@@ -647,37 +420,55 @@ static X86MatchRange x86_match_range(uint32_t form)
     return range;
 }
 
+// The width an AT&T size suffix gives an instruction of the form (#1134), which X86MatchRequest.width asks for: the size
+// of its general-register or memory operand (operand_bytes), but of a general register destination where its source is
+// a vector or mask register (cvtsd2siq: the q is the destination's, not the source's 8 bytes), and a near branch's
+// and leave's implicit qword. Vector forms' memory widths are also what the x, y and z suffixes ask for (vcvtpd2dqx).
+static uint32_t x86_match_suffix_width(const X86FormDescription* form)
+{
+    const uint32_t reg = form->reg & BUSTER_X86_OPERAND_CLASS;
+    const uint32_t rm = form->rm & BUSTER_X86_OPERAND_CLASS;
+    const bool implicit_qword = form->operand_bytes == 0 && (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0 || strcmp(form->mnemonic, "ret") == 0 || strcmp(form->mnemonic, "leave") == 0);
+    const bool vector_source = rm >= BUSTER_X86_CLASS_XMM && rm <= BUSTER_X86_CLASS_OPMASK && reg >= BUSTER_X86_CLASS_GPR8 && reg <= BUSTER_X86_CLASS_GPR64;
+    return implicit_qword ? 8 : vector_source ? 1u << (reg - BUSTER_X86_CLASS_GPR8) : form->operand_bytes;
+}
+
+// Whether a VEX form yields to its EVEX siblings (#1134): its features aren't ones every processor with the EVEX form's
+// has. AVX-VNNI's vpdpbusd and the others: a processor with AVX512-VNNI (Zen 4) may lack them. GNU as picks the EVEX
+// form of those mnemonics unless {vex} asks for VEX's, and so does the matcher, which takes the VEX form only where the
+// target has no EVEX one. Every other VEX form comes before its EVEX siblings (x86_match).
+static bool x86_match_yields(uint32_t form)
+{
+    return x86_form_descriptions[form].family == BUSTER_X86_FAMILY_VEX && (x86_target_requirement(form) & BUSTER_X86_FEATURE(AVXVNNI)) != 0;
+}
+
 static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
 {
     memset(index, 0, sizeof(*index));
     x86_target_forms(target, index->allowed);
     bool admitted[BUSTER_X86_FORM_LEGACY_MODES];
     uint16_t buckets[BUSTER_X86_FORM_LEGACY_MODES];
-    const X86FormDescription* previous = 0;
-    bool supported = false;
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
-        uint8_t roles[4];
         admitted[f] = false;
-        if (index->allowed[f])
+        if (x86_match_supported(form))
         {
-            // Reuse only identical syntax inputs; keep this key in step with x86_match_supported.
-            // Different spelling pointers recompute, even when their string contents are equal.
-            if (previous == 0 || previous->mnemonic != form->mnemonic || previous->family != form->family || previous->vector_length != form->vector_length || previous->encoding != form->encoding || previous->reg != form->reg || previous->rm != form->rm || previous->syntax != form->syntax)
-            {
-                supported = x86_match_supported(form);
-                previous = form;
-            }
-            admitted[f] = supported && x86_match_roles(form->syntax, roles) <= 4;
-        }
-        if (admitted[f])
-        {
+            // Every name the syntax admits has its bucket, with or without forms the target allows: a name whose forms the
+            // target refuses is still that instruction (its AT&T suffix isn't stripped), and its diagnostic says why.
             const String8 name = x86_match_canonical((String8){.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)});
             const uint32_t bucket = x86_match_bucket(index, name);
             index->names[bucket] = name;
-            buckets[f] = bucket;
-            index->begin[bucket + 1] += 1;
+            admitted[f] = index->allowed[f] != 0;
+            if (admitted[f])
+            {
+                buckets[f] = bucket;
+                index->begin[bucket + 1] += 1;
+            }
+            else
+            {
+                index->excluded[bucket] |= x86_target_requirement(f) != 0 ? BUSTER_X86_MATCH_EXCLUDED_TARGET : BUSTER_X86_MATCH_EXCLUDED_UNCLASSIFIED;
+            }
         }
     }
     for (uint32_t b = 0; b < BUSTER_X86_MATCH_BUCKETS; b += 1)
@@ -696,15 +487,16 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
             const uint32_t at = cursors[buckets[f]]++;
             index->forms[at] = f;
             index->counts[at] = count;
-            index->broadcast[at] = (form->evex & BUSTER_X86_EVEX_BROADCAST) ? 64 / form->disp8_scale : 0;
-            const bool implicit_qword = form->operand_bytes == 0 && (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0 || strcmp(form->mnemonic, "ret") == 0 || strcmp(form->mnemonic, "leave") == 0);
-            index->attributes[at] = (implicit_qword ? 8 : form->operand_bytes) |
+            // A broadcast's count of elements: the vector's bytes over the element's ({1to4} of a ymm's doubles).
+            index->broadcast[at] = (form->evex & BUSTER_X86_EVEX_BROADCAST) ? form->operand_bytes / form->disp8_scale : 0;
+            index->attributes[at] = x86_match_suffix_width(form) |
                 (strcmp(form->mnemonic, "movabs") == 0 ? BUSTER_X86_MATCH_MOVABS : 0) |
                 (strcmp(form->mnemonic, "pushw") == 0 ? BUSTER_X86_MATCH_PUSHW_NAME : 0) |
                 (form->operand_bytes == 2 && (strcmp(form->mnemonic, "pushw") == 0 || strcmp(form->mnemonic, "push") == 0) ? BUSTER_X86_MATCH_PUSH_WORD : 0) |
                 (form->family == BUSTER_X86_FAMILY_EVEX ? BUSTER_X86_MATCH_EVEX : 0) |
                 ((form->evex & BUSTER_X86_EVEX_ROUNDING) != 0 ? BUSTER_X86_MATCH_ROUNDING : 0) |
-                ((form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) != 0 ? BUSTER_X86_MATCH_FORBIDDEN : 0);
+                ((form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) != 0 ? BUSTER_X86_MATCH_FORBIDDEN : 0) |
+                (x86_match_yields(f) ? BUSTER_X86_MATCH_YIELDS : 0);
             const X86MatchRange range = x86_match_range(f);
             index->immediate_min[at] = range.min;
             index->immediate_max[at] = range.max;
@@ -712,15 +504,26 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
             for (uint32_t operand = 0; operand < count; operand += 1)
             {
                 const uint32_t role = roles[operand];
-                const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG ? form->reg
-                                                                          : role == X86_MATCH_VVVV  ? form->vvvv
-                                                                                                    : 0;
+                const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG || role == X86_MATCH_IS4 ? form->reg
+                                                                          : role == X86_MATCH_VVVV                          ? form->vvvv
+                                                                                                                            : 0;
                 uint32_t kinds = ((descriptor & BUSTER_X86_OPERAND_REGISTER) ? 1u << X86_OPERAND_REGISTER : 0) | ((descriptor & BUSTER_X86_OPERAND_MEMORY) ? 1u << X86_OPERAND_MEMORY : 0);
                 uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
                 uint32_t fixed = 0;
-                if (role == X86_MATCH_IMM || role == X86_MATCH_REL || role == X86_MATCH_ONE)
+                if (role == X86_MATCH_IS4)
+                {
+                    // The /is4 register is a register of the reg operand's class, never memory.
+                    kinds = 1u << X86_OPERAND_REGISTER;
+                }
+                else if (role == X86_MATCH_IMM || role == X86_MATCH_REL || role == X86_MATCH_ONE)
                 {
                     kinds = 1u << X86_OPERAND_IMMEDIATE;
+                }
+                else if (role == X86_MATCH_XMM0)
+                {
+                    kinds = 1u << X86_OPERAND_REGISTER;
+                    class = BUSTER_X86_CLASS_XMM;
+                    fixed = 1;
                 }
                 else if (role == X86_MATCH_ACC || role == X86_MATCH_CL)
                 {
@@ -825,8 +628,7 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
     // memory forms, as in GNU as.
     bool result = x86_match_name(request->mnemonic, form->mnemonic) || (x86_match_name(request->mnemonic, "mov") && strcmp(form->mnemonic, "movabs") == 0) || (x86_match_name(request->mnemonic, "pushw") && strcmp(form->mnemonic, "push") == 0 && form->operand_bytes == 2);
     result &= x86_match_roles(form->syntax, roles) == request->count;
-    const bool implicit_qword = form->operand_bytes == 0 && (strcmp(form->mnemonic, "call") == 0 || strcmp(form->mnemonic, "jmp") == 0 || strcmp(form->mnemonic, "ret") == 0 || strcmp(form->mnemonic, "leave") == 0);
-    result &= request->width == 0 || request->width == form->operand_bytes || (request->width == 8 && implicit_qword);
+    result &= request->width == 0 || request->width == x86_match_suffix_width(form);
     result &= ((form->evex & BUSTER_X86_EVEX_BROADCAST) != 0) == (request->broadcast != 0);
     result &= ((form->evex & BUSTER_X86_EVEX_ROUNDING) != 0) == request->rounding;
     result &= (form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) == 0;
@@ -869,6 +671,13 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
         case X86_MATCH_ONE:
             result = operand->kind == X86_OPERAND_IMMEDIATE && !operand->symbolic && operand->value == 1;
             break;
+        case X86_MATCH_IS4:
+            result = operand->kind == X86_OPERAND_REGISTER && operand->class == (form->reg & BUSTER_X86_OPERAND_CLASS);
+            instruction->immediate = (int32_t)((uint32_t)operand->reg << 4);
+            break;
+        case X86_MATCH_XMM0:
+            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_XMM && operand->reg == 0;
+            break;
         default:
             result = false;
             break;
@@ -876,7 +685,7 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
     }
     if (result && request->broadcast != 0)
     {
-        result = request->broadcast == (64u / form->disp8_scale);
+        result = request->broadcast == (uint32_t)form->operand_bytes / form->disp8_scale;
     }
     result = result && x86_validate(instruction, 1) == 1;
     return result;
@@ -1001,6 +810,10 @@ static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86Mat
         {
             x86_match_field(f, operand, instruction);
         }
+        else if (role == X86_MATCH_IS4)
+        {
+            instruction->immediate = (int32_t)((uint32_t)operand->reg << 4);
+        }
     }
     return x86_validate(instruction, 1) == 1;
 }
@@ -1038,7 +851,12 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
             const uint32_t at = first + __builtin_ctz(mask);
             mask &= mask - 1;
             X86Instruction instruction;
-            const bool accepted = BUSTER_VECTOR_PATH(vectorized) ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
+            bool accepted = BUSTER_VECTOR_PATH(vectorized) ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
+            // XCHG of EAX with itself isn't 90, which is NOP and leaves RAX's upper half as it was: its form is 87's, as GNU as
+            // encodes it (#1134 admits the accumulator's 90+r forms). RAX's with itself is a NOP either way: 48 90, where
+            // GNU as writes 90.
+            const uint32_t row = index->forms[at];
+            accepted &= !(row == X86_FORM_XCHG_R32_EAX && instruction.rm == 0);
             if (accepted)
             {
                 const X86FormDescription* form = x86_form_description(instruction.form);
@@ -1056,11 +874,19 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 const uint32_t chosen = (uint32_t)(x86_form_description(result.instruction.form) - x86_form_descriptions);
                 const uint32_t number = (uint32_t)(x86_form_description(instruction.form) - x86_form_descriptions);
                 const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
-                if (length > 0 && (!result.found || length < result.length || (length == result.length && movq)))
+                // Among the forms that match, a legacy or VEX one before an EVEX one, as GNU as picks them, though an EVEX
+                // form's compressed displacement (disp8*N) can make it shorter: AVX-512 isn't what an AVX instruction needs
+                // (#1134: the C lowering's index has every feature). A VEX form that yields to an EVEX one
+                // (x86_match_yields) comes after both. Then the shortest.
+                const uint32_t attributes = index->attributes[at];
+                const uint8_t rank = (attributes & BUSTER_X86_MATCH_YIELDS) ? 2 : (attributes & BUSTER_X86_MATCH_EVEX) ? 1 : 0;
+                const bool shorter = length < result.length || (length == result.length && movq);
+                if (length > 0 && (!result.found || rank < result.rank || (rank == result.rank && shorter)))
                 {
                     result.instruction = instruction;
                     result.length = (uint32_t)length;
                     result.found = true;
+                    result.rank = rank;
                 }
             }
         }

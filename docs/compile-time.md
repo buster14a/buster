@@ -242,6 +242,8 @@ empty value is `UINT32_MAX` with bounded all-one byte fills,
 including each column's sentinel. Requested scalar parsing keeps the original
 interleaved initialization loop as an independent oracle, and the six
 reader-internal NONE stores keep their existing ownership and initialization.
+(Twelve of those columns are sparse since, and need no fill; the reader's six
+are filled a column at a time too: "The sparse output columns", below.)
 Optional zero-default columns retain their existing NULL guards. Dirty and
 borrowed output storage is always explicitly cleared; no fresh-page or arena
 high-water assumption is made. The column layout and allocated byte count do
@@ -629,12 +631,111 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   so that each takes its 2.8 MB whatever its pages: 33 MB. The walk reads most
   of them back by token (the initializers' and the parameters' 12 to 18 times),
   so that records in their place, written as the walk goes, need its lookups to
-  change, and #592's passes' too.
+  change, and #592's passes' too. They are sparse columns now (below).
 - **The graph's leaves.** Their 96-byte values take 14 MB for 144,720 leaves, of
   which the identifiers' carry little but a type and an object: columns and
   payload rows, as the stream's values have, would take about 8 MB less.
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
   8.3 MB, written at declarations, most of whose bits would fit one byte.
+
+### The sparse output columns (#628)
+
+On main `3ce71ec3`, `-c` of the frozen `sqlite3.c` (716,136 tokens) peaked at
+323.5 MB on the 9700X, at the end of `check-input`, which added 171 MB of it.
+Twelve of the reader's output columns took 34.4 MB of that, a value a token
+each, for 57,349 entries:
+
+| column | entries | 16-token blocks with one |
+| --- | ---: | ---: |
+| `declaration_bodies` | 16,655 | 8,917 |
+| `parameters` | 13,789 | 6,777 |
+| `parameter_next` | 5,934 | 3,837 |
+| `initializer_begins`, `initializer_ends` | 4,182 each | 3,502 each |
+| `initializer_nodes` | 3,982 | 3,318 |
+| `control_owners` | 3,012 | 1,285 |
+| `body_declarations` | 2,674 | 2,671 |
+| `string_ids` | 2,132 | 1,445 |
+| `label_targets` | 797 | 780 |
+| `evaluation_nodes`, `case_ranges` | none | none |
+
+The entries lie on most of each column's pages (on 155 to 604 of its 700
+base pages, but for the two empty ones), so neither base pages nor a value for
+NONE that a fresh page holds would have saved much of their memory. And the
+reader filled all twelve with NONE before the walk, 34.4 MB of stores.
+
+They are sparse columns now (`c_check_sparse.c`):
+- **The layout.** A column is a directory, an entry for each 16 tokens, of
+  blocks of 16 values in a pool that the unit's columns share. Block 0 holds
+  16 NONEs and is never written, so a directory's zero entry reads NONE for its
+  16 tokens. A fresh output arena's directories are as the kernel mapped them,
+  so the columns need no fill (`check_input_run`'s `output_zero`); otherwise
+  only the directories are cleared. On `sqlite3.c` the columns take 36,034
+  blocks, 2.3 MB, and the directories 2.1 MB: 4.5 MB in place of 34.4 MB.
+- **Reads and writes.** A read is two loads (`check_sparse_get`), and 16 tokens'
+  values two blocks' and a permute (`check_sparse_vector`), at any start, which
+  the program's and the lowering's scans of 16 tokens at a time take. A write at
+  a token whose 16 have no block takes the pool's next; a write of NONE there
+  takes none. The pool has a block for each directory entry of each column, which
+  a write takes once at most.
+- **Lanes.** The deferred reader's lanes write their own tokens of the same
+  columns at once, and two lanes' tokens can share 16. There a write claims the
+  empty directory entry, then takes, fills and publishes the block; another
+  lane's write waits for it. A read of a claimed entry reads block 0, which is
+  right, as the reading lane hasn't written its own token there yet.
+  - The lanes take blocks one after another, so two lanes' first fills can fall
+    in one fresh 2 MB region of the pool. As with the rare columns
+    (`check_input_rare_claim`, #764, #847), the first lane to fill a block in a
+    region claims it and faults it in, and the others wait
+    (`check_sparse_region`), so no two lanes clear a huge page for it at once.
+  - A shared pool's directories are cleared on the reading's own thread, so
+    their pages are in place before the lanes start.
+- **The deferred merge** maps `string_ids` at its entries by
+  `check_sparse_entries`, which skips 16 tokens without a block with one load,
+  and loads a block's values in its lane's range alone: a neighboring lane
+  writes the others of a block that straddles the range's end.
+
+The reader's own six NONE columns (`activate`, `first_value` and the others), in
+the scratch, are filled a column at a time on the vector path too, as the
+output's two dense ones are (`check_input_output_none`); the scalar twin keeps
+its one loop over every token.
+
+`test-checker`'s scans test checks the columns against columns of a value a
+token at every count to 200: random writes, every token's value, every 16
+tokens' vector at every start, the masks and the entries' lists by both paths,
+with the directory ending at a `PROT_NONE` page. Three lanes then write one
+shared pool's columns at once, interleaved tokens of the same blocks, and scan
+and write their own ranges, which start and end inside blocks: every value, every
+block taken once, and every region's claim settled. The tests that build a
+`CheckInput` by hand build its sparse columns from their values.
+
+On the 9700X, CPU 2 under the host's lock, main `dac5b770` against the change
+merged with it (`67f7bf51`), with every object the same bytes, by both paths, on
+8 lanes and with `-g`: 8 interleaved rounds of `perf stat -r 3`, and
+`measure-compile --runs 11` of each with the other as its reference ([the
+record](https://github.com/buster14a/buster-performance/tree/a012932ca4ca85bca5783d65245ac9837942d02c/docs/measurements/sparse-columns-628-2026-11-02)
+has the raw outputs, the receipts and the scripts):
+
+| measure | main | sparse columns |
+| --- | ---: | ---: |
+| task clock | 117.07 ms | 116.07 ms |
+| user cycles | 555.8 M | 555.5 M |
+| user instructions | 1,274.2 M | 1,272.1 M |
+| kernel cycles | 93.6 M | 88.0 M |
+| peak RSS (`wait4`) | 323,720 KiB | 296,856 KiB |
+| `check-input` | 49.07 ms | 47.35 ms |
+| `check-input`'s peak added | 171,256 KiB | 144,504 KiB |
+
+- **The time.** Every round of the 8 has the change 0.8 to 1.5 ms faster, nearly
+  all of it the kernel's: the fills' and the pages' clearing it no longer does.
+  An earlier round on main `3ce71ec3` (with `93f2085f`, the same code) had it
+  2.0 ms faster, with 1.1% fewer user cycles, which this round doesn't repeat:
+  a placement's difference, as `sqlite3.c`'s `-c` is known to show.
+- **The peak** is still the reader's end, 26,864 KiB (8.3%) lower.
+- **The shared pool's claims** (`3950f15b`, after the review), measured the same
+  way against `dac5b770`: task clock 117.07 → 115.90 ms, kernel cycles 93.8 →
+  89.3 M, peak 323,608 → 296,856 KiB, objects the same bytes. User
+  instructions are 0.75 M more than `67f7bf51`'s: the directories' acquire loads
+  and the exhaustion test.
 
 ## The checker's graph and program passes (#530)
 
@@ -1001,6 +1102,97 @@ The later bitsets (`planned`, `initialized` and `locals`), counted the same way 
 | `check_program`, inclusive | 148.2 M | 145.1 M | -3.1 M |
 | `check_lower_prepare`, inclusive | 51.0 M | 49.0 M | -2.0 M |
 
+## The compiler's own code and a profile (#880)
+
+[#880](https://github.com/buster14a/buster/issues/880) found the 9700X's front end starved: op cache misses 2 to 2.6
+times Zen 4's per instruction, in hot functions tens of kilobytes long. A profile-guided build of the compiler
+(`-fprofile-instr-use`, trained on the frozen corpora) then took 2.4 to 3.6% off `-c`'s time, for the same objects, and
+ordering its functions without a profile took nothing
+([buster-performance#182](https://github.com/buster14a/buster-performance/pull/182)).
+The owner chose to do both of these:
+
+- **Bring the profile's gains to the source**, so that every build has them.
+- **Keep the profile as a build of its own:** `BUSTER_PGO=1 ./build.sh` ([the build guide](commands/build.md)), which
+  isn't the default and which no CI job builds.
+
+**What the profile changes.** These are user-mode counts of sqlite3.c's `-fsyntax-only` at `3ce71ec3` on the 9700X,
+where nearly all of the gain is (the backend's share of `-c` didn't move):
+
+| | without | with the profile |
+| --- | ---: | ---: |
+| instructions | 948.5 M | 873.1 M |
+| calls (`ex_ret_near_ret`) | 4.91 M | 1.96 M |
+| taken branches (`ex_ret_brn_tkn`) | 77.4 M | 43.7 M |
+| stores dispatched | 143.5 M | 122.0 M |
+
+Sampled attribution of the 75 M instructions didn't agree with itself. Fixed-period `instructions:u` samples land after
+stalls, and the savings are spread over hundreds of functions, a few million instructions each. Two exact methods split
+it instead:
+
+- **Profile subsets.** The checker's unit, which holds the whole compile path, was built with parts of the profile. The
+  full profile gave -7.4% of the instructions. The input reader's functions (`check_input_*`, literals, bindings and
+  constants) gave -3.7% alone, the graph's walk and actions -2.8%, the other `check_*` -1.6%, and the preprocessor,
+  parser and types -0.1%.
+- **The profile without its inlining.** Building with the inliner's thresholds for hot and cold calls set to the
+  default (`-mllvm -hot-callsite-threshold=225`, `-inline-cold-callsite-threshold=225`,
+  `-locally-hot-callsite-threshold=225`, `-inline-enable-cost-benefit-analysis=false`) gave -2.1% of the instructions,
+  -1.6% of the cycles and -33% of the taken branches. That part is the profile's block layout; its inlining gave the
+  rest, -5.3% of the instructions and -54% of the calls.
+
+**Inlining.** Clang's inliner keeps a callee of more than one call out of line once its cost passes the threshold,
+about 50 IR instructions, however often it runs. The profile raises the threshold at hot calls. Sampling returns with
+their branch records (`perf record -e ex_ret_near_ret:u -j any_ret,u`, the record's `from` the callee and its `to` the
+caller) named the hot calls, and 46 callees on the checker's paths are now always inlined, each with the caller it
+saves. Among them are the graph's per-node `check_graph_pure`, `check_graph_scalar_node` (with `check_graph_action`,
+`check_graph_store` and `check_graph_leaf`), `check_action_compute`, the reader's `check_input_add_node`, and the
+declarators' and literals' helpers. `check_graph_scalar_node`'s body, `check_graph_node_action` since #1050 gave the
+memoized transitions an out-of-line copy of it, calls `check_action_compute` itself, rather than through
+`check_action_scalar`, whose 15 other callers keep that call out of line. Out of the 4.91 M calls, 2.36 M are left; the
+profile left 1.96 M.
+
+**Layout.** One test is 6% of the taken branches: `type_strip_aligned`'s, inlined everywhere, which clang laid out with
+the rare aligned type on the path. It now says so (`__builtin_expect`). The rest of the profile's layout is a long tail
+of tests that run once a token or a node and are rarely true, such as `check_input_resolve_range`'s events and
+`check_input_expression_coded`'s operators. [#1175](https://github.com/buster14a/buster/issues/1175) tracks it. Marking
+the diagnostics' reporters `cold` (clang treats a path to a cold call as unlikely) took nothing: they are tiny and were
+inlined, and as calls they cost about 2 M instructions more.
+
+**The opt-in build.** Trained on the compiler's own translation units, `BUSTER_PGO=1` gave more than #182's profile of
+the frozen corpora. These are the builds' counts against the same source's plain build, the least of three runs each:
+
+| | instructions | cycles | taken branches |
+| --- | ---: | ---: | ---: |
+| `-fsyntax-only sqlite3.c`, the corpora's profile | -7.95% | -3.29% | -43.6% |
+| `-fsyntax-only sqlite3.c`, the compiler's own | -9.39% | -5.09% | -51.8% |
+| `-c sqlite3.c`, the corpora's profile | -5.90% | -2.18% | -39.8% |
+| `-c sqlite3.c`, the compiler's own | -7.15% | -2.79% | -46.1% |
+| `-c` of 139 musl units, the corpora's profile | -5.61% | -3.95% | -34.5% |
+| `-c` of 139 musl units, the compiler's own | -7.09% | -6.37% | -44.2% |
+
+The build takes 2.0 minutes on the 9700X with `BUSTER_DEBUG_INFO=0`: the instrumented compiles and the training take 78
+s before the usual 45 s of compiles.
+
+**Times.** `time-runs --runs 11 --warmups 1 --copies 2` on the 9700X (CPU 2), with `BUSTER_HOST_ARCH=znver5` and
+`BUSTER_DEBUG_INFO=0`, ran main (`3ce71ec3`), this change, and this change with `BUSTER_PGO=1`. Each build ran at four
+placements of `main.c`'s code (`build.sh shifts`, 0 to 768 bytes): 88 runs per build and list. Every object was byte for
+byte main's. The ranges are over placements and copies.
+
+| `-c sqlite3.c` | wall | user cycles | instructions |
+| --- | ---: | ---: | ---: |
+| main | 116.47 ms | 546.1 M | 1,257.1 M |
+| this change | -1.53% (-2.66% to -0.60%) | -1.73% | -3.64% |
+| this change, `BUSTER_PGO=1` | -3.76% (-4.75% to -3.06%) | -4.32% | -7.25% |
+
+| `-c` of 139 musl units | wall | user cycles | instructions |
+| --- | ---: | ---: | ---: |
+| main | 186.82 ms | 744.2 M | 2,239.5 M |
+| this change | -1.15% (-1.80% to -0.69%) | -1.58% | -3.27% |
+| this change, `BUSTER_PGO=1` | -5.15% (-5.93% to -4.51%) | -7.04% | -7.24% |
+
+The record ([buster-performance#222](https://github.com/buster14a/buster-performance/pull/222),
+[`pgo-port-880-2026-11-02`](https://github.com/buster14a/buster-performance/tree/ff44d0e6baf2231a30d454555abb4694ac06549b/docs/measurements/pgo-port-880-2026-11-02))
+has the scripts, every variant's counts, the call and taken-branch samples, and the executables' hashes.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
@@ -1095,14 +1287,65 @@ report, on standard error after the command, a row per stage.
   N`, and one for a source without code to emit), and `lanes`, those its flow
   ran on, one after a failed start.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
+- **The lowering's phases** inside its stage (#1048) are TSC ticks the emission
+  adds to the clock (`check_clock_lower`): `lower.prepare`,
+  `check_lower_prepare`'s; and on one lane each part's (`CheckLowerPart`'s
+  ticks: with the option alone, three TSC reads a part and two a body)
+  `lower.statements`, its bodies' statements, their controls and tasks' loops;
+  `lower.bodies`, the rest of its bodies' walks (frames, parameters, locals,
+  labels and the columns' copies); and `lower.validate`, its ABI rows (the
+  calls' and the locations', the signatures' checks and each function's
+  parameters and result), `abi_assign` and `tier0_validate`. The last row,
+  `lower.rest`, is the rest of the stage: the parts' own bookkeeping and
+  `check_lower_finish`'s merge. On several lanes, the parts run in the `lanes`
+  stage and read no TSC, and only the preparation and the rest remain.
 - **The expressions' walk** inside `check-input` is a line of its own after the
   total, `time-check expressions MILLISECONDS PERCENT`: the TSC's ticks across
   `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
   #1038; two TSC reads a unit, with the option or without) and the driver adds
   up. It overlaps the stage, so it is no row of the stages' sum. The report's
-  reader (`check_clock_read`) requires it once, within its stage.
+  reader (`check_clock_read`) requires it once, within its stage. Its parts
+  follow, each a `time-check expressions.PART MILLISECONDS PERCENT` line
+  (`CheckInput.expression_part_ticks`, disjoint and within the walk):
+  - `classes`, the classes' pass;
+  - `prepare`, the coded walk's chunks' compaction and identifiers' leaves;
+  - `actions`, the classes' own actions in the coded walk;
+  - `visits`, the walk's own visits (`check_input_expression_visit`): in a
+    coded unit those of the tokens the classes' actions leave, in a unit the
+    coded walk leaves to the visit throughout all of its chunks' actions, and
+    on the scalar path all of the walk past its classes.
+
+  `prepare` and `actions` are the coded walk's: on the scalar path (`--scalar`)
+  both are `0.000`, which is no measurement, and in a unit the coded walk leaves
+  to the visit `actions` is, while `prepare` is its chunks' compaction. Then
+  comes
+  `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the process's
+  `getrusage(RUSAGE_SELF)` counters across the walk, low-confidence as the
+  stages' are. They count every thread's, which in a one-lane compile (as the
+  9700X step's) are the reader's own; in a command with several units on
+  lanes, other threads' too. The faults are mostly the first touches of the
+  graph's node columns, which `check_graph_initialize` leaves unwritten and the
+  walk writes a node at a time; the reader's per-token columns and the output
+  columns `check_input_output_none` clears are written before the walk, so its
+  faults don't count them. Where a unit's read failed, the line is
+  `-1.000 -1`, latched across the units as the stages' columns are, so a
+  substituted zero cannot read as a measurement. `check_clock_read_walk` reads
+  these lines, each once, the parts nonnegative and adding up to no more than
+  the walk, and the usage numeric or wholly unavailable. `measure-compile`
+  prints their medians under `check-input.expressions`
+  (`check_clock_print_walk`), `-1` where a run's usage was unavailable.
+- **The walk's clock is always on.** The walk's row and parts are read with or
+  without the option: two TSC reads a unit for the walk, two for the classes'
+  pass, three a chunk of 1,024 positions, two a visit in a coded unit, and two
+  `getrusage` calls a unit. On sqlite 3.53.2's amalgamation with the 9700X
+  step's `-D` options (710,061 tokens: 694 chunks and 7,800 visits) that is
+  some 18,000 TSC reads and two system calls, well under a millisecond against
+  a walk of about 30 ms on a 4-CPU VM; the frozen corpus's `sqlite3.c` has
+  6,639 visits, about 15,000 reads. Reading them
+  only under the option would take a flag through the reader for less than the
+  run-to-run noise.
 - **Off by default.** Without the option the driver reads no clock, and each lap
-  is a test of a null pointer. With it, the report and the objects are checked
+  is a test of a null pointer; the reader's walk keeps its own counts, above. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
 
 **The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]
@@ -1113,6 +1356,10 @@ without the option, with it, and the reference compiler.
   and `wait4`'s rusage gives its user and system time, peak RSS and faults.
 - **Checks.** Every process must exit with status 0, the two objects of every
   run must be the same bytes, and every report must be whole.
+- **Coverage.** After the runs, with the medians, it prints the first
+  `--time-stages` report's `lowering-nodes` line (every run's is the same), as
+  `lowering coverage:`: the evaluated nodes and the shares #624's fragments
+  and #1048's node templates took, on the host's path.
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
   ranked by elapsed time. The preprocessor's phases and the expressions' walk
@@ -1347,11 +1594,12 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 ### Baked tables (#590)
 
-build.sh has each executable it links write itself with the backend's tables
+The build's post-link step has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
-and their marked copies, the x86 semantics' tables, and the checker unit's
-copies of Tier 0's tables, the Zen 5 cost model's tables and the unwind
-templates, with their initialized flags, all in a section of their own
+and their marked copies, the x86 semantics' tables, Tier 1's selection state
+tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
+are), and the checker unit's copies of Tier 0's tables, the Zen 5 cost model's
+tables and the unwind templates, with their initialized flags, all in a section of their own
 (`buster_baked`, `baked.h`), 5.1 MB of the file. A compile's process starts
 with them built, at their fixed addresses, and reads the pages it touches from
 the page cache, shared with every other process.
@@ -1379,7 +1627,7 @@ the page cache, shared with every other process.
   than the file's.
 - **Where it isn't.** PIEs (the sanitizers' builds, whose tables would hold
   their load address if any had a pointer), executables linked without
-  build.sh and builds with `BUSTER_BAKE=0` build the tables when they run, as
+  the build's post-link step and builds with `BUSTER_BAKE=0` build the tables when they run, as
   before. So do the benchmarks' units.
 
 Objects are the same bytes, baked or built: `hello.c` and c-testsuite's 220

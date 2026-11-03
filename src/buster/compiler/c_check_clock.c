@@ -124,18 +124,65 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_RELEASE] = "release",
 };
 
-// The report's rows inside the preprocessor's stage: PPOptions.timing's phases, in PPPhase's order, then the main loop,
-// the rest of the stage.
-static const char* const check_clock_phase_names[] = { "preprocess.read", "preprocess.lex", "preprocess.refine", "preprocess.directives",
-                                                       "preprocess.main-loop" };
+// The lowering's phases inside its stage (#1048), whose TSC ticks the emission adds to the clock (check_clock_lower):
+// check_lower_prepare's; and on one lane, each part's (check_lower_part) bodies' statements, their controls and tasks'
+// loops; the rest of its bodies' walks, their frames, parameters, locals, labels and columns' copies; and its ABI rows
+// (the calls' and the locations', the signatures' checks and each function's parameters and result), abi_assign and its
+// functions' validation (tier0_validate).
+typedef enum CheckClockLower
+{
+    CHECK_CLOCK_LOWER_PREPARE,
+    CHECK_CLOCK_LOWER_STATEMENTS,
+    CHECK_CLOCK_LOWER_BODIES,
+    CHECK_CLOCK_LOWER_VALIDATE,
+    CHECK_CLOCK_LOWER_COUNT,
+} CheckClockLower;
+
+// The report's rows inside a stage's, each stage's a run of them whose last is the rest of the stage: the preprocessor's,
+// PPOptions.timing's phases in PPPhase's order, then the main loop; and the lowering's, CheckClockLower's in its order,
+// then the rest (its parts' own bookkeeping and check_lower_finish's merge).
+static const char* const check_clock_phase_names[] = {
+    "preprocess.read",
+    "preprocess.lex",
+    "preprocess.refine",
+    "preprocess.directives",
+    "preprocess.main-loop",
+    "lower.prepare",
+    "lower.statements",
+    "lower.bodies",
+    "lower.validate",
+    "lower.rest",
+};
 
 #define BUSTER_CHECK_CLOCK_PHASES (sizeof(check_clock_phase_names) / sizeof(check_clock_phase_names[0]))
+// The preprocessor's rows are the first, its main loop the last of them; the lowering's follow, CheckClockLower's and the
+// rest, which the report's last row of each run assumes.
+#define BUSTER_CHECK_CLOCK_PREPROCESS_PHASES 5u
+#define BUSTER_CHECK_CLOCK_LOWER_FIRST BUSTER_CHECK_CLOCK_PREPROCESS_PHASES
+_Static_assert(BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_COUNT + 1 == BUSTER_CHECK_CLOCK_PHASES,
+               "every phase of the lowering has a row, and its stage's rest one more");
+
+// The stage each row is inside, which the report's readers group them by (measure-compile, the tests).
+static const CheckStage check_clock_phase_stages[BUSTER_CHECK_CLOCK_PHASES] = {
+    CHECK_STAGE_PREPROCESS,
+    CHECK_STAGE_PREPROCESS,
+    CHECK_STAGE_PREPROCESS,
+    CHECK_STAGE_PREPROCESS,
+    CHECK_STAGE_PREPROCESS,
+    CHECK_STAGE_LOWER,
+    CHECK_STAGE_LOWER,
+    CHECK_STAGE_LOWER,
+    CHECK_STAGE_LOWER,
+    CHECK_STAGE_LOWER,
+};
 
 // The direct path's write's phases (executable_write's, EXECUTABLE_PHASES of them, in their order), which the report
 // gives as `time-write` lines after the stages: what the `write` stage's time went to, on the writer's lane 0 (#778).
 static const char* const check_clock_write_names[] = { "count", "layout", "symbols", "dynamic", "open", "chunks", "finish" };
 
 #define BUSTER_CHECK_CLOCK_WRITE_PHASES (sizeof(check_clock_write_names) / sizeof(check_clock_write_names[0]))
+// The expressions' walk's parts the report gives (check_clock_walk_parts): BUSTER_CHECK_EXPRESSION_PARTS.
+#define BUSTER_CHECK_CLOCK_WALK_PARTS 4u
 
 typedef struct CheckClock CheckClock;
 struct CheckClock
@@ -168,9 +215,29 @@ struct CheckClock
     uint32_t lanes_asked;
     uint32_t lanes;
     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
-    // #1038), which the report gives on a `time-check` line.
+    // #1038), which the report gives on a `time-check` line; its parts' (CheckInput.expression_part_ticks, in
+    // check_clock_walk_parts' order), each on a `time-check expressions.PART` line; and the minor faults and system
+    // microseconds across it, on the `time-check expressions.usage` line. A unit whose getrusage read failed
+    // (CheckInput.expression_usage_failed) latches expression_usage_failed, and the line gives the two as unavailable
+    // (-1), as the stages' columns are, rather than a total that a unit's substituted zero would distort.
     uint64_t expression_ticks;
+    uint64_t expression_part_ticks[BUSTER_CHECK_CLOCK_WALK_PARTS];
+    uint64_t expression_faults;
+    uint64_t expression_system_us;
+    bool expression_usage_failed;
+    // Within the lowering's stage, its phases' TSC ticks (by CheckClockLower), which the report gives as `lower.*` rows.
+    uint64_t lower_ticks[CHECK_CLOCK_LOWER_COUNT];
+    // Within `check-expressions`, the graph run's memoized transitions (#1050, CheckStatistics' transition counts): the nodes
+    // an earlier node's answer completed, those probed and not found, and those an operand's payload sent to their actions
+    // (most often a constant to fold), with the table's entries; each a `time-check transitions` line.
+    uint64_t transition_hits;
+    uint64_t transition_misses;
+    uint64_t transition_folds;
+    uint64_t transition_entries;
 };
+
+// The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
+static const char* const check_clock_walk_parts[BUSTER_CHECK_CLOCK_WALK_PARTS] __attribute__((unused)) = { "classes", "prepare", "actions", "visits" };
 
 // Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock. The driver calls it, but
 // not every unit that includes this file (tests/peak-rss.c).
@@ -219,6 +286,16 @@ static inline void check_clock_lap(CheckClock* stage_clock, CheckStage stage)
     }
 }
 
+// Adds `ticks` to the lowering's phase `phase` (CheckClock.lower_ticks), inside the lowering's stage, whose laps charge
+// them too; nothing without a clock.
+static inline void check_clock_lower(CheckClock* stage_clock, CheckClockLower phase, uint64_t ticks)
+{
+    if (stage_clock != NULL)
+    {
+        stage_clock->lower_ticks[phase] += ticks;
+    }
+}
+
 // A lap that also charges the resource use since the last mark to `stage`; nothing without a clock.
 static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
 {
@@ -250,8 +327,9 @@ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
 // Writes the report to `stream`: a line per stage, `time-stage NAME MILLISECONDS PERCENT SYSTEM_MS MINOR_FAULTS
 // PEAK_KB_ADDED` (tab-separated: its marks' low-confidence resource use, system and faults -1 together when the
 // getrusage read failed and peak -1 when its own read did), the preprocessor's phases inside its stage as
-// `preprocess.NAME` with their milliseconds and percent alone (the main loop the rest of the stage), the total, the
-// reader's expressions' walk inside its stage as `time-check expressions MILLISECONDS PERCENT`, and the process's
+// `preprocess.NAME` and the lowering's inside its own as `lower.NAME`, with their milliseconds and percent alone (the
+// last row of each the rest of its stage), the total, the reader's expressions' walk inside its stage as
+// `time-check expressions MILLISECONDS PERCENT`, and the process's
 // resource use so far as `time-process NAME VALUE` lines. `pp_ticks` are the preprocessor's phases'
 // ticks (PP_PHASE_READ to PP_PHASE_DIRECTIVES, in their order), or null. Call it after the last lap.
 static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp_ticks, uint32_t pp_phase_count, FILE* stream)
@@ -283,24 +361,48 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         {
             fputs("-1\n", stream);
         }
-        if (s == CHECK_STAGE_PREPROCESS && pp_ticks != NULL)
+        // The stage's rows: its phases' ticks, then the rest of the stage.
+        const bool preprocess = s == CHECK_STAGE_PREPROCESS && pp_ticks != NULL;
+        const bool lower = s == CHECK_STAGE_LOWER;
+        const uint64_t* phase_ticks = preprocess ? pp_ticks : stage_clock->lower_ticks;
+        const uint32_t first = preprocess ? 0 : BUSTER_CHECK_CLOCK_LOWER_FIRST;
+        const uint32_t rows = preprocess ? BUSTER_CHECK_CLOCK_PREPROCESS_PHASES : BUSTER_CHECK_CLOCK_PHASES - BUSTER_CHECK_CLOCK_LOWER_FIRST;
+        const uint32_t measured = preprocess ? (pp_phase_count < rows - 1 ? pp_phase_count : rows - 1) : CHECK_CLOCK_LOWER_COUNT;
+        uint64_t phase_sum = 0;
+        for (uint32_t p = 0; (preprocess || lower) && p < measured; p += 1)
         {
-            uint64_t phase_sum = 0;
-            for (uint32_t p = 0; p < pp_phase_count && p + 1 < BUSTER_CHECK_CLOCK_PHASES; p += 1)
-            {
-                const double phase = (double)pp_ticks[p] / ticks_per_millisecond;
-                phase_sum += pp_ticks[p];
-                fprintf(stream, "time-stage\t%s\t%.3f\t%.1f\n", check_clock_phase_names[p], phase, total > 0 ? phase * 100.0 / total : 0.0);
-            }
+            const double phase = (double)phase_ticks[p] / ticks_per_millisecond;
+            phase_sum += phase_ticks[p];
+            fprintf(stream, "time-stage\t%s\t%.3f\t%.1f\n", check_clock_phase_names[first + p], phase, total > 0 ? phase * 100.0 / total : 0.0);
+        }
+        if (preprocess || lower)
+        {
             const uint64_t rest = stage_clock->ticks[s] > phase_sum ? stage_clock->ticks[s] - phase_sum : 0;
-            const double loop = (double)rest / ticks_per_millisecond;
-            fprintf(stream, "time-stage\t%s\t%.3f\t%.1f\n", check_clock_phase_names[BUSTER_CHECK_CLOCK_PHASES - 1], loop,
-                    total > 0 ? loop * 100.0 / total : 0.0);
+            const double remainder = (double)rest / ticks_per_millisecond;
+            fprintf(stream, "time-stage\t%s\t%.3f\t%.1f\n", check_clock_phase_names[first + rows - 1], remainder, total > 0 ? remainder * 100.0 / total : 0.0);
         }
     }
     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
     const double expressions = (double)stage_clock->expression_ticks / ticks_per_millisecond;
     fprintf(stream, "time-check\texpressions\t%.3f\t%.1f\n", expressions, total > 0 ? expressions * 100.0 / total : 0.0);
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+    {
+        const double part = (double)stage_clock->expression_part_ticks[p] / ticks_per_millisecond;
+        fprintf(stream, "time-check\texpressions.%s\t%.3f\t%.1f\n", check_clock_walk_parts[p], part, total > 0 ? part * 100.0 / total : 0.0);
+    }
+    if (stage_clock->expression_usage_failed)
+    {
+        fputs("time-check\texpressions.usage\t-1.000\t-1\n", stream);
+    }
+    else
+    {
+        fprintf(stream, "time-check\texpressions.usage\t%.3f\t%llu\n", (double)stage_clock->expression_system_us / 1e3,
+                (unsigned long long)stage_clock->expression_faults);
+    }
+    fprintf(stream, "time-check\ttransition-hits\t%llu\n", (unsigned long long)stage_clock->transition_hits);
+    fprintf(stream, "time-check\ttransition-misses\t%llu\n", (unsigned long long)stage_clock->transition_misses);
+    fprintf(stream, "time-check\ttransition-folds\t%llu\n", (unsigned long long)stage_clock->transition_folds);
+    fprintf(stream, "time-check\ttransition-entries\t%llu\n", (unsigned long long)stage_clock->transition_entries);
     for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
     {
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
@@ -345,16 +447,83 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     }
 }
 
+// Reads the expressions' walk's parts from a report check_clock_report wrote, in `text` among other lines: each part's
+// milliseconds (check_clock_walk_parts' order) into parts[0] to parts[BUSTER_CHECK_CLOCK_WALK_PARTS - 1], then the
+// walk's system milliseconds and minor faults (its `expressions.usage` line). Every row must occur once, nonnegative
+// but for the usage's unavailable pair, -1 and -1 together, and the parts may add up to no more than the walk's own row
+// (each rounded to a microsecond). check_clock_read reads the rest; a report's reader that wants the parts reads them
+// apart (measure-compile).
+static __attribute__((unused)) bool check_clock_read_walk(const char* text, double* parts)
+{
+    uint32_t seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+    double walk = -1;
+    bool valid = text != NULL;
+    const char* at = text;
+    while (valid && at != NULL && *at != 0)
+    {
+        const char* end = strchr(at, '\n');
+        const size_t length = end != NULL ? (size_t)(end - at) : strlen(at);
+        char line[256] = { 0 };
+        memcpy(line, at, length < sizeof(line) - 1 ? length : sizeof(line) - 1);
+        char name[64] = { 0 };
+        double first = -1;
+        double second = -1;
+        const int fields = strncmp(line, "time-check\t", 11) == 0 ? sscanf(line + 11, "%63[^\t]\t%lf\t%lf", name, &first, &second) : 0;
+        for (uint32_t p = 0; fields == 3 && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            char wanted[64];
+            snprintf(wanted, sizeof(wanted), "expressions.%s", check_clock_walk_parts[p]);
+            const bool match = strcmp(name, wanted) == 0;
+            parts[p] = match ? first : parts[p];
+            seen[p] += match;
+            valid = valid && (!match || first >= 0);
+        }
+        const bool usage = fields == 3 && strcmp(name, "expressions.usage") == 0;
+        parts[BUSTER_CHECK_CLOCK_WALK_PARTS] = usage ? first : parts[BUSTER_CHECK_CLOCK_WALK_PARTS];
+        parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] = usage ? second : parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1];
+        seen[BUSTER_CHECK_CLOCK_WALK_PARTS] += usage;
+        valid = valid && (!usage || (first >= 0 && second >= 0) || (first == -1 && second == -1));
+        const bool whole = fields == 3 && strcmp(name, "expressions") == 0;
+        walk = whole ? first : walk;
+        seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] += whole;
+        at = end != NULL ? end + 1 : NULL;
+    }
+    double sum = 0;
+    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(seen); i += 1)
+    {
+        valid = seen[i] == 1;
+        sum += i < BUSTER_CHECK_CLOCK_WALK_PARTS ? parts[i] : 0;
+    }
+    return valid && sum <= walk + 0.001 * BUSTER_CHECK_CLOCK_WALK_PARTS;
+}
+
+// Prints measure-compile's rows of the expressions' walk's parts under its `check-input.expressions` row: `median`,
+// `low` and `high` hold each part's median and range over the runs (check_clock_walk_parts' order), then the usage's
+// system milliseconds and minor faults, as check_clock_read_walk reads them (-1 where unavailable); `span` is the median
+// span the parts' shares are of.
+static __attribute__((unused)) void check_clock_print_walk(FILE* stream, const double* median, const double* low, const double* high, double span)
+{
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "expressions.%s", check_clock_walk_parts[p]);
+        fprintf(stream, "      %-18s %9.3f  (%.3f to %.3f)  %5.1f%%\n", name, median[p], low[p], high[p], span > 0 ? median[p] * 100.0 / span : 0.0);
+    }
+    fprintf(stream, "      %-18s %9.3f  %7.0f  low-confidence system ms and minor faults across the walk (-1 unavailable)\n", "expressions.usage",
+            median[BUSTER_CHECK_CLOCK_WALK_PARTS], median[BUSTER_CHECK_CLOCK_WALK_PARTS + 1]);
+}
+
 // Reads a report check_clock_report wrote, in `text` among other lines (a compile's diagnostics): each stage's
-// milliseconds into `stages` (by CheckStage), the preprocessor's rows into `phases` (by check_clock_phase_names), the
-// total into `*total`, the reader's expressions' walk (its `time-check expressions` row, #1038) into `*walk`, and unless
+// milliseconds into `stages` (by CheckStage), the preprocessor's and the lowering's rows into `phases` (by
+// check_clock_phase_names), the total into `*total`, the reader's expressions' walk (its `time-check expressions` row,
+// #1038) into `*walk`, and unless
 // `usage` is null each stage's system milliseconds, minor faults and peak KB added into usage[3 * stage] to
 // usage[3 * stage + 2]. Every row must occur once, and the walk's within its stage's time (each rounded to a
 // microsecond). Values are nonnegative except
 // that every stage's RSS may be -1 together, with an explicit unavailable status. A report without the status
 // line has numeric peaks, and cannot claim an unavailable reading by silently substituting zero. A report from
-// before the walk's row (#1038) has no such row and is not read: its readers (measure-compile, the tests) read
-// this build's reports.
+// before the walk's row (#1038) or the lowering's rows (#1048) lacks them and is not read: its readers
+// (measure-compile, the tests) read this build's reports.
 static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* walk, double* usage)
 {
     uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 2] = { 0 };

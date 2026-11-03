@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Binding's tests, for the test-bind command:
 //
@@ -101,6 +102,7 @@
 // hand, the rules, the atexit program, the libgcc program, the room, the cross-check, the linkers' cases, the checks,
 // the static runtimes, the shared library's runtime, split-stack code, and run_bind_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -5330,8 +5332,8 @@ static int run_bind_tests(int argc, char** argv)
     }
     int result = 1;
     char directory[BUSTER_BIND_TEST_PATH_BYTES];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-bind-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-bind-XXXXXX", temporary);
     Arena arena = arena_reserve(BUSTER_BIND_TEST_ARENA_BYTES);
     Runtime runtime;
     const RuntimeError imported = valid ? runtime_import(&runtime) : RUNTIME_ERROR_NONE;

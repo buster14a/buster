@@ -116,6 +116,10 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
         case CHECK_INPUT_NO_BUILTIN_DEFINITION: result = "no_builtin attribute is permitted on definitions only"; break;
+        case CHECK_INPUT_SPECIFIER_COMBINE: result = "cannot combine with previous declaration specifier"; break;
+        case CHECK_INPUT_SPECIFIER_SIGN: result = "type cannot be signed or unsigned"; break;
+        case CHECK_INPUT_SPECIFIER_WIDTH: result = "invalid width for the type"; break;
+        case CHECK_INPUT_SPECIFIER_COMPLEX: result = "invalid _Complex type"; break;
     }
     return result;
 }
@@ -368,6 +372,65 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 }
 
 #include "c_check_warning_render.c"
+#include "c_check_literal_diagnostic.c"
+
+// A numeric constant the checker refused, worded and placed as clang does (c_check_literal_diagnostic.c, #1127): false if
+// clang has no error for it, which leaves the checker's own message.
+static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch)
+{
+    bool result = false;
+    PPTokens* output = &pp->output;
+    if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && source < output->count && output->kinds[source] != BUSTER_PP_KIND_EMBED &&
+        output->kinds[source] != BUSTER_PP_KIND_INTEGER)
+    {
+        const uint64_t mark = scratch->length;
+        const uint64_t capacity = (uint64_t)output->values[source] - output->locations[source] + 1;
+        uint8_t* buffer = arena_push(scratch, capacity, 1);
+        const uint8_t* bytes = 0;
+        const uint32_t length = buffer != 0 ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
+        CheckLiteralDiagnostic diagnostic;
+        result = length != 0 && check_literal_diagnose(bytes, length, parser->language.standard >= 2023, &diagnostic);
+        if (result)
+        {
+            const char* radix = diagnostic.radix == 2 ? "binary" : diagnostic.radix == 8 ? "octal" : "decimal";
+            const uint32_t offset = diagnostic.offset;
+            switch (diagnostic.kind)
+            {
+                case CHECK_LITERAL_DIAGNOSTIC_EXPONENT:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "exponent has no digits");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_DIGIT:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid digit '%c' in %s constant", diagnostic.character, radix);
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_SUFFIX:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid suffix '%.*s' on %s constant", (int)(length - offset),
+                                                 (const char*)bytes + offset, diagnostic.floating ? "floating" : "integer");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_HEX_EXPONENT:
+                case CHECK_LITERAL_DIAGNOSTIC_HEX_SIGNIFICAND:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "hexadecimal floating constant requires %s",
+                                                 diagnostic.kind == CHECK_LITERAL_DIAGNOSTIC_HEX_EXPONENT ? "an exponent" : "a significand");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_SEPARATOR:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "digit separator cannot appear at %s of digit sequence",
+                                                 diagnostic.floating ? "end" : "start");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_TOO_LARGE:
+                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "integer literal is too large to be represented in any integer type");
+                    break;
+                default:
+                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'size_t' suffix for literals is a C++23 feature");
+                    break;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return result;
+}
+
+// Tier 1's selection state tables (tier1_select_burs.c), which main.c includes after this file: --tier1 builds them before
+// any lane compiles a unit.
+static bool tier1_select_initialize(void);
 
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
@@ -1075,6 +1138,33 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
                         }
+                        else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
+                        {
+                            // Specifiers that don't combine, named as clang's DeclSpec names them (#1127).
+                            const CheckInputReport* report = input->reports + index;
+                            const char* first = check_declspec_names[report->specifier < CHECK_DECLSPEC_NAME_COUNT ? report->specifier : 0];
+                            const char* type = check_declspec_names[report->specifier_type < CHECK_DECLSPEC_NAME_COUNT ? report->specifier_type : 0];
+                            if (kind == CHECK_INPUT_SPECIFIER_COMBINE)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "cannot combine with previous '%s' declaration specifier", first);
+                            }
+                            else if (kind == CHECK_INPUT_SPECIFIER_SIGN)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' cannot be signed or unsigned", first);
+                            }
+                            else if (kind == CHECK_INPUT_SPECIFIER_WIDTH)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s %s' is invalid", first, type);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'_Complex %s' is invalid", first);
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_LITERAL && check_driver_literal(pp, parser, located, source, publication, scratch))
+                        {
+                            // A numeric constant's error, worded and placed as clang's.
+                        }
                         else if (kind == CHECK_INPUT_UNDECLARED && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
@@ -1676,6 +1766,48 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
+// The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
+// atom, or null), as -c writes it: its link checked, its temporaries (the jump tables' symbols and their labels', the
+// unit's own) left out, as clang's .L labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error
+// is OBJECT_ERROR_FULL where the link isn't valid or memory ran out before the build. check_driver_object writes it;
+// #1057's parity tests build their preparation's so, to compare it with -c's file byte for byte.
+static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
+{
+    ObjectUnits units = { 0 };
+    ObjectSymbols symbols = { 0 };
+    bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch);
+    // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
+    // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
+    // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
+    const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
+    uint8_t* temporary = valid && (switch_symbols != 0 || code->unit_temporary_count != 0) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
+    valid = valid && ((switch_symbols == 0 && code->unit_temporary_count == 0) || temporary != 0);
+    if (temporary != 0)
+    {
+        memset(temporary, 0, code->link.symbols.count);
+        memset(temporary + code->lowered.case_symbol_base, 1, switch_symbols);
+        for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
+        {
+            temporary[code->unit_temporary[s]] = 1;
+        }
+    }
+    Object result = { .error = OBJECT_ERROR_FULL };
+    if (valid)
+    {
+        const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
+        const ObjectOptions options = {
+            .atom_sections = sections,
+            .atom_section_count = sections != 0 ? code->link.atoms.count : 0,
+            .temporary_symbols = temporary,
+            .temporary_symbol_count = temporary != 0 ? code->link.symbols.count : 0,
+            .debug = debug,
+            .debug_count = debug != NULL ? 1 : 0,
+        };
+        result = object_build(&code->link, &units, &symbols, 0, options, source, scratch);
+    }
+    return result;
+}
+
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
 // units that link into one executable, c_checker_units.c), its link, kept for theirs. Its functions compile on `lanes`
 // (check_program_emit_lanes). With `debug` (-g), the object carries DWARF: the unit the executable's would
@@ -1746,40 +1878,12 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     else if (valid)
     {
-        ObjectUnits units = { 0 };
-        ObjectSymbols symbols = { 0 };
-        valid = link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) &&
-                object_map_symbols(&symbols, &code.link, scratch);
-        // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
-        // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
-        // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
-        const uint32_t switch_symbols = code.lowered.table_count + code.lowered.case_symbol_count;
-        uint8_t* temporary = valid && (switch_symbols != 0 || code.unit_temporary_count != 0) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code.link.symbols.count) : 0;
-        valid = valid && ((switch_symbols == 0 && code.unit_temporary_count == 0) || temporary != 0);
-        if (temporary != 0)
+        const Object object = check_driver_object_build(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch);
+        // The optional dump consumes the same resolved Link as the object writer. Validate and render it
+        // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
+        valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission));
+        if (object.error == OBJECT_ERROR_NONE)
         {
-            memset(temporary, 0, code.link.symbols.count);
-            memset(temporary + code.lowered.case_symbol_base, 1, switch_symbols);
-            for (uint32_t s = 0; s < code.unit_temporary_count; s += 1)
-            {
-                temporary[code.unit_temporary[s]] = 1;
-            }
-        }
-        if (valid)
-        {
-            const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const ObjectOptions options = {
-                .atom_sections = sections,
-                .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
-                .temporary_symbols = temporary,
-                .temporary_symbol_count = temporary != 0 ? code.link.symbols.count : 0,
-                .debug = debug ? &dwarf.object : NULL,
-                .debug_count = debug ? 1 : 0,
-            };
-            const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
-            // The optional dump consumes the same resolved Link as the object writer. Validate and render it
-            // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
-            valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission));
             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
             valid = valid && object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
@@ -2684,6 +2788,8 @@ struct CheckDriverCommand
     // --scalar, --verify, --dump-typed, --dump-static, -w, -flazy-system-headers and --lower-all.
     bool scalar;
     bool verify;
+    // --check-transitions: the checker's vector path by its memoized transitions (CheckOptions.transitions, #1050).
+    bool check_transitions;
     bool dump;
     bool dump_static;
     bool quiet;
@@ -2731,7 +2837,7 @@ struct CheckDriverCommand
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
-static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock);
+static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
@@ -2885,7 +2991,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             if (stage_clock != NULL)
             {
+                _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
                 stage_clock->expression_ticks += input.expression_ticks;
+                for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+                {
+                    stage_clock->expression_part_ticks[p] += input.expression_part_ticks[p];
+                }
+                stage_clock->expression_faults += input.expression_faults;
+                stage_clock->expression_system_us += input.expression_system_us;
+                stage_clock->expression_usage_failed = stage_clock->expression_usage_failed || input.expression_usage_failed;
             }
             if (input.resource)
             {
@@ -2895,9 +3009,21 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // reports share source order with declaration reports, but this fragment can never be emitted.
             if (input_valid || input.diagnostic_graph)
             {
-                const CheckOptions check_options = { .scalar = scalar, .verify = verify };
+                const CheckOptions check_options = {
+                    .scalar = scalar,
+                    .verify = verify,
+                    .transitions = command->check_transitions,
+                    .verify_transitions = verify,
+                };
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
+                if (stage_clock != NULL)
+                {
+                    stage_clock->transition_hits += stream.statistics.transition_hits;
+                    stage_clock->transition_misses += stream.statistics.transition_misses;
+                    stage_clock->transition_folds += stream.statistics.transition_folds;
+                    stage_clock->transition_entries += stream.statistics.transition_entries;
+                }
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
@@ -3073,19 +3199,18 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         result = 1;
                     }
                     check_clock_mark(stage_clock, CHECK_STAGE_STATIC_DATA);
-                    const CheckProgramOptions program_options = {
+                    // The identifiers, the target and the predefines are the unit's preprocessor's, as every client's
+                    // program takes them (check_request_program_options, #1057).
+                    const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
                         .initializers = &initializers,
                         .asms = &asms,
                         .prepared_data = result == 0 && (emit_object || link) && !prefix_only ? &data : NULL,
-                        .identifiers = pp->table,
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
                         .scalar = scalar,
-                        .target = options->target,
-                        .predefines = &options->predefines,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
-                    };
+                    });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
                          !pp->diagnostic_collection_failed && !pp->history_failed);
@@ -3304,7 +3429,7 @@ static void check_driver_flow(void* argument)
         {
             run->lanes->units_flow = &run->units_flow;
             check_units_flow_begin(&run->units_flow);
-            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
+            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock, run->release);
             check_units_flow_end(&run->units_flow);
             run->lanes->units_flow = NULL;
         }
@@ -3389,55 +3514,6 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
-// These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
-// still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
-// differently instrumented object. The hardening families (#1125) are refused by prefix, including unknown values
-// and their auxiliary options; only the exact inactive/default requests below are admitted. This does not yet audit
-// every -f/-m option. Negative options outside these families retain their existing handling. -fsanitize-coverage=
-// isn't one of them: the predefines resolve its features as clang does, later -fno-sanitize-coverage= among them, and
-// the driver refuses what is left where it emits code (#1138's predefines.sanitize_coverage); only the bare spelling,
-// which clang doesn't take, is refused here by name.
-static bool check_driver_unsupported_codegen_option(const char* argument)
-{
-    static const char* const exact[] = {
-        "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
-        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
-        "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
-        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double", "-fsanitize-coverage",
-    };
-    static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
-                                            "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
-                                            "-fprofile-generate-cold-function-coverage=",
-                                            "-ftrivial-auto-var-init",
-                                            "-ftrapv",
-                                            "-fzero-call-used-regs",
-                                            "-fsplit-stack",
-                                            "-mcmodel" };
-    bool unsupported = false;
-    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
-    {
-        unsupported = strcmp(argument, exact[i]) == 0;
-    }
-    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
-    {
-        unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
-    }
-    // These complete spellings request the behavior already emitted. Do not use prefix matches for exemptions:
-    // e.g. -mcmodel=small-bogus and -fzero-call-used-regs=skip,all must still be refused by name. Within these
-    // families, an earlier unsupported request is not cancelled by a later inactive spelling; the stack-protector
-    // and CET families are resolved separately and do honor a later disabling spelling.
-    static const char* const inactive[] = {
-        "-ftrivial-auto-var-init=uninitialized",
-        "-fzero-call-used-regs=skip",
-        "-mcmodel=small",
-    };
-    for (uint32_t i = 0; unsupported && i < BUSTER_ARRAY_LENGTH(inactive); i += 1)
-    {
-        unsupported = strcmp(argument, inactive[i]) != 0;
-    }
-    return unsupported;
-}
-
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
@@ -3480,6 +3556,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool scalar = false;
     // --verify checks every function's records with x86_validate (the c-testsuite harness passes it).
     bool verify = false;
+    // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
+    bool check_transitions = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -3522,16 +3600,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool linker_ready = linker_arguments != NULL && libraries.required != NULL &&
                               linker_options_initialize(&libraries.linker, (uint32_t)linker_capacity, &arena);
     bool missing_value = false;
-    const char* unsupported_codegen = NULL;
-    const char* unsupported_stack_protector = NULL;
-    const char* unsupported_cf_protection = NULL;
-    // Object/linkage options have independent last-option states; their neutral forms retain today's output.
-    const char* unsupported_common = NULL;
-    // The last -fvisibility= or -fvisibility-ms-compat; clang's driver reads only the last of them.
-    const char* visibility_option = NULL;
-    const char* unsupported_visibility = NULL;
-    const char* unsupported_function_sections = NULL;
-    const char* unsupported_data_sections = NULL;
+    // The code generation and ABI layout options the driver refuses, read as every client of the request reads them
+    // (c_check_request.c, #1057).
+    CheckRequestScan request = { 0 };
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per core of the CPUs the
     // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
     // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
@@ -3550,13 +3621,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --helper-report prints, on standard error, how many uses of each helper family the lowering took directly and how
     // many call their helper, the helpers planned and the units refused (#1059, CheckHelperReport).
     bool helper_report = false;
-    // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
-    // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
-    const char* short_enums = NULL;
-    const char* packed_bare = NULL;
-    const char* packed_value = NULL;
-    const char* invalid_pack = NULL;
-    bool has_pack_value = false;
     for (int i = 0; linker_ready && !libraries.linker.resource && filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         if (!end_options && strcmp(arguments[i], "--") == 0)
@@ -3592,41 +3656,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         if (!valued)
         {
             const char* argument = arguments[i];
-            if (strcmp(argument, "-fshort-enums") == 0 || strcmp(argument, "-fno-short-enums") == 0)
-            {
-                short_enums = strcmp(argument, "-fshort-enums") == 0 ? argument : NULL;
-            }
-            else if (strcmp(argument, "-fpack-struct") == 0 || strcmp(argument, "-fno-pack-struct") == 0)
-            {
-                packed_bare = strcmp(argument, "-fpack-struct") == 0 ? argument : NULL;
-            }
-            else if (strncmp(argument, "-fpack-struct=", sizeof("-fpack-struct=") - 1) == 0)
-            {
-                const char* digits = argument + sizeof("-fpack-struct=") - 1;
-                uint32_t base = 10;
-                if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X' || digits[1] == 'b' || digits[1] == 'B'))
-                {
-                    base = digits[1] == 'x' || digits[1] == 'X' ? 16 : 2;
-                    digits += 2;
-                }
-                else if (digits[0] == '0')
-                {
-                    base = 8;
-                }
-                bool valid = *digits != 0;
-                uint64_t value = 0;
-                for (const char* digit = digits; *digit != 0; digit += 1)
-                {
-                    const uint32_t number = *digit >= '0' && *digit <= '9' ? (uint32_t)(*digit - '0') :
-                                            *digit >= 'a' && *digit <= 'f' ? (uint32_t)(*digit - 'a' + 10) :
-                                            *digit >= 'A' && *digit <= 'F' ? (uint32_t)(*digit - 'A' + 10) : UINT32_MAX;
-                    valid &= number < base && value <= (UINT32_MAX - (uint64_t)number) / base;
-                    value = valid ? value * base + number : 0;
-                }
-                has_pack_value = true;
-                invalid_pack = valid ? NULL : argument;
-                packed_value = value == 0 && valid ? NULL : argument;
-            }
             if (strcmp(argument, "-Wreturn-type") == 0 || strcmp(argument, "-Werror=return-type") == 0)
             {
                 return_warning = true;
@@ -3723,53 +3752,20 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 runtime_kind = RUNTIME_KIND_STATIC;
             }
         }
-        else if (strcmp(arguments[i], "-fno-stack-protector") == 0 || strcmp(arguments[i], "-fstack-protector") == 0 ||
-                 strcmp(arguments[i], "-fstack-protector-strong") == 0 || strcmp(arguments[i], "-fstack-protector-all") == 0)
+        else if (!check_request_scan(&request, arguments[i]))
         {
-            unsupported_stack_protector = strcmp(arguments[i], "-fno-stack-protector") == 0 ? NULL : arguments[i];
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-fcf-protection") == 0 || strncmp(arguments[i], "-fcf-protection=", 16) == 0)
-        {
-            unsupported_cf_protection = strcmp(arguments[i], "-fcf-protection=none") == 0 ? NULL : arguments[i];
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-fcommon") == 0 || strcmp(arguments[i], "-fno-common") == 0)
-        {
-            unsupported_common = strcmp(arguments[i], "-fcommon") == 0 ? arguments[i] : NULL;
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-ffunction-sections") == 0 || strcmp(arguments[i], "-fno-function-sections") == 0)
-        {
-            unsupported_function_sections = strcmp(arguments[i], "-ffunction-sections") == 0 ? arguments[i] : NULL;
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-fdata-sections") == 0 || strcmp(arguments[i], "-fno-data-sections") == 0)
-        {
-            unsupported_data_sections = strcmp(arguments[i], "-fdata-sections") == 0 ? arguments[i] : NULL;
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-fvisibility-ms-compat") == 0 ||
-                 strncmp(arguments[i], "-fvisibility=", sizeof("-fvisibility=") - 1) == 0)
-        {
-            // The last of these decides the default, as clang's driver reads them; validate it after the loop.
-            visibility_option = arguments[i];
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (strcmp(arguments[i], "-fvisibility") == 0)
-        {
-            // Clang has no bare -fvisibility; keep the explicit named refusal.
-            unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : arguments[i];
-            filtered[filtered_count++] = arguments[i];
-        }
-        else if (check_driver_unsupported_codegen_option(arguments[i]))
-        {
-            // Values of options above are already consumed, so an output name like -pg is never treated as a flag.
-            unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : arguments[i];
+            // An option that asks for code generation the driver doesn't implement, which the preprocessor doesn't model:
+            // refused below (check_request_refusal). The stack protector's, -fcf-protection's and the layout options go
+            // on to pp_parse_options as the other options do, for their predefined macros. Values of options above are
+            // already consumed, so an output name like -pg is never treated as a flag.
         }
         else if (strcmp(arguments[i], "--verify") == 0)
         {
             verify = true;
+        }
+        else if (strcmp(arguments[i], "--check-transitions") == 0)
+        {
+            check_transitions = true;
         }
         else if (strcmp(arguments[i], "--tier1") == 0)
         {
@@ -3884,17 +3880,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
     }
-    // -fvisibility= follows clang's driver: only the last -fvisibility= or -fvisibility-ms-compat counts. An earlier
-    // malformed value is ignored; a malformed last value is pp_parse_options' clang-compatible invalid-value diagnostic.
-    if (visibility_option != NULL)
-    {
-        const char* value = visibility_option + sizeof("-fvisibility") - 1;
-        const bool unsupported = strcmp(visibility_option, "-fvisibility-ms-compat") == 0 ||
-                                 strcmp(value, "=hidden") == 0 || strcmp(value, "=protected") == 0 || strcmp(value, "=internal") == 0;
-        unsupported_visibility = unsupported ? visibility_option : NULL;
-    }
-    // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
-    unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
     // Syntax-only takes precedence over -c, whichever came first.
     emit_object = emit_object && !syntax_only;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
@@ -3946,22 +3931,19 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
     const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && runtime_kind != RUNTIME_KIND_DYNAMIC;
-    if (emit_object || link)
-    {
-        // The C producer does not yet implement common definitions, a command-line visibility change, or per-definition sections.
-        // Reject before parsing/opening any input or output, in both tiers and for every unit of a multi-file command.
-        const char* unsupported_object = unsupported_common != NULL ? unsupported_common : unsupported_visibility != NULL ? unsupported_visibility :
-                                         unsupported_function_sections != NULL ? unsupported_function_sections : unsupported_data_sections;
-        unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_object;
-    }
+    // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
+    // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
+    // where it emits code, the object and linkage options its producer doesn't implement (#1124: common definitions, a
+    // command line's default visibility, per-definition sections), before any input or output is opened.
+    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, emit_object || link);
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
-    bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
-                        pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
+                  !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
@@ -3973,11 +3955,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
-    // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
-    // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
-    const char* unsupported_pic = parsed && (emit_object || link) ?
-        (options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
-         options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
+    // The rest of what the request asks for that the driver doesn't implement, refused before any unit or output is
+    // opened: position-independent code when it emits code (the parser already resolves the last PIC/PIE option; Tier 0
+    // can't yet emit shared-library-safe symbol and TLS accesses, #811; non-emitting actions keep PIC), the ABI layouts
+    // the checker doesn't implement, never emitted silently, and a language or target it doesn't take.
+    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -3996,6 +3978,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .options = options,
         .scalar = scalar,
         .verify = verify,
+        .check_transitions = check_transitions,
         .dump = dump,
         .dump_static = dump_static,
         .quiet = quiet,
@@ -4044,54 +4027,27 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: runtime search paths require dynamic output\n");
     }
-    else if (unsupported_codegen != NULL)
+    else if (codegen.error != CHECK_REQUEST_ACCEPTED)
     {
-        fprintf(stderr, "error: unsupported code generation option '%s'\n", unsupported_codegen);
+        fprintf(stderr, "error: ");
+        check_request_describe(stderr, &codegen);
+        fprintf(stderr, "\n");
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
-    // Predefines model these options even without code generation. Decide from their resolved state, not from
-    // seeing an enabling argument: a later -fno-sanitize= or -fno-openmp may have canceled it. Refuse before any
-    // source, worker session or output is opened. libgomp still requests OpenMP even though it defines no _OPENMP.
-    else if ((emit_object || link) && (options.predefines.sanitizers != 0 || options.predefines.sanitize_coverage || options.predefines.openmp_enabled))
+    // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
+    // opened: the instrumentation's, decided from the resolved predefines rather than from an enabling option, which a
+    // later -fno-sanitize= or -fno-openmp may have cancelled, then position-independent code, the layouts and the
+    // language and target.
+    else if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
-        if (options.predefines.sanitizers != 0)
-        {
-            char spelling[1024];
-            const char* option = predefines_sanitizer_last(&options.predefines, options.predefines.sanitizers, spelling, sizeof(spelling));
-            fprintf(stderr, "error: unsupported code generation option '%s' (sanitizer instrumentation is not implemented)\n",
-                    option[0] != 0 ? option : "-fsanitize");
-        }
-        else if (options.predefines.sanitize_coverage)
-        {
-            char spelling[1024];
-            const char* option = predefines_coverage_last(&options.predefines, options.predefines.coverage_features, spelling, sizeof(spelling));
-            fprintf(stderr, "error: unsupported code generation option '%s' (coverage instrumentation is not implemented)\n",
-                    option[0] != 0 ? option : "-fsanitize-coverage");
-        }
-        else
-        {
-            const char* runtime = options.predefines.openmp_runtime;
-            fprintf(stderr, "error: unsupported code generation option '-fopenmp%s%s' (OpenMP code generation is not implemented)\n",
-                    runtime != NULL ? "=" : "", runtime != NULL ? runtime : "");
-        }
-    }
-    else if (unsupported_pic != NULL)
-    {
-        fprintf(stderr, "error: unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)\n", unsupported_pic);
-    }
-    else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
-    {
-        const char* unsupported = invalid_pack != NULL ? invalid_pack : short_enums != NULL ? short_enums : has_pack_value ? packed_value : packed_bare;
-        fprintf(stderr, "error: unsupported option '%s' (the checker does not implement its ABI layout)\n", unsupported);
-    }
-    else if (!check_input_target_supported(&options))
-    {
-        fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
+        fprintf(stderr, "error: ");
+        check_request_describe(stderr, &refusal);
+        fprintf(stderr, "\n");
     }
     else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
     {
@@ -4107,7 +4063,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
         if (lanes.tier1 && !check_tier1_ready)
         {
-            check_tier1_ready = x86_zen5_initialize();
+            check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
         }
         // The command runs on its session's lanes (#905), which start here, after its options and before any source is
         // read (check_driver_run).

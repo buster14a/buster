@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The link benchmark (docs/object-writer-and-linker.md, step 5 of "Plan"): what linking a generated program that calls
 // libc costs by the direct path, inside the compiler, against writing its objects and linking them with the linkers of
@@ -62,6 +63,7 @@
 // are invalid, a runtime doesn't load from its snapshot, the lanes don't start, a link fails, or a program doesn't
 // print what it should.
 
+#include "buster/compiler/test_paths.h"
 #include "host_isa.h"
 #if BUSTER_HOST_VECTOR
 #include <stdint.h>
@@ -1746,7 +1748,7 @@ int run_link_benchmark(int argc, char** argv)
 {
     LinkBenchmarkSettings settings = {
         .seed = 1,
-        .directory = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp",
+        .directory = oracle_temporary_directory(),
         .lanes = 1,
         .linkers = (1u << BUSTER_LINK_BENCHMARK_LINKERS) - 1,
         .direct = true,

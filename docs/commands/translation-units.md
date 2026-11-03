@@ -22,15 +22,19 @@ the guide's "One cache for all the lanes, measured"). Each unit's diagnostics
 go to a stream of its own, printed in the command line's order after every
 unit has run. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
-release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED` and the
-mappings kept for the next reservations of their shapes); and the arenas of a
+release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED`, and
+the mappings and their writable prefixes kept for the next reservations they
+hold, #1128); and the arenas of a
 unit of less than 1 MB of source start with 16 MB of base pages
 (`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
 write would show. Each lane releases what its units shared, into its pool and
-then the pool itself, on the lane once it takes no more units, and the
+then the pool itself, on the lane as soon as it takes no more units, before it
+helps the others' functions (#777); without a link, in a command whose process
+exits after the lanes (main's, which releases no memory), the lane that stops
+taking units last leaves its memory to the exit. The
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
 that lane 0 announces and every lane runs, with a worker-budget lease of its

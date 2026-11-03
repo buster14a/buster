@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The tests of x86_semantics.c (test-x86-semantics). The processor is the oracle: a harness runs records in this process
 // (x86_semantics_test_enter loads every general register, the flags and the available 128- or 512-bit vector state,
@@ -33,6 +34,7 @@
 // effects; the effects table's execution check; the immediate's contract; form choice (its fixtures, the reference
 // sequences, the semantic check); the vector paths' twins; x86_match's agreement; GNU as; run_x86_semantics_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdarg.h>
 #include <stddef.h>
 #include <signal.h>
@@ -692,6 +694,13 @@ static const X86SemanticsFixture x86_semantics_fixtures[] = {
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION | BUSTER_X86_EFFECT_KEEP_UPPER, 8, 8)
     BUSTER_X86_FIXTURE(CVTTSD2SI_R32_XM64, FLOAT_TO_INT, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0,
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 4, 4)
+    // #1193's legacy forms: the conversions by MXCSR's rounding and the sign masks, into a general register alone.
+    BUSTER_X86_FIXTURE(CVTSS2SI_R64_XM32, FLOAT_TO_INT, BUSTER_X86_W, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0,
+                       BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 8, 8)
+    BUSTER_X86_FIXTURE(CVTSD2SI_R32_XM64, FLOAT_TO_INT, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0,
+                       BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 4, 4)
+    BUSTER_X86_FIXTURE(PMOVMSKB_R32_X, VECTOR_TO_MASK, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0, 0, 4, 4)
+    BUSTER_X86_FIXTURE(MOVMSKPD_R32_X, VECTOR_TO_MASK, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0, 0, 4, 4)
     BUSTER_X86_FIXTURE(UCOMISD_X_XM64, FCOMPARE, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 8, 0)
     BUSTER_X86_FIXTURE(COMISS_X_XM32, FCOMPARE_SIGNALING, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
@@ -3429,7 +3438,7 @@ static int run_x86_semantics_tests(int argc, char** argv)
         }
         if (cross_check && initialized)
         {
-            const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+            const char* parent = oracle_temporary_directory();
             result = x86_semantics_check_assembler(seed, parent, keep) && result;
         }
         x86_semantics_machine_close(&machine);

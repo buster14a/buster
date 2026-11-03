@@ -96,14 +96,19 @@ capture the target feature word before any output write, preserving tested
 target/output overlap and exact unknown-form denial.
 
 The assembler builds its mnemonic index for one target, excluding ineligible
-forms before either matching path runs. Its syntax subset remains separate:
-ISA support does not imply that the frontend understands every encoding. Its
-final resolved records pass `x86_target_validate` at the external-input
-boundary. Tests cover every indexed form, all six profiles, `.S` macro-driven
-instruction choices, option order and independent tuning.
-Initialization reuses syntax results only when the spelling pointer, family,
-vector length, encoding, register class, r/m class and syntax are identical, and computes operand roles only for
-admitted rows. ISA filtering and final record validation still apply per form.
+forms before either matching path runs. Its syntax is the form table's own
+(#1134: every 64-bit form whose operands the parser reads, the assembler
+guide's "The admitted forms"), so this table is what decides which of them a
+target takes, and a form it doesn't classify is refused on every target. #1134
+classified the user-level forms it hadn't (each by its CPUID features, with
+AVX512VL for a packed instruction's 128- and 256-bit EVEX forms), which the GAS
+architecture gate below checks like the others; the CET shadow stack's are
+among the rows that gate skips, as GNU as 2.42's znver5 has no SHSTK. Its final
+resolved records pass `x86_target_validate` at the external-input boundary.
+Tests cover every indexed form, all six profiles, `.S` macro-driven instruction
+choices, option order and independent tuning. Initialization computes each
+form's admission and operand roles from its descriptor. ISA filtering and final
+record validation still apply per form.
 The canonical policy retains #565's baseline string instructions and 512-bit
 quadword moves; the latter require AVX512F, independently of AVX512DQ.
 
@@ -350,7 +355,11 @@ before the call (the callee's) or up to the definition (the caller's), as clang
 inherits them; `CheckProgram.attribute_keys` keeps them, in a unit with a target
 attribute alone. The calls are those clang emits: the walk of the x86 builtins'
 range errors (#487) reaches what a constant condition leaves running, and a
-direct callee is the function's name alone, not `(*f)` or `(&f)`. A `cleanup`
+direct callee is the function's name alone, not `(*f)` or `(&f)`. The functions
+are the selection's, which leaves out a function that only a constant `if`'s
+dead arm reaches (#1108: the program writes no such arm, as clang emits none),
+so the check never walks one: `if (BUSTER_VECTOR_PATH(vector))` in a baseline
+build calls an AVX-512 kernel that clang, and `-c`, never emit. A `cleanup`
 attribute's call (#147, `CallCleanupFunction::Emit`) is one too, of the function
 its argument names, by that function's declarations before the argument. Clang
 emits it where the variable's scope ends, as it pops the cleanup: once, however

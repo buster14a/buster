@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-check-lanes [--executable PATH] [--seed N] [--programs N] [--id-order N] [--keep]: the functions' lanes (#151, and
 // #153's item for them), check_program_emit_lanes. Every output must be one lane's, whatever the lanes, whichever finishes
@@ -65,6 +66,7 @@
 //   a process of its own; then the same on a lazy session, whose lane 1 creates the others while lane 0 runs the first
 //   command.
 
+#include "buster/compiler/test_paths.h"
 #include "worker_budget_test.c"
 
 typedef struct CheckLanesTestTally CheckLanesTestTally;
@@ -303,6 +305,8 @@ static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocesso
         .initializer_references = unit->data.references,
         .initializer_reference_count = unit->data.reference_count,
         .scalar = scalar,
+        .target = options.target,
+        .predefines = &options.predefines,
     };
     ready = ready && check_program(&unit->program, parser, &unit->input, &unit->stream, &unit->types, program_options, &unit->output, &unit->scratch) &&
             check_program_select(&unit->selected, &unit->program, &unit->data, scalar, &unit->output, &unit->scratch);
@@ -730,45 +734,39 @@ struct CheckLanesTestFailure
     const char* name;
     const char* source;
     CheckProgramStatus status;
+    Tier0Error backend_error;
 };
 
-// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a bit-field of a _BitInt past 128 bits), Tier
-// 0's refusal (an addition nested 240 deep in a function with long double values: a stack past the deep slots,
-// BUSTER_TIER0_MAX_DEPTH, where it takes the values past its depth tables, #780), and fine bodies around them.
-// Source order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever
-// it is.
-#define BUSTER_CHECK_LANES_TEST_OPEN16 "a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + ("
-#define BUSTER_CHECK_LANES_TEST_CLOSE16 "))))))))))))))))"
-#define BUSTER_CHECK_LANES_TEST_OPEN80                                                                                      \
-    BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 \
-        BUSTER_CHECK_LANES_TEST_OPEN16
-#define BUSTER_CHECK_LANES_TEST_CLOSE80                                                                                         \
-    BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 \
-        BUSTER_CHECK_LANES_TEST_CLOSE16
-#define BUSTER_CHECK_LANES_TEST_DEEP                                                                                            \
-    "    return " BUSTER_CHECK_LANES_TEST_OPEN80 BUSTER_CHECK_LANES_TEST_OPEN80 BUSTER_CHECK_LANES_TEST_OPEN80 "a" BUSTER_CHECK_LANES_TEST_CLOSE80 \
-        BUSTER_CHECK_LANES_TEST_CLOSE80 BUSTER_CHECK_LANES_TEST_CLOSE80 ";\n}\n"
+// Bodies that fail at different steps, in both orders: lowering refuses a wide _BitInt bit-field; Tier 0 refuses
+// 256 live masks, whose separate byte-depth bound remains (#179). Ordinary deep expressions no longer provide a
+// refusal (#1106). Source-order lowering takes every body before Tier 0 takes any, so it fails first. The explicit
+// target enables mask-class lowering even in baseline-host tests; no emitted mask instructions are executed here.
+#define BUSTER_CHECK_LANES_TEST_MASK_DEPTH \
+    "#define K1(v) __builtin_ia32_kandhi((unsigned short)a, v)\n" \
+    "#define K4(v) K1(K1(K1(K1(v))))\n" \
+    "#define K16(v) K4(K4(K4(K4(v))))\n" \
+    "#define K64(v) K16(K16(K16(K16(v))))\n" \
+    "#define K256(v) K64(K64(K64(K64(v))))\n" \
+    "__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq\"))) int deep(int a) { return K256((unsigned short)a); }\n"
 static const CheckLanesTestFailure check_lanes_test_failures[] = {
     {
         "lowering after Tier 0",
-        "long double g;\n"
         "int fine0(int a) { return a + 1; }\n"
-        "int deep(int a)\n{\n    g = 1.0L;\n"
-        BUSTER_CHECK_LANES_TEST_DEEP
+        BUSTER_CHECK_LANES_TEST_MASK_DEPTH
         "int fine1(int a) { return a * 2; }\n"
         "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
+        TIER0_OK,
     },
     {
         "lowering before Tier 0",
-        "long double g;\n"
         "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int fine0(int a) { return a + 1; }\n"
-        "int deep(int a)\n{\n    g = 1.0L;\n"
-        BUSTER_CHECK_LANES_TEST_DEEP
+        BUSTER_CHECK_LANES_TEST_MASK_DEPTH
         "int main(void) { return fine0(1) + deep(2) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
+        TIER0_OK,
     },
     {
         "two lowering refusals",
@@ -778,16 +776,16 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
         "int refused1(int a) { struct { unsigned _BitInt(300) y : 250; } v; v.y = a; return (int)v.y; }\n"
         "int main(void) { return fine0(1) + refused0(2) + fine1(3) + refused1(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
+        TIER0_OK,
     },
     {
         "Tier 0 alone",
-        "long double g;\n"
         "int fine0(int a) { return a + 1; }\n"
-        "int deep(int a)\n{\n    g = 1.0L;\n"
-        BUSTER_CHECK_LANES_TEST_DEEP
+        BUSTER_CHECK_LANES_TEST_MASK_DEPTH
         "int fine1(int a) { return a * 2; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
+        TIER0_ERROR_DEPTH,
     },
 };
 
@@ -818,8 +816,10 @@ static void check_lanes_test_failing(CheckLanesTestTally* tally, const char* dir
             if (unit.ready)
             {
                 CheckLanesTestEmission one = check_lanes_test_emit(&unit, &parser, &pp, &identifiers, NULL, scalar != 0, false, true);
-                snprintf(detail, sizeof(detail), "%s: status %u, reason %s", failure->name, (uint32_t)one.status, one.reason != NULL ? one.reason : "none");
-                check_lanes_test_expect(tally, !one.emitted && one.status == failure->status, "a failing program fails at its step on one lane", detail);
+                snprintf(detail, sizeof(detail), "%s: status %u, backend %u, reason %s", failure->name, (uint32_t)one.status, (uint32_t)one.backend_error,
+                         one.reason != NULL ? one.reason : "none");
+                check_lanes_test_expect(tally, !one.emitted && one.status == failure->status && one.backend_error == failure->backend_error,
+                                        "a failing program fails at its step on one lane", detail);
                 free(one.object);
                 check_lanes_test_unit(tally, &unit, &parser, &pp, &identifiers, scalar != 0, failure->name, &emitted);
                 check_lanes_test_order(tally, &unit, &parser, &pp, &identifiers, path, scalar != 0, id_order + f, failure->name);
@@ -2151,8 +2151,8 @@ static int run_check_lanes_tests(int argc, char** argv)
         executable = resolved;
     }
     char directory[PATH_MAX];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-lanes-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-lanes-XXXXXX", temporary);
     const bool made = options && mkdtemp(directory) != 0;
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
     if (made)

@@ -193,8 +193,8 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
-    const uint32_t begin = input->initializer_begins[declaration];
-    const uint32_t end = input->initializer_ends[declaration];
+    const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
+    const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
     TypeId type = reader->declared_types[declaration];
     const uint32_t kind = type_kind(reader->types, type);
     bool eligible = !reader->literal_tables_disabled && reader->function_body == BUSTER_CHECK_NONE && !input->compound_objects[declaration] &&

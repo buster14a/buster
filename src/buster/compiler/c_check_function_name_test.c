@@ -19,9 +19,8 @@ static void check_test_function_name_storage(CheckTest* test, const Parser* pars
     Arena arena = arena_reserve(UINT64_C(1) << 16);
     Arena scratch = arena_reserve(UINT64_C(1) << 16);
     Arena columns = arena_reserve(UINT64_C(1) << 16);
-    uint32_t* ids = arena_push_array(&columns, parser->tokens.count + 1, sizeof(uint32_t), 4);
     uint32_t* specifiers = arena_push_array(&columns, parser->tokens.count + 1, sizeof(uint32_t), 4);
-    bool ready = arena.base != 0 && scratch.base != 0 && ids != 0 && specifiers != 0;
+    bool ready = arena.base != 0 && scratch.base != 0 && specifiers != 0;
     uint32_t body = BUSTER_CHECK_NONE;
     uint32_t token = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; i < parser->tokens.count; i += 1)
@@ -48,13 +47,19 @@ static void check_test_function_name_storage(CheckTest* test, const Parser* pars
                 arena.capacity = pass == 1 ? 31 + limit : output_capacity;
                 scratch.length = 29;
                 scratch.capacity = pass == 2 ? 29 + limit : scratch_capacity;
-                memset(ids, 0xff, ((uint64_t)parser->tokens.count + 1) * sizeof(uint32_t));
+                // A fresh column of string ids each time, from the same place in `columns`.
+                const uint64_t mark = columns.length;
+                CheckSparseColumn ids = { 0 };
+                CheckSparsePool* pool = NULL;
+                const bool reserved = check_sparse_reserve(&columns, &pool, &ids, 1, parser->tokens.count, false, false);
+                check_test_expect(test, reserved, "predefined-name exhaustion fixture has room for its string ids");
                 memset(specifiers, 0xff, ((uint64_t)parser->tokens.count + 1) * sizeof(uint32_t));
                 specifiers[body] = 0;
                 CheckInitString strings[3] = { 0 };
                 CheckInputReport reports[4];
                 CheckInput output =
                 {
+                    .sparse_pool = pool,
                     .body_declarations = input->body_declarations,
                     .strings = strings,
                     .reports = reports,
@@ -90,10 +95,11 @@ static void check_test_function_name_storage(CheckTest* test, const Parser* pars
                 }
                 else
                 {
-                    check_test_expect(test, pass != 0 && output.resource && output.string_count == 0 && ids[token] == BUSTER_CHECK_NONE &&
+                    check_test_expect(test, pass != 0 && output.resource && output.string_count == 0 && check_sparse_get(ids, token) == BUSTER_CHECK_NONE &&
                                       arena.length == 31 && scratch.length == 29,
                                       "predefined array exhaustion rolls back bytes without publishing an object");
                 }
+                arena_pop_to(&columns, mark);
             }
         }
         check_test_expect(test, scratch_succeeded, "predefined printer recovers after scratch exhaustion");

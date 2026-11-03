@@ -112,8 +112,8 @@ it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
 cycles of every length) run on a register file, the vector path's application
 of chosen forms against the scalar path's on random records, that both paths
-refuse unsupported entries alike and compile up to 240 values at once alike,
-refusing more, and the
+refuse unsupported entries alike and compile stacks across the former 240-value
+bound, byte wraps and 1000 values alike (#1106), and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
 alike, aligned, inside the frame and apart, every other round's realigned for
@@ -142,18 +142,20 @@ depths (the 15th value in its deep slot), and a function that allocates 64 KB an
 scope of its own, around calls with stack arguments, run natively; the frame's
 address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
 allocation, run natively; and the
-aggregates at locations written by hand, 14 fixtures (each kind of general and
+aggregates at locations written by hand, 16 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
 the low eightbyte alone of a larger one on the stack, SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
 misaligned, and results in each kind and order of register, short ones, a
-vector and through a hidden pointer), run natively both ways: as calls, whose
+vector, through a hidden pointer and a vector split across xmm0 and xmm1 and
+across xmm0 to xmm3, #1193's), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
-copy their parameters out; and `tier0_validate` refusing 61 breaks of their
+copy their parameters out; and `tier0_validate` refusing 67 breaks of their
 rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
-nothing, two parts or two parameters in one register, and registers outside
-the convention's, among them), and a function of value parameters in one
+nothing, two parts or two parameters in one register, registers outside
+the convention's, and a split vector's registers out of order or of the wrong
+parts, among them), and a function of value parameters in one
 register or outside the convention's; then tail calls (#147, `tier0_tail_test.c`):
 a function per aggregate fixture that passes its parameters on to the probe by a
 `TAIL_CALL`, in five frames (plain, an `ALLOCA`'s frame pointer, saved registers
@@ -201,9 +203,8 @@ random program's excess depth fails the check. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
 its entry; stacks of a memory class's values to the last 16-byte slot of the
-integer table, one and two past it and 40, which run (past the table through
-the deep slots, #780), of 238, which compiles, and of 239, past the deep slots
-with the output's address, which both paths refuse (for long double too);
+integer table, one and two past it, 40, the former 240-value bound, byte wraps
+and 1000, all compiled and run (for long double too);
 functions of 128-bit parameters and results in register pairs and on the
 stack, called from C, and calling C; each class's compares and shifts on every
 pair of ten boundary values, against C's own operators too; and `--count`
@@ -337,3 +338,9 @@ totals the files measured, left out and failed and the measurement's outcome
 resources' failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
 `taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
 to one allowed CPU, where a pull request changes what it measures.
+
+The public-driver deep-value regression is in `test-checker-driver`
+(`c_check_deep_driver_test.c`): scalar and vector routes, with and without
+`--tier1`, execute the same generated expressions and nested calls as Clang.
+The ordinary value stacks use full-width cold depths; the mask stack still
+has its separate 240-depth bound, and calls still accept at most 239 arguments.

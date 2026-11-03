@@ -518,12 +518,217 @@ static void integration_tests(void)
 }
 #endif
 
+#ifdef BUSTER_TP_INTEGRATION
+// A seeded straight-line problem the adapter takes, of the tables' own shapes: `registers` general registers of one class
+// (the last reserved as scratch), `count` instructions that each define a value and read up to three earlier ones at
+// once, never more than the allocatable registers. Original synthetic data, not an LLVM capture.
+#define BUSTER_TP_GENERATED_INSTRUCTIONS 48u
+#define BUSTER_TP_GENERATED_REGISTERS 9u
+typedef struct GeneratedProblem GeneratedProblem;
+struct GeneratedProblem
+{
+    Tier1Problem problem;
+    uint32_t blocks[1][8];
+    uint32_t instructions[BUSTER_TP_GENERATED_INSTRUCTIONS][8];
+    uint32_t values[BUSTER_TP_GENERATED_INSTRUCTIONS][4];
+    uint32_t operands[BUSTER_TP_GENERATED_INSTRUCTIONS * 4][10];
+    uint32_t registers[BUSTER_TP_GENERATED_REGISTERS][8];
+    uint32_t classes[1][5];
+    uint32_t members[BUSTER_TP_GENERATED_REGISTERS];
+    uint32_t units[BUSTER_TP_GENERATED_REGISTERS];
+};
+
+static uint64_t generated_next(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+static void generated_problem(GeneratedProblem* g, uint64_t* state)
+{
+    static const uint8_t encodings[BUSTER_TP_GENERATED_REGISTERS] = { 0, 1, 2, 3, 5, 6, 7, 8, 11 };
+    ProblemFixture template;
+    problem_fixture(&template);
+    memset(g, 0, sizeof(*g));
+    const uint32_t registers = 3 + (uint32_t)(generated_next(state) % (BUSTER_TP_GENERATED_REGISTERS - 2));
+    const uint32_t allocatable = registers - 1;
+    const uint32_t count = 2 + (uint32_t)(generated_next(state) % (BUSTER_TP_GENERATED_INSTRUCTIONS - 1));
+    uint32_t operands = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        g->instructions[i][0] = i;
+        g->instructions[i][2] = 400 + i;
+        g->instructions[i][3] = operands;
+        g->values[i][0] = 200 + i;
+        g->values[i][2] = 64;
+        g->operands[operands][1] = i;
+        g->operands[operands][2] = 3;
+        g->operands[operands][3] = BUSTER_TP_WRITE;
+        g->operands[operands][5] = BUSTER_TP_NONE;
+        g->operands[operands][6] = 64;
+        operands += 1;
+        const uint32_t most = i < 3 ? i : 3;
+        const uint32_t reads = (uint32_t)(generated_next(state) % ((most < allocatable ? most : allocatable) + 1));
+        uint32_t read[3] = { BUSTER_TP_NONE, BUSTER_TP_NONE, BUSTER_TP_NONE };
+        for (uint32_t r = 0; r < reads; r += 1)
+        {
+            // A distinct earlier value, nearer ones likelier, as code reads them.
+            uint32_t value = i - 1 - (uint32_t)(generated_next(state) % (generated_next(state) % 2 != 0 ? i : (i < 4 ? i : 4)));
+            while (value == read[0] || value == read[1])
+            {
+                value = value == 0 ? i - 1 : value - 1;
+            }
+            read[r] = value;
+            g->operands[operands][1] = value;
+            g->operands[operands][2] = 0;
+            g->operands[operands][3] = BUSTER_TP_READ;
+            g->operands[operands][5] = BUSTER_TP_NONE;
+            g->operands[operands][6] = 64;
+            operands += 1;
+        }
+        g->instructions[i][4] = operands - g->instructions[i][3];
+    }
+    for (uint32_t r = 0; r < registers; r += 1)
+    {
+        g->registers[r][0] = 100 + r;
+        g->registers[r][2] = encodings[r];
+        g->registers[r][3] = 64;
+        g->registers[r][4] = r;
+        g->registers[r][5] = 1;
+        g->registers[r][6] = r + 1 == registers ? BUSTER_TP_RESERVED | BUSTER_TP_SCRATCH : 0;
+        g->members[r] = r;
+        g->units[r] = r;
+    }
+    g->blocks[0][2] = count;
+    g->blocks[0][5] = 1024;
+    g->classes[0][0] = 300;
+    g->classes[0][2] = 64;
+    g->classes[0][4] = registers;
+    Tier1Problem* p = &g->problem;
+    *p = template.problem;
+    p->original_operands = operands;
+    p->unit_count = registers;
+    const void* rows[BUSTER_TP_TABLE_COUNT] = { g->blocks, 0, g->instructions, g->values, g->operands, g->registers, g->classes, g->members, g->units, 0, 0 };
+    const uint32_t counts[BUSTER_TP_TABLE_COUNT] = { 1, 0, count, count, operands, registers, 1, registers, registers, 0, 0 };
+    for (uint32_t t = 0; t < BUSTER_TP_TABLE_COUNT; t += 1)
+    {
+        p->tables[t].data = rows[t];
+        p->tables[t].count = counts[t];
+    }
+}
+
+// #938's harness's allocations (#939, tier1_problem_allocate): every problem the adapter takes is allocated by both of
+// buster's allocator paths, and reported only past each allocation's certificate. Each attempt is one tally outcome.
+static void harness_tests(void)
+{
+    static _Alignas(64) uint8_t memory[1u << 20];
+    Tier1ProblemTally tally = { 0 };
+    ProblemFixture f;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
+    {
+        if (kind == 0)
+        {
+            problem_fixture(&f);
+        }
+        else
+        {
+            problem_fixture_vector(&f);
+        }
+        Arena arena = { .base = memory, .length = 17, .capacity = sizeof(memory) };
+        Tier1ProblemAllocation made = { 0 };
+        const Tier1ProblemReason reason = tier1_problem_allocate(&f.problem, &arena, &made);
+        tier1_problem_tally(&tally, reason);
+        expect(reason == TIER1_PROBLEM_OK && made.reports[0].error == TIER1_CERT_OK && made.reports[1].error == TIER1_CERT_OK, "both paths' allocations of an import pass the certificate");
+        expect(reason != TIER1_PROBLEM_OK || (made.reports[0].fragments == made.allocations[0].fragment_count && made.reports[1].fragments == made.allocations[1].fragment_count), "each certificate covers its allocation's fragments");
+        const uint64_t retained = arena.length;
+        // The harness's allocations are the allocator's own, as a direct call makes them.
+        Tier1Allocation direct = { 0 };
+        const bool same = reason == TIER1_PROBLEM_OK && tier1_allocate(&made.input, &arena, &direct) == TIER1_ALLOCATION_OK && direct.fragment_count == made.allocations[0].fragment_count &&
+                          memcmp(direct.registers, made.allocations[0].registers, direct.fragment_count) == 0 && memcmp(direct.kinds, made.allocations[0].kinds, direct.fragment_count) == 0;
+        expect(same, "the harness reports the allocator's own allocation");
+        // Every arena too small for the import, its allocations or their checks: a capacity outcome, the arena as it
+        // was and nothing published; then the first that fits gives the same allocation.
+        uint64_t capacity = 17;
+        Tier1ProblemReason fitted = TIER1_PROBLEM_CAPACITY;
+        while (reason == TIER1_PROBLEM_OK && fitted == TIER1_PROBLEM_CAPACITY && capacity <= retained + 4096)
+        {
+            Arena small = { .base = memory, .length = 17, .capacity = capacity };
+            Tier1ProblemAllocation untouched;
+            memset(&untouched, 0x5a, sizeof(untouched));
+            Tier1ProblemAllocation again = untouched;
+            fitted = tier1_problem_allocate(&f.problem, &small, &again);
+            expect(fitted == TIER1_PROBLEM_OK || (fitted == TIER1_PROBLEM_CAPACITY && small.length == 17 && memcmp(&again, &untouched, sizeof(again)) == 0), "a short arena is a capacity outcome, restored and unpublished");
+            expect(fitted != TIER1_PROBLEM_OK || (again.allocations[0].fragment_count == made.allocations[0].fragment_count && again.reports[1].error == TIER1_CERT_OK), "the first arena that fits allocates and certifies alike");
+            capacity += 8;
+        }
+        expect(fitted == TIER1_PROBLEM_OK, "some arena below the retained bytes and a check's scratch fits");
+    }
+    // Problems the adapter refuses keep their reason, with the arena as it was; a missing result is an argument error.
+    const struct
+    {
+        void (*make)(ProblemFixture*);
+        Tier1ProblemReason reason;
+    } refused[] = {
+        { problem_fixture_cfg, TIER1_PROBLEM_PHI },
+        { problem_fixture_form, TIER1_PROBLEM_FORM },
+    };
+    for (uint32_t r = 0; r < sizeof(refused) / sizeof(refused[0]); r += 1)
+    {
+        refused[r].make(&f);
+        Arena arena = { .base = memory, .length = 17, .capacity = sizeof(memory) };
+        Tier1ProblemAllocation made = { 0 };
+        const Tier1ProblemReason reason = tier1_problem_allocate(&f.problem, &arena, &made);
+        tier1_problem_tally(&tally, reason);
+        expect(reason == refused[r].reason && arena.length == 17 && made.allocations[0].fragment_count == 0, "an adapter's refusal keeps its reason through the harness");
+    }
+    // One allocatable register for two values a node reads at once: the allocator refuses the import.
+    problem_fixture(&f);
+    f.registers[1][6] = BUSTER_TP_RESERVED;
+    {
+        Arena arena = { .base = memory, .length = 17, .capacity = sizeof(memory) };
+        Tier1ProblemAllocation made = { 0 };
+        const Tier1ProblemReason reason = tier1_problem_allocate(&f.problem, &arena, &made);
+        tier1_problem_tally(&tally, reason);
+        expect(reason == TIER1_PROBLEM_ALLOCATION_REFUSED && arena.length == 17, "an import the allocator can't allocate is allocation-refused");
+        expect(tier1_problem_allocate(&f.problem, &arena, 0) == TIER1_PROBLEM_ARGUMENT && arena.length == 17, "the harness refuses a missing result");
+    }
+    // Generated imports through the wire, as the harness reads them: every one allocated by both paths and certified, some
+    // spilling, under pressure from fewer registers than values.
+    static uint8_t wire[UINT32_C(1) << 16];
+    static GeneratedProblem g;
+    uint64_t state = 939;
+    uint64_t certified = 0;
+    uint64_t spilled = 0;
+    for (uint32_t k = 0; k < 400; k += 1)
+    {
+        generated_problem(&g, &state);
+        size_t size = 0;
+        Tier1Problem decoded = { 0 };
+        const bool read = tier1_problem_encode(&g.problem, wire, sizeof(wire), &size) == TIER1_PROBLEM_OK && tier1_problem_decode(wire, size, &decoded) == TIER1_PROBLEM_OK;
+        expect(read, "a generated import round-trips through the wire");
+        Arena arena = { .base = memory, .length = 0, .capacity = sizeof(memory) };
+        Tier1ProblemAllocation made = { 0 };
+        const Tier1ProblemReason reason = read ? tier1_problem_allocate(&decoded, &arena, &made) : TIER1_PROBLEM_ARGUMENT;
+        expect(reason == TIER1_PROBLEM_OK && made.reports[0].error == TIER1_CERT_OK && made.reports[1].error == TIER1_CERT_OK, "every generated import's allocations pass the certificate");
+        certified += reason == TIER1_PROBLEM_OK;
+        spilled += reason == TIER1_PROBLEM_OK && made.allocations[0].spill_count != 0;
+    }
+    expect(certified == 400 && spilled != 0, "the generated imports allocate, some of them spilling, and all certify");
+    expect(tally.functions == 5 && tally.accepted == 2 && tally.reasons[TIER1_PROBLEM_PHI] == 1 && tally.reasons[TIER1_PROBLEM_FORM] == 1 && tally.reasons[TIER1_PROBLEM_ALLOCATION_REFUSED] == 1, "the harness's outcomes reconcile in the tally");
+    expect(strcmp(tier1_problem_reason_name(TIER1_PROBLEM_ALLOCATION_REFUSED), "allocation-refused") == 0, "the allocator's refusal is named");
+    printf("tier1-problem: harness: %" PRIu64 " generated imports allocated by both paths and certified, %" PRIu64 " of them spilling\n", certified, spilled);
+}
+#endif
+
 int main(void)
 {
     codec_tests();
     mutation_tests();
 #ifdef BUSTER_TP_INTEGRATION
     integration_tests();
+    harness_tests();
     const char* mode = "codec + production interval adapter";
 #else
     const char* mode = "codec only";

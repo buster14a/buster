@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The dynamic PIE's tests (executable.c's dynamic mode, with dynamic.c's inputs), for the test-dynamic command:
 //
@@ -57,6 +58,7 @@
 // cases, the exports, the imports, the refusals, shared libraries, libgcc_s.so.1, general- and local-dynamic TLS, and
 // run_dynamic_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -4704,7 +4706,7 @@ static int run_dynamic_tests(int argc, char** argv)
     uint64_t seed = 1;
     uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
-    const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* parent = oracle_temporary_directory();
     bool keep = false;
     bool cross_check = false;
     bool valid = true;

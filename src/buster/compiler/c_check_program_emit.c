@@ -117,7 +117,7 @@ static bool check_program_emit_taken(const Link* link, const CheckProgramNames* 
 static bool check_program_emit_makes_name(const CheckInput* input, uint32_t declaration, String8 renamed)
 {
     return input->compound_objects[declaration] ||
-           (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+           (renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
 }
 
 // Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
@@ -812,6 +812,9 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         check_lower_part(&lane->writer, run->shared, &part->lower, lane->output, lane->scratch);
     }
     check_clock_lap(run->stage_clock, CHECK_STAGE_LOWER);
+    check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_STATEMENTS, part->lower.statement_ticks);
+    check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_BODIES, part->lower.body_ticks);
+    check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
     const uint32_t end = part->lower.end;
     part->tier0_failed = end;
     part->code_failed = end;
@@ -1231,7 +1234,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
         // The names the source gives (check_program_emit_given_name's): not a literal's, a compound literal's or a
         // block-scope static's, which the emission makes.
         const bool given = declaration != BUSTER_CHECK_NONE && !input->compound_objects[declaration] &&
-                           !(renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+                           !(renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
         const uint32_t identifier = given ? parser->tokens.names[declaration] : 0;
         const String8 spelling = !given ? (String8){ 0 } : renamed.length != 0 ? renamed :
                                  (String8){ .pointer = (char*)intern_bytes(identifiers, identifier), .length = intern_length(identifiers, identifier) };
@@ -1785,7 +1788,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool lowering = valid;
     if (valid)
     {
+        const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
         valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
+        check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
@@ -1977,6 +1982,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
             }
             run.stage_clock = stage_clock;
+            // The parts read the TSC for the lowering's rows on one lane alone, whose clock takes them; on several, the
+            // lanes' run is one stage, and they read none (CheckLowerShared.timed, false since check_lower_prepare).
+            shared.timed = stage_clock != NULL;
             check_program_emit_alone(&run);
         }
     }
@@ -2249,7 +2257,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         scratch_end(mangle_scratch);
     }
     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
-    // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
+    // template, a mask stack beyond its bound, or an operand window beyond its registers: tier0_select_deep).
     uint32_t failed = count;
     for (uint32_t p = 0; valid && p < run.part_count; p += 1)
     {
@@ -2269,7 +2277,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const Tier0Code* code = run.codes + failed;
             result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                              code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
-            result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
+            result->reason = code->error == TIER0_ERROR_DEPTH ? "Tier 0 mask depth or operand register window exceeded" :
                              code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = code->error;
             result->backend_node = code->node;
@@ -2481,7 +2489,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const uint32_t identifier = parser->tokens.names[declaration];
             const String8 renamed = symbol_names[s + 1];
-            const uint32_t opening = input->declaration_bodies[declaration];
+            const uint32_t opening = check_sparse_get(input->declaration_bodies, declaration);
             if (input->compound_objects[declaration])
             {
                 name = check_program_emit_made_name(&result->link, &names, (const uint8_t*)".compoundliteral", sizeof(".compoundliteral") - 1, scratch);
@@ -2490,7 +2498,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 // The function's name: its symbol's asm label, or its identifier (--lower-all selects the statics of
                 // an inline-only function, which has no symbol, and then no label).
-                const uint32_t function = opening < input->token_count ? input->body_declarations[opening] : BUSTER_CHECK_NONE;
+                const uint32_t function = opening < input->token_count ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
                 const uint32_t function_object = function != BUSTER_CHECK_NONE ? input->objects[function] : 0;
                 const SymbolId function_symbol = function_object != 0 && function_object < program->object_count ? program->object_symbols[function_object] : 0;
                 const String8 label = function_symbol != 0 ? symbol_names[function_symbol] : (String8){ 0 };
@@ -3053,7 +3061,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // A template's `.size` on one of the unit's program symbols, which check_program_sections applies once the static
     // data's atoms exist: a variable's atom is published after this emission.
     bool sized = false;
-    for (uint32_t n = 0; sized == false && n < asms->name_count; n += 1)
+    // An earlier failure can leave asm_symbols unallocated. Keep that failure's diagnostic instead of reading it.
+    for (uint32_t n = 0; valid && sized == false && n < asms->name_count; n += 1)
     {
         const SymbolId symbol = asm_symbols[n];
         sized = symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0;

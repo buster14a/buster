@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The import path's tests, for the test-import command:
 //
@@ -81,6 +82,7 @@
 // shared libraries, linker scripts, page edges, the runtime (discovery and the static runtimes among it), the
 // cross-check, and run_import_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -2736,14 +2738,14 @@ static bool import_test_discovery(void)
     ImportTestTally tally = {
         .check = "discovery",
     };
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char root[BUSTER_RUNTIME_PATH_BYTES];
     char triple[BUSTER_RUNTIME_PATH_BYTES];
     char older[BUSTER_RUNTIME_PATH_BYTES];
     char newer[BUSTER_RUNTIME_PATH_BYTES];
     char older_crt[BUSTER_RUNTIME_PATH_BYTES];
     char newer_crt[BUSTER_RUNTIME_PATH_BYTES];
-    snprintf(root, sizeof(root), "%s/buster-import-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    snprintf(root, sizeof(root), "%s/buster-import-XXXXXX", temporary);
     const bool made = mkdtemp(root) != 0;
     snprintf(triple, sizeof(triple), "%s/x86_64-pc-linux-gnu", root);
     snprintf(older, sizeof(older), "%s/15", triple);

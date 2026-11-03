@@ -242,8 +242,30 @@ definitions (#789): the frame's register save area, which the prologue fills
 from the argument registers, and the overflow area past the incoming stack
 arguments. A narrow call argument reaches Tier 1 as the `i32` the lowering
 extends it to by its class, and a narrow parameter as an `i32` it truncates (#141,
-the [IR guide](ir.md)'s "Typed-stream lowering"). Still refused: floating point,
-stack arguments, switches and aggregates by value.
+the [IR guide](ir.md)'s "Typed-stream lowering"). Arguments and parameters past
+the six registers (#141) go through the CFG consumer too: a call stores each
+argument in its slot of the outgoing area, from wherever its value is, and the
+entry loads each parameter from its incoming slot. Floating values (#141), `F32`
+and `F64`, go through the CFG consumer too, in the vector class's registers by
+SSE2's scalar forms: their arithmetic, comparisons, conversions, loads, stores,
+phis, parameters, arguments and results ([the selection guide](tier1-selection.md)'s
+"Floating values" and [the allocation guide](tier1-allocation.md)'s "The vector
+class's floating values"). So do by-value aggregates' ABI records (#789): a call
+passes each aggregate's bytes where its record says, in registers or in its
+stack slots, and stores an aggregate result into its object; a function stores
+each aggregate parameter's registers into a frame object at its entry, and
+returns an aggregate's parts or copies it through the hidden pointer (the
+selection guide's "By-value aggregates"). So does the dynamic stack (#141):
+variable-length arrays' and `alloca`'s allocations, and the stack's position
+saved and restored around their scopes, in a frame with a frame pointer whose
+places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
+from rsp around it (the selection guide's "The dynamic stack"). Still refused:
+long double and the 128-bit integers (`sqlite3.c`'s `sqlite3Multiply128` and
+`sqlite3Multiply160`), vectors, and the convention's rarer aggregate shapes (a
+part in a stack slot, a high or low eightbyte alone, a vector's or the x87's
+register). The IR's switches and selects of floating values are refused too,
+but the C driver's lowering makes neither: a `switch` comes as compares or a
+jump table, which Tier 1 takes, and `?:` as branches.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
@@ -260,17 +282,64 @@ of C's truth values, addresses and divisions by powers of two (#141's items in
 compiles take 26% fewer as its code than as Tier 0's (41% fewer than before the
 walks). What still costs: a narrow value's zero extension is a `movzx`, though
 its register is zero-extended already; `&&`, `||` and `?:` results whose depth
-slot carries values of several types stay in memory (single-type ones promote
-since #983); a frame
+slot carried values of several types stayed in memory (single-type ones promoted
+since #983, and each depth and type has a slot of its own since #1189); a frame
 object's address is a `lea` rather than part of its users' memory operands; the
 pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
-function, is Tier 0's (its switch). 80 of #142's programs, 40 per generator, gave
+function, was Tier 0's then (its switch). 80 of #142's programs, 40 per generator, gave
 66 passes at both tiers and 14 failures, all in clang's own steps, and 40 more by
 the scalar path alone 36 passes and 4 such failures. The default path's compile
 time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
 the walks, which leave 40% fewer records to emit); the checker's unit, which
 compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 36.9 s without them.
+
+## Where the gap to clang -O2 is (#1189)
+
+#1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
+[the record](https://github.com/buster14a/buster-performance/tree/caa665509d9c68ce3e0091a360f47400170f71f2/docs/measurements/tier1-gap-1189-2026-11-03)
+has the tool, the experiment patches and the counts)
+counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
+scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
+instruction and agrees with the 9700X's `perf stat` on c-testsuite 00040 to the
+instruction. An experiment build, not on main, tags each Tier 1 record with its
+origin: spill, edge spill, call save, edge move, call sequence, frame,
+recomputed value, CFG branch or node. Its executables are main's byte for byte.
+
+At main `96b6cbcd`, the program's own code runs:
+
+| | `--tier1` | clang -O2 | Gap |
+| --- | ---: | ---: | ---: |
+| speedtest1 | 3,744 M | 1,888 M | 1,856 M |
+| Lua 5.4.8, five scripts | 7,228 M | 3,768 M | 3,460 M |
+
+The gap by cause, as shares of each program's gap:
+
+| Cause | speedtest1 | Lua | Issue |
+| --- | ---: | ---: | --- |
+| stack loads and stores | 22.5% | 25.8% | #1216 (edge spills and reloads), #1116 (call saves) |
+| register moves | 18.8% | 12.9% | #1216 (edge moves), #1116 (call sequences' 32-bit self-moves) |
+| address arithmetic | 14.8% | 18.2% | #1217 |
+| compares and branches | 14.8% | 17.8% | #1218 |
+| other loads and stores | 12.1% | 9.3% | #139 (memory value numbering), #1218 (load folding) |
+| zero and sign extensions | 9.0% | 12.5% | #1219 |
+| calls, returns and frames | 7.4% | 1.5% | #139 (inlining), #177 (frames) |
+
+The interpreters' loops hold most of it: `sqlite3VdbeExec` 21% of speedtest1's
+gap, and `luaV_execute` 64% of Lua's.
+
+None of the existing passes that `--tier1` doesn't run measures as a gain:
+- GVN: the measurement above (`--tier1-gvn`).
+- LICM: [the loop-motion guide](ir-loop-motion.md)'s "In `--tier1`".
+- SROA: [the scalar-replacement guide](ir-scalar-replacement.md)'s "In `--tier1`".
+- The inliner: [the inlining guide](ir-inlining.md)'s "Reach in `--tier1`".
+
+What did pay is a slot per depth and type for the typed stream's values that
+cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
+instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
+-O0 on both programs: 3,870 M against 3,908 M, and 7,610 M against 8,253 M.
+
+Cycles and run time remain to be measured on the 9700X.
 
 ## Current integration boundary
 
@@ -297,7 +366,8 @@ its own broader branch subset and explicitly refuses unsupported allocations
 and phis.
 
 Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
-arguments and a void or matching scalar result. The native consumer preserves
+arguments (sixteen through the CFG consumer, those past the sixth on the stack:
+#141) and a void or matching scalar result. The native consumer preserves
 live caller registers, resolves argument cycles, aligns the stack and publishes
 ordinary symbolic CALL references. Independent hostile helpers test clobbers,
 return widths, memory effects and frame safety. Full builtin/source acceptance

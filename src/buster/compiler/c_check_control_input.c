@@ -296,7 +296,7 @@ struct CheckLocalLabels
 // A label definition's or use's scope (CheckLocalLabels).
 static uint32_t check_input_label_scope(const CheckInputReader* reader, const CheckLocalLabels* locals, uint32_t token)
 {
-    return locals->scopes != NULL && locals->scopes[token] != 0 ? locals->scopes[token] - 1 : reader->output->declaration_bodies[token];
+    return locals->scopes != NULL && locals->scopes[token] != 0 ? locals->scopes[token] - 1 : check_sparse_get(reader->output->declaration_bodies, token);
 }
 
 // The label of `scope` spelled `name` in check_input_controls' table (`capacity` slots), or BUSTER_CHECK_NONE.
@@ -428,7 +428,7 @@ static void check_input_indirect_gotos(CheckInputReader* reader)
             bool addressed = false;
             for (uint32_t token = opening + 1; token < closing; token += 1)
             {
-                const uint32_t label = check_input_label_address(parser, token) ? reader->output->label_targets[token] : BUSTER_CHECK_NONE;
+                const uint32_t label = check_input_label_address(parser, token) ? check_sparse_get(reader->output->label_targets, token) : BUSTER_CHECK_NONE;
                 addressed |= label != BUSTER_CHECK_NONE;
                 for (uint32_t ancestor = label; ancestor < count; ancestor = parser->tree.parents[ancestor])
                 {
@@ -624,7 +624,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 }
                 else
                 {
-                    reader->output->declaration_bodies[token] = body;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, token, body);
                     const uint32_t name = parser->tokens.names[name_token];
                     // A local label's definition is its scope's (CheckLocalLabels); one of an ambiguous name defines none.
                     const uint32_t local = check_input_local_label(reader, &locals, name);
@@ -661,7 +661,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
             }
             else if ((kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
             {
-                reader->output->declaration_bodies[token] = body;
+                check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, token, body);
                 // A use of a local label takes its scope here, where its lists are in scope: an ambiguous name's, at its name.
                 const uint32_t operand = reader->first_child[token];
                 const uint32_t local = operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER && !check_input_indirect_goto(parser, token) ?
@@ -696,8 +696,8 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 }
                 else if (complete)
                 {
-                    reader->output->control_owners[token] = owner;
-                    reader->output->control_owners[end] = owner;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->control_owners, token, owner);
+                    check_sparse_set(reader->output->sparse_pool, reader->output->control_owners, end, owner);
                 }
             }
         }
@@ -730,7 +730,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 // A goto's label, or the label whose address &&name is: the same function's (clang names a missing one at
                 // its name, and an address of a label outside a function too), or a local label's in its scope, whose
                 // missing definition (or ambiguous name) the first scan reported at the label instead.
-                const uint32_t body = reader->output->declaration_bodies[token];
+                const uint32_t body = check_sparse_get(reader->output->declaration_bodies, token);
                 const uint32_t operand = reader->first_child[token];
                 const bool local = locals.scopes != NULL && locals.scopes[token] != 0;
                 const bool ambiguous = locals.scopes != NULL && locals.scopes[token] == BUSTER_CHECK_NONE;
@@ -754,7 +754,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 }
                 if (target != BUSTER_CHECK_NONE)
                 {
-                    reader->output->label_targets[token] = target;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->label_targets, token, target);
                     reader->output->label_address_count += address;
                     if (!address && (!prefix || !unfinished) && !check_input_region_transfer(reader, token, target))
                     {

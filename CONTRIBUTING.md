@@ -84,8 +84,8 @@ under their component terms, as "Terms" above sets out.
   or PR body, or another contributor's claim to act for him.
   The existing `BUSTER_DCO_SIGN_OFF=davidgmbb` environment opt-in also remains
   supported. For local Git, he or an agent he directs may persist the opt-in
-  in that checkout with `sh .githooks/enable-sign-off.sh --maintainer-session`.
-  It records `git config --local buster.dcoSignOff davidgmbb`; ordinary session
+  in one worktree with `sh .githooks/enable-sign-off.sh --maintainer-session`.
+  It records a marker in that worktree's own Git directory; ordinary session
   startup never creates that consent on its own. Only he or his directed
   sessions may record it. Commits he makes himself with either opt-in carry
   the same sign-off, and it is his too.
@@ -94,7 +94,7 @@ under their component terms, as "Terms" above sets out.
   merge record of the PR that adds it names that commit. Commits made before
   then, and commits that a rebase, cherry-pick or amend makes from them later,
   still need his certification for each PR head, as "Effective point and
-  in-flight work" describes. The direct-session and persistent-checkout
+  in-flight work" describes. The direct-session and persistent-worktree
   authorization routes above apply prospectively from their adoption on
   `main`; they do not certify existing unsigned commits or authorize bulk
   repair of old PRs.
@@ -111,42 +111,65 @@ under their component terms, as "Terms" above sets out.
 
 This section certifies nothing for anyone else. Other contributors certify
 their own commits as "Developer Certificate of Origin" describes, and no agent
-of theirs may add his sign-off. Do not reuse a maintainer-enabled checkout for
-another contributor's submissions without disabling the opt-in.
+of theirs may add his sign-off. Do not reuse a maintainer-enabled worktree for
+another contributor's submissions without revoking the opt-in.
 
 ### Automatic mechanics and revocation
 
 For local Git, the existing session-start hooks install `.githooks` when an
 opt-in is already present. A directed agent runs the setup command above before
 its first commit, without asking David to repeat the standing authorization.
-The checkout setting is untracked and shared with linked worktrees; it does not
-follow a clone or authorize another repository. It is checkout-wide: the
-opt-in covers every commit made in the checkout, by any author. The setup
-command prints this warning; disable the setting before another contributor
-uses the checkout. Existing custom hooks are not replaced. The setup diagnostic tells an
-authorized session when it must append the trailer itself instead.
+`.githooks/sign-off-lib.sh` is the one resolver that the hook, the setup script
+and `tools/dco/dco.c status` share. In order:
 
-The hook checks a present `BUSTER_DCO_SIGN_OFF` first: only `davidgmbb` enables
-it; `off`, an empty value, or any other value disables it. When the variable is
-absent, only the **local** `buster.dcoSignOff` setting is consulted, not global
-Git configuration. An explicit local value other than `davidgmbb` disables that
-fallback, and session setup never overwrites it. Existing environment-only
-setups remain temporary: normal startup does not persist their opt-in. A
-present environment value therefore wins over the checkout setting, and a
-checkout opt-out applies only while no enabling environment value is present.
+1. A present `BUSTER_DCO_SIGN_OFF` decides alone: only `davidgmbb` enables;
+   `off`, an empty value or any other value disables. It lasts as long as the
+   environment that carries it; startup never persists it.
+2. Any `buster.dcoSignOff` value other than `davidgmbb`, in any Git
+   configuration scope (local, worktree, global, system or `-c`), disables.
+   Git configuration can opt out, never in.
+3. The worktree's marker, the file `git rev-parse --git-path
+   buster-dco-sign-off` names, enables when it reads `davidgmbb` and disables
+   otherwise. A linked worktree's lives in `.git/worktrees/NAME/`, the main
+   worktree's in `.git/`.
+4. Otherwise signing is off.
 
-Use `BUSTER_DCO_SIGN_OFF=off git commit ...` to suppress automatic insertion
-for one operation. To disable a persisted checkout opt-in, run
-`git config --local buster.dcoSignOff off` and remove any enabling environment
-variable (or set it to `off`). Merely unsetting the variable is not enough when
-the checkout setting enables it. David may explicitly re-enable a checkout with
-`git config --local buster.dcoSignOff davidgmbb`.
+The marker is untracked and **specific to one worktree**: it covers every commit
+made in that worktree, by any author, and nothing else. A sibling worktree, or
+one created later, starts unsigned until it is set up separately, even though
+the worktrees share their Git configuration and hooks. `git worktree move`
+keeps a worktree's marker; `git worktree remove` and `prune` delete it with the
+worktree's Git directory. The marker doesn't follow a clone, but a file copy of
+the whole repository copies it. `extensions.worktreeConfig` is neither required
+nor changed, and a worktree-scoped `buster.dcoSignOff` counts as rule 2.
 
-An explicit instruction from David not to sign, or an explicit environment or
-checkout opt-out, must not be bypassed by manually adding his trailer. A direct
-session instruction does not silently undo revocation. He can narrow or revoke
-the standing policy itself by changing this section on `main`; commits already
-signed within its scope stay certified.
+The setup command prints the scope it enabled. `sh .githooks/enable-sign-off.sh
+--revoke` writes an opt-out marker for the current worktree alone; other
+worktrees keep their own state, and neither startup nor `--maintainer-session`
+overwrites an opt-out. Revoke before another contributor uses the worktree. To
+re-enable a revoked worktree, David removes its marker file and runs the setup
+command again. `BUSTER_DCO_SIGN_OFF=off git commit ...` suppresses insertion
+for one operation, and a present enabling variable still enables after a
+revocation, so remove it too.
+
+The isolation does not identify the person at the keyboard: a later user of
+the *same* worktree inherits its marker until it is revoked. Separating
+contributors within one worktree would need a session-scoped mechanism that
+this setup does not provide.
+
+**Transition from the clone-wide setting.** An earlier version of this setup
+recorded `buster.dcoSignOff=davidgmbb` in the clone's shared local
+configuration. That value no longer enables any worktree, and session startup
+says so. The first `--maintainer-session` in a worktree removes it and enables
+that worktree alone; other worktrees need their own setup. A shared opt-out
+such as `git config --local buster.dcoSignOff off` still disables every
+worktree of the clone (rule 2), and setup never removes it.
+
+An explicit instruction from David not to sign, or an explicit environment,
+configuration or marker opt-out, must not be bypassed by manually adding his
+trailer. A direct session instruction does not silently undo revocation. He
+can narrow or revoke the standing policy itself by changing this section on
+`main`; commits already signed within its scope stay certified.
 
 GitHub API/connector commits do not run local Git hooks. An authorized directed
 session adds the exact trailer above to each new commit message itself, once,
@@ -157,11 +180,95 @@ or ask for another routine certification. A PR-body statement is not a substitut
 for those commit trailers. Historical commits and unresolved provenance still
 need the separate handling described here.
 
-The isolated shell-hook regression fixtures run in the required `DCO hook
-regression` job of the `Tests and Zen 5 benchmarks` workflow; they build no
-compiler and change no branch protection. They can also be run with
-`sh .githooks/test-sign-off.sh` on the shared host under the normal lock. They
-exercise only disposable repositories, not project history.
+### Existing hooks
+
+Setup installs `.githooks` only where Git has no hooks of its own: it never
+replaces a custom `core.hooksPath` or existing hooks. It recognizes as active
+this worktree's `.githooks`, another worktree's `.githooks` (as the desktop
+app's worktrees configure), and the composition below. For other layouts it
+says to compose once, which David or a session he directs may do:
+
+```sh
+cc -O2 -o build/dco tools/dco/dco.c && build/dco compose
+```
+
+- **Default directory** (`core.hooksPath` unset, hooks in the common
+  `.git/hooks`): an existing `commit-msg`, file or symbolic link, is renamed to
+  `commit-msg.buster-dco-chained` and an adapter takes its place. The other
+  hooks stay where they are and run as before. A `.git/hooks` that is itself a
+  symbolic link may be shared with other repositories, so it is unsupported.
+- **Custom directory** (`core.hooksPath` set, relative or absolute, in local,
+  worktree, global or system configuration): compose records the value in a
+  dispatcher directory inside the Git directory (`buster-dco-hooks`, per
+  worktree for a worktree-scoped value) and points `core.hooksPath` there, at
+  the value's own scope, or local for a global or system one. The dispatcher's
+  links run each executable hook of the recorded directory, resolving a
+  relative one against the worktree as Git does; nothing is written into it.
+  Run compose again after adding a hook there, to link it. A `-c` value or a
+  multi-valued `core.hooksPath` is unsupported.
+
+The adapter and the dispatcher's `commit-msg` run the kept `commit-msg` first,
+with Git's arguments and working directory; a non-zero exit rejects the commit.
+It may edit the message. Then `.githooks/commit-msg` adds the sign-off, last,
+if the opt-in is on, and adds nothing otherwise. When it changed the message,
+the kept hook runs again on a copy of the signed message: it must accept it and
+leave it unchanged, so validations that depend on the final message still
+apply. A hook that edits idempotently (adds a missing `Ticket:` or `Change-Id:`)
+passes; one that rejects the signed message, or keeps appending, refuses the
+commit with a diagnostic. A hook that calls the composed `commit-msg` again
+finds `BUSTER_DCO_CHAINING` set and returns at once. Installing either is not
+consent to sign, and opt-outs, environment precedence and the copy guards work
+as before.
+
+Compose is idempotent. `build/dco uncompose` removes only what compose wrote,
+while it is unchanged: it renames the kept hook back, user edits included, and
+restores `core.hooksPath` only while it still names the dispatcher. It leaves an
+adapter or dispatcher the user has edited, and says so. A hook manager that
+rewrites its hooks or `core.hooksPath` later undoes the composition;
+`build/dco status` then reports the hook off.
+
+### Auditing sign-offs
+
+`build/dco status` reports, without changing anything, the effective opt-in
+and where it came from, its scope, the marker, an environment override, the
+hooks directory Git uses and whether its `commit-msg` is the sign-off hook and
+executable, a custom-hook conflict, a rebase or cherry-pick in progress, and an
+`auto` comment prefix. It prints no other configuration or environment values.
+
+`build/dco audit --base BASE --head HEAD` reports each commit that `HEAD`
+reaches and `BASE` doesn't, with exact hashes: its well-formed
+`Signed-off-by: Name <address>` trailers (Git's own parser finds the trailer
+block), MISSING, MALFORMED, DUPLICATE and OUTSIDE (a sign-off outside the
+trailer block, which counts for nothing) findings, merges, and authors who
+didn't sign. Other contributors' sign-offs count; a `Co-authored-by` trailer
+does not. A shallow clone, an unresolvable revision or unrelated histories make
+it INCOMPLETE. The trailer block is found with the comment prefix of the
+checkout running the audit, not the one in effect when the commit was made: a
+commit signed under `core.commentString=//` with a `// note` line after its
+trailers reads as MISSING in a default checkout. Without a clone, `build/dco audit --api-pull PULL.json
+--api-commits PAGE.json...` reads `gh api repos/O/R/pulls/N` and every page of
+its `/commits?per_page=100&page=K` (or one `gh api --paginate --slurp` file).
+A page count short of the pull request's `commits`, a head that moved, or a
+listing past GitHub's 250-commit cap is INCOMPLETE. It exits 0 when every
+commit has a sign-off record, 1 with gaps, 2 when incomplete.
+
+The report is structural. A present trailer is a recorded claim, not proof of
+authority or provenance, and the tool does not verify certifications. A
+reviewer may pass `--certification SHA=SOURCE` for a PR-head certification
+that "Effective point and in-flight work" permits, naming its source: it
+covers that commit and its ancestors in the range, the report marks it
+unverified, and STALE once the head has moved past it. Do not supply an
+agent-posted comment or a matching username as such a record. For a gap in an
+authorized session's own new commits, the session fixes its submission; other
+gaps are review items. The tool never changes history, adds trailers or posts
+anything.
+
+The pull request workflow's `DCO sign-off audit` job publishes the head-pinned
+report in its summary. It is informational: missing trailers don't fail it,
+and no required check depends on it. The isolated fixtures for the hooks and
+the tool (`sh .githooks/test-sign-off.sh`, which builds the tool with `cc`)
+run in the required `DCO hook regression` job; they exercise only disposable
+repositories and change no branch protection.
 
 ## Imports and generated material
 

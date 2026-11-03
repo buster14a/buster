@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // benchmark-check-debug [--functions N] [--seed N] [--runs N] [--only rows|lines|keep|build|emit] [--path vector|scalar]
 // [--after-scalar MS] [--directives] [--print PATH]: the C driver's source rows (#395, c_check_debug.c), each pass by its
@@ -23,6 +24,7 @@
 // runs the exact twin for MS ms before each sample of the vector path
 // (the state a compiler's vector phases run in after lighter code, #199). Run it under the 9700X's lock with taskset -c 2.
 
+#include "buster/compiler/test_paths.h"
 #define BUSTER_CHECK_DEBUG_BENCHMARK_ENTRIES 300
 
 typedef enum CheckDebugBenchmarkPass
@@ -325,8 +327,8 @@ static int run_check_debug_benchmark(int argc, char** argv)
     // The program: generated into a file of a directory of its own, compiled once with source rows.
     char directory[PATH_MAX];
     char path[PATH_MAX + 16];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-debug-benchmark-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-debug-benchmark-XXXXXX", temporary);
     const bool made = ready && mkdtemp(directory) != 0;
     ready = made;
     snprintf(path, sizeof(path), "%s/program.c", directory);

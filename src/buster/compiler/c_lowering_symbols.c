@@ -369,12 +369,12 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     }
     for (uint32_t token = 0; valid && token < count; token += 1)
     {
-        const uint32_t opening = input->declaration_bodies[token];
+        const uint32_t opening = check_sparse_get(input->declaration_bodies, token);
         const uint32_t object = input->objects[token] <= count + 1 ? input->objects[token] : 0;
         const bool block_static = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT && input->static_objects[token] &&
                                   input->linkage[token] == 0 && !input->compound_objects[token] && opening < count && object != 0 &&
                                   object_labels[object].length == 0;
-        const uint32_t function = block_static ? input->body_declarations[opening] : BUSTER_CHECK_NONE;
+        const uint32_t function = block_static ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
         if (function < count)
         {
             const uint32_t function_object = input->objects[function] <= count + 1 ? input->objects[function] : 0;

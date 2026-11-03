@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The per-file jobs' tests (c_files.c), for the test-files command:
 //
@@ -54,6 +55,7 @@
 //
 // main.c includes this file after c_files.c and c_preprocessor_test.c, whose spellings, comparison and printing it uses.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1640,8 +1642,8 @@ static int run_files_tests(int argument_count, char** arguments)
         files[f] = sources.paths[f];
     }
     char directory[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-files-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-files-test-XXXXXX", temporary);
     bool passed_all = valid && mkdtemp(directory) != 0;
     if (!valid)
     {

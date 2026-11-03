@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-inflate [--seed N] [--directory PATH] [--keep]: inflate.c against streams of the test's own making and of
 // gzip's.
@@ -19,6 +20,7 @@
 //     the decoder accepts must give the input back (it changed bits the data doesn't use).
 // The files go in a directory under --directory (TMPDIR or /tmp), removed unless --keep.
 
+#include "buster/compiler/test_paths.h"
 typedef struct InflateTestTally InflateTestTally;
 struct InflateTestTally
 {
@@ -513,7 +515,7 @@ static int run_inflate_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
     bool keep = false;
-    const char* base = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* base = oracle_temporary_directory();
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
     {

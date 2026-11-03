@@ -25,12 +25,14 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `check-call-graph, test-call-graph` | `call_graph.c` | [call-graph](call-graph.md) |
 | `test-calling-convention, benchmark-calling-convention` | `calling_convention.c` | [calling-convention](calling-convention.md) |
 | `check, test-checker, test-checker-driver` | `c_checker.c` | [checker](checker.md) |
+| `test-checker --requests` (request configuration, source preparation) | `c_check_request.c` | [checker](checker.md) |
 | `test-checker-asm` | `c_check_program_asm.c` | [checker-asm](checker-asm.md) |
 | `test-checker-corpus` | `c_check_corpus.c` | [checker-corpus](checker-corpus.md) |
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |
 | `correctness.tests / CI selection` | `tools/ci/correctness.tests` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite` | `c_testsuite.c` | [c-testsuite](c-testsuite.md) |
+| `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
 | `test-dataflow, benchmark-dataflow` | `dataflow.c` | [dataflow](dataflow.md) |
 | `test-debug, benchmark-debug` | `debug.c` | [debug](debug.md) |
 | `test-checker-deferred, benchmark-checker-deferred` | `c_check_deferred_test.c` | [deferred](deferred.md) |
@@ -131,6 +133,7 @@ The original section titles are retained in their owning guides.
 - [Foreign tests](foreign.md#foreign-tests).
 - [Foreign benchmark](foreign.md#foreign-benchmark).
 - [Foreign corpus test](foreign-corpus.md#foreign-corpus-test).
+- [DCO sign-off tooling](dco.md#dco-sign-off-tooling).
 - [Dataflow tests](dataflow.md#dataflow-tests).
 - [Dataflow benchmark](dataflow.md#dataflow-benchmark).
 - [Preprocessor harness tests](preprocessor-fuzz.md#preprocessor-harness-tests).

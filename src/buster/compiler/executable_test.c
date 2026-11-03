@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The direct path's executable tests, for the test-executable command:
 //
@@ -48,6 +49,7 @@
 // tables read back, the build IDs, the programs, hand-made links, the chunks, the files, the limits, the unwind tables,
 // the blocks, the patch kernel, and run_executable_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -4213,7 +4215,7 @@ static int run_executable_tests(int argc, char** argv)
     uint64_t seed = 1;
     uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
-    const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* parent = oracle_temporary_directory();
     bool keep = false;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)

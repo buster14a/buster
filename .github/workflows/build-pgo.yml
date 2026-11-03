@@ -1,0 +1,72 @@
+name: build.sh PGO
+
+# BUSTER_PGO=1 is opt-in, and no CI job builds with it, so that its two builds and its training keep off the 9700X
+# (#880). Its refusals cost no build: this runs each on GitHub's runner, with a clang that answers the queries build.sh
+# makes before them and fails at any compile, so a refusal that moved after the build, or went, fails here. The
+# settings' checks (cmake/BusterSettings.cmake) make them before any tree is configured.
+on:
+  pull_request:
+    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, .github/workflows/build-pgo.yml]
+  push:
+    branches: [main]
+    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, .github/workflows/build-pgo.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refusals:
+    name: build.sh refuses BUSTER_PGO's unsupported builds before compiling
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Stage CMake and Ninja
+        shell: bash
+        run: bash tools/ci/setup-build-tools.sh "$RUNNER_TEMP/build-tools" >> "$GITHUB_PATH"
+      - name: Run each refusal with a clang that cannot compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          cat > "$bin/clang" << 'EOF'
+          #!/bin/bash
+          case " $* " in
+              *' -dumpmachine '*) echo x86_64-pc-linux-gnu ;;
+              *' -dM -E '*) ;;
+              *) echo "clang: build.sh compiled before refusing: $*" >&2; exit 1 ;;
+          esac
+          EOF
+          chmod +x "$bin/clang"
+          fails=0
+          # Each case runs in a directory of its own, holding build.sh and the settings' checks alone: one that went
+          # on to build would leave build/ behind, which the check below reads.
+          check()
+          {
+              local expected="$1" tree output status
+              shift
+              tree="$(mktemp -d)"
+              cp -r build.sh cmake "$tree/"
+              output="$(cd "$tree" && env PATH="$bin:$PATH" "$@" 2>&1 > /dev/null)" && status=0 || status=$?
+              if [ "$status" = 1 ] && grep -qF -- "$expected" <<< "$output" && [ ! -e "$tree/build" ]; then
+                  echo "refused: $*"
+              else
+                  echo "::error::$* exited with $status, without refusing first:"
+                  printf '%s\n' "$output" | head -20 || true
+                  fails=1
+              fi
+          }
+          check 'BUSTER_PGO_TRAIN requires BUSTER_PGO=1' BUSTER_PGO_TRAIN=/dev/null bash build.sh
+          check 'BUSTER_PGO must be 0 or 1' BUSTER_PGO=2 bash build.sh
+          check 'not a sanitizer build' BUSTER_PGO=1 BUSTER_SANITIZER=address bash build.sh
+          # A fuzzing build is an address sanitizer build unless it names another.
+          check 'not a sanitizer build' BUSTER_PGO=1 BUSTER_FUZZ_AVAILABLE=1 bash build.sh
+          check "BUSTER_HOST_RUNTIME's link leaves out" BUSTER_PGO=1 BUSTER_HOST_RUNTIME=/nonexistent bash build.sh
+          check 'BUSTER_PGO_TRAIN must name a file' BUSTER_PGO=1 BUSTER_PGO_TRAIN=/nonexistent bash build.sh
+          check 'lexer-variant: BUSTER_PGO builds' BUSTER_PGO=1 bash build.sh lexer-variant name=source.c
+          exit "$fails"
