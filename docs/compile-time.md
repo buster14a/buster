@@ -812,6 +812,25 @@ they tested the columns' bytes. The expressions' walk gathers a declaration's
 byte once for its three flags. `declaration_kinds`, `function_flags`,
 `explicit_abis` and the constant warnings' two columns stay columns of their own.
 
+On the 9700X, main `703ae9f5` against the branch merged with it (`49f066ba`),
+both changes, measured as the attributes' change was, with every object the same
+bytes ([the
+record](https://github.com/buster14a/buster-performance/tree/3dd0b4bfce2982eae0fb2ccb42be8a537d89c951/docs/measurements/attributes-column-1167-2026-11-03),
+`round5/`):
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 111.59 ms | 109.25 ms |
+| user cycles | 530.4 M | 520.7 M |
+| user instructions | 1,204.8 M | 1,204.1 M |
+| kernel cycles | 88.0 M | 85.5 M |
+| peak RSS (`wait4`) | 295,172 KiB | 287,028 KiB |
+| `check-input` | 44.37 ms | 43.15 ms |
+
+Every round of the 8 has the branch 1.8 to 2.8 ms faster. The peak is 8.1 MB
+lower, of the 12 MB that #1167 bounded for the two changes. Main's own peak had
+risen 4 MB since `b70deb47`, by its changes between.
+
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
