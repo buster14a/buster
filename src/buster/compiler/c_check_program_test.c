@@ -1044,6 +1044,18 @@ static const char check_test_program_harness[] =
     "int external_apply_atomic_h2(_Atomic(ExternalAtomicH2)(*f)(_Atomic(ExternalAtomicH2),int),int n){ExternalAtomicH2 v={(short)n,(short)(-7*n)};"
     "_Atomic(ExternalAtomicH2) out=f(v,3);ExternalAtomicH2 r=out;return r[0]*5+r[1];}\n"
     "#endif\n"
+    // Vectors of 32 and 64 bytes both ways at every -march (#1193): passed in memory where the target's registers are
+    // narrower, and returned split across them as LLVM returns them (xmm0 and xmm1, xmm0 to xmm3, ymm0 and ymm1), or
+    // in ymm0 or zmm0 whole. Each element is changed, and the results are folded by their bytes.
+    "typedef int ExternalWide8 __attribute__((vector_size(32)));typedef double ExternalWide16 __attribute__((vector_size(64)));"
+    "static unsigned external_wide_fold(const void*p,unsigned long n){const unsigned char*b=p;unsigned h=2166136261u;"
+    "for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}"
+    "ExternalWide8 external_wide8(ExternalWide8 x,int k){for(int i=0;i<8;i++)x[i]=x[i]*3+k-i;return x;}"
+    "ExternalWide16 external_wide16(ExternalWide16 x,int k){for(int i=0;i<8;i++)x[i]=x[i]*0.5+k+i;return x;}"
+    "int external_apply_wide8(ExternalWide8(*f)(ExternalWide8,int),int n){ExternalWide8 v;for(int i=0;i<8;i++)v[i]=n*(i+3)-i;"
+    "ExternalWide8 r=f(v,n+1);return (int)external_wide_fold(&r,sizeof(r));}"
+    "int external_apply_wide16(ExternalWide16(*f)(ExternalWide16,int),int n){ExternalWide16 v;for(int i=0;i<8;i++)v[i]=n*0.25+i;"
+    "ExternalWide16 r=f(v,n+2);return (int)external_wide_fold(&r,sizeof(r));}\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
     // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in

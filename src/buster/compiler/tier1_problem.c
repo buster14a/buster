@@ -81,6 +81,9 @@ typedef enum Tier1ProblemReason
     TIER1_PROBLEM_CERTIFICATE_UNAVAILABLE,
     // #939: an allocation of the problem whose certificate the checker refused (tier1_problem_certify).
     TIER1_PROBLEM_CERTIFICATE_REJECTED,
+    // #939: a problem the adapter takes but buster's allocator refuses, by either path (tier1_problem_allocate): its
+    // constraints, which the allocator can't meet, or columns it calls invalid.
+    TIER1_PROBLEM_ALLOCATION_REFUSED,
     TIER1_PROBLEM_REASON_COUNT,
 } Tier1ProblemReason;
 
@@ -667,6 +670,7 @@ static const char* tier1_problem_reason_name(Tier1ProblemReason reason)
         "mask-change",
         "certificate-unavailable",
         "certificate-rejected",
+        "allocation-refused",
     };
     return (unsigned)reason < TIER1_PROBLEM_REASON_COUNT ? names[reason] : "invalid-reason";
 }
