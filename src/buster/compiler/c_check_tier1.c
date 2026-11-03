@@ -83,8 +83,10 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
             category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         case CHECK_TIER1_CAUSE_CERTIFICATE:
-            // A refused certificate is an allocation the allocator got wrong (#939): internal, never Tier 0's to hide.
-            category = error == TIER1_CERT_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            // A refused certificate is an allocation the allocator got wrong, or code the emitter got wrong (its
+            // Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE, #939): internal, never Tier 0's to hide. Either
+            // checker's capacity is a resource failure.
+            category = error == TIER1_CERT_CAPACITY || error == (BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY) ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         default:
             break;

@@ -41,6 +41,8 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_FRAME, TIER1_FRAME_REGISTER_CONFLICT, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_VALUE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_CAPACITY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
+    { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_FRAME, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
+    { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_EMISSION, TIER1_EMIT_INVALID, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION, BUSTER_CHECK_TIER1_FRAME_PUBLICATION, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, 0xfedcba98, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
@@ -113,6 +115,9 @@ static const CheckTier1ClassCase check_tier1_classification_cases[] = {
     { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_TRANSITION, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_ENTRY, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_CERTIFICATE, TIER1_CERT_EDGE, CHECK_TIER1_INTERNAL },
+    // The code's certificate (tier1_certificate_emitted.c): its capacity (check_tier1_test_classification walks every
+    // refusal's reason).
+    { CHECK_TIER1_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY, CHECK_TIER1_RESOURCE_FAILURE },
     { CHECK_TIER1_CAUSE_PUBLICATION, BUSTER_CHECK_TIER1_FRAME_PUBLICATION, CHECK_TIER1_INTERNAL },
     { CHECK_TIER1_CAUSE_PUBLICATION, 0, CHECK_TIER1_INTERNAL },
 };
@@ -131,6 +136,17 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
                                 failure.error == test->error && failure.instruction == 0x12345678 && failure.detail == 0x87654321 &&
                                 failure.fallback == expected && strict.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN,
                                 "the classification table follows the documented policy", detail);
+    }
+    // Every refusal of the code's certificate is internal; only its capacity is a resource failure.
+    for (uint32_t reason = TIER1_CERT_EMITTED_REFUSED; reason < TIER1_CERT_EMITTED_REASON_COUNT; reason += 1)
+    {
+        const uint32_t error = BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason;
+        const CheckTier1Outcome failure = check_tier1_failure(CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_CERTIFICATE, error, 0x12345678, 0x87654321);
+        const CheckTier1Category expected = reason == TIER1_CERT_EMITTED_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : CHECK_TIER1_INTERNAL;
+        char detail[96];
+        snprintf(detail, sizeof(detail), "code certificate reason %" PRIu32, reason);
+        check_lanes_test_expect(tally, failure.category == expected && failure.error == error && failure.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN,
+                                "the code certificate's refusals are internal and its capacity a resource failure", detail);
     }
     check_lanes_test_expect(tally, BUSTER_ARRAY_LENGTH(check_tier1_emission_causes) == TIER1_EMIT_CAUSE_CERTIFICATE + 1 &&
                             check_tier1_emission_causes[TIER1_EMIT_CAUSE_NONE] == CHECK_TIER1_CAUSE_EMISSION &&
