@@ -534,8 +534,11 @@ The decoding:
   register and frame byte its records write (by their effects) killed, its
   definition written where its interval starts. A call's sequence is checked
   against the IR (its target's reference, `al`, its result's extension), its
-  arguments read in their ABI registers and outgoing slots, the outgoing area
-  killed after it (its callee owns it). A copy that vanishes in its own register
+  arguments read in their ABI registers and outgoing slots (a value passed
+  twice at each of its locations), then every register the SysV ABI lets the
+  callee change killed (rax, rcx, rdx, rsi, rdi, r8 to r11, every xmm and
+  opmask register, which `x86_semantics`' effects of the `call` itself don't
+  say) and the outgoing area too (its callee owns it), before its result. A copy that vanishes in its own register
   is its operand's value. A return's epilogue may come before its `ret`.
 - **Entry.** The parameters are entry facts in their ABI registers and incoming
   slots. The prologue may write none of them; a narrow parameter's extension
@@ -579,7 +582,13 @@ certificate. Canonical 32-bit storage (a 4-byte value's upper half zero) is the
 selection's contract and isn't checked: a 4-byte value is its low 4 bytes.
 
 **Tests.** The emitter's tests, the mask tests and the pipeline test run it on
-every CFG function they emit. `test-tier1-pipeline` also corrupts each
+every CFG function they emit. `test-tier1-emit`'s call fixture
+(`tier1_code_certificate_test.c`, `g(v, v)` and `h()` with values live across
+them, the caller-saved registers alone allocatable) corrupts its calls: each
+argument move made a move of its source into itself, refused even for the
+second placement of the value passed twice, and each save or restore, and each
+store before a call with its load after it, left out, refused: the callee may
+change the register. `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an
 immediate 8 off, two adjacent records of one origin swapped). A mutant the

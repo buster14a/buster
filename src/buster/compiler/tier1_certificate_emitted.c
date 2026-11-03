@@ -437,14 +437,18 @@ struct Tier1CertEmittedKernel
     uint32_t definition_location;
     // A call's outgoing area's bytes from rsp, which its callee owns: killed after it.
     uint32_t outgoing;
+    // A call's: every register the ABI lets its callee change is killed after its arguments are read.
+    bool call;
 };
 
+// A use of `value` at `location`: one for each distinct pair, so that a value read at two locations (a call's argument
+// passed twice, in two registers) is proved at both.
 static bool tier1_cert_emitted_add_use(Tier1CertEmittedKernel* kernel, uint32_t value, uint32_t location)
 {
     bool fresh = true;
     for (uint32_t k = 0; fresh && k < kernel->use_count; k += 1)
     {
-        fresh = kernel->uses[k] != value;
+        fresh = kernel->uses[k] != value || kernel->use_locations[k] != location;
     }
     if (fresh && kernel->use_count < BUSTER_ARRAY_LENGTH(kernel->uses))
     {
@@ -487,6 +491,7 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     }
     const uint32_t vector_count = abi != 0 ? abi->call.vector_registers : vectors;
     kernel->outgoing = tier1_select_call_stack_bytes(function, call);
+    kernel->call = true;
     if (valid && call->variadic)
     {
         kernel->records[kernel->count++] = vector_count == 0 ? (X86Instruction){ .form = X86_FORM_XOR_R32_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }
@@ -696,7 +701,16 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
             }
         }
     }
-    // A call's callee owns its outgoing area.
+    // A call's callee may change every caller-saved register (the SysV ABI's: rax, rcx, rdx, rsi, rdi, r8 to r11, every
+    // xmm and opmask register), which x86_semantics' effects of the call instruction itself don't say; and it owns its
+    // outgoing area.
+    if (kernel->call)
+    {
+        writes |= BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RAX) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RCX) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RDX) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSI) |
+                  BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RDI) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R8) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R9) | BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R10) |
+                  BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R11) | BUSTER_X86_RESOURCE_LOWER_VECTORS;
+        masks |= 0xff00;
+    }
     for (uint32_t at = 0; valid && at < kernel->outgoing; at += BUSTER_CERT_MAX_WIDTH)
     {
         const uint32_t width = kernel->outgoing - at < BUSTER_CERT_MAX_WIDTH ? kernel->outgoing - at : BUSTER_CERT_MAX_WIDTH;

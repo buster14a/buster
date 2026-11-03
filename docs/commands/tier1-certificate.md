@@ -27,8 +27,11 @@ requirements. [Command index](README.md).
   frames, variadic definitions, indirect jumps to several labels) leave the
   code uncertified, by reason; `--tier1-report` counts `code_certified` and
   `code_uncertified`. `test-tier1-pipeline` corrupts certified functions'
-  records: a refused mutant counts, an accepted one runs natively and must
-  agree with the interpreter.
+  records, every prologue and epilogue record among them: a refused mutant
+  counts, an accepted one runs natively and must agree with the interpreter.
+  `test-tier1-emit`'s call fixture (`tier1_code_certificate_test.c`) leaves an
+  argument register stale (a value passed twice) and leaves out saves and
+  spills around calls: each must be refused.
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and
