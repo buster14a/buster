@@ -1170,19 +1170,22 @@ fit, it starts with at most 1,024 entries, and then with 16; where even that
 doesn't, the run takes the regions; where it can't grow, it stops inserting,
 and where the classes can't, new values have none.
 
-`CheckOptions.verify_transitions` runs each hit's action too, keeps its answer
-and counts a difference (`CheckStatistics.transition_mismatches`), which fails
-the run. The driver's `--verify` (with `--check-transitions`) verifies, and so
-does `test-checker`, whose graphs and source fixtures the transitions check
-against the scalar path too. `CheckStatistics` counts hits, misses, folds,
-inserts and the table's entries, and `--time-stages` reports them as
-`time-check transition-*` lines. `benchmark-checker-source` prints them with
-each path's time.
+`CheckOptions.verify_transitions` runs each hit's action too, the loop's
+first-probe hits' and those found after a batch ran (flushed hits), keeps its
+answer and counts a difference (`CheckStatistics.transition_mismatches`), which
+fails the run. The driver's `--verify` (with `--check-transitions`) verifies,
+and so does `test-checker`, whose graphs and source fixtures the transitions
+check against the scalar path too, each verified run's hits all verified
+(`transition_verified`). `CheckStatistics` counts hits (and of them the flushed
+ones), misses, folds, inserts and the table's entries, and `--time-stages`
+reports them as `time-check transition-*` lines. `benchmark-checker-source`
+prints them with each path's time.
 
 `test-checker --transitions` runs the section alone. Each fixture is checked by
 the scalar path, the oracle, and by the vector path's regions and its
 transitions in batches of 32, 3 and 1, and every stream must be the oracle's.
-Each fixture's hits, misses, folds and entries are pinned. Each node's class
+Each fixture's hits, flushed hits, misses, folds and entries are pinned, and a
+fixture's `(1 + 2) + 3` finds an earlier `3 + 3` only after `1 + 2`'s batch ran. Each node's class
 must be shared exactly with the nodes of the same value but its object, and the
 static words by 16 lanes must be the scalar path's, with system-header marks in
 arrays from the tokens' whole count down to fewer than a gather's 4 bytes. A

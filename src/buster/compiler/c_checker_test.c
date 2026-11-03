@@ -1670,7 +1670,8 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
+                                vector.statistics.transition_verified == vector.statistics.transition_hits,
                           order == 1 ? "graph paths or level-order batch partitions differ" :
                           order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
@@ -2533,6 +2534,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             CheckStream stream;
             const bool rechecked = check_graph_run(&types[1].table, &input[1].graph, &output_storage[1], &scratch[1], &memoized, &stream);
             check_test_expect(test, rechecked && stream.statistics.transition_mismatches == 0 &&
+                                   stream.statistics.transition_verified == stream.statistics.transition_hits &&
                                    check_test_stream_equal(&streams[0], &stream, input[0].graph.argument_count), "source paths' transitions produce another typed stream");
             arena_pop_to(&output_storage[1], mark);
         }

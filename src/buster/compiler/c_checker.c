@@ -297,14 +297,17 @@ struct CheckStatistics
     uint64_t output_bytes;
     uint64_t scratch_bytes;
     // The vector path's memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
-    // (hits), those probed and not found (misses), those whose operator memoizes but an operand or argument of which holds
-    // a payload, most often a constant to fold (folds), the entries inserted and the table's entries at the end, and with
-    // CheckOptions.verify_transitions, the hits whose action gave another answer.
+    // (hits, of which those found after the batch their operands waited in ran: flushed hits), those probed and not found
+    // (misses), those whose operator memoizes but an operand or argument of which has no class, a fault or an overload set
+    // (folds), the entries inserted and the table's entries at the end, and with CheckOptions.verify_transitions, the hits
+    // checked by their actions too (verified) and those whose action gave another answer (mismatches).
     uint32_t transition_hits;
+    uint32_t transition_flushed_hits;
     uint32_t transition_misses;
     uint32_t transition_folds;
     uint32_t transition_inserts;
     uint32_t transition_entries;
+    uint32_t transition_verified;
     uint32_t transition_mismatches;
 };
 

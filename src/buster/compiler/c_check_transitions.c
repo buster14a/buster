@@ -849,6 +849,7 @@ static __attribute__((noinline)) void check_transition_verify(TypeTable* types, 
         equal = argument_conversions[i].type == stream->argument_conversions[offset + i].type &&
                 argument_conversions[i].flags == stream->argument_conversions[offset + i].flags;
     }
+    stream->statistics.transition_verified += 1;
     stream->statistics.transition_mismatches += !equal;
 }
 
@@ -917,12 +918,15 @@ struct CheckTransitionRun
     uint32_t hits;
     uint32_t misses;
     uint32_t folds;
+    // CheckOptions.verify_transitions: every hit's action run too, the loop's first-probe hits' and these.
+    bool verify;
 };
 
 // Every node but a leaf and a first-probe hit, out of the node order's loop so that the loop keeps its values in
 // registers: `kind` and `miss` are the loop's key of an eligible node (`header`, check_transition_statics) and `found` its
 // probe, CHECK_TRANSITION_NONE for any other node. A node reading a batch member runs the batch and is keyed again; a hit
-// is written, a pure miss or other pure node joins the batch, and any other node runs its action after the batch.
+// (then a flushed hit) is written and, with `verify`, checked by its action too, a pure miss or other pure node joins the
+// batch, and any other node runs its action after the batch.
 static __attribute__((noinline)) void check_transition_other(CheckTransitionRun* run, uint32_t node, uint32_t header, CheckTransitionMiss* miss,
                                                             CheckTransitionKind kind, uint32_t found)
 {
@@ -947,6 +951,10 @@ static __attribute__((noinline)) void check_transition_other(CheckTransitionRun*
     if (hit)
     {
         check_transition_write(stream, graph, table, table->entries + found, node, miss->objects, run->classes);
+        if (run->verify)
+        {
+            check_transition_verify(run->types, graph, stream, node, run->arguments, run->scratch);
+        }
     }
     else if ((run->marks[node] & BUSTER_CHECK_MARK_PURE) != 0 && run->batch_size > 1)
     {
@@ -1002,6 +1010,7 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types, 
         .batch = batch,
         .words = words,
         .batch_size = batch_size,
+        .verify = verify,
     };
     // The loop's hits, kept here rather than through `run` or `stream`, which the columns' stores could alias.
     uint32_t hits = 0;
@@ -1047,6 +1056,7 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types, 
     }
     hits += run.hits;
     stream->statistics.transition_hits += hits;
+    stream->statistics.transition_flushed_hits += run.hits;
     stream->statistics.transition_misses += run.misses;
     stream->statistics.transition_folds += run.folds;
     stream->statistics.vector_nodes += hits;

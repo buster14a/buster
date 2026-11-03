@@ -20,6 +20,8 @@ struct CheckTransitionFixture
     uint32_t misses;
     uint32_t folds;
     uint32_t entries;
+    // Of the hits, those found after the batch their operands waited in ran (CheckStatistics.transition_flushed_hits).
+    uint32_t flushed;
     // Whether the oracle reports a diagnostic (a fixture of a tag's completion reads an incomplete one first).
     bool reported;
 };
@@ -159,17 +161,22 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
         CheckStream stream;
         const bool checked = check_graph_run(&types[1].table, &input[1].graph, &output[1], &scratch[1], variants + v, &stream);
         const CheckStatistics* statistics = &stream.statistics;
-        snprintf(description, sizeof(description), "%s, %s: the stream is the oracle's (%u hits, %u misses, %u folds, %u mismatches)", fixture->name, names[v],
-                 statistics->transition_hits, statistics->transition_misses, statistics->transition_folds, statistics->transition_mismatches);
-        check_test_expect(test, checked && check_test_stream_equal(&oracle, &stream, input[1].graph.argument_count) && statistics->transition_mismatches == 0,
+        // A verified run checks every hit by its action, a flushed hit's too.
+        const bool verified = !variants[v].verify_transitions || statistics->transition_verified == statistics->transition_hits;
+        snprintf(description, sizeof(description), "%s, %s: the stream is the oracle's (%u hits, %u verified, %u misses, %u folds, %u mismatches)", fixture->name,
+                 names[v], statistics->transition_hits, statistics->transition_verified, statistics->transition_misses, statistics->transition_folds,
+                 statistics->transition_mismatches);
+        check_test_expect(test, checked && check_test_stream_equal(&oracle, &stream, input[1].graph.argument_count) && statistics->transition_mismatches == 0 &&
+                                verified,
                           description);
         // A scalar host's run takes the scalar path whatever its options (check_graph_run), with no transitions to count.
         if (checked && v == 0 && BUSTER_HOST_VECTOR)
         {
-            snprintf(description, sizeof(description), "%s: node order counts %u hits, %u misses, %u folds and %u entries (%u, %u, %u and %u expected)",
-                     fixture->name, statistics->transition_hits, statistics->transition_misses, statistics->transition_folds, statistics->transition_entries,
-                     fixture->hits, fixture->misses, fixture->folds, fixture->entries);
-            check_test_expect(test, statistics->transition_hits == fixture->hits && statistics->transition_misses == fixture->misses &&
+            snprintf(description, sizeof(description), "%s: node order counts %u hits (%u flushed), %u misses, %u folds and %u entries (%u (%u), %u, %u and %u expected)",
+                     fixture->name, statistics->transition_hits, statistics->transition_flushed_hits, statistics->transition_misses, statistics->transition_folds,
+                     statistics->transition_entries, fixture->hits, fixture->flushed, fixture->misses, fixture->folds, fixture->entries);
+            check_test_expect(test, statistics->transition_hits == fixture->hits && statistics->transition_flushed_hits == fixture->flushed &&
+                                   statistics->transition_misses == fixture->misses &&
                                    statistics->transition_folds == fixture->folds && statistics->transition_entries == fixture->entries &&
                                    statistics->transition_inserts <= statistics->transition_misses && statistics->transition_entries <= statistics->transition_inserts,
                               description);
@@ -237,8 +244,9 @@ static bool check_test_transition_room(CheckTest* test, TypeTable* table, const 
     {
         const uint32_t taken = stream.statistics.transition_entries;
         *seen |= (taken == 0 && stream.statistics.transition_hits == 0 ? 1u : 0u) | (taken != 0 && taken < entries ? 2u : 0u) | (taken == entries ? 4u : 0u);
-        check_test_expect(test, check_test_stream_equal(oracle, &stream, graph->argument_count) && stream.statistics.transition_mismatches == 0,
-                          "the table's limit: a run within the room's stream is the oracle's");
+        check_test_expect(test, check_test_stream_equal(oracle, &stream, graph->argument_count) && stream.statistics.transition_mismatches == 0 &&
+                                stream.statistics.transition_verified == stream.statistics.transition_hits,
+                          "the table's limit: a run within the room's stream is the oracle's, every hit verified");
     }
     arena_pop_to(output, output_mark);
     return checked;
@@ -341,6 +349,7 @@ static void check_test_transitions(CheckTest* test)
             .source = "int f(int a, int b) { int x = a + b; int y = a + b; return x + y + a + b; }\n"
                       "int g(int a, int b) { return a * b + a * b; }\n",
             .hits = 5,
+            .flushed = 2,
             .misses = 9,
             .folds = 0,
             .entries = 7,
@@ -410,6 +419,7 @@ static void check_test_transitions(CheckTest* test)
             .source = "int f(int a) { return 1 + 2 + 3 + a * 4 + (a ? 5 : 6) + (int)(1.5 * a) + (int)__real__ (2.0i + a); }\n"
                       "unsigned g(unsigned a) { return (a << 3) + (a >> 1) + ~a + -a + !a; }\n",
             .hits = 5,
+            .flushed = 3,
             .misses = 19,
             .folds = 0,
             .entries = 19,
@@ -444,6 +454,18 @@ static void check_test_transitions(CheckTest* test)
             .folds = 0,
             .entries = 2,
             .reported = true,
+        },
+        {
+            // A hit found after a batch ran: `1 + 2` waits in the batch, and `(1 + 2) + 3`, which reads it, runs the batch
+            // first and then finds h's `3 + 3`, a flushed hit, which a verified run checks by its action too.
+            .name = "flushed hits",
+            .source = "int h(void) { return 3 + 3; }\n"
+                      "int g(void) { return 1 + 2 + 3; }\n",
+            .hits = 2,
+            .flushed = 1,
+            .misses = 3,
+            .folds = 0,
+            .entries = 3,
         },
         {
             // Faults: a constant division by zero, whose value has no class, so that the nodes reading it are folds.
