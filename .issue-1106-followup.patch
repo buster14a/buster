@@ -1,0 +1,79 @@
+--- a/src/buster/compiler/c_check_lanes_test.c
++++ b/src/buster/compiler/c_check_lanes_test.c
+@@ -732,30 +732,39 @@
+     const char* name;
+     const char* source;
+     CheckProgramStatus status;
++    Tier0Error backend_error;
+ };
+ 
+ // Bodies that fail at different steps, in both orders: lowering refuses a wide _BitInt bit-field; Tier 0 refuses
+-// a frame whose two individually valid 1 GiB objects exceed its signed displacement range. Deep expressions no longer
+-// provide a refusal (#1106). Source-order lowering takes every body before Tier 0 takes any, so it fails first.
+-#define BUSTER_CHECK_LANES_TEST_FRAME \
+-    "int deep(int a) { char x[1073741824], y[1073741824]; return x[a] + y[a]; }\n"
++// 256 live masks, whose separate byte-depth bound remains (#179). Ordinary deep expressions no longer provide a
++// refusal (#1106). Source-order lowering takes every body before Tier 0 takes any, so it fails first. The explicit
++// target enables mask-class lowering even in baseline-host tests; no emitted mask instructions are executed here.
++#define BUSTER_CHECK_LANES_TEST_MASK_DEPTH \
++    "#define K1(v) __builtin_ia32_kandhi((unsigned short)a, v)\n" \
++    "#define K4(v) K1(K1(K1(K1(v))))\n" \
++    "#define K16(v) K4(K4(K4(K4(v))))\n" \
++    "#define K64(v) K16(K16(K16(K16(v))))\n" \
++    "#define K256(v) K64(K64(K64(K64(v))))\n" \
++    "__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq\"))) int deep(int a) { return K256((unsigned short)a); }\n"
+ static const CheckLanesTestFailure check_lanes_test_failures[] = {
+     {
+         "lowering after Tier 0",
+         "int fine0(int a) { return a + 1; }\n"
+-        BUSTER_CHECK_LANES_TEST_FRAME
++        BUSTER_CHECK_LANES_TEST_MASK_DEPTH
+         "int fine1(int a) { return a * 2; }\n"
+         "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
+         "int main(void) { return fine0(1) + deep(2) + fine1(3) + refused(4); }\n",
+         CHECK_PROGRAM_UNSUPPORTED,
++        TIER0_OK,
+     },
+     {
+         "lowering before Tier 0",
+         "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
+         "int fine0(int a) { return a + 1; }\n"
+-        BUSTER_CHECK_LANES_TEST_FRAME
++        BUSTER_CHECK_LANES_TEST_MASK_DEPTH
+         "int main(void) { return fine0(1) + deep(2) + refused(4); }\n",
+         CHECK_PROGRAM_UNSUPPORTED,
++        TIER0_OK,
+     },
+     {
+         "two lowering refusals",
+@@ -765,14 +774,16 @@
+         "int refused1(int a) { struct { unsigned _BitInt(300) y : 250; } v; v.y = a; return (int)v.y; }\n"
+         "int main(void) { return fine0(1) + refused0(2) + fine1(3) + refused1(4); }\n",
+         CHECK_PROGRAM_UNSUPPORTED,
++        TIER0_OK,
+     },
+     {
+         "Tier 0 alone",
+         "int fine0(int a) { return a + 1; }\n"
+-        BUSTER_CHECK_LANES_TEST_FRAME
++        BUSTER_CHECK_LANES_TEST_MASK_DEPTH
+         "int fine1(int a) { return a * 2; }\n"
+         "int main(void) { return fine0(1) + deep(2) + fine1(3); }\n",
+         CHECK_PROGRAM_UNSUPPORTED,
++        TIER0_ERROR_DEPTH,
+     },
+ };
+ 
+@@ -803,8 +814,10 @@
+             if (unit.ready)
+             {
+                 CheckLanesTestEmission one = check_lanes_test_emit(&unit, &parser, &pp, &identifiers, NULL, scalar != 0, false, true);
+-                snprintf(detail, sizeof(detail), "%s: status %u, reason %s", failure->name, (uint32_t)one.status, one.reason != NULL ? one.reason : "none");
+-                check_lanes_test_expect(tally, !one.emitted && one.status == failure->status, "a failing program fails at its step on one lane", detail);
++                snprintf(detail, sizeof(detail), "%s: status %u, backend %u, reason %s", failure->name, (uint32_t)one.status, (uint32_t)one.backend_error,
++                         one.reason != NULL ? one.reason : "none");
++                check_lanes_test_expect(tally, !one.emitted && one.status == failure->status && one.backend_error == failure->backend_error,
++                                        "a failing program fails at its step on one lane", detail);
+                 free(one.object);
+                 check_lanes_test_unit(tally, &unit, &parser, &pp, &identifiers, scalar != 0, failure->name, &emitted);
+                 check_lanes_test_order(tally, &unit, &parser, &pp, &identifiers, path, scalar != 0, id_order + f, failure->name);

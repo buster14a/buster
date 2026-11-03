@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Temporary transport and qualification on agent/1106-workspace only; never part of the implementation PR.
+# Temporary qualification branch only; neither this workflow nor its patch enters the implementation PR.
 name: Issue 1106 focused qualification
 on:
   push:
@@ -23,28 +23,26 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 96b6cbcd122ffdc45700cf01d6e8adb40a81243c
+          ref: 330400f6a6b3dfcfd3facbcf26e085e425459e0b
           path: implementation
-      - name: Publish the exact reviewed patch on its own branch
+      - name: Commit the lane failure-stage fixture correction
         id: publish
         working-directory: implementation
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 96b6cbcd122ffdc45700cf01d6e8adb40a81243c
-          xz -dc ../payload/.issue-1106.patch.xz > "$RUNNER_TEMP/issue-1106.patch"
-          printf '%s  %s\n' 52e573873a7c3c862be348b55032902c8a8d28fe2aa716db896235338c46b8bc "$RUNNER_TEMP/issue-1106.patch" | sha256sum --check
-          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-1106.patch"
-          git apply --unidiff-zero "$RUNNER_TEMP/issue-1106.patch"
+          test "$(git rev-parse HEAD)" = 330400f6a6b3dfcfd3facbcf26e085e425459e0b
+          git apply --check ../payload/.issue-1106-followup.patch
+          git apply ../payload/.issue-1106-followup.patch
           git diff --check
-          git switch -c agent/1106-deep-values
+          git switch -c agent/1106-lane-fixture
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           sh .githooks/enable-sign-off.sh --maintainer-session
-          git add docs/commands/tier0.md docs/tier0.md src/buster/compiler/c_check_deep_driver_test.c src/buster/compiler/c_check_lanes_test.c src/buster/compiler/c_check_program_emit.c src/buster/compiler/c_checker_driver_test.c src/buster/compiler/tier0.c src/buster/compiler/tier0_int128_test.c src/buster/compiler/tier0_mask_test.c src/buster/compiler/tier0_test.c
-          git commit -m 'tier0: retain full-width depths for deep values and nested calls' -m 'Reconstruct 32-bit integer and floating depth columns only on the cold spill path, with a vector prefix scan and scalar twin. Rebase memory-only entries by their true depth and recompute ordinary call saves after byte wrap. Keep the normal byte path, mask limit, and ABI argument bound unchanged.' -m 'Add typed-stream boundary, native memory-class, and public-driver compile/link/run regressions through depth 1000. Replace lane failure fixtures that depended on the retired refusal with a genuine frame-size failure.' -m 'Fixes #1106' -m 'Agent model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          git add src/buster/compiler/c_check_lanes_test.c
+          git commit -m 'tests: preserve Tier 0 lane refusal coverage with mask depth' -m 'The oversized-object fixture was rejected by validation before code generation. Exercise the independent mask-depth bound instead, with an explicit target independent of host features, and assert the backend error as well as the pipeline status. No mask instructions are executed.' -m 'Agent model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
           test "$(git log -1 --format=%B | sed '/^$/d' | tail -n 1)" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
-          git push origin HEAD:refs/heads/agent/1106-deep-values
+          git push origin HEAD:refs/heads/agent/1106-lane-fixture
           printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git show --stat --oneline HEAD
   validate:
@@ -73,10 +71,10 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: set -o pipefail; ./build/compiler test-checker-driver --part 2/64 --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-driver.log"
-      - name: Lane failure and retry semantics
+      - name: Lane failure and retry semantics with the default program inventory
         if: ${{ !cancelled() }}
         shell: bash
-        run: set -o pipefail; ./build/compiler test-check-lanes --programs 1 --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-lanes.log"
+        run: set -o pipefail; ./build/compiler test-check-lanes --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-lanes.log"
       - name: Check module ownership
         if: ${{ !cancelled() }}
         shell: bash
