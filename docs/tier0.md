@@ -193,8 +193,10 @@ table. The kinds are:
   free register (which the entry so claims, as a copy's scratch), `lock cmpxchg` of the desired value's register with
   the object, the class's bytes, a full barrier on x86-64 that every order takes, which leaves the old value in rax, the
   swap undone, and the old value extended as the class's load extends it. The producer compares it with the expected
-  value for the success (in `I32` for a narrow class, which Tier 0's compares take). No consumer moves an access across
-  it or drops it; `ir_lower` makes it a load of the local and the IR's `rmw ... cas`. The typed interpreter runs it as
+  value for the success (in `I32` for a narrow class, which Tier 0's compares take). Its local counts as a use of it
+  where Tier 0 gives locals their homes (`tier0_count_references` and its vector twin), so that a pointer parameter
+  whose only use is a compare-exchange's address keeps its incoming value (`test-ir-lowering` runs such functions
+  natively against both interpreters). No consumer moves an access across it or drops it; `ir_lower` makes it a load of the local and the IR's `rmw ... cas`. The typed interpreter runs it as
   one thread does, as an `ATOMIC_RMW`. The C producer gives a compare-exchange of a constant order one
   (`check_program_direct_cas`) and so does every plan's (an implicit `_Atomic` update's loop, a generic form's: [the
   builtin integration guide](c-builtins-integration.md)'s "Direct compare-exchanges").

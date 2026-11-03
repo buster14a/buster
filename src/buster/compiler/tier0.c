@@ -206,8 +206,9 @@
 //     object's address. It is one lock cmpxchg of the class's bytes at the address, naturally aligned, a full barrier
 //     on x86-64, which every order takes: the object takes the desired value where it holds the expected one, and the
 //     old value is pushed either way, so that the producer compares it with the expected one for the success. A
-//     consumer keeps it as an atomic read/modify/write's barrier. Tier 0 defers it (tier0_emit_atomic_cas); the C
-//     producer's compare-exchanges of a native object (c_check_program_atomic.c's plans).
+//     consumer keeps it as an atomic read/modify/write's barrier, and its local as a use of it (the references that
+//     give a local its home: tier0_count_references). Tier 0 defers it (tier0_emit_atomic_cas); the C producer's
+//     compare-exchanges of a native object (c_check_program_atomic.c's plans).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
@@ -4086,6 +4087,12 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
         {
             references[values[i]] += 1;
         }
+        else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+        {
+            // A compare-exchange reads its address from the local its value names (#1059), so that a parameter whose
+            // only use it is still has its home and its incoming register's save.
+            references[values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] += 1;
+        }
     }
     if (function->call_tails != 0)
     {
@@ -4096,14 +4103,16 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
 static __mmask64 tier0_lanes(int64_t first, uint32_t count);
 
 // tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
-// kinds in the four kinds' bitset), then a count per set bit, without a branch per entry.
+// kinds in the five kinds' bitset), then a count per set bit, without a branch per entry: an ATOMIC_CAS's local is its
+// value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
 static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
     const uint32_t count = function->count;
     memset(references, 0, function->local_count * sizeof(uint32_t));
-    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL;
+    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL |
+                                     1ull << BUSTER_TYPED_ATOMIC_CAS;
     const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
     _Static_assert(BUSTER_TYPED_KIND_LIMIT == 64, "a kind is a bit of a quadword");
     for (uint32_t first = 0; first < count; first += 64)
@@ -4114,7 +4123,7 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
         {
             const uint32_t i = first + (uint32_t)__builtin_ctzll(bits);
             bits &= bits - 1;
-            references[values[i]] += 1;
+            references[values[i] >> (kinds[i] == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0)] += 1;
         }
     }
     if (function->call_tails != 0)
