@@ -956,9 +956,10 @@ cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 
-Issue #141 remains open. The 9700X measurements its Done-when asks for are
-recorded in [buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01), at #1001's
-heads and at its merge with main, `cc3387f`:
+Issue #141's Done-when is met; whether it closes is the owner's call. The 9700X
+measurements its Done-when asks for are recorded in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/70a6b824ba7917e62968b0baabed847dd7d9fd0c/docs/measurements/tier1-reciprocal-141-2026-11-01),
+at #1001's heads and at its merge with main, `cc3387f`:
 
 - **Programs**, by the driver's `--tier1` (each function Tier 1's pipeline
   takes by Tier 1, the others by Tier 0), against Tier 0, clang -O0 and clang
@@ -995,8 +996,15 @@ heads and at its merge with main, `cc3387f`:
   Buster refuses too, compiles past the output limit, runs past 30 s), none in
   Buster's.
 
-The remaining scalar/ABI/spill consumers and whole-C integration are
-outstanding. `sqlite3.c`'s `sqlite3Multiply128` and `sqlite3Multiply160`,
-which selection refused whole for a 128-bit constant each, are Tier 1's since
-the 128-bit integers' split (#141, [the Tier 1 guide](tier1.md)'s "The 128-bit
-integers"): every function of `sqlite3.c` compiles by `--tier1 --tier1-strict`.
+Whole C is Tier 1's: every function of `sqlite3.c` compiles by `--tier1
+--tier1-strict` (`sqlite3Multiply128` and `sqlite3Multiply160`, which selection
+refused whole for a 128-bit constant each, since the 128-bit integers' split,
+[the Tier 1 guide](tier1.md)'s "The 128-bit integers"), as does every function
+of Lua 5.4.8 (#1204's runs, at `c1f08986`), and every function of c-testsuite's
+subset. Since #1204's merge, Tier 1 also takes thread-locals' addresses, calls
+of up to eight 64-byte vectors in registers, and addresses whose constant index
+doesn't fit a disp32 (#141); the compiler's own `main.c` by `--tier1
+-march=native` then compiles 983 of its 1,100 functions by Tier 1, and the
+others stop before selection: one naked, and 115 at the lowering to the IR, for
+vectors and x86 builtins it doesn't represent (the Tier 1 guide's list). What
+Tier 1 still refuses is that list's. The run-time gap to clang -O2 is #1189's.

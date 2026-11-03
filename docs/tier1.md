@@ -277,10 +277,20 @@ part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
 register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
 which the lowering makes aggregates in a vector register whole. Still refused: a
-vector result LLVM demotes to a hidden pointer, and naked functions, whose
-bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
+vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
+are assembly Tier 0 copies as written, an address whose offset alone is past 32
+bits, and a call whose aggregates' parts in registers other than 64-byte
+vectors take more than the red zone's 14 staging slots (four 32-byte vectors,
+for one). The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
+Functions with what the IR doesn't represent stop before Tier 1, at the
+lowering to the IR: vectors of elements other than 32-bit integers (floats,
+doubles, 8-, 16- and 64-bit integers, which `__m512i`'s intrinsics are), any
+vector at a target without AVX-512 (#775), and x86 builtins' rows, scalar ones
+among them (BMI2's `pdep`, `pext` and `bzhi`), which #732's subset left to the
+typed stream's adapter. Adding them is the IR's: its type column has 18 of the
+32 types its masks allow.
 
 ### The 128-bit integers
 
