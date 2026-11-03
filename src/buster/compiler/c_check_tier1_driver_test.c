@@ -2514,11 +2514,13 @@ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, con
                                   NULL, true);
 }
 
-// The vectors' fixture (#141), for x86-64-v4, run where the host has AVX-512 F and VL.
+// The vectors' fixture (#141), for x86-64-v4, run where the host has every feature of it: both compilers' code is
+// x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review).
 static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
-    const bool host = (x86_target_native().features & needed) == needed;
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
                                   check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
 }

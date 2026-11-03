@@ -10,8 +10,8 @@
 // and stores masks into its second half. Each is parsed by both of
 // ir_parse.c's paths into the same function, planned and emitted by both of Tier 1's paths for x86-64-v4 (AVX512F, BW,
 // DQ and VL), its allocation checked by tier1_cfg_verify, its records by the target's allow-list, and encoded by both
-// encoders into the same bytes. Where the host has AVX512F, BW and DQ, it runs in a child process on random buffers,
-// and the buffer it leaves must be the interpreter's, byte for byte (the bytes no store writes among them).
+// encoders into the same bytes. Where the host has every feature of x86-64-v4, it runs in a child process on random
+// buffers, and the buffer it leaves must be the interpreter's, byte for byte (the bytes no store writes among them).
 //
 // The fixtures: and, or, xor, not and copies at the four widths; constants (zero, every bit and others); a loop whose
 // mask phis swap, a cycle through k0, beside a mask accumulated from the buffer; more masks live at once than k1 to k7
@@ -1992,10 +1992,11 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             x86_target_parse("x86-64-v3", 9, &v3);
             const X86Target f = { .features = v3.features | BUSTER_X86_FEATURE(AVX512F), .architecture = X86_ARCH_OTHER };
             x86_target_forms(&f, foundation);
-            // The native runs need the forms the fixtures have: AVX512F's words, DQ's bytes, BW's doublewords and quadwords.
+            // The native runs execute code checked against x86-64-v4's forms (the fixtures', the typed programs' and Tier
+            // 0's rows), so they need every feature of it: AVX512F's words, DQ's bytes, BW's doublewords and quadwords,
+            // and VL's EVEX forms at 128 and 256 bits, which the vectors' fixtures take (#1204's review).
             const X86Target host = x86_target_native();
-            const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
-            test.native = (host.features & needed) == needed;
+            test.native = parsed && (host.features & v4.features) == v4.features;
             for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
             {
                 tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);

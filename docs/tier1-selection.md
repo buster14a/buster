@@ -735,9 +735,11 @@ integer). Each is parsed by both of `ir_parse.c`'s paths into the same function,
 planned and emitted by both of Tier 1's paths for x86-64-v4, its allocation
 accepted by `tier1_cfg_verify`, its records by the target's allow-list and
 `x86_semantics.c`'s coverage, and encoded by both encoders into the same bytes.
-On a host with AVX512F, BW and DQ, each runs in a child on 16 random buffers (a
-quarter all zeros, a quarter all ones), whose bytes after the run, the ones no
-store writes among them, must be the shared IR interpreter's. The fixtures:
+On a host with every feature of x86-64-v4 (AVX512F, BW, DQ and VL, which the
+vectors' fixtures' 128- and 256-bit EVEX forms need, among them), each runs in a
+child on 16 random buffers (a quarter all zeros, a quarter all ones), whose
+bytes after the run, the ones no store writes among them, must be the shared IR
+interpreter's. The fixtures:
 
 - `and`, `or`, `xor`, `not` and copies at the four widths;
 - constants: zero and every bit at each width, and others through r11;
