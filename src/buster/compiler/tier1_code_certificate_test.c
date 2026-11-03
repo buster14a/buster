@@ -18,6 +18,11 @@
 // of right after its push, each epilogue's reset from it moved to match, is refused, rbp no longer being the frame
 // record's (the caller's rbp at it, the return address above it) that the layout's offsets are computed for.
 //
+// A conditional branch's tail, walked (tier1_cert_emitted_walk): the condition is jne, laid out `je false; the true
+// edge's move; jne true`, the false block next. A move that keeps the flags (mov) reaches the true block through the
+// second jump; a zero's xor between them, which writes the flags, would leave that jne reading the xor's instead of the
+// condition, and the walk refuses it.
+//
 // A dynamic frame without calls: s(p0, ..., p6), p6 on the stack, saves the stack pointer in one branch (IR_STACK_SAVE
 // alone, which makes the frame dynamic: its rows and its incoming area from rbp, and no alloca or stack restore to leave
 // it uncertified). Its code is certified, p6 read from its incoming slot through rbp. With rbp set after the allocation
@@ -274,6 +279,51 @@ static bool tier1_code_certificate_pointer_moved(Tier1EmitTest* test, const Tier
     return refused;
 }
 
+// Block 0's tail `je b1; [edge 0's move]; jne b2`, b1 and b2 next, walked for edge 0 (to b2, the condition true): the
+// move a mov, or a zero's xor, which writes the flags. Whether the walk reaches b2 through the move.
+static bool tier1_code_certificate_walked(bool xor)
+{
+    X86Instruction records[5] = {
+        { .form = X86_FORM_JE_REL8 },
+        xor ? (X86Instruction){ .form = X86_FORM_XOR_RM32_R32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }
+            : (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX },
+        { .form = X86_FORM_JNE_REL8 },
+        { .form = X86_FORM_RET },
+        { .form = X86_FORM_RET },
+    };
+    uint32_t targets[2] = { 3, 4 };
+    uint32_t branch_of[5] = { 0, UINT32_MAX, 1, UINT32_MAX, UINT32_MAX };
+    uint32_t origins[5] = {
+        tier1_origin(TIER1_ORIGIN_CONTROL, 0),
+        tier1_origin(TIER1_ORIGIN_EDGE, 0),
+        tier1_origin(TIER1_ORIGIN_CONTROL, 0),
+        tier1_origin(TIER1_ORIGIN_NODE, 0),
+        tier1_origin(TIER1_ORIGIN_NODE, 1),
+    };
+    uint32_t block_records[4] = { 0, 3, 4, 5 };
+    // Edge 0 to b2, the condition's true successor; edge 1 to b1.
+    uint32_t successors[2] = { 2, 1 };
+    Tier1EmitResult emitted = { 0 };
+    emitted.code.records = records;
+    emitted.code.targets = targets;
+    emitted.code.count = 5;
+    emitted.origins = origins;
+    emitted.block_records = block_records;
+    emitted.cfg_input.successors = successors;
+    Tier1CertEmittedStats stats = { 0 };
+    Tier1CertEmittedBuild build = {
+        .emitted = &emitted,
+        .stats = &stats,
+        .branch_of = branch_of,
+    };
+    uint32_t taken = 0;
+    uint32_t other = 0;
+    const bool reached = tier1_cert_emitted_walk(&build, 0, 0, true, X86_FORM_JNE_REL8, true, 0, &taken) && taken == 1;
+    // The false edge leaves by the first jump, before the move, either way.
+    const bool left = tier1_cert_emitted_walk(&build, 0, 1, false, X86_FORM_JNE_REL8, true, 0, &other) && other == 0;
+    return reached && left;
+}
+
 // The prologue's records [0, end), its `mov rbp, rsp` record `m` (UINT32_MAX for none) and how far its pushes and
 // allocation after it move rsp.
 static uint32_t tier1_code_certificate_prologue(const Tier1EmitResult* emitted, uint32_t* m, int32_t* delta)
@@ -455,10 +505,15 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_saved(test, variant != 0, &counts);
     }
+    const bool kept = tier1_code_certificate_walked(false);
+    const bool clobbered = tier1_code_certificate_walked(true);
+    tier1_emit_test_expect(test, kept, "a conditional tail whose edge move keeps the flags reaches its true successor");
+    tier1_emit_test_expect(test, !clobbered, "a conditional jump after an edge move that writes the flags fails the code's certificate: it reads the move's flags");
     tier1_emit_test_expect(test, counts.certified == 8 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0 && counts.lowered == 8 && counts.pointers == 4 && counts.saved_moved == 2,
                            "the fixtures' compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
     printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
-           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused\n",
+           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused; a conditional jump after an edge's "
+           "flag-writing move %s\n",
            counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
-           counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved);
+           counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved, kept && !clobbered ? "refused" : "accepted");
 }

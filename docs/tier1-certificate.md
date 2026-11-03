@@ -572,7 +572,10 @@ The decoding:
   reach the successor's first record through that edge's moves alone, or reach
   a successor whose only predecessor it is and whose first records are the
   edge's moves. Every branch target is a block's or a stub's start, or the
-  prologue's own probes'.
+  prologue's own probes'. A conditional jump reads the condition only while the
+  flags are its comparison's: the branch's own (or, for a branch with no
+  records but its jumps, the last node's that wrote them), with no move after it
+  and no edge move before the jump writing them (a zero's `xor` does).
 - **Frame.** No record but the prologue and the epilogues writes the frame base
   register or the frame pointer, nor rsp but a call's and a `ret`'s own push and
   pop. A store through
@@ -606,7 +609,8 @@ return address still come back, but rbp is no longer the frame record). A
 dynamic frame without calls, from a stack save alone (its rows and incoming
 area from rbp), is certified with its stack parameter read through rbp; with
 rbp set after its allocation, that load and the rows are elsewhere, and it is
-refused.
+refused. A conditional tail `je false; edge move; jne true`, walked directly, is
+refused when the move is a zero's `xor`, whose flags the `jne` would read.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an
@@ -622,6 +626,8 @@ c-testsuite subset 231 of 288, none refused; most of the rest are aggregates'.
 [-E's options] file...` times the decoding, the check and both per IR
 instruction and per record, beside the emission they certify, on every
 function whose code it certifies, with the certificates' sizes and the
-uncertified functions by reason. The 9700X job runs it on the frozen
-`sqlite3.c` where `changes`' `tier1-code-certificate` entry says, and its
-numbers go to buster-performance.
+uncertified functions by reason. A refusal, or a step out of memory or past
+a limit, fails it with no report, rather than timing a smaller corpus. The
+9700X job runs it on the frozen `sqlite3.c` where `changes`'
+`tier1-code-certificate` entry says, and its numbers go to buster-performance
+(buster-performance#238 has #1212's).

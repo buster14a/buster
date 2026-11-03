@@ -906,11 +906,21 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     return reason;
 }
 
+// Whether `record` writes any flag, which a conditional jump after it would read instead of its condition's.
+static bool tier1_cert_emitted_writes_flags(const X86Instruction* record)
+{
+    uint64_t read = 0;
+    uint64_t written = 0;
+    x86_instruction_effects_scalar(record, &read, &written);
+    return (written & BUSTER_X86_RESOURCE_FLAGS) != 0;
+}
+
 // Block `b`'s tail, walked for its edge `e` (`outcome` the condition's value for a conditional branch's, its form
 // `condition`): from `start`, through its jumps and its edges' moves, to its successor's first record. True where it
 // gets there through edge e's moves alone; `taken` counts them. A path may leave the block only by a jump or past its end,
-// and arrives where it reaches the successor's first record having left `start`, or outside the tail.
-static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, uint32_t e, bool outcome, uint16_t condition, uint32_t start, uint32_t* taken)
+// and arrives where it reaches the successor's first record having left `start`, or outside the tail. A conditional jump
+// reads the condition only while `flags` (the body left them its comparison's) and no edge move before it wrote them.
+static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, uint32_t e, bool outcome, uint16_t condition, bool flags, uint32_t start, uint32_t* taken)
 {
     const Tier1EmitResult* emitted = build->emitted;
     const uint32_t target = emitted->block_records[emitted->cfg_input.successors[e]];
@@ -929,7 +939,9 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
         const Tier1Origin kind = tier1_cert_emitted_kind(origin);
         if (valid && !arrived && kind == TIER1_ORIGIN_EDGE)
         {
+            // An edge's move that writes the flags (a zero's xor) leaves no condition for a conditional jump after it.
             valid = (origin & BUSTER_TIER1_ORIGIN_PAYLOAD) == e;
+            flags = flags && !tier1_cert_emitted_writes_flags(&emitted->code.records[pc]);
             *taken += 1;
             pc += 1;
         }
@@ -940,7 +952,7 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
             const bool jump = form == X86_FORM_JMP_REL8 || form == X86_FORM_JMP_REL32;
             const bool conditional = condition != X86_FORM_NONE && (form == condition || form == inverse);
             const bool branches = jump || (form == condition && outcome) || (form == inverse && !outcome);
-            valid = branch != UINT32_MAX && (jump || conditional);
+            valid = branch != UINT32_MAX && (jump || (conditional && flags));
             pc = valid ? (branches ? emitted->code.targets[branch] : pc + 1) : pc;
         }
         else if (valid && !arrived)
@@ -1716,11 +1728,16 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
         }
         bool body = false;
         uint16_t condition = X86_FORM_NONE;
+        // The node whose run last wrote the flags, or UINT32_MAX where another record did since (a move's xor); and
+        // whether the block's conditional branch ran its own comparison.
+        uint32_t flags_node = UINT32_MAX;
+        bool compared = false;
         for (uint32_t r = lead; live && valid && r < tail; r += 1)
         {
             const uint32_t origin = emitted->origins[r];
             const Tier1Origin kind = tier1_cert_emitted_kind(origin);
             const uint32_t payload = origin & BUSTER_TIER1_ORIGIN_PAYLOAD;
+            const uint32_t from = r;
             if (kind == TIER1_ORIGIN_FRAME && payload == 0)
             {
                 // The prologue: first in the entry block (tier1_cert_emitted_prologue), writing no parameter's register.
@@ -1780,7 +1797,19 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             {
                 valid = tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_ORIGIN, r);
             }
+            // The records just decoded, [from, r]: a node's run that writes the flags leaves them its own, and any other
+            // record that does leaves them no node's.
+            bool writes = false;
+            for (uint32_t k = from; valid && k <= r && k < tail; k += 1)
+            {
+                writes = writes || tier1_cert_emitted_writes_flags(&code->records[k]);
+            }
+            flags_node = writes ? (kind == TIER1_ORIGIN_NODE ? payload : UINT32_MAX) : flags_node;
+            compared = compared || (kind == TIER1_ORIGIN_NODE && function->op[payload] == IR_CBR);
         }
+        // The flags the tail's conditional jumps read: the branch's own comparison's where it ran one, else (a branch
+        // with no records but its jumps) the last node's that wrote them; never a move's.
+        const bool flags = flags_node != UINT32_MAX && (!compared || function->op[flags_node] == IR_CBR);
         // The block's nodes past its last record.
         valid = valid && (!live || tier1_cert_emitted_flush(&build, &cursor, node_end, tail, degree, &condition));
         Tier1CertBlock* block = live ? cert_blocks + numbers[b] : 0;
@@ -1805,7 +1834,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
             const uint32_t s_first = emitted->block_records[s];
             const uint32_t moves = edge_offsets[e + 1] - edge_offsets[e];
             uint32_t taken = 0;
-            valid = tier1_cert_emitted_walk(&build, b, e, e == input->successor_offsets[b], degree == 2 ? condition : X86_FORM_NONE, tail, &taken);
+            valid = tier1_cert_emitted_walk(&build, b, e, e == input->successor_offsets[b], degree == 2 ? condition : X86_FORM_NONE, flags, tail, &taken);
             // The edge's moves: all on the path, or all at its successor's start, which this edge alone reaches.
             uint32_t at_start = 0;
             while (s_first + at_start < records && emitted->origins[s_first + at_start] == tier1_origin(TIER1_ORIGIN_EDGE, e))
