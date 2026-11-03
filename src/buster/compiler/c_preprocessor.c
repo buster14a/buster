@@ -17912,6 +17912,14 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     result = result && pp_tables_lay_out(pp, &measure, table);
     const uint64_t table_bytes = measure.length;
     pp->tables = result ? arena_reserve_exact(table_bytes, (table_bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1)) : (Arena){ 0 };
+#if !BUSTER_SANITIZER_RESOURCES
+    // A refused mapping (ENOMEM, or Valgrind's EINVAL) makes the thread's reservations compact, as c_check_deferred.c's
+    // lanes' does, and pp_initialize then tries the compact shape, whose tables are smaller.
+    if (result && pp->tables.base == 0 && (errno == ENOMEM || errno == EINVAL))
+    {
+        arena_compact = true;
+    }
+#endif
     uint8_t* tables = result ? arena_push(&pp->tables, table_bytes, 64) : 0;
     Arena laid = { .base = tables, .capacity = tables != 0 ? table_bytes : 0 };
     result = pp_tables_lay_out(pp, &laid, table) && tables != 0;
