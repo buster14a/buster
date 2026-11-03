@@ -438,4 +438,21 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epo
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9600\.3\.defer$" 'the next step refills the slot its completion freed'
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and the job still waits for the window'
 rm -f "$fixtures/runs-workflow_dispatch.json.2" "$fixtures"/count-*
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls and refilled preparations checked\n'
+# The handoff from the prepare job to the window job: a prepare step inside the window admits no hardware, and the
+# window job, reading the prepare job's pending dispatches with its ledger, repeats none that aren't visible yet.
+rm -f "$fixtures"/count-* "$fixtures/runs-push.json"
+echo '{"workflow_runs":[]}' > "$fixtures/runs-workflow_dispatch.json"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:05') run_coordinator "$work/handoff-prepare" prepare run
+expect_no_match "$fixtures/calls.log" 'hardware=admit' 'a prepare step inside the window admits no hardware'
+expect_match "$fixtures/calls.log" "^workflow run .*-f purpose=snapshot -f hardware=defer .*request=20261104\\.9700\\.1\\.defer$" 'it prepares'
+expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and hands over to the window job'
+test -s "$work/handoff-prepare/pending.tsv" || fail 'the prepare job keeps its pending dispatches'
+(cd "$work/handoff-prepare" && rm -f "$fixtures/artifact-9701.zip" && zip -q "$fixtures/artifact-9701.zip" ledger.tsv report.md pending.tsv)
+echo '{"artifacts":[{"id":9701,"name":"nightly-ledger-prepare-1","expired":false}]}' > "$fixtures/artifacts-9700.json"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$head run_coordinator "$work/handoff-window" window run
+expect_no_match "$fixtures/calls.log" '^workflow run' 'the window job repeats none of the prepare job'"'"'s dispatches the API doesn'"'"'t show yet'
+cmp "$work/handoff-prepare/pending.tsv" "$work/handoff-window/pending.tsv" || fail 'the window job starts from the prepare job'"'"'s pending dispatches'
+rm -f "$fixtures/artifacts-9700.json"
+printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations and the prepare-to-window handoff checked\n'

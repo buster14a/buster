@@ -307,8 +307,11 @@ load_ledger()
     local ledger=$1 id='' run
     printf '# buster-nightly-ledger 1\n' > "$ledger"
     : > "$work/ledger.previous"
+    local own=false
     id=$(ledger_artifact "${GITHUB_RUN_ID:?}")
-    if ! [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
+        own=true
+    else
         for run in $(api "repos/$repository/actions/workflows/nightly-backfill.yml/runs?branch=main&status=completed&per_page=10" \
             --jq '.workflow_runs[]? | select(.event == "schedule" or .event == "workflow_dispatch") | .id' | grep -E '^[1-9][0-9]*$' || true); do
             id=$(ledger_artifact "$run")
@@ -319,6 +322,10 @@ load_ledger()
     fi
     if [[ "$id" =~ ^[1-9][0-9]*$ ]] && "$gh" api "repos/$repository/actions/artifacts/$id/zip" > "$work/ledger.zip"; then
         unzip -p "$work/ledger.zip" ledger.tsv 2> /dev/null | head -c 67108864 > "$work/ledger.previous" || true
+        # This run's prepare job's dispatches not yet visible as runs, which the window job must not repeat.
+        if [ "$own" = true ]; then
+            unzip -p "$work/ledger.zip" pending.tsv 2> /dev/null | head -c 65536 | grep -E $'^pending\t' > "$work/pending.tsv" || true
+        fi
     elif git -c advice.detachedHead=false clone -q --depth 1 --branch nightly-ledger \
         "${NIGHTLY_PERFORMANCE_REMOTE:-https://github.com/buster14a/buster-performance.git}" "$work/published" 2> /dev/null &&
         [ -f "$work/published/nightly/main-coverage.tsv" ]; then
@@ -475,8 +482,8 @@ coordinate()
     fi
     load_states "$states"
     main=$main_head
-    load_ledger "$ledger"
     : > "$pending"
+    load_ledger "$ledger"
     times=$("$tool" window-times --now "$(now)")
     cycle=$(awk -F '\t' '$1 == "cycle" { print $2 }' <<< "$times")
     start=$(awk -F '\t' '$1 == "start" { print $2 }' <<< "$times")
@@ -520,7 +527,8 @@ coordinate()
             sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
         "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
             --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" \
-            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" > "$work/plan.tsv"
+            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" \
+            $( [ "$phase" = prepare ] && printf -- '--prepare-only' ) > "$work/plan.tsv"
         cat "$work/plan.tsv"
         verdict=''
         while IFS= read -r line; do

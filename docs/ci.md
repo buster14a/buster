@@ -322,7 +322,11 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    daily diagnostics the old schedule ran. It also dispatches the plain rows of
    the oldest states that have none, three at a time and forty a cycle. A
    prepare job that waits for the window plans again every five minutes until
-   it opens, so each completed preparation frees its slot for the next.
+   it opens, so each completed preparation frees its slot for the next. It
+   never admits hardware, even when a step lands at 04:00 or carries an
+   override: admission is the window job's alone. The window job starts from
+   the prepare job's ledger and its pending dispatches, so a dispatch the API
+   doesn't show yet isn't repeated.
 4. **Measure.** Inside the window it admits one 9700X run at a time: the
    snapshot's comprehensive run first, then the oldest ready state. While the
    snapshot's hosted rows are in flight, it keeps room for the snapshot. If

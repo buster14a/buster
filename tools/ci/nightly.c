@@ -1855,6 +1855,9 @@ struct NightlyPlanInput
     const char* override;
     // First-parent states of the last fortnight before the epoch: out of scope, reported.
     uint32_t earlier;
+    // The prepare job's steps: hosted preparations alone, never a hardware admission, which is the window job's, so that
+    // a step at or after 04:00 (or under an override) can't dispatch one the window job doesn't know of.
+    bool prepare_only;
 };
 
 typedef struct NightlyCycleState NightlyCycleState;
@@ -2276,7 +2279,12 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 }
             }
         }
-        if (inside && cycle.admit_in_flight)
+        if (inside && input->prepare_only)
+        {
+            verdict = "prepared; the window job admits hardware";
+            done = true;
+        }
+        else if (inside && cycle.admit_in_flight)
         {
             verdict = "a hardware run is in flight";
         }
@@ -3135,6 +3143,7 @@ struct NightlyScenario
     char refs[8][41];
     uint32_t ref_count;
     bool dry_run;
+    bool prepare_only;
     const char* override;
     char output[1 << 15];
     char report[1 << 15];
@@ -3234,6 +3243,7 @@ static void nightly_scenario_plan(NightlyScenario* scenario, int64_t now)
         .backlog_bound = 1500,
         .snapshot_bound = 1920,
         .override = scenario->override,
+        .prepare_only = scenario->prepare_only,
     };
     // A fresh copy of the folded fields for each plan, as each coordinator step reads the inputs afresh.
     for (uint32_t i = 0; i < scenario->states.count; i += 1)
@@ -3385,6 +3395,20 @@ static void nightly_test_plan(NightlyTest* test)
     scenario->dry_run = true;
     nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 13, 0));
     nightly_expect(test, nightly_count(scenario, "would-dispatch\tsnapshot\tadmit") == 0, "a dry run's override admits nothing");
+    nightly_scenario_free(scenario);
+
+    // The prepare job's step inside the window (or under an override) prepares and admits nothing: admission is the
+    // window job's alone, which would not know of a hardware run the prepare job dispatched.
+    scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_DEFERRED);
+    scenario->prepare_only = true;
+    nightly_scenario_plan(scenario, opening);
+    nightly_expect(test, nightly_count(scenario, "dispatch\tsnapshot\tadmit") == 0 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared; the window job admits hardware"), "the prepare job admits nothing inside the window");
+    scenario->override = "validating the coordinator";
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 4, 13, 0));
+    nightly_expect(test, nightly_count(scenario, "dispatch\tsnapshot\tadmit") == 0, "nor under an override");
     nightly_scenario_free(scenario);
 
     // An ineligible snapshot: the newest eligible earlier state is measured instead, and said so.
@@ -3681,6 +3705,7 @@ static int nightly_command_plan(int argc, char** argv)
         .snapshot_bound = (int64_t)nightly_option_number(argc, argv, "--snapshot-bound", 1920, 86400),
         .override = override,
         .earlier = (uint32_t)nightly_option_number(argc, argv, "--earlier", 0, UINT32_MAX),
+        .prepare_only = argc >= 3 && strcmp(argv[argc - 1], "--prepare-only") == 0,
     };
     FILE* report = fopen(nightly_required(argc, argv, "--report"), "wb");
     if (report == NULL)
