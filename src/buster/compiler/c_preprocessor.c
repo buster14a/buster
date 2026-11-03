@@ -156,8 +156,8 @@ _Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_range looks 
 #define BUSTER_PP_MAX_PARAMETERS 4096
 // Token arrays get whole-vector stores past their last token.
 #define BUSTER_PP_TOKEN_SLACK 64
-// The arrays of records, each reserved in an arena of its own.
-#define BUSTER_PP_ARRAYS 40
+// The history's tables that outgrow their slice of the shared one, each moving to an arena of its own (pp_history_grow).
+#define BUSTER_PP_ARRAYS 8
 // The base pages before the huge pages of the tables that a translation unit usually fills to a few hundred kilobytes:
 // the macros and their names' index, the compiled bodies, and the history's substitutions and generated tokens. On
 // sqlite3.c (with glibc's headers) each would otherwise take a huge page the kernel clears whole (2 MB, about 86 us on
@@ -411,8 +411,9 @@ struct PPTokens
     uint32_t* locations;
     uint32_t count;
     uint32_t capacity;
-    // A column per arena, so that each one's first pages are base pages (lane.c): a stack that holds a few tokens touches
-    // a few kilobytes, where columns side by side would each start in a 2 MB huge page the kernel clears.
+    // The output's columns, an arena each, so that each one's first pages are base pages (lane.c): an output of a few
+    // tokens touches a few kilobytes, where columns side by side would each start in a 2 MB huge page the kernel clears.
+    // A stack's columns are in the unit's tables, all base pages (pp_tables_lay_out), and these are empty.
     Arena arenas[4];
     // Temporary buffers only. The final output has no origin column, just PPHistoryRun records.
     uint32_t* origins;
@@ -1321,10 +1322,12 @@ struct Preprocessor
     // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
     uint64_t split_kinds;
     // Memory for files' leading-space words and directive tables, macro bodies' spellings and paths. Files' token
-    // columns (kinds, starts and values) have an arena each, `columns`, and so do the output and the stacks (PPTokens)
-    // and each array of records (`arrays`, whose first pages are then base pages).
+    // columns (kinds, starts and values) have an arena each, `columns`, and so does the output (PPTokens). The tables of
+    // a fixed size, the records' and the stacks', share `tables`, in base pages (pp_tables_lay_out); a history table that
+    // outgrows its slice moves to one of `arrays`.
     Arena arena;
     Arena columns[3];
+    Arena tables;
     Arena arrays[BUSTER_PP_ARRAYS];
     uint32_t array_count;
     // The output, and the three stacks of buffers.
@@ -1726,9 +1729,6 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 }
 
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
-
-static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
-static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 
 #include "c_preprocessor_history.c"
@@ -17717,18 +17717,16 @@ static void pp_dedupe_directories(Preprocessor* pp)
     scratch_end(scratch);
 }
 
-// An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
-// An array of its own of `count` entries of `size` bytes, while `*reserved` (which becomes false if it can't be): the
-// reservations stop at the first that fails.
-// pp_array whose first `small` bytes are base pages (arena_reserve_small): for a table a translation unit usually fills
-// to a few hundred kilobytes, where the first huge page past them would cost more than the base pages it replaces.
-static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small, bool exact)
+// An array of `count` records of `size` bytes in an arena of its own (address space, touched as it is used), whose first
+// `small` bytes are base pages (arena_reserve_small), while `*reserved` (which becomes false if it can't be): where a
+// history table moves when it outgrows its slice (pp_history_grow).
+static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
 {
     void* result = 0;
     if (*reserved && pp->array_count < BUSTER_PP_ARRAYS)
     {
         Arena* arena = &pp->arrays[pp->array_count];
-        *arena = exact ? arena_reserve_exact(count * size + 64, small) : arena_reserve_small(count * size + 64, small);
+        *arena = arena_reserve_small(count * size + 64, small);
         result = arena_push_array(arena, count, size, 64);
         pp->array_count += 1;
     }
@@ -17736,14 +17734,77 @@ static void* pp_array_with(Preprocessor* pp, bool* reserved, uint64_t count, uin
     return result;
 }
 
-static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small)
+// `count` records of `size` bytes from `arena`, and 64 bytes past them; none if `count` is 0 or they don't fit.
+static void* pp_table(Arena* arena, uint64_t count, uint64_t size)
 {
-    return pp_array_with(pp, reserved, count, size, small, false);
+    void* result = count != 0 ? arena_push_array(arena, count, size, 64) : 0;
+    return result != 0 && arena_push(arena, 64, 1) != 0 ? result : 0;
 }
 
-static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size)
+// A stack of `capacity` tokens (and BUSTER_PP_TOKEN_SLACK), its columns from `arena`, as pp_tokens_reserve makes the
+// output's in arenas of their own.
+static bool pp_tokens_lay_out(PPTokens* tokens, Arena* arena, uint32_t capacity)
 {
-    return pp_array_small(pp, reserved, count, size, BUSTER_ARENA_SMALL_BYTES);
+    const uint64_t slots = (uint64_t)capacity + BUSTER_PP_TOKEN_SLACK;
+    tokens->kinds = pp_table(arena, slots, 1);
+    tokens->flags = pp_table(arena, slots, 1);
+    tokens->values = pp_table(arena, slots, sizeof(uint32_t));
+    tokens->locations = pp_table(arena, slots, sizeof(uint32_t));
+    tokens->count = 0;
+    tokens->capacity = capacity;
+    return tokens->kinds != 0 && tokens->flags != 0 && tokens->values != 0 && tokens->locations != 0;
+}
+
+// The unit's tables of a fixed size, each pushed whole from `arena` as the unit starts: the records, the three stacks of
+// buffers, and the file cache, unless the options give one. Returns false if one doesn't fit.
+//
+// They share one reservation, all of it base pages (#652). In an arena of its own each was a mapping, a protection change
+// and, once touched, page tables of its own, 2 to 3.4 us on the 9700X with their teardown, though most touch a page or
+// none on a small unit: an empty file's unit reserved 39 of its 81 mappings for them, and touched 19. Base pages
+// throughout cost the large units little, since none of the tables is large there either: on sqlite3.c the most any of
+// them touches is 368 KB (the macros), and on this compiler's main.c 1.9 MB (the items) and 1.1 MB (the macros).
+static bool pp_tables_lay_out(Preprocessor* pp, Arena* arena, InternTable* table)
+{
+    const uint32_t shift = pp->capacity_shift;
+    pp->ranges = pp_table(arena, BUSTER_PP_MAX_RANGES >> shift, sizeof(PPRange));
+    pp->datas = pp_table(arena, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFileData));
+    pp->dependencies = pp_table(arena, pp->options.dependencies.enabled ? BUSTER_PP_MAX_FILES >> shift : 0, sizeof(DependencyFile));
+    pp->record_data = pp_table(arena, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
+    pp->files = pp_table(arena, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFile));
+    pp->file_slots = pp_table(arena, BUSTER_PP_FILE_SLOTS >> shift, sizeof(uint32_t));
+    pp->directories = pp_table(arena, BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
+    pp->directory_lengths = pp_table(arena, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
+    pp->directory_system = pp_table(arena, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
+    pp->line_directives = pp_table(arena, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, sizeof(PPLineDirective));
+    pp->expansion_starts = pp_table(arena, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, sizeof(PPExpansionStart));
+    pp->silent_pragmas = pp_table(arena, BUSTER_PP_MAX_SILENT_PRAGMAS >> shift, sizeof(PPExpansionStart));
+    pp->embeds = pp_table(arena, BUSTER_PP_MAX_EMBEDS >> shift, sizeof(PPEmbed));
+    pp->macro_of = pp_table(arena, intern_id_limit(table), sizeof(PPMacroId));
+    pp->is_macro = pp_table(arena, intern_id_limit(table) / 64, sizeof(uint64_t));
+    pp->poisoned = pp_table(arena, intern_id_limit(table) / 64, sizeof(uint64_t));
+    pp->macros = pp_table(arena, BUSTER_PP_MAX_MACROS >> shift, sizeof(PPMacro));
+    pp->items = pp_table(arena, BUSTER_PP_MAX_ITEMS >> shift, sizeof(PPItem));
+    pp->parameters = pp_table(arena, BUSTER_PP_MAX_ITEMS >> shift, sizeof(IdentId));
+    // The vectorized path's compiled bodies, which a unit with history doesn't use.
+    pp->templates = pp_table(arena, BUSTER_VECTOR_PATH(pp->vectorized) && pp->options.no_history ? BUSTER_PP_MAX_TEMPLATES >> shift : 0, sizeof(PPTemplate));
+    pp->pushed_names = pp_table(arena, BUSTER_PP_MAX_PUSHED >> shift, sizeof(IdentId));
+    pp->pushed_macros = pp_table(arena, BUSTER_PP_MAX_PUSHED >> shift, sizeof(PPMacroId));
+    pp->contexts = pp_table(arena, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPContext));
+    pp->conditionals = pp_table(arena, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPConditional));
+    pp->invocations = pp_table(arena, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPInvocation));
+    pp->argument_records = pp_table(arena, BUSTER_PP_MAX_STACK_TOKENS >> shift, sizeof(PPArgument));
+    pp->capture_frames = pp_table(arena, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPCapture));
+    const bool stacks = pp_tokens_lay_out(&pp->arguments, arena, BUSTER_PP_MAX_STACK_TOKENS >> shift) && pp_tokens_lay_out(&pp->captures, arena, BUSTER_PP_MAX_STACK_TOKENS >> shift) &&
+                        pp_tokens_lay_out(&pp->expansions, arena, BUSTER_PP_MAX_STACK_TOKENS >> shift);
+    // About 120 KB, most of it the lanes' arenas: here, where a reservation of its own would take it past its first 64 KB
+    // and into a huge page.
+    pp->cache = pp->options.files != 0 ? pp->options.files : pp_table(arena, 1, sizeof(FileCache));
+    return pp->ranges != 0 && pp->datas != 0 && (pp->dependencies != 0 || !pp->options.dependencies.enabled) && pp->record_data != 0 && pp->files != 0 &&
+           pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 && pp->directory_system != 0 && pp->line_directives != 0 &&
+           pp->expansion_starts != 0 && pp->silent_pragmas != 0 && pp->embeds != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->poisoned != 0 &&
+           pp->macros != 0 && pp->items != 0 && pp->parameters != 0 && (pp->templates != 0 || !BUSTER_VECTOR_PATH(pp->vectorized) || !pp->options.no_history) &&
+           pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 && pp->argument_records != 0 &&
+           pp->capture_frames != 0 && stacks && pp->cache != 0;
 }
 
 // SOURCE_DATE_EPOCH is a complete, nonnegative decimal integer. strtoll handles overflow; the first-byte and end
@@ -17844,40 +17905,17 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         largest = largest > largest_tables[i] ? largest : largest_tables[i];
     }
     pp->capacity_shift = arena_capacity_shift(largest);
-    result = result && pp_tokens_reserve(&pp->output, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->arguments, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) &&
-             pp_tokens_reserve(&pp->captures, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift)) && pp_tokens_reserve(&pp->expansions, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift));
-    pp->ranges = pp_array(pp, &result, (BUSTER_PP_MAX_RANGES >> pp->capacity_shift), sizeof(PPRange));
-    pp->datas = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFileData));
-    pp->dependencies = options->dependencies.enabled ? pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(DependencyFile)) : NULL;
-    pp->record_data = pp_array(pp, &result, BUSTER_PP_MAX_FILES, sizeof(uint32_t));
-    pp->files = pp_array(pp, &result, (BUSTER_PP_MAX_FILES >> pp->capacity_shift), sizeof(PPFile));
-    pp->file_slots = pp_array(pp, &result, BUSTER_PP_FILE_SLOTS >> pp->capacity_shift, sizeof(uint32_t));
+    result = result && pp_tokens_reserve(&pp->output, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift));
+    // The tables of a fixed size in one reservation, as long as they measure on an arena of no memory, made writable at
+    // once and laid out again on it (or on no memory, which leaves every table's pointer 0).
+    Arena measure = arena_measure();
+    result = result && pp_tables_lay_out(pp, &measure, table);
+    const uint64_t table_bytes = measure.length;
+    pp->tables = result ? arena_reserve_exact(table_bytes, (table_bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1)) : (Arena){ 0 };
+    uint8_t* tables = result ? arena_push(&pp->tables, table_bytes, 64) : 0;
+    Arena laid = { .base = tables, .capacity = tables != 0 ? table_bytes : 0 };
+    result = pp_tables_lay_out(pp, &laid, table) && tables != 0;
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp->directories = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(char*));
-    pp->directory_lengths = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(uint8_t));
-    pp->line_directives = pp_array(pp, &result, (BUSTER_PP_MAX_LINE_DIRECTIVES >> pp->capacity_shift), sizeof(PPLineDirective));
-    pp->expansion_starts = pp_array(pp, &result, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift) + 1, sizeof(PPExpansionStart));
-    pp->silent_pragmas = pp_array(pp, &result, (BUSTER_PP_MAX_SILENT_PRAGMAS >> pp->capacity_shift), sizeof(PPExpansionStart));
-    pp->embeds = pp_array(pp, &result, (BUSTER_PP_MAX_EMBEDS >> pp->capacity_shift), sizeof(PPEmbed));
-    pp->macro_of = pp_array_with(pp, &result, intern_id_limit(table), sizeof(PPMacroId), BUSTER_PP_TABLE_SMALL_BYTES, true);
-    pp->is_macro = pp_array_with(pp, &result, intern_id_limit(table) / 64, sizeof(uint64_t), BUSTER_ARENA_SMALL_BYTES, true);
-    pp->poisoned = pp_array_with(pp, &result, intern_id_limit(table) / 64, sizeof(uint64_t), BUSTER_ARENA_SMALL_BYTES, true);
-    pp->macros = pp_array_small(pp, &result, (BUSTER_PP_MAX_MACROS >> pp->capacity_shift), sizeof(PPMacro), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->items = pp_array_small(pp, &result, (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift), sizeof(PPItem), BUSTER_PP_TABLE_SMALL_BYTES);
-    pp->parameters = pp_array(pp, &result, (BUSTER_PP_MAX_ITEMS >> pp->capacity_shift), sizeof(IdentId));
-    // About 250 templates of 260 bytes on sqlite3.c and on this compiler's main.c: past pp_array's 64 KB of base
-    // pages, the first huge page cost them 2 MB of clearing.
-    pp->templates = BUSTER_VECTOR_PATH(pp->vectorized) && pp->options.no_history
-                        ? pp_array_small(pp, &result, (BUSTER_PP_MAX_TEMPLATES >> pp->capacity_shift), sizeof(PPTemplate), BUSTER_PP_TABLE_SMALL_BYTES)
-                        : 0;
-    pp->pushed_names = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(IdentId));
-    pp->pushed_macros = pp_array(pp, &result, (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift), sizeof(PPMacroId));
-    pp->contexts = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPContext));
-    pp->conditionals = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPConditional));
-    pp->invocations = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPInvocation));
-    pp->argument_records = pp_array(pp, &result, (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift), sizeof(PPArgument));
-    pp->capture_frames = pp_array(pp, &result, (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift), sizeof(PPCapture));
     if (result && !pp->options.no_history)
     {
         // Five retained tables and three temporary columns share base pages for their first few records. Only a
@@ -17897,15 +17935,12 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         }
         result = result && pp->history != 0 && pp->substitutions != 0 && pp->generated != 0 && pp->history_sources != 0 && pp->history_runs != 0;
     }
-    // The file cache: the options', made for the same language mode and intern table, or one of the unit's own.
-    pp->cache = options->files;
-    if (pp->cache == 0)
+    // The file cache: the options', made for the same language mode and intern table, or one of the unit's own, in its
+    // tables (pp_tables_lay_out).
+    if (options->files == 0)
     {
-        // A reservation of its own: its 41 KB (with every lane's arenas) would take the arena past its first 64 KB, and
-        // its later pushes into a huge page the kernel clears whole.
-        pp->cache = result ? pp_array(pp, &result, 1, sizeof(FileCache)) : 0;
-        pp->owns_cache = pp->cache != 0;
-        result = result && pp->cache != 0 && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
+        pp->owns_cache = result;
+        result = result && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
              pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
@@ -18090,6 +18125,7 @@ static void pp_release_unit(Preprocessor* pp)
     {
         arena_release(&pp->arrays[i]);
     }
+    arena_release(&pp->tables);
     *pp = (Preprocessor){ 0 };
 }
 
