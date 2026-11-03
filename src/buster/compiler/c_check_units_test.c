@@ -59,6 +59,8 @@
 //   again, and the executable the test read runs.
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the first program's objects and executable as by --lanes 1.
+// - The benchmark (benchmark-check-units, #1128) of three units by --lanes 1 and 2, a run each, which must report both
+//   counts, and a lane count of 0, which it must refuse.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
 //   --poison-arenas: each file's status and object as with the file alone, and its diagnostics in their place, in the
 //   files' order.
@@ -1809,6 +1811,29 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
     free(diagnostics);
 }
 
+// benchmark-check-units (#1128), at its smallest: three units by one lane and two, a run each, which must succeed and
+// report both counts against one lane's; and a lane count it can't take, which it must refuse.
+static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    char output[PATH_MAX];
+    snprintf(output, sizeof(output), "%s/benchmark.txt", directory);
+    char* arguments[] = { (char*)executable, "benchmark-check-units", "--units", "3", "--functions", "4", "--lanes", "1,2", "--runs", "1", NULL };
+    const int status = BUSTER_HOST_VECTOR ? check_units_test_run(directory, arguments, output, "/dev/null", false) : 0;
+    uint64_t length = 0;
+    char* text = BUSTER_HOST_VECTOR ? check_units_test_read(output, &length) : NULL;
+    const bool reported = !BUSTER_HOST_VECTOR || (text != NULL && strstr(text, "check units, --lanes 1: ") != NULL && strstr(text, "check units, --lanes 2: ") != NULL &&
+                                                  strstr(text, "time-runs: done, 0 failed processes") != NULL);
+    check_units_test_expect(tally, status == 0 && reported, "the units' benchmark times each lane count", output);
+    free(text);
+    char* refused[] = { (char*)executable, "benchmark-check-units", "--lanes", "1,0", NULL };
+    const int refusal = BUSTER_HOST_VECTOR ? check_units_test_run(directory, refused, "/dev/null", "/dev/null", false) : 1;
+    check_units_test_expect(tally, refusal == 1, "the units' benchmark took no lanes as a lane count", directory);
+    if (BUSTER_HOST_VECTOR)
+    {
+        printf("  benchmark: benchmark-check-units by 1 and 2 lanes, and a count of none refused\n");
+    }
+}
+
 static int run_check_units_tests(int argc, char** argv)
 {
     CheckUnitsTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -1922,6 +1947,7 @@ static int run_check_units_tests(int argc, char** argv)
 #endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
+        check_units_test_benchmark(&tally, executable, directory);
     }
     if (made && !keep && tally.failures == 0)
     {
