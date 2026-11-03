@@ -132,7 +132,13 @@
 //   - NEG and NOT: the operand (of `class`) negated or complemented (NOT for integers alone).
 //   - CONVERT: the operand converted to `class` (by C's rules for the two classes; a conversion to a narrower integer
 //     keeps the low bits).
-//   - LOAD: the value of `class` at the address the operand (U64) holds.
+//   - LOAD: the value of `class` at the address the operand (U64) holds. An integer class's LOAD, STORE and SET take a
+//     `value` (#1059): 0 for an ordinary access, or BUSTER_TYPED_ACCESS_ATOMIC with a C memory order
+//     (BUSTER_TYPED_FENCE_ORDER's bits) for an atomic one, a single access of the class's bytes, naturally aligned. Its
+//     code is an ordinary access's: on x86-64 a naturally aligned access of 1, 2, 4 or 8 bytes is atomic, and the total
+//     store order gives a load's and a release store's orders; a seq_cst store's fence is the FENCE of seq_cst after it,
+//     which its producer writes. The IR keeps the order (BUSTER_IR_ATOMIC), and ir_lower refuses a marker of another
+//     shape; Tier 0, whose code is the same either way, doesn't read it.
 //   - ADD ... SHR: the two operands' sum ... (by `class`, which both operands have, but a shift's count, any integer
 //     class); DIV, MOD and SHR divide and shift right as `class`'s signedness says. The generated code wraps.
 //   - PTR_ADD: the first operand (U64) plus the second (I64 or U64) times `value`, the element's size (nonzero).
@@ -186,6 +192,14 @@
 //     needs an instruction, mfence (tier0_fence_records); Tier 0, which moves no access across an entry, emits nothing
 //     for the others: the C producer's __atomic_thread_fence, __atomic_signal_fence, __sync_synchronize and C11's
 //     fences of a constant order (c_check_program_helpers.c's check_program_direct_fence).
+//   - ATOMIC_RMW: an atomic read/modify/write (#1059), which pops an address (U64) and an operand of `class` (an
+//     integer's, 1 to 8 bytes) and pushes the object's old value, of `class`: `value` its operation
+//     (BUSTER_TYPED_RMW_ADD for an addition, an exchange without it) and its C memory order (BUSTER_TYPED_FENCE_ORDER's
+//     bits). It is one locked access of the class's bytes at the address, naturally aligned: xchg (an exchange) or lock
+//     xadd (an addition), each a full barrier on x86-64, which every order takes. A consumer keeps it as an atomic
+//     store's and load's barrier: no access moves across it, and it is never eliminated. Tier 0 defers it
+//     (tier0_emit_atomic_rmw); the C producer's exchanges, additions and subtractions of a constant order
+//     (c_check_program_helpers.c's check_program_direct_rmw).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
@@ -278,11 +292,16 @@
 #define BUSTER_TYPED_X86 48
 // Past the vectors' kind, so that the vector validator leaves it to the scalar one, whose vectors' test takes it.
 #define BUSTER_TYPED_FENCE 49
-#define BUSTER_TYPED_KINDS 50
+// Past the fence, as it is, for the scalar validator alone.
+#define BUSTER_TYPED_ATOMIC_RMW 50
+#define BUSTER_TYPED_KINDS 51
 // A FENCE's value: its order (C's memory_order) and its scope (a signal fence's bit), and the one that takes mfence.
 #define BUSTER_TYPED_FENCE_ORDER 0x07
 #define BUSTER_TYPED_FENCE_SIGNAL 0x08
 #define BUSTER_TYPED_FENCE_SEQ_CST 5
+#define BUSTER_TYPED_ACCESS_ATOMIC 0x10
+// An ATOMIC_RMW's operation: an addition (lock xadd), and without it an exchange (xchg).
+#define BUSTER_TYPED_RMW_ADD 0x08
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -757,6 +776,13 @@ static bool tier0_moves_stack(uint32_t kind)
 static bool tier0_fence_valid(uint64_t value)
 {
     return (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_FENCE_SIGNAL)) == 0 && (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
+}
+
+// Whether an ATOMIC_RMW is one: of an integer class, and of an order of C's (0 to 5) and the operation's bit, nothing else.
+static bool tier0_atomic_rmw_valid(uint32_t class, uint64_t value)
+{
+    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_RMW_ADD)) == 0 &&
+           (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
 }
 
 // A FENCE's records: mfence for a thread fence of seq_cst, which orders the thread's stores before its later loads, as
@@ -2764,6 +2790,11 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     // FENCE: tier0_emit_deferred's, mfence or nothing by its value (tier0_fence_records).
     tier0_defer(BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
+    // ATOMIC_RMW: tier0_emit_deferred's, of each integer class (tier0_emit_atomic_rmw).
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_U64; class += 1)
+    {
+        tier0_defer(BUSTER_TYPED_ATOMIC_RMW, class, BUSTER_TIER0_VARIANT_PLAIN);
+    }
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -3329,6 +3360,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_TAIL_CALL] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
     [BUSTER_TYPED_FENCE] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
+    [BUSTER_TYPED_ATOMIC_RMW] = BUSTER_TIER0_ADDRESSED,
     [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
@@ -6093,6 +6125,24 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
     }
 }
 
+// An ATOMIC_RMW's records: xchg (an exchange) or lock xadd (an addition) of the operand's register, at depth - 1, with
+// the object at the address in depth - 2's register, which leaves the old value in the operand's register, then the old
+// value in depth - 2's register, extended as the class's load extends it (tier0_load_form's movsx, movzx or mov).
+#define BUSTER_TIER0_ATOMIC_RMW_RECORDS 2
+static void tier0_emit_atomic_rmw(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t depth = entries->depths[i];
+    const uint32_t class = entries->key_classes[i];
+    const uint8_t address = tier0_integer_depths[depth - 2];
+    const uint8_t operand = tier0_integer_depths[depth - 1];
+    const uint32_t bytes = tier0_class_bytes(class);
+    const bool add = (function->values[i] & BUSTER_TYPED_RMW_ADD) != 0;
+    const uint32_t form = add ? bytes == 1 ? X86_FORM_LOCK_XADD_M8_R8 : bytes == 2 ? X86_FORM_LOCK_XADD_M16_R16 : bytes == 4 ? X86_FORM_LOCK_XADD_M32_R32 : X86_FORM_LOCK_XADD_M64_R64
+                              : bytes == 1 ? X86_FORM_XCHG_RM8_R8 : bytes == 2 ? X86_FORM_XCHG_RM16_R16 : bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
+    tier0_put(writer, tier0_instruction(form, operand, address, BUSTER_X86_MEMORY_BASE, 0, 0));
+    tier0_put(writer, tier0_instruction(tier0_load_form(class), address, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+}
+
 // A FENCE's records (tier0_fence_records): mfence for a thread fence of seq_cst, none for the others.
 static void tier0_emit_fence(uint64_t value, Tier0Writer* writer)
 {
@@ -8174,6 +8224,10 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     {
         tier0_emit_fence(function->values[i], writer);
     }
+    else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+    {
+        tier0_emit_atomic_rmw(function, entries, i, writer);
+    }
     else if (memory && tier0_vector_entry(entries, i))
     {
         tier0_emit_vector_entry(function, entries, frame, homes, i, writer);
@@ -8395,6 +8449,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     else if (kind == BUSTER_TYPED_FENCE)
     {
         count = tier0_fence_records(function->values[i]);
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+    {
+        count = BUSTER_TIER0_ATOMIC_RMW_RECORDS;
     }
     else if (memory && tier0_vector_entry(entries, i))
     {
@@ -8782,9 +8840,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 {
                     clobbers |= tier0_tail_clobbers(function, i);
                 }
-                else if (function->kinds[i] == BUSTER_TYPED_FENCE)
+                else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
                 {
-                    // No register: mfence or nothing.
+                    // No register past its operands': mfence or nothing, or an atomic read/modify/write in its operands'.
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
@@ -8942,6 +9000,13 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     else if (kind == BUSTER_TYPED_FENCE)
     {
         // Neither stack: mfence or nothing.
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+    {
+        // Its address and its operand, whose registers it writes and no other.
+        uses[0] = true;
+        window[0] = 2;
+        touch[0] = (int32_t)before[0] - 1;
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
@@ -10714,6 +10779,18 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                     }
                     continue;
                 }
+                if (kind == BUSTER_TYPED_ATOMIC_RMW)
+                {
+                    // An atomic read/modify/write takes its operand of its class and an address, and leaves the old value.
+                    const uint32_t operand = tier0_pop(&validator, i);
+                    const uint32_t address = tier0_pop(&validator, i);
+                    if (!tier0_atomic_rmw_valid(class, value) || operand != class || address != BUSTER_TYPED_CLASS_U64)
+                    {
+                        tier0_reject(&validator, i, "an atomic read/modify/write's address, operand, class, operation or order");
+                    }
+                    tier0_push(&validator, class);
+                    continue;
+                }
                 tier0_validate_vector(function, &validator, hashes, seen, i);
                 continue;
             }
@@ -12025,9 +12102,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             {
                 clobbers |= tier0_tail_clobbers(function, i);
             }
-            else if (function->kinds[i] == BUSTER_TYPED_FENCE)
+            else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
             {
-                // No register, as the scalar selection has it.
+                // No register past its operands', as the scalar selection has it.
             }
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {

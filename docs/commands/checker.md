@@ -15,13 +15,16 @@ requirements. [Command index](README.md).
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
   `c_check_declspec.c` and `c_check_literal_diagnostic.c` word its refusals of
   declaration specifiers that don't combine and of numeric constants as clang
-  does, at clang's places (#1127), and only a refusal runs them;
+  does, at clang's places (#1127), and only a refusal runs them; a constant
+  before a unit's first syntax error, which only the parse reached, is checked
+  first, so that its error is clang's first (`c_checker_driver.c`);
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
   "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
   an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
-  "The sparse output columns", #628); `c_check_binding.c` publishes each use's retained answer from those events
+  "The sparse output columns", #628), and `attributes` as a wide one, of 64-bit
+  values ("The attributes column", #1167); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`

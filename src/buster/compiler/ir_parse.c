@@ -767,7 +767,7 @@ static void ir_parse_instruction(IrParseState* state)
                     };
                     row.c = ir_parse_named(state, names, IR_PREDICATE_COUNT);
                 }
-                if (row.op == IR_LOAD || row.op == IR_STORE)
+                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)
                 {
                     ir_parse_keyword(state, "align=");
                     const uint32_t alignment = (uint32_t)ir_parse_unsigned(state, UINT32_C(1) << 31, false);
@@ -779,9 +779,29 @@ static void ir_parse_instruction(IrParseState* state)
                     {
                         row.alignment_log2 = (uint8_t)__builtin_ctz(alignment);
                     }
+                }
+                if (row.op == IR_ATOMIC_RMW)
+                {
+                    // An atomic read/modify/write's operation and its order (#1059), after its alignment.
+                    static const char* const operations[2] = {
+                        "xchg",
+                        "add",
+                    };
+                    row.c = ir_parse_named(state, operations, 2);
+                    const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                    row.flags = (uint8_t)(BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
+                }
+                if (row.op == IR_LOAD || row.op == IR_STORE)
+                {
                     if (ir_parse_word(state, "volatile"))
                     {
                         row.flags = BUSTER_IR_VOLATILE;
+                    }
+                    // An atomic access's order (#1059), as a fence's is named.
+                    if (ir_parse_word(state, "atomic"))
+                    {
+                        const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
                     }
                 }
             } break;

@@ -354,7 +354,7 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
     }
     valid &= depth != 0 && first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = valid ? reader->output->declarations[first] : BUSTER_CHECK_NONE;
-    valid &= declaration < parser->tokens.count && !reader->output->compound_objects[declaration];
+    valid &= declaration < parser->tokens.count && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
     TypeId type = valid ? reader->declared_types[first] : 0;
     uint32_t packed_member = 0;
     uint32_t packed_record = 0;
@@ -379,7 +379,7 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
                 if (!arrow)
                 {
                     const uint32_t natural = type_alignment_log2(types, reader->declared_types[first]);
-                    const CheckInputAttributes* attributes = reader->output->attributes[declaration];
+                    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
                     const uint32_t declared = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1 : 0;
                     complete_alignment = natural > complete_alignment ? natural : complete_alignment;
                     complete_alignment = declared > complete_alignment ? declared : complete_alignment;

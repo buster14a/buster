@@ -675,6 +675,11 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct S { int a; } s = { .a 1 };\n", "1:30: expected '=' or another designator", 0 },
     { "int a[1][2] = { [0][1] 1 };\n", "1:24: expected '=' or another designator", 0 },
     { "struct S { int a[1]; } s = { .a[0] 1 };\n", "1:36: expected '=' or another designator", 0 },
+    // After a single one, clang reads the value GNU lets follow it: what can't begin one is a missing expression.
+    { "int a[2] = { [0] };\n", "1:18: expected expression", 0 },
+    { "int a[2] = { [0 ... 1], 1 };\n", "1:23: expected expression", 0 },
+    { "int a[2] = { [0] / 2 };\n", "1:18: expected expression", 0 },
+    { "void f(int *p) { int a[2] = { [1] -1, [0] (int)2.5 }, b[2] = { [1] sizeof a, [0] *p }; }\n", "", 0 },
     // K&R definitions: the name's own identifier list, through the declarator's groups, in C17 and before.
     { "int (f(x)) int x; { return x; }\nint (*g(y)) int y; { return 0; }\n", "", 0 },
     { "int f(x) int x; 5\n", "1:17: expected function body after function declarator", 0 },
@@ -883,6 +888,60 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int a) { do ; while a; }\n", "1:28: expected '(' after 'do/while'", 0 },
     // A braced initializer in a list takes no postfix operator, which both paths took before.
     { "int a[2][1] = { {1}[0] };\n", "1:20: expected '}'", 0 },
+    // A `#pragma pack` may follow a tag's body, and the specifiers go on (clang's error is the checker's, "cannot combine
+    // with previous 'struct' declaration specifier"); another pragma there is a missing `;`.
+    { "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nint x;\n", "", 0, true },
+    { "struct P { char c; int i; }\n_Pragma(\"pack(pop)\") static int x;\n", "", 0, true },
+    { "struct P { char c; int i; }\n#pragma GCC diagnostic push\nint x;\n", "1:28: expected ';' after struct", 0 },
+    { "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nx y;\n", "2:28: expected ';' after struct", 0 },
+    // A string follows no subscript (K6 let it, for asm operands' `[name] "constraint"`, which go to the scalar parser).
+    { "void g(const char *, const char *); void f(char **a) { g(a[0] \"x\"); }\n", "1:63: expected ')'", 0 },
+    { "void f(int x) { asm volatile (\"\" : [r] \"=r\" (x) : [i] \"r\" (x)); }\n", "", 0 },
+    // A parameter's declarator without specifiers is an implicit int, at its name or where its name would be; a typeless
+    // abstract declarator's and an unnamed bit-field's are too.
+    { "int f(*p);\n", "1:8: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f(*);\n", "1:8: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f([3]);\n", "1:7: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f((void));\n", "1:8: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f(int a, (*b)(void));\n", "1:16: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f(* char p);\n", "1:9: invalid parameter name: 'char' is a keyword", 0 },
+    { "int f((__nonnull__ (1)));\n", "1:21: expected parameter declarator", 0 },
+    { "int x = (const)1;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "struct S { const : 3; };\n", "1:18: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A declarator ends at its attributes and asm label: no suffix after them, nor attributes after its name in its
+    // parentheses; a declaration's `(` there is clang's C++-style direct initializer, which the checker refuses.
+    { "int x __attribute__((unused)) [3];\n", "1:30: expected ';' after top level declarator", 0 },
+    { "struct S { int x __attribute__((unused)) [3]; };\n", "1:41: expected ';' at end of declaration list", 0 },
+    { "void g(int x __attribute__((unused)) [3]);\n", "1:38: expected ')'", 0 },
+    { "int (*p __attribute__((unused)))(void);\n", "1:9: expected ')'", 0 },
+    { "int x __attribute__((unused)) (3);\n", "", 0 },
+    { "int x __asm__(\"x\") (3), y;\n", "", 0 },
+    { "int x __attribute__((unused)) (3) = 4;\n", "1:34: expected ';' after top level declarator", 0 },
+    { "int x __attribute__((unused)) (int);\n", "1:32: expected expression", 0 },
+    { "struct S { int x __attribute__((unused)) (3); };\n", "1:41: expected ';' at end of declaration list", 0 },
+    // A declarator's group holds no initializer: clang closes it at the `=`.
+    { "int (*fp(int, ...) = 0;\n", "1:20: expected ')'", 0 },
+    { "void f(void) { int (*p = 0; }\n", "1:24: expected ')'", 0 },
+    // What can't continue a declarator ends it, and clang's Sema takes it, saying a missing type, before the parser
+    // looks at what follows: but after it asks for a function's body.
+    { "*p 1;\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "*p }\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(*p 1);\n", "1:9: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "static const char *name( (int c)\n{\n", "1:27: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void g(void) { const *p ); }\n", "1:23: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "struct S { const *p ) };\n", "1:19: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "*f() 1;\n", "1:6: expected function body after function declarator", 0 },
+    { "int f( (a, b);\n", "1:10: expected ')'", 0 },
+    { "(*x 1;\n", "1:5: expected ')'", 0 },
+    { "(x;\n", "1:3: expected ')'", 0 },
+    { "*f() int x;\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // At the end of the file: a function's body, a do-statement's while, a head's or a label's statement.
+    { "int f(void)\n", "1:12: expected function body after function declarator", 0 },
+    { "void f(int a) { do { { a -= 1; } while (a > 0); return; }\n", "1:58: expected 'while' in do/while loop", 0 },
+    { "void f(int a) { if (a) do a -= 1;\n", "1:34: expected 'while' in do/while loop", 0 },
+    { "void f(int a) { while (a)\n", "1:26: expected expression", 0 },
+    { "void f(int a) { switch (a) { case 1:\n", "1:37: expected expression", 0 },
+    { "void f(int a) { do { { a -= 1; }\n", "1:33: expected '}'", 0 },
 };
 
 // Writes `text` to `path`. Returns false if it can't.
@@ -969,13 +1028,15 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
 // cast of `*p` where T names a type and a product where it doesn't; an if-statement with an else (c_parser.c's
 // example); and the declarator `(*a[3])(double)`, whose spine from the name out is array, pointer, function. Then
 // #431's review's computed gotos: each `*` the goto's child and the whole expression after it the `*`'s (the `:` of
-// `p ? p : p`, the `+` of `p + 0` and the comma of `p, p`), which the vector path builds without its fallback.
+// `p ? p : p`, the `+` of `p + 0` and the comma of `p, p`), which the vector path builds without its fallback. Then
+// #1127's GNU array designators without their `=`: the `]` and the value siblings where an `=` would have been their
+// parent, the value's tree whole (`-f(1)`'s `-` the root of its own, not the `]`'s parent), through the fallback.
 typedef struct ParseTestFixture ParseTestFixture;
 struct ParseTestFixture
 {
     const char* source;
     uint32_t count;
-    int32_t parents[40];
+    int32_t parents[64];
     // Whether the vector path must keep every top-level declaration (none for the scalar parser's fallback).
     bool vector;
 };
@@ -991,6 +1052,9 @@ static const ParseTestFixture parse_test_fixtures[] =
     { "int (*a[3])(double);\n", 12, { 11, 7, 7, 6, 6, 6, 2, 10, 10, 10, 0, -1 } },
     { "void f(void *p) { goto *p ? p : p; goto *p + 0; goto *p, p; }\n", 29,
       { 28, 6, 6, 6, 3, 4, 0, 28, 15, 8, 13, 13, 13, 9, 13, 28, 21, 16, 19, 17, 19, 28, 27, 22, 25, 23, 25, 28, -1 }, true },
+    { "int a[2] = { [1] -f(1), 2 };\nint b[2] = { [1] = -f(1), 2 };\nint c[2] = { [1] g(1) + 1 };\n", 57,
+      { 18, 4, 4, 4, 5, 0, 17, 9, 9, 15, 15, 14, 14, 14, 10, 17, 15, 5, -1, 38, 23, 23, 23, 24, 19, 37, 28, 28, 29, 35, 29, 34, 34, 34, 30, 37, 35, 24, -1,
+        56, 43, 43, 43, 44, 39, 55, 48, 48, 55, 52, 52, 52, 53, 55, 53, 44, -1 } },
 };
 
 // Each fixture through both paths, against its parents.

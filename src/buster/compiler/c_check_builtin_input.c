@@ -97,7 +97,7 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
             {
                 context.last_parameter = parameter;
                 context.last_parameter_type = reader->declared_types[parameter];
-                context.last_parameter_flags = reader->registers[parameter] ? BUSTER_CHECK_REGISTER : 0;
+                context.last_parameter_flags = check_input_bit(reader->declaration_bits, parameter, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0;
             }
         }
         const uint32_t index = reader->vararg_count++;

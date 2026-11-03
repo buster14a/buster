@@ -1128,7 +1128,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             needed = 1;
             pushed = 1;
         }
-        else if ((kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SET) || kind == BUSTER_TYPED_PTR_ADD || kind == BUSTER_TYPED_COPY)
+        else if ((kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SET) || kind == BUSTER_TYPED_PTR_ADD || kind == BUSTER_TYPED_COPY || kind == BUSTER_TYPED_ATOMIC_RMW)
         {
             needed = 2;
         }
@@ -1185,6 +1185,12 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
         {
             shape = classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class;
+        }
+        else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+        {
+            // An integer class's exchange or addition of a C order (#1059, tier0_atomic_rmw_valid), its address and an
+            // operand of its class.
+            shape = tier0_atomic_rmw_valid(class, value) && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == class;
         }
         else if (kind == BUSTER_TYPED_COPY)
         {
@@ -1262,6 +1268,23 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             address = stack[top - needed].low;
             read = kind == BUSTER_TYPED_LOAD;
             write = !read;
+        }
+        else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+        {
+            // With memory checks, its address refused where its natural alignment, which the producer proved (#1059),
+            // isn't, whatever its bytes hold; then its object checked as a load's, which reports reading undefined
+            // bytes, before a store's marks them written.
+            address = stack[top - 2].low;
+            const uint64_t bytes = tier0_class_bytes(class);
+            result->status = runtime.check_memory && (address & (bytes - 1)) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, address, bytes, false);
+            if (result->status == INTERPRETER_OK)
+            {
+                result->status = interpreter_memory_access(&runtime, address, bytes, true);
+            }
+            if (result->status != INTERPRETER_OK)
+            {
+                break;
+            }
         }
         if (read || write)
         {
@@ -1456,6 +1479,22 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             // One thread's accesses in program order, as this interpreter runs them, are already what any fence orders
             // them into: a fence (#1059) has nothing of its own to do here. A concurrent model would need more than this.
             break;
+        case BUSTER_TYPED_ATOMIC_RMW:
+        {
+            // An atomic read/modify/write (#1059), as one thread runs it: the object's old value, normalized as a load's,
+            // replaces the address, and the operand (an exchange) or the sum (an addition) is written in its class's bytes.
+            const uint64_t bytes = tier0_class_bytes(class);
+            uint64_t old = 0;
+            memcpy(&old, (const void*)(uintptr_t)address, bytes);
+            const uint64_t written = (value & BUSTER_TYPED_RMW_ADD) != 0 ? old + stack[top - 1].low : stack[top - 1].low;
+            memcpy((void*)(uintptr_t)address, &written, bytes);
+            stack[top - 2] = (InterpreterValue){
+                .low = interpreter_typed_normalize(class, old),
+            };
+            classes[top - 2] = (uint8_t)class;
+            top -= 1;
+            break;
+        }
         case BUSTER_TYPED_COPY:
             result->status = interpreter_typed_copy(&runtime, stack[top - 2].low, stack[top - 1].low, value);
             top -= 2;

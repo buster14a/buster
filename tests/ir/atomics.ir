@@ -1,0 +1,28 @@
+function (ptr, i32, ptr) -> i64 {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i32 1
+  %2 = param.ptr 2
+  %3 = store.void %0, %1 align=4 atomic relaxed
+  %4 = store.void %0, %1 align=4 atomic release
+  %5 = store.void %0, %1 align=4 atomic seq_cst
+  %6 = fence.void seq_cst
+  %7 = load.i32 %0 align=4 atomic relaxed
+  %8 = load.i32 %0 align=4 atomic consume
+  %9 = load.i32 %0 align=4 atomic acquire
+  %10 = load.i32 %0 align=4 atomic seq_cst
+  %11 = load.i8 %0 align=1 atomic acquire
+  %12 = load.i16 %0 align=2 volatile atomic seq_cst
+  %13 = load.ptr %2 align=8 atomic acquire
+  %14 = store.void %2, %13 align=8 atomic release
+  %15 = load.i64 %2 align=8 atomic seq_cst
+  %16 = store.void %2, %15 align=8 atomic relaxed
+  %17 = load.i64 %2 align=8 volatile
+  %18 = rmw.i32 %0, %1 align=4 xchg seq_cst
+  %19 = rmw.i32 %0, %18 align=4 add relaxed
+  %20 = rmw.i8 %0, %11 align=1 add acq_rel
+  %21 = rmw.i16 %0, %12 align=2 xchg consume
+  %22 = rmw.i64 %2, %17 align=8 add release
+  %23 = rmw.i64 %2, %22 align=16 xchg acquire
+  %24 = ret.void %23
+}

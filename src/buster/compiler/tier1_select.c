@@ -183,6 +183,11 @@ typedef enum Tier1SelectRule
     // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32), and its phis
     // TIER1_RULE_PHI's. Only the CFG consumer takes it.
     TIER1_RULE_VECTOR,
+    // An atomic read/modify/write (IR_ATOMIC_RMW, #1059) of the object at the address in values[0], of values[1], by
+    // the operation `immediate` (BUSTER_IR_RMW_EXCHANGE or BUSTER_IR_RMW_ADD): the operand copied to the scratch
+    // register, xchg or lock xadd of it with the object, a full barrier every order takes, and its old value zero-extended
+    // into the destination, as a load's is. Never folded into a consumer, and a barrier no load folds past.
+    TIER1_RULE_ATOMIC_RMW,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -1019,6 +1024,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_MFENCE });
         }
         break;
+    case TIER1_RULE_ATOMIC_RMW:
+    {
+        const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
+        tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+        const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
+                                  : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+        tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
+        const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+        tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        break;
+    }
     case TIER1_RULE_PHI:
         break;
     case TIER1_RULE_ALLOCA:
@@ -1721,9 +1737,10 @@ struct Tier1SelectForest
     const uint32_t* blocks;
     const uint32_t* uses;
     const uint32_t* costs;
-    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a volatile access, a fence or
-    // a move of rsp, which a load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no
-    // atomic access of its own: C's atomic operations reach it as calls of the unit's leaves, and its fences as IR_FENCE.
+    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a volatile or atomic load
+    // (BUSTER_IR_OBSERVABLE), a fence or a move of rsp, which a load isn't folded past (tier1_select_load_folds;
+    // tier1_select_barriers). An atomic access is never folded itself, and a load moved past a fence would leave the place
+    // its order keeps (#1059).
     const uint32_t* barriers;
     // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
     const uint8_t* canonical;
@@ -1737,9 +1754,10 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     const uint32_t op = function->op[node];
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
-    // past it, so that the access stays on the fence's side the program put it.
-    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE ||
-           (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+    // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
+    // an atomic read/modify/write.
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
+           (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -1769,11 +1787,11 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const __mmask16 active = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
         const __m512i op = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->op + first));
         const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
-        const __mmask16 volatile_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
+        const __mmask16 observable_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_OBSERVABLE));
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) | volatile_load) &
-                                  active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | observable_load) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -2168,6 +2186,23 @@ static uint32_t tier1_select_part_slots(uint32_t bytes)
     return bytes <= 8 ? 1 : bytes / 8;
 }
 
+// A call argument's whole 64-byte vector register part (#141) waits in zmm16 and on rather than in the red zone, whose 14
+// staging slots two such parts would overflow: Tier 1 allocates nothing to registers past xmm15, a call clobbers them all,
+// and only a target with AVX-512F, which has them, passes a vector in a zmm register. The first of them, by the call's
+// parts in order.
+#define BUSTER_TIER1_SELECT_PART_ZMM 16u
+
+static bool tier1_select_part_in_zmm(uint32_t bytes)
+{
+    return bytes == 64;
+}
+
+// The red zone's staging slots a call argument's part takes (tier1_select_part_slots), none for one in zmm16 and on.
+static uint32_t tier1_select_argument_part_slots(uint32_t bytes)
+{
+    return tier1_select_part_in_zmm(bytes) ? 0 : tier1_select_part_slots(bytes);
+}
+
 // The form that loads (`load`) or stores a vector register's part of `bytes` (#789, #141) whole: an eightbyte's or less
 // movsd (its bytes past the part's padding), and a whole register's movups, vmovdqu (AVX's) or vmovdqu64 (AVX512F's), as
 // the convention passes it at the target's width, whose forms the target then has.
@@ -2283,7 +2318,8 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         supported &= abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (type == IR_VOID && object)) &&
                                   abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
         // The aggregates' parts in registers wait in the red zone's staging slots, 14 of them (#789), a whole vector
-        // register's taking its bytes' (#141, tier1_select_part_slots).
+        // register's taking its bytes' (#141, tier1_select_part_slots), but a 64-byte one's, which waits in zmm16 and on
+        // (tier1_select_argument_part_slots).
         uint32_t staged = 0;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
@@ -2296,7 +2332,7 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
             const uint32_t count = supported && record != 0 && record->size != 0 && !tier1_select_location_whole(record->location) ? tier1_select_location_parts(record->location, record->size, parts) : 0;
             for (uint32_t k = 0; k < count; k += 1)
             {
-                staged += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_part_slots(parts[k].bytes) : 0;
+                staged += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_argument_part_slots(parts[k].bytes) : 0;
             }
         }
         supported &= staged <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS;
@@ -3336,6 +3372,23 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             }
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
+        else if (constant_index && operand.offset == (int64_t)(int32_t)operand.offset)
+        {
+            // A constant index whose scaled value doesn't fit the displacement (#141: `p[1ull << 30]`, a struct array's
+            // element past 2 GB): the constant in a register, its own node's mov, as an index the lea scales, and the
+            // offset the displacement. No walk: nothing folds into it, nor it into a user, whose walk stops at it (the
+            // displacement doesn't fit there either), and the bottom-up path's class for it is the REG leaf's
+            // (tier1_burs_displacement), whose pattern is maximal munch's, this one.
+            base.rule = TIER1_RULE_ADDRESS;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.stack_object = BUSTER_IR_NONE;
+            base.displacement = (int32_t)operand.offset;
+            base.scale = (uint8_t)tier1_select_log2(operand.scale);
+            base.fold_count = 0;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
     }
     else if ((op == IR_LOAD && tier1_select_memory_width(type) != 0) || (op == IR_STORE && tier1_select_memory_width(function->type[b]) != 0))
     {
@@ -3525,6 +3578,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_FENCE;
         base.immediate = a;
         base.intrinsic_cost = a == BUSTER_IR_FENCE_SEQ_CST ? 1 : 0;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_ATOMIC_RMW && tier1_select_memory_width(type) != 0)
+    {
+        // The object's bytes, as a load's, never the narrow value's 32-bit register: a byte's or a short's xchg or lock
+        // xadd of 4 bytes would write past its object.
+        base.rule = TIER1_RULE_ATOMIC_RMW;
+        base.width = (uint8_t)tier1_select_memory_width(type);
+        base.values[0] = a;
+        base.values[1] = b;
+        base.immediate = c;
+        base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     return candidates;
