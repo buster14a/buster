@@ -7080,7 +7080,7 @@ static void executable_symbol_sections(const Link* link, const ExecutableLayout*
         global += is_local ? 0 : 1;
         symbols[index] = (Elf64_Sym){
             .st_name = name_offset,
-            .st_info = is_local ? flags & BUSTER_LINK_SYMBOL_TYPE : link_symbol_elf_info(flags),
+            .st_info = is_local ? ELF64_ST_TYPE(link_symbol_elf_info(flags)) : link_symbol_elf_info(flags),
             .st_other = link->symbols.flags[symbol] >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = section,
             .st_value = address,

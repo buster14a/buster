@@ -478,31 +478,24 @@ makes its own; with one, the units and lanes that share it read each file once
   too wherever a huge page held a used byte: 9 bytes per input byte.
 - **Tables of a fixed size** (#652). The records' tables (ranges, files,
   macros, items and the rest), the three stacks' token columns and a unit's
-  own file cache are pushed whole as the unit starts, into one reservation of
-  base pages: `pp_tables_lay_out` lays them out on `arena_measure`'s arena for
-  its size, then on the reservation, which is made writable at once. Each had
-  an arena of its own, whose mapping, protection change and, once touched, page
-  tables cost 2 to 3.4 µs on the 9700X with their teardown (a benchmark of 90
-  reservations in a forked process, each committing 64 KB and touching a page:
-  3.35 µs each at 64 GB, 2.11 at 2 MB, 1.36 as ranges of one mapping, 0.49 for
-  the page's fault alone), though most touch a page or none on a small unit:
-  an empty file's unit reserved 39 of its 81 arenas for them, and touched 19.
-  It now reserves 43 and has 125 VMAs at exit rather than 260, and its
-  `-fsyntax-only` makes 214 system calls rather than 363 on the 9700X. None of
-  the tables grows large enough for base pages to cost the large units much:
-  on `sqlite3.c` the macros touch the most, 368 KB, and on this compiler's
-  `main.c` the items 1.9 MB and the macros 1.1 MB. The
-  output's columns keep their arenas, whose huge pages pay on large units, and
-  a history table that outgrows its slice still moves to an arena of its own.
-  On the 9700X ([the
-  record](https://github.com/buster14a/buster-performance/tree/b8048387bc7a16d89329acb9ae8df96d8f8acdf2/docs/measurements/fewer-arenas-652-2026-11-03)),
-  `time-runs --copies 3` against main in three rounds, with main again as the
-  floor (within 0.5%): an empty file's `-fsyntax-only` took 13.2% to 13.4% less
-  wall time, its `-E -P` 16.0% to 16.5% less and a one-line `-c` 9.1% to 10.4%
-  less, all of it the kernel's (the empty file's kernel instructions went from
-  3.65 to 2.92 M, while its user cycles read 1% to 2% over their floor).
-  `sqlite3.c`'s `-E -P` took 1.7% to 2.4% less, and its `-fsyntax-only` and
-  `-c` 0.0% to 0.6% less, where the floor moved up to 0.3%.
+  own file cache are pushed whole as the unit starts, as the tables of one
+  arena (`arena_reserve_tables`, #1128): `pp_tokens_plan` lays out a stack's
+  columns as `pp_tokens_reserve` lays out the output's in an arena of its own.
+  Each stack's columns and the file cache had an arena of their own. An arena
+  costs 2 to 3.4 µs on the 9700X with its teardown, in its mapping, its
+  protection change and, once touched, its own page tables, though a small
+  unit touches a page of each or none (a benchmark of 90 reservations in a
+  forked process, each committing 64 KB and touching a page: 3.35 µs each at
+  64 GB, 2.11 at 2 MB, 1.36 as ranges of one mapping, 0.49 for the page's
+  fault alone; [the
+  record](https://github.com/buster14a/buster-performance/tree/b8048387bc7a16d89329acb9ae8df96d8f8acdf2/docs/measurements/fewer-arenas-652-2026-11-03)).
+  The file cache's 120 KB, which `file_cache_initialize` writes whole, are
+  base pages, where in an arena of its own the pages past its first 64 KB were
+  a huge page the kernel clears. An empty file's `-fsyntax-only` makes four
+  fewer `mmap`, `mprotect` and `madvise` calls each (241 system calls rather
+  than 254 on a 7940HS). The output's columns keep an arena of tables of their
+  own, whose huge pages pay on large units, and a history table that outgrows
+  its slice still moves to an arena of its own.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
@@ -1285,7 +1278,9 @@ sequences need a separate compact conversion representation.
 ### Built-in macros and the predefines
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
-`__FILE_NAME__`, `__FLT_EVAL_METHOD__` (0 on x86-64, as clang gives it), and
+`__FILE_NAME__` (the presumed name's last component, as clang's
+`llvm::sys::path::filename` takes it: `pp_path_file_name`), `__FLT_EVAL_METHOD__`
+(0 on x86-64, as clang gives it), and
 `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
 `SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
 `__has_attribute`, `__has_builtin`, `__has_constexpr_builtin`, `__has_feature`,
@@ -1448,9 +1443,9 @@ query:
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
 default, clang's include search, and clang's predefined macros for the same
-options plus `__BUSTER__` defined to 1. One capability macro differs: the
-default omits `__GCC_ASM_FLAG_OUTPUTS__` until inline assembly flag-output
-constraints are implemented (#798). `pp_predefines` writes the rest in three parts:
+options plus `__BUSTER__` defined to 1, `__GCC_ASM_FLAG_OUTPUTS__` among
+them, since the C driver lowers inline assembly's flag outputs (#147).
+`pp_predefines` writes them in three parts:
 
 - the fixed part, `pp_predefines_base`: clang 23.1.3's for
   `x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
@@ -1469,9 +1464,7 @@ constraints are implemented (#798). `pp_predefines` writes the rest in three par
 file runs use it, so that they start from clang's macros alone and compare only
 preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
 `__clang_version__` differ from the generator's.
-The file may define `__GCC_ASM_FLAG_OUTPUTS__`; `-D` and `-U` also retain their
-usual order after the chosen predefines. `--clang-features` selects feature
-query answers and does not enable the omitted macro.
+`-D` and `-U` keep their usual order after the chosen predefines.
 
 `__FLT_EVAL_METHOD__` is a builtin, as in clang: 0, or 1 and 2 with
 `-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).

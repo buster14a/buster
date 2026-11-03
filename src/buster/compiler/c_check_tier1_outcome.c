@@ -22,6 +22,8 @@ typedef enum CheckTier1Stage
     CHECK_TIER1_RESOURCE,
     CHECK_TIER1_PUBLICATION,
     CHECK_TIER1_VALUE_NUMBERING,
+    // The 128-bit integers' split into halves (ir_wide.c, #141), between promotion and the optimizer.
+    CHECK_TIER1_WIDE,
     CHECK_TIER1_STAGE_COUNT,
 } CheckTier1Stage;
 
@@ -98,7 +100,7 @@ struct CheckTier1Fault
     uint32_t detail;
 };
 
-static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn" };
+static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn", "wide" };
 static const char* const check_tier1_category_names[CHECK_TIER1_CATEGORY_COUNT] = { "unattempted", "compiled", "unsupported", "resource", "internal" };
 static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame", "certificate" };
 

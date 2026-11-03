@@ -108,13 +108,14 @@ families (`x86_match_supported`): a form is admitted when
 - its operand roles are ones the matcher has (`x86_match_roles`): none, rm, reg,
   vvvv (first, as BMI's `blsr` and the vector shifts by an immediate have it, or
   third, as BMI2's `shlx`), an immediate, a branch target, the accumulator, CL,
-  the count 1, an `/is4` register (VEX's four-operand blends) and XMM0 written
-  out (SSE4.1's blends, `sha256rnds2`), at most four of them;
+  the count 1, an `/is4` register (VEX's four-operand blends), XMM0 written
+  out (SSE4.1's blends, `sha256rnds2`) and the x87's st(0) beside an st(i)
+  (#147), at most four of them;
 - every operand descriptor is one the parser reads: general registers of 8 to 64
-  bits, XMM, YMM and ZMM registers, opmasks, and memory addressed by general
-  registers; not the x87's stack registers (`%st(1)`), MMX, bound, control,
-  debug, segment or tile registers, vector-indexed (VSIB) memory, register pairs
-  or a default flags value;
+  bits, XMM, YMM and ZMM registers, opmasks, the x87's stack registers
+  (`%st` and `%st(i)`, Intel's `st` and `st(i)`, #147), and memory addressed by
+  general registers; not MMX, bound, control, debug, segment or tile registers,
+  vector-indexed (VSIB) memory, register pairs or a default flags value;
 - its mnemonic is one the parser spells, with the catalogue's prefixes composed
   from their tokens: `lock` before any instruction, `notrack` and `bnd` before a
   near call or jmp, `rep`, `repe` and `repne` before the string instructions and
@@ -124,6 +125,24 @@ families (`x86_match_supported`): a form is admitted when
   (`{sae}`), APX's new data destination and no flags, and source conditions.
   Embedded rounding (`{rn-sae}`) has no syntax either, so its forms never match.
   The far call and jmp through memory aren't near branches' syntax.
+
+The x87's forms of st(i) take the operands GNU as leaves out (#147,
+`asm_x87_operands`): `fxch`, `fcom`, `fcomp`, `fucom` and `fucomp` alone are
+of st(1); `fadd %st(i)` is of st(0) and st(i); `faddp` alone is of st(1) and
+st(0), and `faddp %st(i)` of st(i); `fcomi %st(i)` is of st(0) and st(i).
+AT&T's bare `fadd`, `fmul`, `fsub`, `fsubr`, `fdiv` and `fdivr` are their
+popping forms, which GNU as warns it translates them to, and which Intel syntax
+refuses, as GNU as does, though clang's assembler takes them. In AT&T syntax a
+subtraction or division whose destination is st(i) (`fsub %st, %st(1)`,
+`fsubp`, and every popping form) assembles as Intel's reversed one, as GNU as
+and clang assemble it (the System V assembler's convention: `fsub %st, %st(1)`
+is Intel's `fsubr st(1), st`); Intel syntax takes them as Intel's manual has
+them. An x87 memory operand without a width (`fstp (%rax)`), which GNU as takes
+with a warning as its default width, is refused, as clang refuses it. Two GNU
+as spellings are refused too (#1126's review; #1223 has them): `ffreep %st(i)`,
+which no form row has, and the reversed operands of the commutative popping
+forms (`faddp %st(1), %st`, `fmulp`'s), which GNU as warns it translates to
+`faddp %st, %st(1)`.
 
 About 6,100 forms pass, of about 1,900 mnemonics (the index has 4,096
 buckets). The target intersection then keeps out every form the target's

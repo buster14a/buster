@@ -2231,27 +2231,7 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
 // each class's counts, among them the tokens no class's action takes.
 static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* test)
 {
-    static const char* const names[BUSTER_CHECK_EXPRESSION_CODES] = {
-        [CHECK_INPUT_CODE_SCALAR] = "scalar",
-        [CHECK_INPUT_CODE_LIST] = "list",
-        [CHECK_INPUT_CODE_DROP] = "drop",
-        [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
-        [CHECK_INPUT_CODE_LITERAL] = "literal",
-        [CHECK_INPUT_CODE_PREFIX] = "prefix",
-        [CHECK_INPUT_CODE_BINARY] = "binary",
-        [CHECK_INPUT_CODE_SEPARATOR] = "separator",
-        [CHECK_INPUT_CODE_GROUP] = "group",
-        [CHECK_INPUT_CODE_CAST] = "cast",
-        [CHECK_INPUT_CODE_TERNARY] = "ternary",
-        [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
-        [CHECK_INPUT_CODE_MEMBER] = "member",
-        [CHECK_INPUT_CODE_POSTFIX] = "postfix",
-        [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
-        [CHECK_INPUT_CODE_CONDITION] = "condition",
-        [CHECK_INPUT_CODE_CALL] = "call",
-        [CHECK_INPUT_CODE_STRING] = "string",
-        [CHECK_INPUT_CODE_RETURN] = "return",
-    };
+    const char* const* names = check_input_expression_code_names;
     printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
     for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
     {
@@ -2323,6 +2303,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];
+    // The oracle's -w (parse_test_clang's): clang then skips its analysis of each function's CFG, and so its misplaced
+    // fallthrough's error (check_input_fallthrough_analyzed), which test-checker-driver compares without -w.
     const PPOptions pp_options = {
         .language = {
             .standard = fixture->standard != 0 ? fixture->standard : 2017,
@@ -2330,6 +2312,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         },
         .no_standard_includes = true,
         .semantic_pragmas = true,
+        .suppress_warnings = true,
         .predefines.char_unsigned = fixture->char_unsigned,
     };
     const ParseOptions parser_options[2] = {
@@ -6574,6 +6557,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_identifier_leaves(&test);
+                check_test_literal_values(&test);
             }
             if (check_test_takes())
             {
