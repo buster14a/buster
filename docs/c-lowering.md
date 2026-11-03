@@ -229,11 +229,7 @@ module), so that tools and the comparisons below read them alike.
 
 `c_check_program_batch.c` handles reached operation fragments before the general
 task loop expands them. The original
-scalar expression expansion remains the oracle (`--scalar`). Where #1048's lean
-steps run ("Lean steps in the tasks' loop" below: the vector path's compile of a
-program without a `_BitInt` type), they take these paths' shapes first, and
-the fragments, the leaf path and the wrapper path aren't tried; a program with
-a `_BitInt` type and the node templates' loop still take them.
+scalar expression expansion remains the oracle (`--scalar`).
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -284,9 +280,7 @@ evaluated expression occurrences, those handled by vector operation fragments,
 their percentage, and records classified; then the evaluated nodes and the
 entries #1048's node templates spliced (`templates` and `template-entries`)
 with their shares of the evaluated nodes and the entries (`template-share` and
-`entry-share`), which are 0 while no compile takes the templates; and the
-evaluated nodes #1048's lean steps took (`lean`) with their share
-(`lean-share`). This counts
+`entry-share`), which are 0 while no compile takes the templates. This counts
 repeated graph uses and excludes unevaluated operands and unselected
 definitions. Scalar leaf templates
 are excluded from the vector expression-node share. The optional packed type table costs four bytes per type; failure keeps
@@ -681,88 +675,6 @@ in the compile-time guide's older figure, which later splits compare with:
 The statements, the controls and the tasks' loops, are two thirds of the
 stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
 templates' target.
-
-## Lean steps in the tasks' loop (#1048)
-
-The measurements above rule out a separate pass over every node: #1197's and
-#1201's, scalar and AVX-512, cost more per node than the expansion they would
-replace. So `c_check_program_lean.c` makes the loop's one visit of each node
-cheaper instead. When the vector path's loop pops an EXPRESSION task,
-`check_lower_lean_step` takes the node where its shape is one of the
-expansion's ordinary ones:
-
-- a folded constant;
-- a `VALUE`'s read or address;
-- a cast, a conversion, unary plus or a selection;
-- `&x` and `*p`;
-- a member access, but a bit-field's;
-- the negation, the complements and the truth tests;
-- the comma;
-- a scalar assignment;
-- pointer arithmetic and subscripts;
-- the binary operators of the classes below VECTOR.
-
-A step pushes the tasks and writes the entries `check_lower_expand` would, in the
-same order and through the same helpers. Its guards are the tests the expansion
-makes before the node's case that the node could pass, so a node it takes is
-one the expansion gives the same case. What it leaves out is the expansion's
-per-node overhead:
-
-- the node's 96-byte `CheckValue`: a step reads the columns its case needs, and
-  the payload row only where the node has one;
-- the chain of tests before the node's case;
-- the call chain of each operand's push (`check_lower_lean_operand`);
-- the push and pop of the operand the node evaluates first. That is the task
-  the expansion pushes last and the loop pops next, so the step continues with
-  it in the same iteration, with its conversion pushed below it as before.
-
-Every other node goes to the expansion unchanged, and so does any node whose
-shape the steps don't take: calls, `&&` `||` `?:`, updates, bit-fields, compound
-literals, aggregates, atomics, complex, `_BitInt`, half and vector values,
-variable-length arrays, builtins, statement expressions and overloads. The task
-stack holds the continuation, so the decision is per node, with no proof about
-a subtree and no fallback per body.
-
-The steps run where the writer takes them (`CheckLowerWriter.lean`): the vector
-path, without `-g`'s sources, of a stream of columns, in the plain loop. A
-program with a `_BitInt` type has a loop of its own without them, and so do the
-node templates. `--scalar` and the baseline host take the expansion for every
-node: that is the steps' exact rules and their oracle. `test-checker` compares
-the two lowerings' functions on every program fixture
-(`check_test_program_function`). The default compile's objects and `--scalar`'s
-were the same, byte for byte, on all 256 of these:
-
-- `sqlite3.c`, with #136's options and with the frozen corpus's pinned ones;
-- Lua 5.4.8's 34 units;
-- c-testsuite's subset of 220.
-
-`main.c` was the same too, though the steps take none of its nodes, since its
-program has a `_BitInt` type. `test-lowering-templates` found no difference on
-those corpora either.
-
-The steps took 243,691 of `sqlite3.c`'s 266,764 evaluated nodes (91.35%) with
-#136's options, and 93.71% of Lua's `lvm.c`'s.
-
-callgrind counted the instructions of `check_lower_part` on `sqlite3.c` (#136's
-options) on a baseline build of main at `e7235325`, with the steps forced on for
-the count, since the baseline host doesn't take them. The tasks' loop with what
-it calls (`check_lower_drain`) went from 124.4 M to 110.2 M (−11.5%), and the
-part from 218.9 M to 204.6 M. That is less than the design's estimate on #1048:
-a step that tests only its own case's guards still makes about 180 instructions
-a node. The tests and loads each node needs are many: its op, its payload row,
-its type and the type's class and facts, its category, constant kind and
-object, its operands and their conversions' types, and its token.
-
-On this session's Xeon, the vector path, 15 runs of each build alternating,
-pinned, `-c --time-stages --lanes 1`, gave these medians:
-
-| row | main | the lean steps |
-| --- | ---: | ---: |
-| `lower.statements` | 13.012 ms | 12.402 ms |
-| `lower.statements` ÷ Tier 0 | 1.694 | 1.609 |
-| `lower` ÷ Tier 0 | 2.512 | 2.440 |
-
-That is a 5% drop of the statements' row. The 9700X's run decides.
 
 ## Against clang -O0's objects
 

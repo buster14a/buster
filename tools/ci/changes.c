@@ -366,7 +366,7 @@ static const ChangesModule changes_modules[] = {
     // main.
     {
         .name = "compile_time",
-        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|c_check_program_lean|"
+        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
                    "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
     },
 };
@@ -1699,11 +1699,6 @@ static const ChangesFixture changes_fixtures[] = {
     {
         .name = "the expression templates' lowering time",
         .files = "src/buster/compiler/c_check_program_batch.c",
-        .outputs_true = "code compile_time",
-    },
-    {
-        .name = "the lean steps' lowering time",
-        .files = "src/buster/compiler/c_check_program_lean.c",
         .outputs_true = "code compile_time",
     },
     {
