@@ -74,18 +74,25 @@ jobs:
           retention-days: 7
 
   bootstrap:
-    name: Self-host bootstrap and probe equivalence
+    name: Self-host bootstrap and probe equivalence (${{ matrix.host_arch }})
     needs: harness
     runs-on: ubuntu-26.04
     # This is an initial budget on a hosted runner, not a throughput acceptance
     # threshold. The first artifact records the actual cost; 900 s bounds each
     # subprocess.
     timeout-minutes: 120
+    # native needs the complete host vector path, which a hosted runner may lack
+    # (the job then skips); x86-64 is the baseline scalar host (#1193), whose
+    # units compile at -march=x86-64 on every runner.
+    strategy:
+      fail-fast: false
+      matrix:
+        host_arch: [native, x86-64]
     defaults:
       run:
         shell: bash
     env:
-      BUSTER_HOST_ARCH: native
+      BUSTER_HOST_ARCH: ${{ matrix.host_arch }}
       BUSTER_DEBUG_INFO: '0'
       BUSTER_SANITIZER: none
       BUSTER_FUZZ_AVAILABLE: '0'
@@ -118,19 +125,22 @@ jobs:
           defines=$("$host_compiler" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
           if grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
               printf 'host_path=vector\n' >> "$artifacts/metadata.txt"
-              printf 'vector=1\n' >> "$GITHUB_OUTPUT"
+              printf 'run=1\n' >> "$GITHUB_OUTPUT"
+          elif [ "$BUSTER_HOST_ARCH" = x86-64 ]; then
+              printf 'host_path=scalar\n' >> "$artifacts/metadata.txt"
+              printf 'run=1\n' >> "$GITHUB_OUTPUT"
           else
               printf 'host_path=scalar\n' >> "$artifacts/metadata.txt"
-              printf 'vector=0\n' >> "$GITHUB_OUTPUT"
-              printf '%s\n' '::warning::This hosted runner has no complete host vector path; the self-host bootstrap is skipped because baseline self-hosting is blocked by #1108.'
+              printf 'run=0\n' >> "$GITHUB_OUTPUT"
+              printf '%s\n' '::warning::This hosted runner has no complete host vector path; the native self-host bootstrap is skipped. The x86-64 bootstrap qualifies the scalar host path.'
           fi
 
       - name: Stage the official Clang 23 toolchain
-        if: steps.host.outputs.vector == '1'
+        if: steps.host.outputs.run == '1'
         run: bash tools/ci/setup-hosted.sh
 
       - name: Verify the staged official Clang and host path
-        if: steps.host.outputs.vector == '1'
+        if: steps.host.outputs.run == '1'
         run: |
           set -euo pipefail
           test -n "${BUSTER_CLANG_RESOURCE_DIR:-}"
@@ -142,13 +152,18 @@ jobs:
               "$llvm_root/bin/clang" --version
           } >> "$artifacts/metadata.txt"
           defines=$("$llvm_root/bin/clang" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-              printf '%s\n' '::error::The staged official Clang does not select the complete host vector path; baseline self-hosting is blocked by #1108.'
+          if [ "$BUSTER_HOST_ARCH" = x86-64 ]; then
+              if grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
+                  printf '%s\n' '::error::The staged official Clang selects the host vector path at -march=x86-64; the baseline bootstrap must qualify the scalar host path.'
+                  exit 1
+              fi
+          elif ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
+              printf '%s\n' '::error::The staged official Clang does not select the complete host vector path for the native bootstrap.'
               exit 1
           fi
 
       - name: Build stage 1 and qualify the self-host
-        if: steps.host.outputs.vector == '1'
+        if: steps.host.outputs.run == '1'
         run: |
           set -euo pipefail
           unset CPATH C_INCLUDE_PATH
@@ -175,22 +190,23 @@ jobs:
           artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           if [ -s "$artifacts/result/PASS" ]; then
               cat "$artifacts/result/summary.md" >> "$GITHUB_STEP_SUMMARY"
-          elif [ '${{ steps.host.outcome }}' = 'success' ] && [ '${{ steps.host.outputs.vector }}' != '1' ]; then
+              printf '\nHost path: `BUSTER_HOST_ARCH=%s`.\n' "$BUSTER_HOST_ARCH" >> "$GITHUB_STEP_SUMMARY"
+          elif [ '${{ steps.host.outcome }}' = 'success' ] && [ '${{ steps.host.outputs.run }}' != '1' ]; then
               printf '%s\n' \
-                  '## Self-host qualification' \
+                  "## Self-host qualification ($BUSTER_HOST_ARCH)" \
                   '' \
-                  'SKIPPED: this hosted runner does not expose the complete host vector feature set,' \
-                  'and baseline self-hosting is still blocked by #1108. The harness regression job still ran.' \
+                  'SKIPPED: this hosted runner does not expose the complete host vector feature set.' \
+                  'The x86-64 bootstrap qualifies the scalar host path, and the harness regression job still ran.' \
                   >> "$GITHUB_STEP_SUMMARY"
           else
-              printf '## Self-host qualification\n\nFAILED or interrupted before completion. See command logs and partial timings in the artifact.\n' >> "$GITHUB_STEP_SUMMARY"
+              printf '## Self-host qualification (%s)\n\nFAILED or interrupted before completion. See command logs and partial timings in the artifact.\n' "$BUSTER_HOST_ARCH" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Preserve inputs, timings and both sides of every probe comparison
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: selfhost-${{ github.sha }}-${{ github.run_attempt }}
+          name: selfhost-${{ matrix.host_arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/metadata.txt
             ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/*.argv

@@ -102,27 +102,10 @@ or rotate of one operand shifts by 1 (`shrl %ecx`, `shr ecx`), the D1 form.
 
 #1115 added what GCC's and Clang's ordinary `-S` output needs beyond that:
 
-- The x87's stack registers: `%st` (ST(0)) and `%st(0)` to `%st(7)`, and `st`
-  and `st(N)` without prefixes, in any case. GNU as's implicit operands are
-  supplied, in Intel order:
-  - the pops (`faddp`, `fmulp`, `fsubp`, `fsubrp`, `fdivp`, `fdivrp`) on ST(1),
-    or their one operand, and ST(0);
-  - the other arithmetic of one stack register on ST(0) and it (`fadd %st(2)`);
-  - `fcomi`, `fcomip`, `fucomi` and `fucomip` on ST(0) and ST(1), or their one
-    operand;
-  - `fcom`, `fcomp`, `fucom`, `fucomp` and `fxch` on ST(1).
-
-  GNU as's translations, which it warns of, are taken too: AT&T's arithmetic
-  without operands is the pop (`fadd` is `faddp`), and `faddp` and `fmulp` of
-  ST(0) and ST(i) take ST(i) as the destination (`faddp %st(1), %st` is
-  `faddp %st, %st(1)`). GNU as refuses the other pops so, and Intel's arithmetic
-  without operands, and so does this assembler.
-  LLVM's `fucompi` and `fcompi` are `fucomip` and `fcomip`. As GNU as reads
-  AT&T (the System V convention), a subtraction or division whose destination is
-  ST(i) names the reversed operation: `fsubp %st, %st(1)` is Intel's
-  `fsubrp st(1), st` (`de e9`). That covers every pop, and DC's forms but those
-  on ST(0), which are D8's (`fsub %st, %st(0)` is `d8 e0`). Intel syntax names
-  the operation itself.
+- The x87's stack registers' two GNU as spellings that #1126's review left to
+  #1223 (#147's forms, below): `ffreep %st(i)` and the commutative pops'
+  reversed operands. LLVM's `fucompi` and `fcompi` are `fucomip` and `fcomip`
+  (clang's long double code writes them).
 - The compare-predicate names, each the instruction without the predicate and
   the predicate's number as its immediate:
   - SSE's `cmpPss`, `cmpPsd`, `cmpPps` and `cmpPpd`, with eight predicates
@@ -147,13 +130,13 @@ families (`x86_match_supported`): a form is admitted when
   vvvv (first, as BMI's `blsr` and the vector shifts by an immediate have it, or
   third, as BMI2's `shlx`), an immediate, a branch target, the accumulator, CL,
   the count 1, an `/is4` register (VEX's four-operand blends), XMM0 written
-  out (SSE4.1's blends, `sha256rnds2`) and the x87's ST(0) written out beside
-  ST(i) (#1115), at most four of them;
+  out (SSE4.1's blends, `sha256rnds2`) and the x87's st(0) beside an st(i)
+  (#147), at most four of them;
 - every operand descriptor is one the parser reads: general registers of 8 to 64
-  bits, XMM, YMM and ZMM registers, opmasks, the x87's stack registers (#1115:
-  `%st(1)`), and memory addressed by general registers; not MMX, bound,
-  control, debug, segment or tile registers, vector-indexed (VSIB) memory,
-  register pairs or a default flags value;
+  bits, XMM, YMM and ZMM registers, opmasks, the x87's stack registers
+  (`%st` and `%st(i)`, Intel's `st` and `st(i)`, #147), and memory addressed by
+  general registers; not MMX, bound, control, debug, segment or tile registers,
+  vector-indexed (VSIB) memory, register pairs or a default flags value;
 - its mnemonic is one the parser spells, with the catalogue's prefixes composed
   from their tokens: `lock` before any instruction, `notrack` and `bnd` before a
   near call or jmp, `rep`, `repe` and `repne` before the string instructions and
@@ -164,6 +147,26 @@ families (`x86_match_supported`): a form is admitted when
   (`{sae}`), APX's new data destination and no flags, and source conditions.
   Embedded rounding (`{rn-sae}`) has no syntax either, so its forms never match.
   The far call and jmp through memory aren't near branches' syntax.
+
+The x87's forms of st(i) take the operands GNU as leaves out (#147,
+`asm_x87_operands`): `fxch`, `fcom`, `fcomp`, `fucom` and `fucomp` alone are
+of st(1); `fadd %st(i)` is of st(0) and st(i); `faddp` alone is of st(1) and
+st(0), and `faddp %st(i)` of st(i); `fcomi %st(i)` is of st(0) and st(i).
+AT&T's bare `fadd`, `fmul`, `fsub`, `fsubr`, `fdiv` and `fdivr` are their
+popping forms, which GNU as warns it translates them to, and which Intel syntax
+refuses, as GNU as does, though clang's assembler takes them. In AT&T syntax a
+subtraction or division whose destination is st(i) (`fsub %st, %st(1)`,
+`fsubp`, and every popping form) assembles as Intel's reversed one, as GNU as
+and clang assemble it (the System V assembler's convention: `fsub %st, %st(1)`
+is Intel's `fsubr st(1), st`); Intel syntax takes them as Intel's manual has
+them. An x87 memory operand without a width (`fstp (%rax)`), which GNU as takes
+with a warning as its default width, is refused, as clang refuses it. Two GNU
+as spellings that #1126's review left are taken since #1223 (#1115):
+`ffreep %st(i)` (DF C0+i, baseline in the target table, below), and the
+reversed operands of the commutative popping forms (`faddp %st(1), %st` and
+Intel's `faddp st, st(1)`, `fmulp`'s), which GNU as warns it translates to
+`faddp %st, %st(1)`. GNU as refuses the other pops so (`fsubp %st(1), %st`),
+and so does this assembler.
 
 About 6,100 forms pass, of about 1,900 mnemonics (the index has 4,096
 buckets). The target intersection then keeps out every form the target's
@@ -599,9 +602,8 @@ only so. On binutils 2.42 that was 16,314 of 16,316 lines the same and 2 counted
 (GNU as's imm8 form of `add $49,%ax`, in each syntax), which the matcher takes
 since #1115. With #1115's x87 forms, 4,119 forms round-trip, and on binutils
 2.42 16,474 of 16,476 lines were the same and 2 counted: GNU as's two-byte VEX
-form of `vmovss` between registers (`asm_round_trip_gnu_swaps`: the round trip's
-lines have no `{load}`, and the form table has no register form of F3 0F 11's), in
-each syntax. The
+form of `vmovss` between registers (`asm_round_trip_gnu_prefers`, #147's: the
+round trip's lines have no `{load}`), in each syntax; the report names them. The
 issue's 47 inline-assembly instructions and #1115's are fixtures of their own,
 compared with GNU as too, beside each diagnostic's message and name and the
 encoding choices above.

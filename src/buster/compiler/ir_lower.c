@@ -82,10 +82,20 @@ struct IrTypedPlan
     uint32_t maximum_spill_depth;
     // The depth slots' bytes and alignment: at least 8, 16 for scalar memory classes, or the widest admitted vector.
     uint32_t spill_bytes;
+    // Depth d's values of IR type t are in depth slot depth_slots[d * IR_TYPE_COUNT + t] (of depth_slot_count, after the
+    // locals), each (depth, type) that some block's incoming shape has in a slot of its own, in that order, so that every
+    // depth slot holds one type and promotes (#1189). One slot for all of a depth's values held several types in a
+    // function whose `&&`, `||` and `?:` results differ in type at one depth (luaV_execute's), and stayed in memory: each
+    // truth value a store, a load and the slot's address. Every block is entered with one shape (ir_typed_plan_arrive),
+    // so the stores at a block's end and its successors' loads agree on each depth's type.
+    uint32_t* depth_slots;
+    uint32_t depth_slot_count;
     const IrSimdTypedOperation* operations;
     // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch
     // block (the emitter's last); a jump table's goes to its table's labels from its own block.
     uint32_t indirect;
+    // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
+    bool ignored_arguments;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -337,11 +347,12 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 
 // Emission algorithm:
 //
-// 1. Create one stack slot per source local, plus maximum_spill_depth slots of size 8
-//    and alignment 8. Source slots keep the typed local's actual size/alignment
-//    (an object's from local_sizes and local_alignments, with type VOID);
-//    expression slots are untyped bytes and may hold different classes in
-//    disjoint regions. Mark all address-taken locals so #134 never promotes them.
+// 1. Create one stack slot per source local, plus a slot of spill_bytes for each
+//    (depth, IR type) that a block's incoming shape has (IrTypedPlan.depth_slots).
+//    Source slots keep the typed local's actual size/alignment (an object's from
+//    local_sizes and local_alignments, with type VOID); expression slots are
+//    untyped temporaries, each of which one type's values reach, so that #134
+//    promotes it. Mark all address-taken locals so #134 never promotes them.
 // 2. In a preheader, materialize each slot address and each PARAM value, then
 //    store parameters into their local slots and branch to source block zero.
 //    The preheader matters when source entry zero is a backedge target: placing
@@ -525,6 +536,8 @@ struct IrTypedSink
 {
     IrFunction* output;
     IrSizes sizes;
+    // The plan's ignored_arguments: whether a call's arguments' locations need reading (ir_typed_aggregate_call).
+    bool ignored_arguments;
 };
 
 // Keep constructor updates visible in both replay instantiations: count erases column writes and fill erases null
@@ -809,14 +822,50 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSi
     return value;
 }
 
-static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* sink, const uint32_t* stack, const uint8_t* classes, uint32_t depth, uint32_t local_count)
+// Depth d's slot for a value of stack class `class`: the plan's (depth, type) slot after the locals.
+static uint32_t ir_typed_depth_slot(const IrTypedPlan* plan, uint32_t local_count, uint32_t d, uint8_t class)
+{
+    return local_count + plan->depth_slots[d * IR_TYPE_COUNT + ir_typed_stack_type(class)];
+}
+
+static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* sink, const IrTypedPlan* plan, const uint32_t* stack, const uint8_t* classes, uint32_t depth, uint32_t local_count)
 {
     for (uint32_t d = 0; d < depth; d += 1)
     {
         // All slot addresses are emitted first in the preheader, so an address
         // value's instruction ID is exactly its slot ID.
-        ir_typed_emit(sink, IR_STORE, IR_VOID, local_count + d, stack[d], BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_depth_slot(plan, local_count, d, classes[d]), stack[d], BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
     }
+}
+
+// The plan's depth slots (IrTypedPlan.depth_slots): each (depth, type) a block's incoming shape has, depth by depth and
+// each depth's types in IR type order. Returns false if scratch has no room for the map.
+static bool ir_typed_plan_depth_slots(IrTypedPlan* plan, Arena* scratch)
+{
+    const uint64_t cells = (uint64_t)plan->maximum_spill_depth * IR_TYPE_COUNT;
+    plan->depth_slots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, cells + 1);
+    plan->depth_slot_count = 0;
+    const bool ok = plan->depth_slots != 0;
+    if (ok)
+    {
+        memset(plan->depth_slots, 0, (cells + 1) * sizeof(uint32_t));
+        for (uint32_t b = 0; b < plan->block_count; b += 1)
+        {
+            const uint32_t depth = plan->stack_depths[b];
+            const uint8_t* shape = scratch->base + plan->stack_offsets[b];
+            for (uint32_t d = 0; depth != UINT32_MAX && d < depth; d += 1)
+            {
+                plan->depth_slots[d * IR_TYPE_COUNT + ir_typed_stack_type(shape[d])] = 1;
+            }
+        }
+        for (uint64_t cell = 0; cell < cells; cell += 1)
+        {
+            const uint32_t used = plan->depth_slots[cell];
+            plan->depth_slots[cell] = used != 0 ? plan->depth_slot_count : UINT32_MAX;
+            plan->depth_slot_count += used;
+        }
+    }
+    return ok;
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_address(IrTypedSink* sink, uint32_t base_bits, uint32_t index, uint64_t scale)
@@ -897,14 +946,47 @@ static bool ir_typed_own_records(const Tier0Function* input)
     return own;
 }
 
+// Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes), whose
+// call then has ABI records (ir_typed_aggregate_call): once a function, so that no call reads its arguments' locations
+// where none is. The vector path tests the kinds of 8 locations a load (AbiLocation's byte 6, IGNORE 0); its scalar twin
+// one at a time, which must agree.
+static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
+{
+    (void)vector;
+
+    const uint32_t count = input->argument_locations != 0 ? input->argument_count : 0;
+    bool ignored = false;
+    if (BUSTER_VECTOR_PATH(vector))
+    {
+        for (uint32_t first = 0; !ignored && first < count; first += 8)
+        {
+            const uint32_t lanes = count - first < 8 ? count - first : 8;
+            const __mmask8 active = (__mmask8)((1u << lanes) - 1);
+            const __m512i locations = _mm512_maskz_loadu_epi64(active, input->argument_locations + first);
+            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0);
+        }
+    }
+    else
+    {
+        for (uint32_t a = 0; !ignored && a < count; a += 1)
+        {
+            ignored = input->argument_locations[a].kind == BUSTER_ABI_LOCATION_IGNORE;
+        }
+    }
+    return ignored;
+}
+
 // Whether call `call` passes or returns an aggregate by value (Tier0Function.argument_sizes, call_result_objects): its
-// IR call then has ABI records.
-static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call)
+// IR call then has ABI records. So does one that passes an aggregate the convention ignores (#141: an empty struct, of
+// no bytes), which a call without records would place by its type, in a register of its own; only a function with one
+// (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
+static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
-    for (uint32_t a = 0; input->argument_sizes != 0 && a < input->call_argument_counts[call]; a += 1)
+    for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
-        aggregate |= input->argument_sizes[input->call_first[call] + a] != 0;
+        const uint32_t argument = input->call_first[call] + a;
+        aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || (ignored && input->argument_locations[argument].kind == BUSTER_ABI_LOCATION_IGNORE);
     }
     return aggregate;
 }
@@ -920,7 +1002,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     const uint32_t count = input->call_argument_counts[call];
     const uint32_t first = (uint32_t)sink->sizes.extra_count;
     const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
-    const bool aggregate = ir_typed_aggregate_call(input, call);
+    const bool aggregate = ir_typed_aggregate_call(input, call, sink->ignored_arguments);
     const uint32_t abi = aggregate ? (uint32_t)sink->sizes.abi_call_count : BUSTER_IR_NONE;
     const uint32_t passed = (uint32_t)sink->sizes.passed_count;
     const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
@@ -1056,6 +1138,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
+    if (check.error == IR_OK && input->unwind_init)
+    {
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), is Tier 0's:
+        // ordinary Tier 1 falls back to it.
+        check.error = IR_ERROR_UNSUPPORTED;
+    }
     if (check.error == IR_OK)
     {
         const Tier0Check typed = tier0_validate(input);
@@ -1084,9 +1172,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         }
         else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
         {
-            // A frame's address (#148) and a tail call (#147's musttail), which this adapter doesn't lower and the plan
-            // and the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
-            check.error = IR_ERROR_OPCODE;
+            // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
+            // neither reaches the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
         else if (kind == BUSTER_TYPED_X86)
@@ -1147,6 +1235,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     {
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
+        plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
+        if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
+        {
+            plan.error = "no scratch memory for the depth slots";
+            plan.error_code = IR_ERROR_MEMORY;
+        }
         if (plan.error != 0)
         {
             check.error = plan.error_code;

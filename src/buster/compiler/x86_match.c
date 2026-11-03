@@ -118,7 +118,7 @@ enum
     X86_MATCH_IS4,
     // XMM0, written out (SSE4.1's blends and SHA's rounds read it implicitly; GNU as and clang print it).
     X86_MATCH_XMM0,
-    // The x87's ST(0), written out beside the rm operand's ST(i) (#1115: `fmulp %st, %st(1)`, `fucomip %st(1), %st`).
+    // The x87's st(0), which an ST_RM or RM_ST form names beside its st(i) (#147).
     X86_MATCH_ST0,
 };
 
@@ -269,9 +269,8 @@ static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
         roles[3] = X86_MATCH_RM;
         count = 4;
         break;
-    // The x87's two-register forms (#1115): ST(0) and ST(i) (D8's arithmetic, FCMOVcc and FCOMI), and ST(i) and ST(0)
-    // (DC's and DE's, whose destination is ST(i)).
     case X86_SYNTAX_ST_RM:
+        // fadd st(0), st(i), in Intel's order (the AT&T parser reverses its operands, #147).
         roles[0] = X86_MATCH_ST0;
         roles[1] = X86_MATCH_RM;
         count = 2;
@@ -333,9 +332,10 @@ static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
 }
 
 // Whether the parser has a grammar for an operand descriptor (#1134): no operand, memory addressed by general registers,
-// or a register of a class it names (general registers, XMM, YMM and ZMM registers, opmasks, and the x87's stack,
-// #1115's %st(i)). MMX, bound, control, debug, segment and tile registers, vector-indexed (VSIB) memory, register pairs
-// and blocks and a default flags value aren't the parser's, and neither are the forms that take them.
+// or a register of a class it names (general registers, XMM, YMM and ZMM registers, opmasks, and the x87's stack: %st
+// and %st(i), Intel's st and st(i), #147). MMX, bound, control, debug, segment and tile registers, vector-indexed
+// (VSIB) memory, register pairs and blocks and a default flags value aren't the parser's, and neither are the forms that
+// take them.
 static bool x86_match_descriptor_parsed(uint16_t descriptor)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
@@ -536,7 +536,7 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 else if (role == X86_MATCH_XMM0 || role == X86_MATCH_ST0)
                 {
                     kinds = 1u << X86_OPERAND_REGISTER;
-                    class = role == X86_MATCH_XMM0 ? BUSTER_X86_CLASS_XMM : BUSTER_X86_CLASS_ST;
+                    class = role == X86_MATCH_ST0 ? BUSTER_X86_CLASS_ST : BUSTER_X86_CLASS_XMM;
                     fixed = 1;
                 }
                 else if (role == X86_MATCH_ACC || role == X86_MATCH_CL)

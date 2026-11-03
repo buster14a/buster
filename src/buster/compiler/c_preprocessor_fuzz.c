@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The preprocessor's differential fuzzing (#109), for test-preprocessor --fuzz: run_preprocessor_fixture_tests runs
-// pp_fuzz.
+// pp_fuzz_checks and pp_fuzz_batch, each a check of its own (pp_test_sections).
 // Each case preprocessor_fuzz_generate.c makes is preprocessed as clang reads it alone (preprocessor_fuzz_batch_source:
 // its #line, its source and its marker), by preprocessors of its own with the oracle's configuration, -undef -nostdinc
 // and -std=c17 or -std=c23 (trigraphs in C17, as in clang's ISO modes). Its vectorized kernels and their scalar twins
@@ -26,7 +26,7 @@
 // pp_same_directive_tables, pp_stream_spellings, pp_test_printed, pp_test_print and pp_test_quiet), and which has
 // PPFuzzOptions, since run_preprocessor_fixture_tests parses them. Layout: the counts, our side of a case (pp_fuzz_run,
 // pp_fuzz_output), the kernels' check, the oracles the minimizer calls, reports, a worker (pp_fuzz_worker), and
-// pp_fuzz.
+// pp_fuzz_checks and pp_fuzz_batch.
 
 #include <errno.h>
 #include <inttypes.h>
@@ -50,7 +50,7 @@
 // How much of an output a report prints.
 #define BUSTER_PP_FUZZ_SHOWN 600
 
-// What a worker did in one mode; pp_fuzz sums the workers'.
+// What a worker did in one mode; pp_fuzz_batch sums the workers'.
 typedef struct PPFuzzTally PPFuzzTally;
 struct PPFuzzTally
 {
@@ -818,7 +818,7 @@ static PreprocessorFuzzDifference pp_fuzz_check_ends(Arena* scratch, const char*
 // literal that ends in one, splices it to the next; one that ends in a line splice is spelled with a newline; and
 // stringizing an unterminated literal leaves its quote, or that newline, in the string (clang escapes only literals'
 // quotes).
-// Sets state->unprintable; pp_fuzz counts these cases.
+// Sets state->unprintable; pp_fuzz_batch counts these cases.
 static bool pp_fuzz_unprintable(Preprocessor* pp, PPFuzzState* state)
 {
     const PPTokens* out = &pp->output;
@@ -1792,26 +1792,64 @@ static bool pp_fuzz_read_tallies(int descriptor, PPFuzzTally tallies[2])
     return result;
 }
 
-// Runs each mode the options ask for, with options->jobs workers, and prints each mode's counts. Returns whether every
-// case agreed and gave results.
-static bool pp_fuzz(const PPFuzzOptions* options)
+// SOURCE_DATE_EPOCH set to the batch's, so that __DATE__, __TIME__ and __TIMESTAMP__ come from one instant on both sides
+// (clang reads the environment too): its value before, for pp_fuzz_epoch_end, or null where it had none.
+static char* pp_fuzz_epoch_begin(void)
 {
-    PPFuzzTally totals[2] = { 0 };
-    bool result = options->jobs >= 1 && options->jobs <= BUSTER_PP_FUZZ_MAX_JOBS;
-    // __DATE__, __TIME__ and __TIMESTAMP__ from one instant on both sides (clang reads the environment too).
     const char* epoch = getenv("SOURCE_DATE_EPOCH");
-    char* saved_epoch = epoch != 0 ? strdup(epoch) : 0;
+    char* saved = epoch != 0 ? strdup(epoch) : 0;
     setenv("SOURCE_DATE_EPOCH", BUSTER_PPF_EPOCH, 1);
+    return saved;
+}
+
+static void pp_fuzz_epoch_end(char* saved)
+{
+    if (saved != 0)
+    {
+        setenv("SOURCE_DATE_EPOCH", saved, 1);
+        free(saved);
+    }
+    else
+    {
+        unsetenv("SOURCE_DATE_EPOCH");
+    }
+}
+
+// Whether the options' workers and clang are ones the batch can use.
+static bool pp_fuzz_usable(const PPFuzzOptions* options)
+{
+    bool result = options->jobs >= 1 && options->jobs <= BUSTER_PP_FUZZ_MAX_JOBS;
     if (result && options->with_clang && !preprocessor_fuzz_clang_version(options->clang_path))
     {
         printf("fuzz: %s isn't clang 23\n", options->clang_path);
         result = false;
     }
+    return result;
+}
+
+// The harness's own checks, which the batch's cases rely on: its isolation, its comparison, and with clang its
+// emulation, its ends and a failed comparison. test-preprocessor's --part runs them apart from the modes
+// (pp_test_sections).
+static bool pp_fuzz_checks(const PPFuzzOptions* options)
+{
+    char* saved_epoch = pp_fuzz_epoch_begin();
+    bool result = pp_fuzz_usable(options);
     result = result && pp_fuzz_check_isolation();
     result = result && pp_fuzz_check_comparison();
     result = result && (!options->with_clang || pp_fuzz_check_emulation(options));
     result = result && (!options->with_clang || pp_fuzz_check_ends_cases(options));
     result = result && (!options->with_clang || pp_fuzz_check_failed_comparison(options));
+    pp_fuzz_epoch_end(saved_epoch);
+    return result;
+}
+
+// Runs each mode the options ask for, with options->jobs workers, and prints each mode's counts. Returns whether every
+// case agreed and gave results.
+static bool pp_fuzz_batch(const PPFuzzOptions* options)
+{
+    PPFuzzTally totals[2] = { 0 };
+    char* saved_epoch = pp_fuzz_epoch_begin();
+    bool result = pp_fuzz_usable(options);
     if (result && options->jobs == 1)
     {
         for (uint32_t mode = 0; mode < 2; mode += 1)
@@ -1902,14 +1940,6 @@ static bool pp_fuzz(const PPFuzzOptions* options)
             result = result && total->cases == options->count && compared && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0;
         }
     }
-    if (saved_epoch != 0)
-    {
-        setenv("SOURCE_DATE_EPOCH", saved_epoch, 1);
-        free(saved_epoch);
-    }
-    else
-    {
-        unsetenv("SOURCE_DATE_EPOCH");
-    }
+    pp_fuzz_epoch_end(saved_epoch);
     return result;
 }

@@ -303,6 +303,13 @@ the statement's helper, as clang's inline bytes execute in its function; a
 assembly's, and `.popsection` or `.previous` returns to the template's own
 code. A pushed `.note.GNU-stack` is the writer's empty note, as `.section`'s is.
 
+Such a whole helper has the record path's operand block and stores, but none
+of its own paths: the x87's places, held vector operands, a flag output's
+`setcc` stores and an asm goto's exits (`check_asm_helper_code`). A template
+that takes directives refuses each by name ("inline assembly x87 operands",
+"vector operands", "flag outputs in templates that take directives", "asm goto
+in templates that take directives").
+
 A template of alignment, section and symbol directives alone has no code
 (`entry_code` is false): its sections, data and defined labels are published,
 and the statement calls nothing, so zstd's `__asm__(".p2align 5")` before a hot loop
@@ -387,12 +394,84 @@ bytes of a prefix written alone before a 16-bit instruction.
 3. the loads of the operands from the block: the x87's first, the deepest
    first, a narrower integer zero-extended, and the load into rdi last;
 4. the template's records;
-5. the register outputs' stores through their addresses, from two registers no
+5. an asm goto's exits (below);
+6. the flag outputs' stores, while the flags are the template's (no record
+   before them sets any, nor do these): each condition's `setcc` into a
+   register, zero-extended, then one store over its object at its width, an
+   `_Atomic` object's an exchange, through its address in the block's register,
+   which is loaded again after it;
+7. the register outputs' stores through their addresses, from two registers no
    output holds, then the x87's from st(0) down, and the pops of the x87 inputs
    the template left;
-6. the epilogue.
+8. an asm goto's exit number moved into eax;
+9. the epilogue.
 
-`unwind_tier0_frame` describes it (`Tier0Code.frame_saved` and `frame_size`).
+`unwind_tier0_frame` describes it (`Tier0Code.frame_saved` and `frame_size`):
+an asm goto's branches are inside the frame, and its exits share one epilogue.
+
+## The x87's f
+
+An input of `f`, an x87 register of the compiler's choice (clang refuses `f`
+for an output), takes the shallowest depth no `t` or `u` input, and no `f`
+input before it, holds at the template's start, in the operands' order. A
+template names it by `%N`, which prints its depth's register, so the depth is
+the lowering's to choose, as clang's register allocation chooses it. As LLVM's
+stackifier has it, the template doesn't pop it, and the helper pops it after
+the stores. GCC's rules require the outputs beside an `f` input to be
+early-clobbered; clang's code for a pushed output without the `&` pops the
+wrong register after the template, so such a statement's result is clang's
+own mistake, not a lowering to follow.
+
+## Flag outputs
+
+A flag output, `"=@ccz"(r)` (clang's 28 conditions: `a`, `ae`, `b`, `be`, `c`,
+`e`, `z`, `g`, `ge`, `l`, `le`, `o`, `p`, `s` and their `n` forms, but `pe` and
+`po`, which clang refuses), is a place of its own (`BUSTER_CHECK_ASM_FLAG`) with
+no register: after the template, the helper writes the condition's value, 0 or
+1, over the whole object, as clang's code stores `setcc`'s byte converted to the
+output's type: one store of the object's width (two 8-byte ones for 16 bytes,
+as clang's are), so that a volatile object takes one, and an `_Atomic` one an
+exchange, clang's sequentially consistent store (#1126's review; a 16-byte
+`_Atomic` one, which clang stores by a library call, is refused by name). The
+object may be of any type of 1, 2, 4, 8 or 16 bytes (a
+`bool`, an `int`, an `__int128`, a `float`'s bits, a struct of 4 bytes), as
+clang's code stores the value's integer bits into it; clang's Sema takes any
+type but `_BitInt`, which it refuses as every asm operand, and its code
+generation refuses other sizes, which the lowering refuses by name. A `+` flag
+output reads nothing: clang's code loads its value where the template can't
+name it. A template of no instructions with a flag output has a helper too, as
+clang sets the output after one. With flag outputs lowered, the preprocessor
+defines `__GCC_ASM_FLAG_OUTPUTS__`, as clang does.
+
+## asm goto
+
+An asm goto's template refers to its labels by `%l[name]` or `%lN`, N
+counting after the operands and the `+` outputs' inputs, as GCC and clang
+number them. The substitution prints each label as a name of the statement's
+own, `.Lbuster_goto_S_L`, which the assembler takes for an undefined symbol: a
+jmp or a jcc to it is a reference from its rel32 form. The planning
+(`check_program_asm_plan_one`) turns each such reference into a branch, its rel8
+form back, and `check_asm_helper_code` adds after the template an exit per way
+out: the fall-through's, a move of 0 into a register no output or store holds
+and a jump to the stores, then each label's, a move of its index plus one and a
+jump to the stores (the last one falling into them). The template's jumps go to
+their labels' exits, branch sizing sizes them all with the template's own
+branches, and every way out stores the outputs, so an output's value reaches
+each label, as clang's code gives it (GCC's since 11). The helper returns the
+number in eax, and the statement's code (`check_lower_asm`) keeps it in a
+temporary and branches to each label whose number it is, falling through on 0.
+A label as anything but a jmp's or a jcc's target (data, a call's target, an
+addend) is refused by name. A template of no instructions never jumps, and has
+no helper.
+
+An asm goto's possible targets are its own labels, as clang's
+JumpScopeChecker takes them (`check_input_asm_goto_refused`). The checker
+refuses one that would enter the scope of a variable-length array or of a
+cleanup variable it isn't in, or that would leave the scope of a cleanup
+variable it is in, with clang's "cannot jump from this asm goto statement to
+one of its possible targets". It may leave a variable-length array's scope,
+as clang allows. Like clang's `callbr`, it then goes straight to the label,
+without the stack restore that the scope's normal end makes.
 
 ## File-scope assembly
 
@@ -415,15 +494,17 @@ type than its class's (an init array's, a note).
 
 Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 
-- `asm goto`;
-- flag outputs (`=@cc...`);
+- an asm goto's label as anything but a jmp's or a jcc's target;
+- flag outputs named in their templates (clang prints the register its code
+  sets the condition into after the template), of a size no integer store
+  covers, and with another alternative (`"=r@ccz"`, which clang takes as `r`);
 - MMX's, the opmasks' and the rax and rdx pair's constraints (`y`, `k`, `A`),
-  `f` (an x87 register of the compiler's choice), and the other letters it
-  doesn't place;
+  and the other letters it doesn't place;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
   at st(0), a clobber below the outputs), which clang's code refuses too; two
-  operands at one depth, which clang compiles as one register's; and an integer
-  in an x87 register;
+  operands at one depth, which clang compiles as one register's; and an
+  integer in an x87 register. An x87 operand named in the template prints as
+  its depth's register, `%st` or `%st(1)`, as GCC and clang print it;
 - a template's common symbols (`.comm` of a global, #1115), which only an
   assembler's object holds (`SHN_COMMON`);
 - symbolic immediates, and constants outside their letter's range;
@@ -499,6 +580,16 @@ has the commands, the logs and the default path's numbers against main.
   - the x87's control and status words and MXCSR;
   - `syscall`;
   - branches to the template's own labels;
+  - flag outputs: each of clang's 28 conditions after compares of values
+    around their edges, into objects of every size an integer store covers
+    (`bool`, `char`, `short`, `int`, `long`, `__int128`, a `float`'s bits, a
+    struct of 4 bytes), a `+` one, several beside register outputs and an x87
+    one;
+  - asm goto: labels by name and by number (after a `+` operand's input),
+    jcc's and jmp's, several labels and one named twice, a label before the
+    statement (a loop), a template that falls through, outputs whose values
+    reach every label, a flag output beside them, and statements in a loop of
+    live values and in a function with a variable-length array;
   - callee-saved clobbers inside a loop of live values, and a statement
     expression's asm under a live value;
   - every callee-saved register but rbp clobbered under eight live values,
@@ -552,6 +643,13 @@ has the commands, the logs and the default path's numbers against main.
     width, a 32-bit name, outputs of a register's and a memory constraint, a
     `+` operand in rbx, a matching input in its variable's register, an XMM
     register's, and a template of no instructions;
+  - `f`'s inputs, below the fixed operands, each in a register of its own,
+    beside a `+t` operand, early-clobbered outputs the template pushes, and a
+    template of no instructions;
+  - the x87's registers named in templates: `%0` of `t` as `%st` and of `u`
+    as `%st(1)`, `fxch`, `fadd %%st(1), %%st`, `fld %%st(0)` and `fstp
+    %%st(1)`, AT&T's reversed `fsubp %%st, %%st(1)` popping a clobbered st(1),
+    and `fcomi` into a flag output;
   - the x87's operands: the shapes of musl's long double functions, in
     functions of the test's own (`fabs`, `fsqrt` and `frndint` on `+t`, fprem's
     and fprem1's loops with the status word in `%ax`, a remainder's quotient bits
@@ -587,16 +685,17 @@ has the commands, the logs and the default path's numbers against main.
 
 What the lowering still refuses of what GCC and clang take:
 
+- an asm goto's label as data or a call's target (the Linux kernel's jump
+  tables), whose exits a helper has no address for;
+
 - labels in templates of no instructions (a place in the caller's code), and
   numeric labels or `.` as data;
 - inline emission of a template that returns, which clang places in its
   function's own code; this compiler's helper design refuses it by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
-- the matcher's gaps: `fstp` without a suffix (GNU as assumes `fstps`), Intel's
-  `tbyte ptr`, MMX's `movq`, the x87's stack registers as operands
-  (`fxch %st(1)`, and an x87 operand named in a template), `lock xchg`, and the
-  instructions outside its families;
-- `f`'s x87 registers of the compiler's choice, two operands at one x87
-  depth, and explicit register variables in the registers the helper doesn't
-  place them in.
+- the matcher's gaps: MMX's `movq`, `lock xchg`, `ffreep`, and the
+  instructions outside its families (an x87 memory operand without a width,
+  `fstp (%rax)`, is refused as clang refuses it);
+- two operands at one x87 depth, and explicit register variables in the
+  registers the helper doesn't place them in.

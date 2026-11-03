@@ -308,6 +308,9 @@ the exit status, filesystem contents and exact reported path. Expected failures'
 artifacts stay inside the regression driver's private workspace. The driver removes
 that workspace after all eight cases pass, or retains and names it on failure or
 with its own `--keep`. Clang builds the fixtures and `rm` performs normal cleanup.
+The eight cases run at once, each in its own directory of that workspace, and
+are checked and reported in their order: each mostly waits out its fixtures'
+one-second watchdogs, so in turn they took about 20 s and at once take about 5.
 
 The original seed-138 generator control produced two generated programs and
 zero Buster campaign passes. It remains a protocol control, not compiler

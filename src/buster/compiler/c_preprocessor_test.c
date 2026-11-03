@@ -38,6 +38,7 @@
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
 // keywords, features, -f option sets and timestamps checks, and run_preprocessor_tests.
 
+#include "buster/compiler/test_deal.h"
 #include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <stdint.h>
@@ -3389,13 +3390,12 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
     result = result && clang_arguments != 0;
     if (result)
     {
-        clang_arguments[0] = "-U__GCC_ASM_FLAG_OUTPUTS__";
         for (int i = 0; i < argument_count; i += 1)
         {
-            clang_arguments[i + 1] = arguments[i];
+            clang_arguments[i] = arguments[i];
         }
     }
-    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count + 1, path, true) : (PPClangOutput){ 0 };
+    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count, path, true) : (PPClangOutput){ 0 };
     free(clang_arguments);
     char* theirs = clang.status == PP_CLANG_ACCEPTED ? clang.text : 0;
     result = theirs != 0 && ours != 0;
@@ -3817,8 +3817,7 @@ static bool pp_test_predefines(const char* directory)
         size_t ours_length = passed ? made : 0;
         size_t clang_length = 0;
         char* clang_arguments[3] = { (char*)modes[m][0], (char*)modes[m][1], 0 };
-        clang_arguments[count] = "-U__GCC_ASM_FLAG_OUTPUTS__";
-        free(pp_test_clang(clang_arguments, count + 1, empty_path, clang_path, &clang_length));
+        free(pp_test_clang(clang_arguments, count, empty_path, clang_path, &clang_length));
         FILE* file = fopen(clang_path, "r");
         char* theirs = malloc(1 << 20);
         clang_length = file != 0 && theirs != 0 ? fread(theirs, 1, (1 << 20) - 1, file) : 0;
@@ -5386,7 +5385,8 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     return result;
 }
 
-// The fuzz batch's options, which c_preprocessor_fuzz.c (included after this file) runs with pp_fuzz.
+// The fuzz batch's options, which c_preprocessor_fuzz.c (included after this file) runs with pp_fuzz_checks and
+// pp_fuzz_batch.
 #define BUSTER_PP_FUZZ_CASES 1500
 #define BUSTER_PP_FUZZ_MAX_JOBS 256
 
@@ -7060,7 +7060,8 @@ static bool pp_test_headers(const char* directory)
     return trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
-static bool pp_fuzz(const PPFuzzOptions* options);
+static bool pp_fuzz_checks(const PPFuzzOptions* options);
+static bool pp_fuzz_batch(const PPFuzzOptions* options);
 static bool pp_fuzz_print_case(const PPFuzzOptions* options, uint64_t id);
 
 // A decimal option's value (--fuzz, --seed, --jobs). Returns false if it isn't one.
@@ -7077,8 +7078,8 @@ static bool pp_test_number(const char* text, uint64_t* value)
     return result;
 }
 
-// The default capability inventory requires source checking and both required consumers; action folding alone
-// remains private to its action API. Clang's oracle mode retains its independent frozen tables and raw operands.
+// __GCC_ASM_FLAG_OUTPUTS__: clang's 1 by default and in clang's feature mode, since the C driver lowers flag outputs
+// (#147); -D and -U after it, and a --predefines file's own, as for any predefined macro.
 static bool pp_test_asm_flag_predefine(const char* directory)
 {
     static const char source[] = "#ifdef __GCC_ASM_FLAG_OUTPUTS__\nvalue __GCC_ASM_FLAG_OUTPUTS__\n#else\nabsent\n#endif\n";
@@ -7088,9 +7089,10 @@ static bool pp_test_asm_flag_predefine(const char* directory)
         bool explicit_predefines;
         const char* expected;
     } cases[] = {
-        { NULL, false, "absent" },
-        { "--clang-features", false, "absent" },
+        { NULL, false, "value 1" },
+        { "--clang-features", false, "value 1" },
         { "-D__GCC_ASM_FLAG_OUTPUTS__=7", false, "value 7" },
+        { "-U__GCC_ASM_FLAG_OUTPUTS__", false, "absent" },
         { "-U__GCC_ASM_FLAG_OUTPUTS__", true, "absent" },
         { NULL, true, "value 3" },
         { "-D__GCC_ASM_FLAG_OUTPUTS__=7", true, "value 7" },
@@ -7292,6 +7294,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_CANONICALIZE, "__builtin_canonicalize", false, true, false },
         { CBUILTIN_CANONICALIZEF, "__builtin_canonicalizef", false, true, false },
         { CBUILTIN_CANONICALIZEL, "__builtin_canonicalizel", false, true, false },
+        { CBUILTIN_CANONICALIZEF16, "__builtin_canonicalizef16", false, true, false },
         { CBUILTIN_SQRT, "__builtin_sqrt", false, true, false },
         { CBUILTIN_SQRTF, "__builtin_sqrtf", false, true, false },
         { CBUILTIN_COPYSIGN, "__builtin_copysign", false, true, false },
@@ -7600,6 +7603,35 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_EH_RETURN_DATA_REGNO, "__builtin_eh_return_data_regno", false, true, true },
         { CBUILTIN_DWARF_CFA, "__builtin_dwarf_cfa", false, true, false },
         { CBUILTIN_LAUNDER, "__builtin_launder", false, true, true },
+        { CBUILTIN_ALLOCA_UNINITIALIZED, "__builtin_alloca_uninitialized", false, true, false },
+        { CBUILTIN_ALLOCA_WITH_ALIGN, "__builtin_alloca_with_align", false, true, false },
+        { CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED, "__builtin_alloca_with_align_uninitialized", false, true, false },
+        { CBUILTIN_ALLOW_RUNTIME_CHECK, "__builtin_allow_runtime_check", false, true, false },
+        { CBUILTIN_ALLOW_SANITIZE_CHECK, "__builtin_allow_sanitize_check", false, true, false },
+        { CBUILTIN_ANNOTATION, "__builtin_annotation", false, true, false },
+        { CBUILTIN_ADDRESSOF, "__builtin_addressof", false, true, true },
+        { CBUILTIN_FUNCTION_START, "__builtin_function_start", false, true, true },
+        { CBUILTIN_COMPLEX, "__builtin_complex", false, true, true },
+        { CBUILTIN_ARITHMETIC_FENCE, "__arithmetic_fence", false, true, true },
+        { CBUILTIN_XRAY_CUSTOMEVENT, "__xray_customevent", false, true, false },
+        { CBUILTIN_XRAY_TYPEDEVENT, "__xray_typedevent", false, true, false },
+        { CBUILTIN_WARN_MEMSET_ZERO_LEN, "__warn_memset_zero_len", false, true, false },
+        { CBUILTIN_TRIVIALLY_RELOCATE, "__builtin_trivially_relocate", false, true, false },
+        { CBUILTIN_OPERATOR_NEW, "__builtin_operator_new", false, true, true },
+        { CBUILTIN_OPERATOR_DELETE, "__builtin_operator_delete", false, true, true },
+        { CBUILTIN_PTRAUTH_AUTH, "__builtin_ptrauth_auth", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_AND_RESIGN, "__builtin_ptrauth_auth_and_resign", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_LOAD_RELATIVE_AND_SIGN, "__builtin_ptrauth_auth_load_relative_and_sign", false, true, false },
+        { CBUILTIN_PTRAUTH_AUTH_WITH_PC_AND_RESIGN, "__builtin_ptrauth_auth_with_pc_and_resign", false, true, false },
+        { CBUILTIN_PTRAUTH_BLEND_DISCRIMINATOR, "__builtin_ptrauth_blend_discriminator", false, true, false },
+        { CBUILTIN_PTRAUTH_SIGN_CONSTANT, "__builtin_ptrauth_sign_constant", false, true, true },
+        { CBUILTIN_PTRAUTH_SIGN_GENERIC_DATA, "__builtin_ptrauth_sign_generic_data", false, true, false },
+        { CBUILTIN_PTRAUTH_SIGN_UNAUTHENTICATED, "__builtin_ptrauth_sign_unauthenticated", false, true, false },
+        { CBUILTIN_PTRAUTH_STRING_DISCRIMINATOR, "__builtin_ptrauth_string_discriminator", false, true, true },
+        { CBUILTIN_PTRAUTH_STRIP, "__builtin_ptrauth_strip", false, true, false },
+        { CBUILTIN_CPU_INIT, "__builtin_cpu_init", false, true, false },
+        { CBUILTIN_CPU_IS, "__builtin_cpu_is", false, true, false },
+        { CBUILTIN_CPU_SUPPORTS, "__builtin_cpu_supports", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
@@ -7804,7 +7836,10 @@ static bool pp_test_implemented_features(const char* directory)
 }
 
 // c_predefines_test.c's checks and generator: main.c includes it after this file.
-static bool predefines_test_run(const char* directory, uint64_t seed);
+static bool predefines_test_tables(const char* directory);
+static bool predefines_test_options(const char* directory, uint64_t seed, uint32_t random, uint32_t slice, uint32_t slices);
+static bool predefines_test_dump(const char* directory);
+static bool predefines_test_attributes(const char* directory);
 static bool predefines_test_print_tables(const char* directory);
 static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
@@ -7992,6 +8027,205 @@ static bool pp_test_no_external_files(const char* directory)
     return result;
 }
 
+// --part K/N's deal of the checks (pp_test_sections) to N parts, each a command of its own that the parallel runner packs
+// beside the others (#465's test-checker parts): each check weighs about what it takes, in tenths of a second of one CPU
+// (on a 4-CPU Xeon VM, the cases' and the fuzz batch's workers counted whole), and the deal gives each check, the
+// heaviest first (of two that weigh the same, the earlier), to the part that weighs the least so far (of those, the
+// first), the deal the runner's shards take too (test_deal.h). The parts together run every check once; the weights only
+// balance them, from a run on one CPU without the oracle cache (a check under 0.1 s weighs 1). A check's output and
+// failures are its part's.
+#define BUSTER_PP_TEST_MAX_SECTIONS 128
+// The option sets' check against clang -dM (predefines_test_options), the heaviest, runs as this many checks, each a
+// slice of the sets.
+#define BUSTER_PP_TEST_PREDEFINES_SLICES 4
+
+typedef struct PPTestDeal PPTestDeal;
+struct PPTestDeal
+{
+    // This part, from 1, of `parts`.
+    uint32_t part;
+    uint32_t parts;
+    // The first pass weighs the checks and runs none; the second runs those dealt to the part.
+    bool collecting;
+    // The checks met so far in this pass, and how many of them the part has.
+    uint32_t count;
+    uint32_t dealt;
+    // The checks the first pass met, and whether the second met another sequence: a check whose weight isn't the one the
+    // first pass recorded at its place, or one past them. Each part checks it, so that a check whose guard came to
+    // depend on what another check does can't move between the parts unseen, the parts' union no longer every check
+    // once.
+    uint32_t collected;
+    bool shifted;
+    uint64_t weights[BUSTER_PP_TEST_MAX_SECTIONS];
+    // Each check's part, from 0.
+    uint64_t assigned[BUSTER_PP_TEST_MAX_SECTIONS];
+};
+
+// Whether the next check runs: never while the deal weighs them (it records the check's weight), and then if it is
+// this part's.
+static bool pp_test_section(PPTestDeal* deal, uint32_t weight)
+{
+    const uint32_t index = deal->count;
+    bool runs = false;
+    if (deal->collecting && index < BUSTER_PP_TEST_MAX_SECTIONS)
+    {
+        deal->weights[index] = weight;
+    }
+    else if (!deal->collecting)
+    {
+        deal->shifted |= index >= deal->collected || deal->weights[index] != weight;
+        runs = !deal->shifted && deal->assigned[index] + 1 == deal->part;
+    }
+    deal->count += 1;
+    return runs;
+}
+
+// A check `call` (a bool) of `weight` tenths of a second: its result if the part runs it, and true if not.
+#define PP_TEST_SECTION(deal, weight, call) (pp_test_section((deal), (weight)) ? (call) : true)
+
+// Deals the weighed checks to the parts as the runner deals its shards (test_deal: heaviest first, each to the lightest
+// part so far). False if there are more checks than the deal can hold.
+static bool pp_test_deal(PPTestDeal* deal)
+{
+    const bool valid = deal->count <= BUSTER_PP_TEST_MAX_SECTIONS && deal->parts >= 1;
+    uint64_t order[BUSTER_PP_TEST_MAX_SECTIONS];
+    uint64_t loads[BUSTER_PP_TEST_MAX_SECTIONS];
+    const uint32_t count = valid ? deal->count : 0;
+    test_deal(deal->weights, count, deal->parts, order, loads, deal->assigned);
+    deal->collected = count;
+    deal->dealt = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        deal->dealt += deal->assigned[i] + 1 == deal->part;
+    }
+    if (!valid)
+    {
+        printf("test-preprocessor: %u checks, more than the %u a deal holds\n", deal->count, BUSTER_PP_TEST_MAX_SECTIONS);
+    }
+    return valid;
+}
+
+// The cases in parts that run at once (pp_test_children), each in a directory of its own, their output in the cases'
+// order, then the system levels they found.
+static bool pp_test_cases_section(const char* directory, bool with_clang, bool keep)
+{
+    const PPTestChildren children = {
+        .work = PP_TEST_CHILD_CASES,
+        .parts = BUSTER_PP_TEST_CASE_PARTS,
+        .directory = directory,
+        .with_clang = with_clang,
+        .keep = keep,
+    };
+    const PPTestChildCounts cases = pp_test_children(&children);
+    pp_test_system_units += cases.system_units;
+    pp_test_system_inexact += cases.system_inexact;
+    pp_test_system_tokens += cases.system_tokens;
+    pp_test_system_made += cases.system_made;
+    snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", cases.system_inexact_first);
+    const uint32_t failures = cases.failures + !cases.result;
+    printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
+    printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
+           "by macros\n",
+           (unsigned long long)pp_test_system_units, (unsigned long long)pp_test_system_inexact, pp_test_system_inexact != 0 ? " (the first: " : "",
+           pp_test_system_inexact_first, pp_test_system_inexact != 0 ? ")" : "", (unsigned long long)pp_test_system_tokens,
+           (unsigned long long)pp_test_system_made);
+    return failures == 0;
+}
+
+// One mode of the fuzz batch, without the harness's own checks (pp_fuzz_checks), which a section of their own runs.
+static bool pp_test_fuzz_mode(const PPFuzzOptions* fuzz, uint32_t mode)
+{
+    PPFuzzOptions one = *fuzz;
+    one.modes[0] = mode == 0;
+    one.modes[1] = mode == 1;
+    fflush(stdout);
+    return pp_fuzz_batch(&one);
+}
+
+// test-preprocessor's checks without files, in their order, each through the deal (PP_TEST_SECTION). Returns whether
+// every one that ran passed.
+static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_clang, bool keep, const PPFuzzOptions* fuzz, uint64_t id_order, uint64_t count)
+{
+    bool passed = true;
+    passed &= PP_TEST_SECTION(deal, 103, pp_test_cases_section(directory, with_clang, keep));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_case_retention(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_no_external_files(directory));
+    passed &= PP_TEST_SECTION(deal, 1, test_process_test() == 0);
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_system_case_levels(directory));
+    passed &= PP_TEST_SECTION(deal, 6, pp_test_macro_batches(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 8, pp_test_many_parameters(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 2, pp_test_semantic_pragmas(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_timestamps(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_implemented_features(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_asm_flag_predefine(directory));
+    passed &= PP_TEST_SECTION(deal, 1, predefines_test_target());
+    passed &= PP_TEST_SECTION(deal, 1, predefines_test_refused());
+    passed &= PP_TEST_SECTION(deal, 11, pp_test_history(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_print_offsets());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_print_spellings());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_print_unspliced());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_print_batches(directory));
+    passed &= PP_TEST_SECTION(deal, 3, pp_test_print_spelling_paths(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_print_lines(directory));
+    passed &= PP_TEST_SECTION(deal, 6, pp_test_system_warnings(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_pragma_origins(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_text(fuzz->seed));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_lookups(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_scalar_reference(directory));
+    passed &= PP_TEST_SECTION(deal, 19, pp_test_windows(fuzz->seed));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_line_ends());
+    passed &= PP_TEST_SECTION(deal, 5, pp_test_window_units(directory, fuzz->seed));
+    passed &= PP_TEST_SECTION(deal, 28, pp_test_directives(directory, with_clang, fuzz->seed, count));
+    passed &= PP_TEST_SECTION(deal, 130, pp_test_id_order(directory, id_order));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_assembly_printing(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_raw_query_views(directory));
+    passed &= PP_TEST_SECTION(deal, 5, pp_test_raw_query_capacity(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_raw_recovery_failures());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_named_ucns(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_named_ucn_scaling(directory));
+    passed &= PP_TEST_SECTION(deal, 2, pp_test_named_ucn_boundaries(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_prelude_failures());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_direct_argument_failures());
+    passed &= PP_TEST_SECTION(deal, 2, pp_test_nested_arguments());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_argument_links());
+    passed &= PP_TEST_SECTION(deal, 4, pp_test_argument_slice_semantics(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 26, pp_test_option_refusals(directory, with_clang));
+    if (with_clang)
+    {
+        passed &= PP_TEST_SECTION(deal, 9, pp_test_predefines(directory));
+        passed &= PP_TEST_SECTION(deal, 221, pp_test_headers(directory));
+        // predefines_test_run's checks (c_predefines_test.c), each a check of its own.
+        passed &= PP_TEST_SECTION(deal, 145, predefines_test_tables(directory));
+        for (uint32_t slice = 0; slice < BUSTER_PP_TEST_PREDEFINES_SLICES; slice += 1)
+        {
+            passed &= PP_TEST_SECTION(deal, 102, predefines_test_options(directory, fuzz->seed, 400, slice, BUSTER_PP_TEST_PREDEFINES_SLICES));
+        }
+        passed &= PP_TEST_SECTION(deal, 1, predefines_test_dump(directory));
+        passed &= PP_TEST_SECTION(deal, 4, predefines_test_attributes(directory));
+        passed &= PP_TEST_SECTION(deal, 35, pp_test_keywords(directory));
+        passed &= PP_TEST_SECTION(deal, 10, pp_test_features(directory));
+        passed &= PP_TEST_SECTION(deal, 49, pp_test_option_features(directory));
+        passed &= PP_TEST_SECTION(deal, 1, pp_test_builtin_targets(directory));
+    }
+    if (fuzz->count != 0)
+    {
+        // The fuzz batch (c_preprocessor_fuzz.c): the harness's own checks, then each mode it runs.
+        passed &= PP_TEST_SECTION(deal, 22, pp_fuzz_checks(fuzz));
+        if (fuzz->modes[0])
+        {
+            passed &= PP_TEST_SECTION(deal, 115, pp_test_fuzz_mode(fuzz, 0));
+        }
+        if (fuzz->modes[1])
+        {
+            passed &= PP_TEST_SECTION(deal, 115, pp_test_fuzz_mode(fuzz, 1));
+        }
+    }
+    return passed;
+}
+
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
@@ -8018,6 +8252,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     // aren't an option's value.
     bool tables = false;
     uint64_t count = BUSTER_PP_DIRECTIVE_TEST_SOURCES;
+    // --part K/N: the checks without files that the deal gives part K of N (pp_test_sections).
+    uint32_t part = 1;
+    uint32_t parts = 1;
+    bool parted = false;
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** files = calloc((size_t)argument_count + 1, sizeof(char*));
@@ -8087,6 +8325,26 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             i += 1;
             count = strtoull(arguments[i], 0, 10);
         }
+        else if (strcmp(argument, "--part") == 0)
+        {
+            // K/N: decimal K from 1 to N, a '/', and decimal N up to the deal's checks, digits alone on either side.
+            const char* slash = next != 0 ? strchr(next, '/') : 0;
+            char first_text[24] = { 0 };
+            const size_t first_length = slash != 0 ? (size_t)(slash - next) : 0;
+            // Without a value or its '/', there is nothing to copy, and `next` may be null.
+            if (slash != 0 && first_length < sizeof(first_text))
+            {
+                memcpy(first_text, next, first_length);
+            }
+            uint64_t first = 0;
+            uint64_t second = 0;
+            valid = valid && !parted && slash != 0 && first_length < sizeof(first_text) && pp_test_number(first_text, &first) &&
+                    pp_test_number(slash + 1, &second) && first >= 1 && first <= second && second <= BUSTER_PP_TEST_MAX_SECTIONS;
+            part = (uint32_t)first;
+            parts = (uint32_t)second;
+            parted = true;
+            i += 1;
+        }
         else if (argument[0] == '-')
         {
             passed[passed_count++] = arguments[i];
@@ -8110,9 +8368,11 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         }
     }
     fuzz.with_clang = with_clang;
+    // --part deals the checks without files alone.
+    valid = valid && (!parted || (file_count == 0 && !tables && !generate_targets && !print_case));
     if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
     {
-        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [options] [file...]\n");
     }
     char directory[4096];
     const char* temporary = oracle_temporary_directory();
@@ -8128,88 +8388,29 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     }
     else if (passed_all && file_count == 0)
     {
-        // The cases in parts that run at once (pp_test_children), each in a directory of its own, their output in the
-        // cases' order.
-        const PPTestChildren children = {
-            .work = PP_TEST_CHILD_CASES,
-            .parts = BUSTER_PP_TEST_CASE_PARTS,
-            .directory = directory,
-            .with_clang = with_clang,
-            .keep = keep,
+        // The checks, all of them or --part's, in their order (pp_test_sections): first a pass that only weighs them,
+        // then the deal, then the pass that runs this part's.
+        PPTestDeal deal = {
+            .part = part,
+            .parts = parts,
+            .collecting = true,
         };
-        const PPTestChildCounts cases = pp_test_children(&children);
-        pp_test_system_units += cases.system_units;
-        pp_test_system_inexact += cases.system_inexact;
-        pp_test_system_tokens += cases.system_tokens;
-        pp_test_system_made += cases.system_made;
-        snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", cases.system_inexact_first);
-        const uint32_t failures = cases.failures + !cases.result;
-        printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
-        printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
-               "by macros\n",
-               (unsigned long long)pp_test_system_units, (unsigned long long)pp_test_system_inexact, pp_test_system_inexact != 0 ? " (the first: " : "",
-               pp_test_system_inexact_first, pp_test_system_inexact != 0 ? ")" : "", (unsigned long long)pp_test_system_tokens,
-               (unsigned long long)pp_test_system_made);
-        passed_all = failures == 0;
-        passed_all &= pp_test_case_retention(directory);
-        passed_all &= pp_test_no_external_files(directory);
-        passed_all &= test_process_test() == 0;
-        passed_all &= pp_test_system_case_levels(directory);
-        passed_all &= pp_test_macro_batches(directory, with_clang);
-        passed_all &= pp_test_many_parameters(directory, with_clang);
-        passed_all &= pp_test_semantic_pragmas(directory, with_clang);
-        passed_all &= pp_test_timestamps(directory, with_clang);
-        passed_all &= pp_test_implemented_features(directory);
-        passed_all &= pp_test_asm_flag_predefine(directory);
-        passed_all &= predefines_test_target();
-        passed_all &= predefines_test_refused();
-        passed_all &= pp_test_history(directory, with_clang);
-        passed_all &= pp_test_print_offsets();
-        passed_all &= pp_test_print_spellings();
-        passed_all &= pp_test_print_unspliced();
-        passed_all &= pp_test_print_batches(directory);
-        passed_all &= pp_test_print_spelling_paths(directory);
-        passed_all &= pp_test_print_lines(directory);
-        passed_all &= pp_test_system_warnings(directory, with_clang);
-        passed_all &= pp_test_pragma_origins(directory, with_clang);
-        passed_all &= pp_test_embed_text(fuzz.seed);
-        passed_all &= pp_test_embed_lookups(directory, with_clang);
-        passed_all &= pp_test_lookup_accounting(directory);
-        passed_all &= pp_test_final_copy_accounting();
-        passed_all &= pp_test_trailing_splices();
-        passed_all &= pp_test_scalar_reference(directory);
-        passed_all &= pp_test_windows(fuzz.seed);
-        passed_all &= pp_test_line_ends();
-        passed_all &= pp_test_window_units(directory, fuzz.seed);
-        passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
-        passed_all &= pp_test_id_order(directory, id_order);
-        passed_all &= pp_test_assembly_printing(directory);
-        passed_all &= pp_test_raw_query_views(directory);
-        passed_all &= pp_test_raw_query_capacity(directory, with_clang);
-        passed_all &= pp_test_raw_recovery_failures();
-        passed_all &= pp_test_named_ucns(directory, with_clang);
-        passed_all &= pp_test_named_ucn_scaling(directory);
-        passed_all &= pp_test_named_ucn_boundaries(directory);
-        passed_all &= pp_test_prelude_failures();
-        passed_all &= pp_test_direct_argument_failures();
-        passed_all &= pp_test_nested_arguments();
-        passed_all &= pp_test_argument_links();
-        passed_all &= pp_test_argument_slice_semantics(directory, with_clang);
-        passed_all &= pp_test_option_refusals(directory, with_clang);
-        if (with_clang)
+        pp_test_sections(&deal, directory, with_clang, keep, &fuzz, id_order, count);
+        passed_all = pp_test_deal(&deal);
+        if (parts > 1)
         {
-            passed_all &= pp_test_predefines(directory);
-            passed_all &= pp_test_headers(directory);
-            passed_all &= predefines_test_run(directory, fuzz.seed);
-            passed_all &= pp_test_keywords(directory);
-            passed_all &= pp_test_features(directory);
-            passed_all &= pp_test_option_features(directory);
-            passed_all &= pp_test_builtin_targets(directory);
+            printf("test-preprocessor: part %u of %u: %u of %u checks\n", part, parts, deal.dealt, deal.count);
         }
-        if (fuzz.count != 0)
+        fflush(stdout);
+        deal.collecting = false;
+        deal.count = 0;
+        passed_all = passed_all && pp_test_sections(&deal, directory, with_clang, keep, &fuzz, id_order, count);
+        // The checks the parts run are the deal's only if this pass met the first one's, check for check.
+        if (deal.shifted || deal.count != deal.collected)
         {
-            fflush(stdout);
-            passed_all &= pp_fuzz(&fuzz);
+            printf("test-preprocessor: the checks run aren't the ones dealt: %u of them against %u weighed%s\n", deal.count, deal.collected,
+                   deal.shifted ? ", from one whose weight or place differs" : "");
+            passed_all = false;
         }
     }
     else if (passed_all && tables)

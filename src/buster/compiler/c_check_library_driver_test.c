@@ -4,8 +4,8 @@
 // #148's library builtins through the driver, against clang as an external oracle (c_builtin_library.c): the implicit
 // declarations of every plain library name, in each language mode and with -fno-builtin, -fno-builtin-NAME and
 // -ffreestanding, whose diagnostics must be clang's line for line; programs that call library functions declared so,
-// fold plain declarations' calls or not as those options say, and abort, which must run as clang's builds do; and the
-// library builtins the lowering refuses, by name. Include after c_check_fortify_driver_test.c, whose runner it takes.
+// fold plain declarations' calls or not as those options say, and abort, which must run as clang's builds do. Include
+// after c_check_fortify_driver_test.c, whose runner it takes.
 
 // The lines of a compiler's diagnostics that implicit declarations make (clang's ext_implicit_lib_function_decl and its
 // C99 form, the header's note, and the ordinary implicit declarations' and undeclared identifiers' errors), in order,
@@ -64,7 +64,7 @@ static void check_test_library_difference(const char* a, const char* b, char* di
 }
 
 // Every plain library name called once, undeclared, in each configuration, then non-call uses of names before their
-// calls: clang creates the builtin's declaration where its name is looked up, call or not, and its diagnostic says
+// calls, then the names of FILE, jmp_buf and ucontext_t after their typedefs: clang creates the builtin's declaration where its name is looked up, call or not, and its diagnostic says
 // "call" either way. Each configuration's lines must be clang's, and its status, by both paths: some lines, but none
 // where -Wno-implicit-function-declaration turns the diagnostics off (`quiet`).
 static void check_test_library_implicit(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -99,17 +99,32 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
         length += (uint64_t)snprintf(calls + length, capacity - length, "    %s();\n", cbuiltin_library_plains[p].name);
     }
     length += calls != NULL ? (uint64_t)snprintf(calls + length, capacity - length, "}\n") : 0;
-    char paths[2][512];
+    // And the names whose prototypes take the unit's FILE, jmp_buf, sigjmp_buf or ucontext_t, after typedefs of them, which
+    // the diagnostics spell (CBuiltinLibraryNamed).
+    char* typed = malloc(capacity);
+    uint64_t typed_length = typed != NULL ? (uint64_t)snprintf(typed, capacity, "typedef struct F FILE;\ntypedef long jmp_buf[8];\ntypedef int* sigjmp_buf[3];\n"
+                                                                              "typedef struct U { int x; } ucontext_t;\nvoid f(void)\n{\n") : 0;
+    for (uint32_t p = 0; typed != NULL && p < BUSTER_CBUILTIN_LIBRARY_PLAIN_COUNT; p += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(cbuiltin_library_plains[p].name, cbuiltin_library_plains[p].length);
+        const bool named = info != NULL && (memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
+                                            memchr(info->encoding, 'K', info->encoding_length) != NULL);
+        typed_length += named ? (uint64_t)snprintf(typed + typed_length, capacity - typed_length, "    %s();\n", cbuiltin_library_plains[p].name) : 0;
+    }
+    typed_length += typed != NULL ? (uint64_t)snprintf(typed + typed_length, capacity - typed_length, "}\n") : 0;
+    char paths[3][512];
     snprintf(paths[0], sizeof(paths[0]), "%s/library-calls.c", directory);
     snprintf(paths[1], sizeof(paths[1]), "%s/library-uses.c", directory);
-    const bool written = calls != NULL && length < capacity && parse_test_write(paths[0], calls, length) && parse_test_write(paths[1], uses, sizeof(uses) - 1);
+    snprintf(paths[2], sizeof(paths[2]), "%s/library-typed.c", directory);
+    const bool written = calls != NULL && length < capacity && parse_test_write(paths[0], calls, length) && parse_test_write(paths[1], uses, sizeof(uses) - 1) &&
+                         typed != NULL && typed_length < capacity && parse_test_write(paths[2], typed, typed_length);
     check_test_expect(test, written, "library implicit declarations: fixtures written");
     enum { LINES = 1 << 20 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
     for (uint32_t c = 0; written && expected_lines != NULL && actual_lines != NULL && c < BUSTER_ARRAY_LENGTH(configurations); c += 1)
     {
-        for (uint32_t f = 0; f < 2; f += 1)
+        for (uint32_t f = 0; f < 3; f += 1)
         {
             char* arguments[12] = { (char*)clang, (char*)configurations[c].standard, "-fno-caret-diagnostics", "-ferror-limit=0", "-fsyntax-only", paths[f] };
             uint32_t count = 6;
@@ -141,7 +156,7 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
                 char description[768];
                 snprintf(description, sizeof(description), "library implicit declarations %s %s %s %s, %s: status %d (clang %d), %s",
                          configurations[c].standard, configurations[c].first != NULL ? configurations[c].first : "",
-                         configurations[c].second != NULL ? configurations[c].second : "", f == 0 ? "calls" : "uses", scalar != 0 ? "scalar" : "vector",
+                         configurations[c].second != NULL ? configurations[c].second : "", f == 0 ? "calls" : f == 1 ? "uses" : "typed", scalar != 0 ? "scalar" : "vector",
                          status, oracle, difference);
                 check_test_expect(test, oracle >= 0 && status == oracle && same, description);
                 free(actual);
@@ -152,8 +167,10 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
     free(actual_lines);
     free(expected_lines);
     free(calls);
+    free(typed);
     unlink(paths[0]);
     unlink(paths[1]);
+    unlink(paths[2]);
 }
 
 // Programs built by clang and by this executable, by both paths, that must print the same and exit alike: C89's calls
@@ -161,6 +178,124 @@ static void check_test_library_implicit(CheckTest* test, const char* clang, cons
 // plain declaration's strcmp of constants, which folds to clang's -1 where the name is a builtin and calls the library's
 // otherwise, by -fno-builtin, -fno-builtin-strcmp and -ffreestanding; __builtin_strcmp's fold, which no option turns
 // off; and __builtin_abort.
+static void check_test_library_run(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name,
+                                   const char* program_source, const char* standard, const char* option);
+
+// __builtin_cpu_supports and __builtin_cpu_is of every name of the table (c_builtin_cpu.inc) against clang's code (#148):
+// a program that defines libgcc's model itself, sets each bit of each feature word alone and each value from 0 to 63 of
+// the vendor, the type and the subtype, and prints which make each name's test true, built by clang and by this
+// executable (check_test_library_run), so that any name's word, bit, field or value other than clang's shows.
+static void check_test_cpu_model_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const features[] = {
+#define BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit) name,
+#define BUSTER_CBUILTIN_CPU_NAME(name, field, value)
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_NAME
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+    };
+    static const char* const names[] = {
+#define BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit)
+#define BUSTER_CBUILTIN_CPU_NAME(name, field, value) name,
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_NAME
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+    };
+    enum { CAPACITY = 32768 };
+    char* source = malloc(CAPACITY);
+    uint32_t length = source != NULL ? (uint32_t)snprintf(source, CAPACITY,
+        "int printf(const char*,...);struct M{unsigned vendor,type,subtype;unsigned features[1];}__cpu_model;unsigned __cpu_features2[3];\n"
+        "static void clear(void){__cpu_model.vendor=__cpu_model.type=__cpu_model.subtype=__cpu_model.features[0]=0;"
+        "__cpu_features2[0]=__cpu_features2[1]=__cpu_features2[2]=0;}\nstatic int feature(int i){switch(i){\n") : 0;
+    for (uint32_t i = 0; source != NULL && i < BUSTER_ARRAY_LENGTH(features) && length < CAPACITY; i += 1)
+    {
+        length += (uint32_t)snprintf(source + length, CAPACITY - length, "case %u:return __builtin_cpu_supports(\"%s\");\n", i, features[i]);
+    }
+    length += source != NULL && length < CAPACITY ? (uint32_t)snprintf(source + length, CAPACITY - length, "}return -1;}\nstatic int name(int i){switch(i){\n") : 0;
+    for (uint32_t i = 0; source != NULL && i < BUSTER_ARRAY_LENGTH(names) && length < CAPACITY; i += 1)
+    {
+        length += (uint32_t)snprintf(source + length, CAPACITY - length, "case %u:return __builtin_cpu_is(\"%s\");\n", i, names[i]);
+    }
+    length += source != NULL && length < CAPACITY ? (uint32_t)snprintf(source + length, CAPACITY - length,
+        "}return -1;}\nint main(void){for(int i=0;i<%u;i++){int found=0;for(int w=0;w<4;w++)for(int b=0;b<32;b++){clear();"
+        "if(w==0)__cpu_model.features[0]=1u<<b;else __cpu_features2[w-1]=1u<<b;if(feature(i)){printf(\"f%%d %%d %%d\\n\",i,w,b);found+=1;}}"
+        "if(found!=1)printf(\"f%%d found %%d\\n\",i,found);}\nfor(int i=0;i<%u;i++){int found=0;for(int f=0;f<3;f++)for(unsigned v=0;v<64;v++){"
+        "clear();if(f==0)__cpu_model.vendor=v;else if(f==1)__cpu_model.type=v;else __cpu_model.subtype=v;if(name(i)){printf(\"n%%d %%d %%u\\n\",i,f,v);found+=1;}}"
+        "if(found!=1)printf(\"n%%d found %%d\\n\",i,found);}\nclear();printf(\"%%d %%d\\n\",__builtin_cpu_supports(\"not-a-feature\"),"
+        "(int)sizeof(__builtin_cpu_is(\"intel\")));return 0;}\n", (uint32_t)BUSTER_ARRAY_LENGTH(features), (uint32_t)BUSTER_ARRAY_LENGTH(names)) : 0;
+    check_test_expect(test, source != NULL && length < CAPACITY, "the cpu builtins' program fits");
+    if (source != NULL && length < CAPACITY)
+    {
+        check_test_library_run(test, clang, executable, directory, "the cpu builtins of every name over libgcc's model", source, "-std=gnu17", NULL);
+    }
+    free(source);
+}
+
+// One program built by clang and by this executable, by both paths, which must exit alike and print the same: `source`
+// in `directory`, with `standard` and `option` (NULL for none).
+static void check_test_library_run(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name,
+                                   const char* program_source, const char* standard, const char* option)
+{
+    char source[512];
+    char built[3][512];
+    snprintf(source, sizeof(source), "%s/library-run.c", directory);
+    for (uint32_t b = 0; b < 3; b += 1)
+    {
+        snprintf(built[b], sizeof(built[b]), "%s/library-run-%u", directory, b);
+    }
+    const bool written = parse_test_write(source, program_source, strlen(program_source));
+    int statuses[3] = { -1, -1, -1 };
+    char* outputs[3] = { NULL, NULL, NULL };
+    for (uint32_t b = 0; written && b < 3; b += 1)
+    {
+        char* arguments[10] = { (char*)(b == 0 ? clang : executable), (char*)standard, "-w", source, "-o", built[b], "-lm" };
+        uint32_t count = 7;
+        if (option != NULL)
+        {
+            arguments[count++] = (char*)option;
+        }
+        if (b == 2)
+        {
+            arguments[count++] = "--scalar";
+        }
+        arguments[count] = NULL;
+        char* diagnostics = NULL;
+        unlink(built[b]);
+        const int compiled = check_test_driver_spawn(arguments, &diagnostics);
+        free(diagnostics);
+        if (compiled == 0)
+        {
+            // The status of a run, then, for a program that exits (not __builtin_abort's, whose core the runner turns
+            // off), what a second run prints.
+            char* run[] = { built[b], NULL };
+            statuses[b] = check_test_fortify_execute(built[b]);
+            if (statuses[b] >= 0 && statuses[b] < 128)
+            {
+                check_test_driver_spawn_stream(run, &outputs[b], true);
+            }
+            else
+            {
+                outputs[b] = strdup("");
+            }
+        }
+    }
+    for (uint32_t b = 1; written && b < 3; b += 1)
+    {
+        char description[384];
+        snprintf(description, sizeof(description), "%s, %s: exit %d and output \"%s\" (clang %d, \"%s\")", name, b == 2 ? "scalar" : "vector",
+                 statuses[b], outputs[b] != NULL ? outputs[b] : "", statuses[0], outputs[0] != NULL ? outputs[0] : "");
+        check_test_expect(test, statuses[0] >= 0 && statuses[b] == statuses[0] && outputs[0] != NULL && outputs[b] != NULL &&
+                                strcmp(outputs[0], outputs[b]) == 0, description);
+    }
+    check_test_expect(test, written, "library programs: source written");
+    for (uint32_t b = 0; b < 3; b += 1)
+    {
+        free(outputs[b]);
+        unlink(built[b]);
+    }
+    unlink(source);
+}
+
 static void check_test_library_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -220,113 +355,15 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             NULL,
         },
     };
-    char source[512];
-    char built[3][512];
-    snprintf(source, sizeof(source), "%s/library-run.c", directory);
-    for (uint32_t b = 0; b < 3; b += 1)
-    {
-        snprintf(built[b], sizeof(built[b]), "%s/library-run-%u", directory, b);
-    }
     for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(programs); p += 1)
     {
-        const bool written = parse_test_write(source, programs[p].source, strlen(programs[p].source));
-        int statuses[3] = { -1, -1, -1 };
-        char* outputs[3] = { NULL, NULL, NULL };
-        for (uint32_t b = 0; written && b < 3; b += 1)
-        {
-            char* arguments[10] = { (char*)(b == 0 ? clang : executable), (char*)programs[p].standard, "-w", source, "-o", built[b], "-lm" };
-            uint32_t count = 7;
-            if (programs[p].option != NULL)
-            {
-                arguments[count++] = (char*)programs[p].option;
-            }
-            if (b == 2)
-            {
-                arguments[count++] = "--scalar";
-            }
-            arguments[count] = NULL;
-            char* diagnostics = NULL;
-            unlink(built[b]);
-            const int compiled = check_test_driver_spawn(arguments, &diagnostics);
-            free(diagnostics);
-            if (compiled == 0)
-            {
-                // The status of a run, then, for a program that exits (not __builtin_abort's, whose core the runner turns
-                // off), what a second run prints.
-                char* run[] = { built[b], NULL };
-                statuses[b] = check_test_fortify_execute(built[b]);
-                if (statuses[b] >= 0 && statuses[b] < 128)
-                {
-                    check_test_driver_spawn_stream(run, &outputs[b], true);
-                }
-                else
-                {
-                    outputs[b] = strdup("");
-                }
-            }
-        }
-        for (uint32_t b = 1; written && b < 3; b += 1)
-        {
-            char description[384];
-            snprintf(description, sizeof(description), "%s, %s: exit %d and output \"%s\" (clang %d, \"%s\")", programs[p].name, b == 2 ? "scalar" : "vector",
-                     statuses[b], outputs[b] != NULL ? outputs[b] : "", statuses[0], outputs[0] != NULL ? outputs[0] : "");
-            check_test_expect(test, statuses[0] >= 0 && statuses[b] == statuses[0] && outputs[0] != NULL && outputs[b] != NULL &&
-                                    strcmp(outputs[0], outputs[b]) == 0, description);
-        }
-        check_test_expect(test, written, "library programs: source written");
-        for (uint32_t b = 0; b < 3; b += 1)
-        {
-            free(outputs[b]);
-            unlink(built[b]);
-        }
+        check_test_library_run(test, clang, executable, directory, programs[p].name, programs[p].source, programs[p].standard, programs[p].option);
     }
-    unlink(source);
-}
-
-// The library builtins the checker types and the lowering refuses: -c fails naming each, by both paths, and writes no
-// object; their __has_builtin is 0, which the same unit's #if checks.
-static void check_test_library_refusals(CheckTest* test, const char* executable, const char* directory)
-{
-    static const struct
-    {
-        const char* name;
-        const char* source;
-    } refusals[] = {
-        { "__builtin_alloca_with_align", "void* f(void){return __builtin_alloca_with_align(16,64);}\n" },
-        { "__builtin_alloca_uninitialized", "void* f(unsigned long n){return __builtin_alloca_uninitialized(n);}\n" },
-    };
-    char source[512];
-    char object[512];
-    snprintf(source, sizeof(source), "%s/library-refusal.c", directory);
-    snprintf(object, sizeof(object), "%s/library-refusal.o", directory);
-    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
-    {
-        char text[512];
-        const int length = snprintf(text, sizeof(text), "#if __has_builtin(%s)\n#error advertised\n#endif\n%s", refusals[r].name, refusals[r].source);
-        const bool written = length > 0 && (size_t)length < sizeof(text) && parse_test_write(source, text, (uint64_t)length);
-        for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
-        {
-            char* diagnostics = NULL;
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, scalar != 0 ? "--scalar" : NULL, NULL };
-            unlink(object);
-            const int status = check_test_driver_spawn(arguments, &diagnostics);
-            char expected[128];
-            snprintf(expected, sizeof(expected), "unsupported: %s", refusals[r].name);
-            char description[384];
-            snprintf(description, sizeof(description), "%s is refused by name at -c (%s): status %d, \"%.160s\"", refusals[r].name, scalar != 0 ? "scalar" : "vector",
-                     status, diagnostics != NULL ? diagnostics : "");
-            check_test_expect(test, status == 1 && diagnostics != NULL && strstr(diagnostics, expected) != NULL && strstr(diagnostics, "advertised") == NULL &&
-                                    access(object, F_OK) != 0, description);
-            free(diagnostics);
-        }
-    }
-    unlink(source);
-    unlink(object);
 }
 
 static void check_test_driver_library(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_library_implicit(test, clang, executable, directory);
     check_test_library_runs(test, clang, executable, directory);
-    check_test_library_refusals(test, executable, directory);
+    check_test_cpu_model_runs(test, clang, executable, directory);
 }
