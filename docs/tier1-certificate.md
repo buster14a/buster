@@ -546,10 +546,14 @@ The decoding:
 - **Entry.** The parameters are entry facts in their ABI registers and incoming
   slots. An incoming slot is placed by the ABI from the decoded prologue (8 bytes
   past the return address per slot), and the layout's offset, which the
-  parameter's load uses, must be that. The prologue may write none of them; a
-  narrow parameter's extension
-  into its canonical form is the parameter, and a stack parameter's load must
-  be its type's form.
+  parameter's load uses, must be that. The prologue may write none of them,
+  and a stack parameter's load must be its type's form. A narrow parameter (an
+  I1's, I8's or I16's) is at entry only its caller's 1 or 2 bytes, in its
+  register's low bytes or its slot's: its own value, past the function's. Its
+  zero extension into canonical 32-bit storage (`movzx`, in its register or
+  from its slot) is the instruction that reads those bytes and defines the
+  parameter, so an extension left out, or made a wider move or load, leaves the
+  parameter undefined and its uses fail.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
   record by rsp's offset from its value at entry, each record exactly its form's
   (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),
@@ -610,7 +614,9 @@ dynamic frame without calls, from a stack save alone (its rows and incoming
 area from rbp), is certified with its stack parameter read through rbp; with
 rbp set after its allocation, that load and the rows are elsewhere, and it is
 refused. A conditional tail `je false; edge move; jne true`, walked directly, is
-refused when the move is a zero's `xor`, whose flags the `jne` would read.
+refused when the move is a zero's `xor`, whose flags the `jne` would read. A
+fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
+its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an

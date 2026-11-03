@@ -18,6 +18,13 @@
 // of right after its push, each epilogue's reset from it moved to match, is refused, rbp no longer being the frame
 // record's (the caller's rbp at it, the return address above it) that the layout's offsets are computed for.
 //
+// Narrow parameters (#1212's review): z(p0, ..., p6), p0 an I8 in rdi and p6 an I16 on the stack, returns p0 + p6 zero
+// extended in one branch. Its code is certified, each extension the instruction that defines its parameter from its
+// caller's bytes. Then p0's `movzx edi, dil` made `mov edi, edi`, which keeps the caller's upper bits, and p6's
+// `movzx r32, word [slot]` made a 32-bit load of the slot (its origin a move's, which decodes any load), which reads the
+// caller's upper bytes: each is refused, a certificate that took the caller's registers and slots as canonical having
+// accepted both.
+//
 // A conditional branch's tail, walked (tier1_cert_emitted_walk): the condition is jne, laid out `je false; the true
 // edge's move; jne true`, the false block next. A move that keeps the flags (mov) reaches the true block through the
 // second jump; a zero's xor between them, which writes the flags, would leave that jne reading the xor's instead of the
@@ -54,6 +61,13 @@ struct Tier1CodeCertificateCounts
     uint32_t saved;
     uint32_t saved_moved;
     uint32_t saved_refused;
+    // The narrow parameters' compiles certified; their extensions corrupted, in a register and from a slot, and those
+    // refused.
+    uint32_t narrow;
+    uint32_t narrow_register;
+    uint32_t narrow_register_refused;
+    uint32_t narrow_stack;
+    uint32_t narrow_stack_refused;
 };
 
 static bool tier1_code_certificate_function(Arena* input, IrFunction* function, uint32_t* call)
@@ -171,6 +185,51 @@ static bool tier1_code_certificate_saved_function(Arena* input, IrFunction* func
         function->block_offsets[2] = next;
         const uint32_t difference = tier1_select_test_append(function, &next, IR_SUB, IR_I64, parameters[6], parameters[0], BUSTER_IR_NONE);
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, difference, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->instruction_count = next;
+        function->block_offsets[3] = next;
+    }
+    return created;
+}
+
+// z(p0, ..., p6), p0 an I8 and p6 an I16 (on the stack), the rest I64: b0 branches on p1's low bit to b1 or b2; b1
+// returns zext(p0) + zext(p6); b2 returns p1.
+static bool tier1_code_certificate_narrow_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 24,
+        .block_count = 3,
+        .constant_count = 2,
+        .parameter_count = 7,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        for (uint32_t p = 0; p < 7; p += 1)
+        {
+            function->parameter_types[p] = p == 0 ? IR_I8 : p == 6 ? IR_I16 : IR_I64;
+        }
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = BUSTER_ABI_INTEGER_ARGUMENTS, .stack_bytes = BUSTER_ABI_SLOT_BYTES };
+        function->constants[0].low = 1;
+        function->constants[1].low = 0;
+        uint32_t next = 0;
+        uint32_t parameters[7];
+        for (uint32_t p = 0; p < 7; p += 1)
+        {
+            parameters[p] = tier1_select_test_append(function, &next, IR_PARAM, function->parameter_types[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t bit = tier1_select_test_append(function, &next, IR_AND, IR_I64, parameters[1], one, BUSTER_IR_NONE);
+        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t odd = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, bit, zero, IR_NE);
+        tier1_select_test_append(function, &next, IR_CBR, IR_VOID, odd, 1, 2);
+        function->block_offsets[1] = next;
+        const uint32_t low = tier1_select_test_append(function, &next, IR_ZEXT, IR_I64, parameters[0], BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t high = tier1_select_test_append(function, &next, IR_ZEXT, IR_I64, parameters[6], BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, low, high, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[2] = next;
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, parameters[1], BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->instruction_count = next;
         function->block_offsets[3] = next;
     }
@@ -494,6 +553,63 @@ static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1
     arena_pop_to(&test->input, 0);
 }
 
+static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+{
+    IrFunction function;
+    const bool created = tier1_code_certificate_narrow_function(&test->input, &function);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the code certificate's narrow-parameter fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the code certificate's narrow-parameter fixture selects");
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    tier1_emit_test_expect(test, certified, "the narrow-parameter fixture's code, its extensions proved, passes its certificate");
+    counts->narrow += certified;
+    const uint32_t position = 2 * (emitted.cfg_input.block_count - function.block_count);
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        const X86Instruction record = emitted.code.records[r];
+        const bool entry = tier1_cert_emitted_kind(emitted.origins[r]) == TIER1_ORIGIN_ENTRY;
+        const bool in_register = entry && record.form == X86_FORM_MOVZX_R32_RM8 && record.mode == BUSTER_X86_REGISTER_DIRECT && record.reg == X86_REGISTER_RDI && record.rm == X86_REGISTER_RDI;
+        const bool from_slot = entry && record.form == X86_FORM_MOVZX_R32_RM16 && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == X86_REGISTER_RSP;
+        if (in_register)
+        {
+            // The caller's upper bits kept.
+            emitted.code.records[r] = (X86Instruction){ .form = X86_FORM_MOV_R32_RM32, .reg = X86_REGISTER_RDI, .rm = X86_REGISTER_RDI };
+            const bool refused = tier1_code_certificate_refused(test, &plan, &emitted);
+            emitted.code.records[r] = record;
+            counts->narrow_register += 1;
+            counts->narrow_register_refused += refused;
+            tier1_emit_test_expect(test, refused, "a narrow register parameter's extension made a 32-bit move fails the code's certificate: its caller's upper bits stay");
+        }
+        else if (from_slot)
+        {
+            // A 32-bit load of the slot, decoded as a move (its origin a move's at the entry's first node).
+            const uint32_t origin = emitted.origins[r];
+            const uint32_t value = emitted.origin_values[r];
+            emitted.code.records[r] = (X86Instruction){ .form = X86_FORM_MOV_R32_RM32, .reg = record.reg, .rm = record.rm, .mode = record.mode, .displacement = record.displacement };
+            emitted.origins[r] = tier1_origin(TIER1_ORIGIN_MOVE, position);
+            emitted.origin_values[r] = emitted.node_values[6];
+            const bool refused = tier1_code_certificate_refused(test, &plan, &emitted);
+            emitted.code.records[r] = record;
+            emitted.origins[r] = origin;
+            emitted.origin_values[r] = value;
+            counts->narrow_stack += 1;
+            counts->narrow_stack_refused += refused;
+            tier1_emit_test_expect(test, refused, "a narrow stack parameter's extension made a 32-bit load fails the code's certificate: its caller's upper bytes are read");
+        }
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
@@ -505,6 +621,11 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_saved(test, variant != 0, &counts);
     }
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        tier1_code_certificate_narrow(test, variant != 0, &counts);
+    }
+    tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
     const bool kept = tier1_code_certificate_walked(false);
     const bool clobbered = tier1_code_certificate_walked(true);
     tier1_emit_test_expect(test, kept, "a conditional tail whose edge move keeps the flags reaches its true successor");
@@ -513,7 +634,8 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
                            "the fixtures' compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
     printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
            "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused; a conditional jump after an edge's "
-           "flag-writing move %s\n",
+           "flag-writing move %s; narrow parameters %u of 2 certified, their extensions corrupted in a register %u of %u and from a slot %u of %u refused\n",
            counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
-           counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved, kept && !clobbered ? "refused" : "accepted");
+           counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved, kept && !clobbered ? "refused" : "accepted", counts.narrow,
+           counts.narrow_register_refused, counts.narrow_register, counts.narrow_stack_refused, counts.narrow_stack);
 }
