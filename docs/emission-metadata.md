@@ -139,11 +139,9 @@ vector command enables `BUSTER_HOST_VECTOR` through
 `BUSTER_EMISSION_METADATA_TEST_VECTOR`.
 
 Sparse event resolution and frame-state protocol checking currently use scalar
-code. There is no locked-9700X measurement demonstrating whether further
-vectorization pays, and this prerequisite makes no speedup claim. Integration
-must measure the retained storage and total compile cost, including the layout
-arrays, rather than treating this module's allocation-free implementation as
-proof that the complete path is free.
+code, and this prerequisite makes no speedup claim. The integrated path's total
+compile cost and storage are measured ("Cost and what remains" below); whether
+vectorizing resolution pays is not.
 
 ## The emitted function
 
@@ -399,10 +397,26 @@ them through the final layout and lowers them, where it built the fixed
 descriptor directly before: work per function proportional to its frame's
 transitions, plus the protocol's layout check over its records (16 at a time on
 AVX-512 hosts). The events live on the lane's scratch until the emission ends.
-No locked-9700X measurement of that cost or storage is in this change; the
-9700X CI job's `measure-compile` and `benchmark-check-lanes` steps run where
-their selectors say, and their numbers are the first evidence. New raw evidence
-belongs in `buster-performance`.
+
+On the locked 9700X ([the record](https://github.com/buster14a/buster-performance/tree/e44b9d01cf1475bc604af3001dd23654219c3d03/docs/measurements/emission-cost-1056-2026-11-02),
+main `c10aa68e` against #1145's `5052211a`, znver5 without debug information, six
+placements of the checker's unit, three copies each, three rounds), the objects
+are the same bytes, and:
+
+- `-c sqlite3.c` executes 9,276,365 more instructions (+0.73%, the same in
+  every process): +0.65% user cycles and +0.47% wall time, 0.5 ms of 116 ms,
+  outside main's floor against itself in every round. `--time-stages` puts it
+  all in `tier0` (+0.24 ms, the adapter's frame events) and `unwind`
+  (+0.26 ms, their resolution and check, where the fixed descriptor was written
+  at once).
+- `-c` of musl's 72 `src/string` units: +0.07% instructions, its cycles and wall
+  time within the floor.
+- Peak resident memory is unchanged on `sqlite3.c` and 36 KiB higher on musl's
+  units.
+
+A fast path that writes a Tier 0 frame's fixed descriptor without its events
+would buy the 0.5 ms back, at the price of a second path the verifier and the
+row writer don't see.
 
 Remaining beyond this change:
 
