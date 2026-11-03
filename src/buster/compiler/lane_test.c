@@ -15,7 +15,7 @@
 //     only the touched page is committed (mincore); and the page sizes asked for, read back from /proc/self/smaps: base
 //     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there. An arena
 //     of tables (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a
-//     pool for the same tables alone.
+//     pool for the same tables alone; for random tables, a layout that maps no more than their own arenas.
 //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
 //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
 //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
@@ -842,6 +842,45 @@ static bool lane_test_arenas(void)
     }
     arena_pool = saved_pool;
     arena_pool_release(&pool);
+    // An arena of tables maps no more than its tables did as arenas of their own (arena_mapping_bytes each), but for a
+    // page with one table, which a finite RLIMIT_AS bounds (#1203's review: the preprocessor's tables and token columns,
+    // grouped, outgrew what a 512 MB limit left a unit's replay for its expansion history). Laid out for sets of 1 to 8
+    // tables of a page to 64 MB, of each base-page size the callers ask for: each table in its own pages, in order, and
+    // its huge pages, past its base pages, on a huge-page boundary where the arena's base is at the layout's phase.
+    uint64_t state = 0x9e3779b97f4a7c15ull;
+    bool bounded = true;
+    for (uint32_t set = 0; bounded && set < 4096; set += 1)
+    {
+        ArenaTable laid[8];
+        const uint32_t laid_count = 1 + (uint32_t)(lane_test_random(&state) % BUSTER_ARRAY_LENGTH(laid));
+        const uint64_t smalls_asked[] = { BUSTER_ARENA_SMALL_BYTES, 4 * BUSTER_ARENA_SMALL_BYTES, BUSTER_ARENA_HUGE_PAGE_BYTES / 2, 2 * BUSTER_ARENA_HUGE_PAGE_BYTES };
+        uint64_t separate = 0;
+        for (uint32_t i = 0; i < laid_count; i += 1)
+        {
+            const uint64_t random = lane_test_random(&state);
+            laid[i] = (ArenaTable){
+                .bytes = 1 + (random >> 8) % ((BUSTER_ARENA_PAGE_BYTES << (random % 15)) + 64),
+                .small = smalls_asked[(random >> 4) % BUSTER_ARRAY_LENGTH(smalls_asked)],
+            };
+            separate += arena_mapping_bytes(laid[i].bytes);
+        }
+        uint64_t starts[8];
+        uint64_t smalls[8];
+        uint64_t ends[8];
+        uint64_t phase = 0;
+        bool huge = false;
+        uint64_t layout = 0;
+        const uint64_t span = arena_tables_layout(laid, laid_count, starts, smalls, ends, &phase, &huge, &layout);
+        bounded = arena_tables_mapping_bytes(span, huge) <= separate + (laid_count == 1 ? BUSTER_ARENA_PAGE_BYTES : 0) && phase < BUSTER_ARENA_HUGE_PAGE_BYTES &&
+                  starts[0] == 0 && ends[laid_count - 1] == span;
+        for (uint32_t i = 0; bounded && i < laid_count; i += 1)
+        {
+            const uint64_t pages = (laid[i].bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+            bounded = ends[i] - starts[i] == pages && starts[i] % BUSTER_ARENA_PAGE_BYTES == 0 && (i == 0 || starts[i] >= ends[i - 1]) && smalls[i] <= ends[i] &&
+                      (smalls[i] == ends[i] || (phase + smalls[i]) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0);
+        }
+    }
+    lane_test_expect(&tally, bounded, "an arena of tables mapped more than its tables' own arenas, or laid them out wrong");
     ArenaTable none[] = { { .bytes = 0, .small = 0, .base = (void*)1 } };
     const Arena refused = arena_reserve_tables(none, 1);
     const Arena empty_tables = arena_reserve_tables(tables, 0);

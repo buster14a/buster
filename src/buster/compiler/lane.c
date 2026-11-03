@@ -494,25 +494,36 @@ static __attribute__((unused)) Arena arena_reserve_exact(uint64_t capacity, uint
     return arena_reserve_policy(capacity, small, false);
 }
 
-// arena_reserve_tables' layout, from a huge-page boundary: each table's start, the end of its base pages and its end, in
-// whole pages. A table larger than its base pages starts where they end on a huge-page boundary and ends on one, as an
-// arena of its own lays them out (arena_reserve_policy); one of base pages alone starts at the next page. Returns the
-// bytes the tables span, and in `layout` a hash of their sizes and base pages, never 0.
-static uint64_t arena_tables_layout(const ArenaTable* tables, uint32_t count, uint64_t* starts, uint64_t* smalls, uint64_t* ends, uint64_t* layout)
+// arena_reserve_tables' layout, from the first table's start: each table's start, the end of its base pages and its
+// end, in whole pages. A table larger than its base pages starts where they end on a huge-page boundary, as an arena of
+// its own lays them out (arena_reserve_policy); one of base pages alone starts at the previous table's end, as does the
+// first with huge pages, which sets `phase`, where in a huge page the arena's base must be. So each table takes its
+// bytes and, but for the first with huge pages, at most a huge page less a page before it: the tables' mapping
+// (arena_tables_mapping_bytes) is at most a page larger than their own arenas' (arena_mapping_bytes: their bytes and a
+// huge page each), and no larger for two tables or more, which a finite RLIMIT_AS bounds (#1203's review). Returns the
+// bytes the tables span, in `huge` whether any has huge pages, and in `layout` a hash of their sizes and base pages,
+// never 0.
+static uint64_t arena_tables_layout(const ArenaTable* tables, uint32_t count, uint64_t* starts, uint64_t* smalls, uint64_t* ends, uint64_t* phase, bool* huge,
+                                    uint64_t* layout)
 {
     uint64_t at = 0;
     uint64_t hash = 0xcbf29ce484222325ull ^ count;
+    *phase = 0;
+    *huge = false;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint64_t bytes = (tables[i].bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
         uint64_t small = (tables[i].small + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
         small = small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES;
         small = arena_small_floor > small ? arena_small_floor : small;
-        const bool huge = bytes > small;
-        const uint64_t start = huge ? ((at + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) - small : at;
+        const bool pages = bytes > small;
+        const uint64_t into = (at + small) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        *phase = pages && !*huge ? (BUSTER_ARENA_HUGE_PAGE_BYTES - into) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1) : *phase;
+        *huge = *huge || pages;
+        const uint64_t start = pages ? ((at + small + *phase + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) - *phase - small : at;
         starts[i] = start;
-        smalls[i] = start + (huge ? small : bytes);
-        ends[i] = huge ? smalls[i] + ((bytes - small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) : smalls[i];
+        smalls[i] = start + (pages ? small : bytes);
+        ends[i] = start + bytes;
         at = ends[i];
         hash = (hash ^ bytes) * 0x100000001b3ull;
         hash = (hash ^ small) * 0x100000001b3ull;
@@ -521,23 +532,35 @@ static uint64_t arena_tables_layout(const ArenaTable* tables, uint32_t count, ui
     return at;
 }
 
-// The tables' mapping starts its first table on a huge-page boundary, a page or more past its start, and ends an
-// inaccessible page or more past their end. All of it is base pages but the tables' huge pages (#652's advice where the
-// layout doesn't decide): one MADV_NOHUGEPAGE for the mapping and one MADV_HUGEPAGE for each table with huge pages, which
-// stay advised while the pool keeps the mapping. Pushing the arena full commits it in one mprotect.
+// The bytes arena_reserve_tables maps for tables that span `bytes`: an inaccessible page on each side, and where any of
+// them has huge pages, room to place the arena's base at its phase within a huge page.
+static uint64_t arena_tables_mapping_bytes(uint64_t bytes, bool huge)
+{
+    return huge ? bytes + BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_PAGE_BYTES : bytes + 2 * BUSTER_ARENA_PAGE_BYTES;
+}
+
+// The tables' mapping starts its first table a page or more past its start, at the layout's phase in a huge page,
+// and ends an inaccessible page or more past their end. All of it is base pages but the tables' huge pages (#652's
+// advice where the layout doesn't decide): one MADV_NOHUGEPAGE for the mapping and one MADV_HUGEPAGE for each table with
+// huge pages, which stay advised while the pool keeps the mapping. Pushing the arena full commits it in one mprotect. A
+// mapping refused for its size (ENOMEM, or Valgrind's EINVAL) past BUSTER_ARENA_COMPACT_BYTES switches the thread to
+// compact reservations as arena_reserve_policy's does, so that a caller that sizes its tables by arena_capacity_shift
+// (pp_initialize) can try smaller ones.
 static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
 {
     Arena result = { 0 };
     uint64_t starts[BUSTER_ARENA_TABLES];
     uint64_t smalls[BUSTER_ARENA_TABLES];
     uint64_t ends[BUSTER_ARENA_TABLES];
+    uint64_t phase = 0;
+    bool huge = false;
     uint64_t layout = 0;
     bool valid = count != 0 && count <= BUSTER_ARENA_TABLES;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         valid = tables[i].bytes != 0 && tables[i].bytes <= BUSTER_ARENA_MAX_CAPACITY / BUSTER_ARENA_TABLES;
     }
-    const uint64_t bytes = valid ? arena_tables_layout(tables, count, starts, smalls, ends, &layout) : 0;
+    const uint64_t bytes = valid ? arena_tables_layout(tables, count, starts, smalls, ends, &phase, &huge, &layout) : 0;
     ArenaPool* pool = arena_pool;
     // An arena of tables' base pages are its capacity (as `small`), so that its commit takes it whole and advises nothing.
     const uint32_t slot = valid ? arena_pool_choose(pool, bytes, bytes, layout) : BUSTER_ARENA_POOL_SLOTS;
@@ -547,7 +570,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
     }
     else if (valid)
     {
-        const uint64_t mapping_bytes = bytes + BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_PAGE_BYTES;
+        const uint64_t mapping_bytes = arena_tables_mapping_bytes(bytes, huge);
         bool allowed = true;
 #if BUSTER_SANITIZER_RESOURCES
         allowed = arena_test_reservation_allowed(mapping_bytes);
@@ -556,8 +579,10 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
         uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
         if (mapping != MAP_FAILED)
         {
-            const uintptr_t begin = ((uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
-            const uint64_t offset = begin - (uintptr_t)mapping;
+            // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
+            // page past it).
+            const uintptr_t after_guard = (uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES;
+            const uint64_t offset = BUSTER_ARENA_PAGE_BYTES + (huge ? (phase - after_guard) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1) : 0);
             if (bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
             {
                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
@@ -584,6 +609,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
         else
         {
             arena_failure = (ArenaFailure){ .bytes = bytes, .error = errno };
+            arena_compact = arena_compact || (allowed && (errno == ENOMEM || errno == EINVAL) && bytes > BUSTER_ARENA_COMPACT_BYTES);
         }
     }
     uint8_t* base = result.base != 0 ? arena_push(&result, bytes, BUSTER_ARENA_PAGE_BYTES) : 0;

@@ -11959,18 +11959,21 @@ static void* parse_column(Parser* parser, uint32_t column, uint64_t count, uint6
 
 // Padded columns as parse_column's, `count` of them, the ith of `entries[i]` entries of `sizes[i]` bytes, all in arena
 // `column` as its tables (arena_reserve_tables, #1128): columns that a parse reserves together take one mapping and one
-// discard, their first pages each base pages as in an arena of its own. Each table takes a power of two of bytes, from
-// BUSTER_ARENA_SMALL_BYTES: a pooled arena of tables serves only its own layout, which units of a few sizes then share,
-// where each unit's token count would make one of its own. Sets *columns[i] to each, or every one to null if they can't
-// be reserved.
+// discard, their first pages each base pages as in an arena of its own. Where the address space is unbounded, each
+// table takes a power of two of bytes, from BUSTER_ARENA_SMALL_BYTES: a pooled arena of tables serves only its own
+// layout, which units of a few sizes then share, where each unit's token count would make one of its own. Under a
+// finite RLIMIT_AS or compact reservations (arena_reservation_limit), each takes its own bytes, so that the columns map
+// no more than arenas of their own did (#1203's review). Sets *columns[i] to each, or every one to null if they can't be
+// reserved.
 static bool parse_columns(Parser* parser, uint32_t column, uint32_t count, const uint64_t* entries, const uint64_t* sizes, void** columns[])
 {
     ArenaTable tables[8];
+    const bool rounded = arena_reservation_limit() == BUSTER_ARENA_MAX_CAPACITY;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint64_t bytes = (entries[i] + 2 * BUSTER_PARSE_TOKEN_PADDING) * sizes[i] + 64;
         tables[i] = (ArenaTable){
-            .bytes = bytes <= BUSTER_ARENA_SMALL_BYTES ? BUSTER_ARENA_SMALL_BYTES : 1ull << (64 - __builtin_clzll(bytes - 1)),
+            .bytes = !rounded ? bytes : bytes <= BUSTER_ARENA_SMALL_BYTES ? BUSTER_ARENA_SMALL_BYTES : 1ull << (64 - __builtin_clzll(bytes - 1)),
             .small = BUSTER_ARENA_SMALL_BYTES,
         };
     }
