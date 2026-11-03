@@ -191,9 +191,13 @@ patterns are:
   word is saved and loaded with rounding toward zero around `fistp` of 64 bits
   (`fisttp` is SSE3's, past the baseline), and an unsigned 64-bit result of 2^63
   or more takes 2^63 away first and sets its top bit after (`fucomi`, `fcmovbe`
-  and `setbe`), as Tier 0's. A phi of long doubles is the edges' copies, every
-  operand loaded onto the x87 stack and then every phi's object stored in
-  reverse (a parallel copy; more than 8 on an edge refuse the function). A call
+  and `setbe`), as Tier 0's. That conversion is a node's longest sequence, 20
+  records against every node's share of 6 (`BUSTER_TIER1_EMIT_X87_RECORDS`):
+  the CFG consumer's capacity counts each long double node's 20, so that a block
+  dense with conversions fits, and it refuses a node's sequence past them. A phi
+  of long doubles is the edges' copies, every operand loaded onto the x87 stack
+  and then every phi's object stored in reverse (a parallel copy; more than 8 on
+  an edge refuse the function). A call
   passes a long double in its 16-byte stack slots aligned to 16, its object's
   bytes copied there by `fld` and `fstp` (`tier1_select_next_place`), and its
   long double result comes in st0, which the call stores into its own object; a
