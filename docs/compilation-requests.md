@@ -282,8 +282,9 @@ What these inputs show, and no more:
   for one file, and about 600 fewer per unit for Lua's 33. Each difference is
   larger than its row's spread between runs (under 900 instructions for the
   single files, up to 5,299 for Lua's), so it is the change's own work, and on
-  inputs from a tiny file to `sqlite3.c` it doesn't grow with their size: no
-  added work per token on them.
+  inputs from a tiny file to `sqlite3.c` the net difference doesn't grow with
+  their size, within this sample and method; net whole-process counts don't
+  isolate any per-token work from work offset elsewhere.
 - Time: the merge costs slightly more user cycles, while its retired
   instructions fall for the tiny file, `changes.c` and Lua's units and rise
   slightly for `sqlite3.c` (397 more by `-c`, 587 by `-fsyntax-only`). With
@@ -305,9 +306,10 @@ What these inputs show, and no more:
 - Both source benchmarks report the same counts and timed regions, with the
   receipt line the only addition. Their processes differ outside the timed
   regions: `benchmark-backend-source` runs 0.006% fewer instructions, and
-  `benchmark-lowering-source` 0.031% more in no more wall time, for the
-  selection and target-feature check that its preparation now runs once per
-  file, as `-c` does.
+  `benchmark-lowering-source` 0.031% more in no more wall time. A plausible
+  contributor is the selection and target-feature check that its preparation
+  now runs once per file, as `-c` does; nothing in the record isolates it, so
+  that attribution is a hypothesis.
 - The corpus is two programs, `sqlite3.c` and Lua; other inputs may differ.
 
 ## Still separate
