@@ -32,10 +32,8 @@
 // vector or aggregate value but an address), never for an atomic, complex, bit-field or _BitInt value, an overload, a
 // compound literal or a variable-length array. A writer takes templates only where its caller asks
 // (check_program_lower_templates, the tests), and not with -g's tokens, a tracked stack or a program with a _BitInt type or
-// an overloaded address: on the 9700X the scalar steps cost about three times what the splices save (docs/c-lowering.md).
-// On the vector host path, the scatter (check_lower_template_scatter_vector) and the classification of the fast twin's
-// common shapes with their conversions (check_lower_template_vector) take 16 nodes at a time; the scalar steps are their
-// twins, which check_program_lower_templates' check compares node by node, and take the nodes the vector ones leave.
+// an overloaded address: on the 9700X these scalar steps cost about three times what the splices save (docs/c-lowering.md),
+// so no compile takes them until they are data-parallel.
 #ifndef BUSTER_C_CHECK_PROGRAM_TEMPLATES_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_TEMPLATES_INCLUDED
 
@@ -754,34 +752,6 @@ static void check_lower_template_unevaluated(CheckLowerWriter* writer, uint32_t 
     }
 }
 
-// Marks every node under `node` (in the range) unevaluated, through their operands (check_lower_template_unevaluated's), an
-// operand that is already marked having its own marked: a stack of the marked nodes in `template_children`, whose room
-// (two a node of the range) the classification fills only after the scatter.
-static void check_lower_template_unevaluated_walk(CheckLowerWriter* writer, uint32_t node)
-{
-    const CheckGraph* graph = &writer->program->input->graph;
-    const uint32_t first = writer->template_first_node;
-    uint32_t* stack = writer->template_children;
-    uint32_t top = 0;
-    stack[top++] = node;
-    while (top != 0)
-    {
-        const uint32_t at = stack[--top];
-        const uint32_t operands[3] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
-        const uint32_t arguments = graph->ops[at] != CHECK_OP_VARARGS ? graph->argument_counts[at] : 0;
-        for (uint32_t k = 0; k < 3 + arguments; k += 1)
-        {
-            const uint32_t operand = k < 3 ? operands[k] : graph->argument_nodes[graph->argument_offsets[at] + k - 3];
-            const uint32_t place = operand - first;
-            if (operand < at && place < writer->template_span && (writer->template_states[place] & BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED) == 0)
-            {
-                writer->template_states[place] |= BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED;
-                stack[top++] = operand;
-            }
-        }
-    }
-}
-
 // From the last node down, each node's rule gives its operands their contexts and targets (`template_contexts`'
 // BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and `template_targets`), before an operand's own turn: a selection's and a comma's
 // right operand take their parent's, which its own parent gave it already. An operand two nodes give theirs is shared, the
@@ -840,197 +810,11 @@ static void check_lower_template_scatter(CheckLowerWriter* writer, uint32_t firs
                 }
                 const uint8_t context = mode == BUSTER_CHECK_LOWER_TEMPLATE_PLACE ? BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS :
                                         mode == BUSTER_CHECK_LOWER_TEMPLATE_PARENT ? (uint8_t)(parent & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) : 0;
-                // A shared operand keeps what its highest operator gave it, as the vector scatter's links do.
                 uint8_t* state = writer->template_states + c;
-                const bool assigned = (*state & BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED) != 0;
-                *state |= assigned ? BUSTER_CHECK_LOWER_TEMPLATE_SHARED : BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED;
-                writer->template_contexts[c] = assigned ? writer->template_contexts[c] : context;
-                writer->template_targets[c] = assigned ? writer->template_targets[c] : target;
+                *state |= (*state & BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED) != 0 ? BUSTER_CHECK_LOWER_TEMPLATE_SHARED : BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED;
+                writer->template_contexts[c] = context;
+                writer->template_targets[c] = target;
             }
-        }
-    }
-}
-
-_Static_assert(CHECK_OP_SELECT < 64 && CHECK_OP_COMMA < 64 && CHECK_OP_ASSIGN < 64 && CHECK_OP_MEMBER < 64,
-               "the rules' table fits the vector scatter's 64 bytes");
-
-// A link's parts (CheckLowerWriter.template_links): the operator's place in the range, the operand's rule (its first or
-// second), whether its target is a comma's, and its context's mode (BUSTER_CHECK_LOWER_TEMPLATE_VALUE, _PLACE or _PARENT).
-#define BUSTER_CHECK_LOWER_TEMPLATE_LINK_SHIFT 4u
-#define BUSTER_CHECK_LOWER_TEMPLATE_LINK_SECOND 0x8u
-#define BUSTER_CHECK_LOWER_TEMPLATE_LINK_COMMA 0x4u
-
-// check_lower_template_scatter's results, data-parallel. Each operator links each operand its rule evaluates (in the range
-// and before it) and gives it its target, 16 operators at a time, by scatters in node order, so that an operand two
-// operators link keeps the highest's link and target. The links read back mark the operands another operator linked
-// shared. Each operand's context is its link's mode: an address's for a place, a value's otherwise, and its operator's
-// own for a parent's (a selection's and a comma's right operand), which, with a comma's right operand's target, its scalar
-// step takes from the last operand down. The operands of an operator the tasks fold are not evaluated, nor theirs: a
-// walk from each such operator, in the range's order from the last, which the folds' own operands are rare enough for.
-// It gives the evaluated, unshared nodes the scalar scatter's contexts and targets, which test-lowering-templates compares.
-static __attribute__((noinline)) void check_lower_template_scatter_vector(CheckLowerWriter* writer, uint32_t first, uint32_t span)
-{
-    const CheckProgram* program = writer->program;
-    const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
-    uint8_t rule_bytes[2][64] __attribute__((aligned(64)));
-    for (uint32_t op = 0; op < 64; op += 1)
-    {
-        rule_bytes[0][op] = op < CHECK_OP_COUNT ? check_lower_template_rules[op][0] : 0;
-        rule_bytes[1][op] = op < CHECK_OP_COUNT ? check_lower_template_rules[op][1] : 0;
-    }
-    const __m512i rules0 = _mm512_load_si512(rule_bytes[0]);
-    const __m512i rules1 = _mm512_load_si512(rule_bytes[1]);
-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const __m512i zero = _mm512_setzero_si512();
-    const __m512i none = _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
-    const __m512i conversion_offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32((int)sizeof(CheckNodeConversions)));
-    const __m512i bound = _mm512_set1_epi32((int)span);
-    const __m512i first_node = _mm512_set1_epi32((int)first);
-    memset(writer->template_links, 0xff, (uint64_t)span * sizeof(uint32_t));
-    // The links and the targets, in node order.
-    for (uint32_t base = 0; base < span; base += 16)
-    {
-        const uint32_t count = span - base < 16 ? span - base : 16;
-        const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const uint32_t node = first + base;
-        const __m512i nodes = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)node));
-        const __m512i places = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)base));
-        const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + node);
-        const __mmask16 small = active & _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
-        const __m512i keys = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops));
-        const __m512i types = _mm512_maskz_loadu_epi32(active, stream->value_types + node);
-        for (uint32_t k = 0; k < 2; k += 1)
-        {
-            const __m512i rule = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, k == 0 ? rules0 : rules1))));
-            const __m512i operands = _mm512_maskz_loadu_epi32(active, (k == 0 ? graph->operand0 : graph->operand1) + node);
-            const __m512i places_c = _mm512_sub_epi32(operands, first_node);
-            const __mmask16 linked = small & _mm512_test_epi32_mask(rule, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_EVALUATED)) &
-                                     _mm512_cmplt_epu32_mask(operands, nodes) & _mm512_cmplt_epu32_mask(places_c, bound);
-            if (linked != 0)
-            {
-                const __m512i mode = _mm512_and_si512(rule, _mm512_set1_epi32(3));
-                const __m512i to = _mm512_and_si512(rule, _mm512_set1_epi32(7u << 2));
-                const __mmask16 to_node = _mm512_cmpeq_epi32_mask(to, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_TO_NODE));
-                const __mmask16 to_a = _mm512_cmpeq_epi32_mask(to, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_TO_A));
-                const __mmask16 to_b = _mm512_cmpeq_epi32_mask(to, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_TO_B));
-                const __mmask16 to_void = _mm512_cmpeq_epi32_mask(to, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_TO_VOID));
-                const __mmask16 to_index = _mm512_cmpeq_epi32_mask(to, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_TO_INDEX));
-                const __mmask16 to_comma = _mm512_cmpeq_epi32_mask(to, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_TO_COMMA));
-                const __m512i types_a = _mm512_mask_i32gather_epi32(zero, linked & (to_a | to_index), conversion_offsets, &stream->conversions[node].operands[0].type, 1);
-                const __m512i types_b = _mm512_mask_i32gather_epi32(zero, linked & (to_b | to_index), conversion_offsets, &stream->conversions[node].operands[1].type, 1);
-                const __m512i indices_a = _mm512_srli_epi32(types_a, BUSTER_TYPE_INDEX_SHIFT);
-                const __m512i info_a = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), linked & to_index & _mm512_cmplt_epu32_mask(indices_a, _mm512_set1_epi32((int)writer->type_count)),
-                                                                   indices_a, writer->type_templates, 4);
-                const __mmask16 pointer = to_index & _mm512_test_epi32_mask(_mm512_srli_epi32(info_a, 8), _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_POINTER));
-                __m512i targets = _mm512_maskz_mov_epi32(to_node, types);
-                targets = _mm512_mask_mov_epi32(targets, to_a, types_a);
-                targets = _mm512_mask_mov_epi32(targets, to_b | (to_index & (__mmask16)~pointer), types_b);
-                targets = _mm512_mask_mov_epi32(targets, to_void, _mm512_set1_epi32(BUSTER_TYPE_VOID));
-                targets = _mm512_mask_mov_epi32(targets, pointer, _mm512_set1_epi32(BUSTER_TYPE_LONG));
-                __m512i links = _mm512_or_si512(_mm512_slli_epi32(places, BUSTER_CHECK_LOWER_TEMPLATE_LINK_SHIFT), mode);
-                links = _mm512_or_si512(links, _mm512_set1_epi32(k == 0 ? 0 : BUSTER_CHECK_LOWER_TEMPLATE_LINK_SECOND));
-                links = _mm512_mask_or_epi32(links, to_comma, links, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_LINK_COMMA));
-                _mm512_mask_i32scatter_epi32(writer->template_links, linked, places_c, links, 4);
-                _mm512_mask_i32scatter_epi32(writer->template_targets, linked, places_c, targets, 4);
-            }
-        }
-    }
-    // The links read back: an operand whose link is another operator's is shared.
-    for (uint32_t base = 0; base < span; base += 16)
-    {
-        const uint32_t count = span - base < 16 ? span - base : 16;
-        const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const uint32_t node = first + base;
-        const __m512i nodes = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)node));
-        const __m512i places = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)base));
-        const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + node);
-        const __mmask16 small = active & _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
-        const __m512i keys = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops));
-        for (uint32_t k = 0; k < 2; k += 1)
-        {
-            const __m512i rule = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, k == 0 ? rules0 : rules1))));
-            const __m512i operands = _mm512_maskz_loadu_epi32(active, (k == 0 ? graph->operand0 : graph->operand1) + node);
-            const __m512i places_c = _mm512_sub_epi32(operands, first_node);
-            const __mmask16 linked = small & _mm512_test_epi32_mask(rule, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_EVALUATED)) &
-                                     _mm512_cmplt_epu32_mask(operands, nodes) & _mm512_cmplt_epu32_mask(places_c, bound);
-            const __m512i links = _mm512_mask_i32gather_epi32(none, linked, places_c, writer->template_links, 4);
-            const __m512i owner = _mm512_srli_epi32(links, BUSTER_CHECK_LOWER_TEMPLATE_LINK_SHIFT);
-            const __mmask16 second = _mm512_test_epi32_mask(links, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_LINK_SECOND));
-            const __mmask16 own = _mm512_cmpeq_epi32_mask(owner, places) & (k == 0 ? (__mmask16)~second : second);
-            uint32_t lost = (uint32_t)(linked & (__mmask16)~own);
-            uint32_t lost_places[16];
-            _mm512_storeu_si512(lost_places, places_c);
-            for (; lost != 0; lost &= lost - 1)
-            {
-                writer->template_states[lost_places[__builtin_ctz(lost)]] |= BUSTER_CHECK_LOWER_TEMPLATE_SHARED;
-            }
-        }
-    }
-    // Each operand's state and context from its link; the parents' modes and the commas' targets left for the steps after.
-    uint32_t work = 0;
-    for (uint32_t base = 0; base < span; base += 16)
-    {
-        const uint32_t count = span - base < 16 ? span - base : 16;
-        const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const __m512i links = _mm512_mask_loadu_epi32(none, active, writer->template_links + base);
-        const __mmask16 linked = active & _mm512_cmpneq_epi32_mask(links, none);
-        const __m512i mode = _mm512_and_si512(links, _mm512_set1_epi32(3));
-        const __mmask16 place = linked & _mm512_cmpeq_epi32_mask(mode, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_PLACE));
-        const __mmask16 later = linked & (_mm512_cmpeq_epi32_mask(mode, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_PARENT)) |
-                                          _mm512_test_epi32_mask(links, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_LINK_COMMA)));
-        const __m512i states = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, writer->template_states + base));
-        _mm_mask_storeu_epi8(writer->template_states + base, active,
-                             _mm512_cvtepi32_epi8(_mm512_mask_or_epi32(states, linked, states, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_ASSIGNED))));
-        _mm_mask_storeu_epi8(writer->template_contexts + base, active, _mm512_cvtepi32_epi8(_mm512_maskz_mov_epi32(place, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS))));
-        _mm512_storeu_si512(writer->template_work + work, _mm512_maskz_compress_epi32(later, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)base))));
-        work += (uint32_t)__builtin_popcount(later);
-    }
-    for (uint32_t w = work; w-- > 0;)
-    {
-        const uint32_t c = writer->template_work[w];
-        const uint32_t link = writer->template_links[c];
-        const uint32_t p = link >> BUSTER_CHECK_LOWER_TEMPLATE_LINK_SHIFT;
-        const uint8_t parent = (uint8_t)(writer->template_contexts[p] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS);
-        if ((link & 3u) == BUSTER_CHECK_LOWER_TEMPLATE_PARENT)
-        {
-            writer->template_contexts[c] = parent;
-        }
-        if ((link & BUSTER_CHECK_LOWER_TEMPLATE_LINK_COMMA) != 0)
-        {
-            const uint8_t own = check_lower_template_child_context(writer, first + p, parent != 0, writer->template_targets[p]);
-            writer->template_targets[c] = (own & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) != 0 ? BUSTER_TYPE_VOID : check_stream_type(stream, first + p);
-        }
-    }
-    // The folds' operands: each fold with an operand in the range, from the last, unless an earlier one's walk marked it.
-    work = 0;
-    for (uint32_t base = 0; base < span; base += 16)
-    {
-        const uint32_t count = span - base < 16 ? span - base : 16;
-        const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const uint32_t node = first + base;
-        const __m512i nodes = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)node));
-        const __m512i constants = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, stream->value_constants + node));
-        __mmask16 operand = 0;
-        const uint32_t* const columns[3] = { graph->operand0, graph->operand1, graph->operand2 };
-        for (uint32_t k = 0; k < 3; k += 1)
-        {
-            const __m512i operands = _mm512_maskz_loadu_epi32(active, columns[k] + node);
-            operand |= _mm512_cmplt_epu32_mask(operands, nodes) & _mm512_cmplt_epu32_mask(_mm512_sub_epi32(operands, first_node), bound);
-        }
-        const __m512i arguments = _mm512_maskz_loadu_epi32(active, graph->argument_counts + node);
-        operand |= _mm512_cmpneq_epi32_mask(arguments, zero);
-        const __mmask16 candidates = active & operand & _mm512_cmpneq_epi32_mask(constants, _mm512_set1_epi32(CHECK_CONSTANT_NONE));
-        _mm512_storeu_si512(writer->template_work + work, _mm512_maskz_compress_epi32(candidates, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)base))));
-        work += (uint32_t)__builtin_popcount(candidates);
-    }
-    for (uint32_t w = work; w-- > 0;)
-    {
-        const uint32_t r = writer->template_work[w];
-        if ((writer->template_states[r] & BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED) == 0 &&
-            check_lower_template_folds(writer, first + r, (writer->template_contexts[r] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0))
-        {
-            check_lower_template_unevaluated_walk(writer, first + r);
         }
     }
 }
@@ -1301,305 +1085,6 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     return fast;
 }
 
-// A node's state where the vector classification took it (check_lower_template_vector): its template is the fast twin's,
-// its own entries in its slot, its evaluated operands in `template_children` and their count in `template_counts`.
-#define BUSTER_CHECK_LOWER_TEMPLATE_FAST 0x40u
-
-_Static_assert(CHECK_OP_PRE_INCREMENT < 64 && sizeof(SymbolId) == sizeof(uint32_t) && sizeof(CheckNodeConversions) == 32,
-               "the vector classification's tables and gathers");
-
-// The vector classification's tables for a writer: each op's binary operator below CHECK_OP_PRE_INCREMENT
-// (check_lower_binary's), and a bit for each object a compound literal of automatic storage takes
-// (check_lower_template_fast's `compound`), bit `o - 1` for object `o`, from the input's columns 64 objects at a time.
-static void check_lower_template_vector_begin(CheckLowerWriter* writer)
-{
-    const CheckProgram* program = writer->program;
-    const uint64_t object_words = ((uint64_t)program->object_count + 32) / 32;
-    for (uint32_t op = 0; op < 64; op += 1)
-    {
-        writer->template_binary[op] = op < CHECK_OP_PRE_INCREMENT ? check_lower_binary((CheckOp)op) : BUSTER_TYPED_NONE;
-    }
-    memset(writer->template_compound_bits, 0, object_words * sizeof(uint32_t));
-    const uint32_t bytes = program->object_count != 0 ? program->object_count - 1 : 0;
-    const uint8_t* compound = program->input->compound_objects;
-    const uint8_t* statics = program->input->static_objects;
-    for (uint32_t i = 0; compound != NULL && statics != NULL && i < bytes; i += 64)
-    {
-        const uint32_t count = bytes - i < 64 ? bytes - i : 64;
-        const __mmask64 active = count == 64 ? ~(__mmask64)0 : (((__mmask64)1 << count) - 1);
-        const __m512i literal = _mm512_maskz_loadu_epi8(active, compound + i);
-        const __m512i fixed = _mm512_maskz_loadu_epi8(active, statics + i);
-        const uint64_t bits = (uint64_t)(_mm512_test_epi8_mask(literal, literal) & _mm512_testn_epi8_mask(fixed, fixed));
-        memcpy(writer->template_compound_bits + i / 32, &bits, count > 32 ? 8 : 4);
-    }
-}
-
-// The fast twin's common shapes 16 nodes at a time (check_lower_template_fast's), for the nodes of the body's range the
-// scatter left evaluated and unshared and whose payload rows are none (so no overload, fault or offset), in a value's or
-// an address's context (none of these shapes is discarded): a VALUE's read of a local or a global; `&x`; `*p`; a cast,
-// a conversion or a unary plus; the negation and the complement; the truth tests; and the scalar binary operators but
-// pointer arithmetic. Each lane it takes gets the fast twin's result, BUSTER_CHECK_LOWER_TEMPLATE_FAST in its state, its
-// own entries in its slot and their count in `template_own`, and its evaluated operands. The body's loop takes the fast
-// twin and the general rules for the others, and with `template_check` compares the twin with each lane taken here.
-static __attribute__((noinline)) void check_lower_template_vector(CheckLowerWriter* writer, uint32_t first, uint32_t span)
-{
-    const CheckProgram* program = writer->program;
-    const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const __m512i one = _mm512_set1_epi32(1);
-    const __m512i zero = _mm512_setzero_si512();
-    const __m512i none = _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
-    const __m512i conversion_offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32((int)sizeof(CheckNodeConversions)));
-    const __m512i interleave_low = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
-    const __m512i interleave_high = _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
-    const __m512i binary_table = _mm512_loadu_si512(writer->template_binary);
-    const __m512i type_count = _mm512_set1_epi32((int)writer->type_count);
-    for (uint32_t base = 0; base < span; base += 16)
-    {
-        const uint32_t count = span - base < 16 ? span - base : 16;
-        const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const uint32_t node = first + base;
-        const __m512i states = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, writer->template_states + base));
-        const __m512i contexts = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, writer->template_contexts + base));
-        const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + node);
-        const __m512i types = _mm512_maskz_loadu_epi32(active, stream->value_types + node);
-        const __m512i flags = _mm512_maskz_loadu_epi32(active, stream->value_flags + node);
-        const __m512i objects = _mm512_maskz_loadu_epi32(active, stream->value_objects + node);
-        const __m512i categories = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, stream->value_categories + node));
-        const __m512i constants = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, stream->value_constants + node));
-        const __m512i rows = _mm512_maskz_loadu_epi32(active, stream->payload_rows + node);
-        const __mmask16 eligible = active & _mm512_testn_epi32_mask(states, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_SHARED | BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED)) &
-                                   _mm512_cmpeq_epi32_mask(rows, zero);
-        // The node's type's class and facts (check_lower_class's and check_lower_facts'), its class as a value's.
-        const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
-        const __m512i info = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), eligible & _mm512_cmplt_epu32_mask(indices, type_count), indices,
-                                                         writer->type_templates, 4);
-        const __m512i raw_classes = _mm512_and_si512(info, _mm512_set1_epi32(0xff));
-        const __m512i facts = _mm512_and_si512(_mm512_srli_epi32(info, 8), _mm512_set1_epi32(0xff));
-        const __mmask16 aggregate = _mm512_test_epi32_mask(facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_AGGREGATE));
-        const __m512i classes = _mm512_mask_mov_epi32(raw_classes, aggregate, _mm512_set1_epi32(BUSTER_TYPED_CLASS_U64));
-        const __mmask16 address = _mm512_test_epi32_mask(contexts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS));
-        const __mmask16 reads = (__mmask16)(~address & ~_mm512_test_epi32_mask(facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_ADDRESS)));
-        const __mmask16 lvalue = _mm512_cmpeq_epi32_mask(categories, _mm512_set1_epi32(CHECK_LVALUE));
-        const __mmask16 ordinary = _mm512_testn_epi32_mask(facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) &
-                                   (address | (__mmask16)~lvalue | _mm512_testn_epi32_mask(facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_ATOMIC)));
-        const __mmask16 known = _mm512_cmpneq_epi32_mask(objects, zero) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int)program->object_count));
-        const __mmask16 value_op = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VALUE));
-        const __m512i object_bits = _mm512_sub_epi32(objects, one);
-        const __mmask16 lookup = eligible & value_op & known;
-        const __m512i compound_words = _mm512_mask_i32gather_epi32(zero, lookup, _mm512_srli_epi32(object_bits, 5), writer->template_compound_bits, 4);
-        const __mmask16 compound = lookup & _mm512_test_epi32_mask(compound_words, _mm512_sllv_epi32(one, _mm512_and_si512(object_bits, _mm512_set1_epi32(31))));
-        const __mmask16 usable = eligible & ordinary & (__mmask16)~compound;
-        const __mmask16 template_class = _mm512_cmple_epu32_mask(_mm512_sub_epi32(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8)),
-                                                                 _mm512_set1_epi32(BUSTER_TYPED_CLASS_F64 - BUSTER_TYPED_CLASS_I8));
-        // A VALUE's read: its local's (check_lower_local_of) or its global's.
-        const __mmask16 reading = usable & value_op & lvalue & _mm512_cmpneq_epi32_mask(types, _mm512_set1_epi32(BUSTER_TYPE_VOID)) & reads & known & (__mmask16)~aggregate &
-                                  template_class;
-        __mmask16 mapped = reading;
-        if (writer->locals != NULL)
-        {
-            const __m512i local_words = _mm512_mask_i32gather_epi32(zero, reading, _mm512_srli_epi32(objects, 5), (const uint32_t*)writer->locals, 4);
-            mapped &= _mm512_test_epi32_mask(local_words, _mm512_sllv_epi32(one, _mm512_and_si512(objects, _mm512_set1_epi32(31))));
-        }
-        const __m512i locals = _mm512_mask_i32gather_epi32(none, mapped, objects, writer->local_map, 4);
-        const __m512i symbols = _mm512_mask_i32gather_epi32(zero, reading, objects, program->object_symbols, 4);
-        const __mmask16 local = _mm512_cmpneq_epi32_mask(locals, none);
-        const __mmask16 read = reading & (local | _mm512_cmpneq_epi32_mask(symbols, zero));
-        // The ops of no constant but the members', the stores' and the VALUEs' (check_lower_template_fast's last branch).
-        const __mmask16 member_op = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_MEMBER)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ARROW));
-        const __mmask16 store_op = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_INITIALIZE));
-        const __mmask16 plain = usable & _mm512_cmpeq_epi32_mask(constants, _mm512_set1_epi32(CHECK_CONSTANT_NONE)) & (__mmask16)~value_op & (__mmask16)~member_op &
-                                (__mmask16)~store_op;
-        const __m512i types_a = _mm512_mask_i32gather_epi32(zero, plain, conversion_offsets, &stream->conversions[node].operands[0].type, 1);
-        const __m512i types_b = _mm512_mask_i32gather_epi32(zero, plain, conversion_offsets, &stream->conversions[node].operands[1].type, 1);
-        const __m512i indices_a = _mm512_srli_epi32(types_a, BUSTER_TYPE_INDEX_SHIFT);
-        const __m512i indices_b = _mm512_srli_epi32(types_b, BUSTER_TYPE_INDEX_SHIFT);
-        const __m512i info_a = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), plain & _mm512_cmplt_epu32_mask(indices_a, type_count), indices_a,
-                                                           writer->type_templates, 4);
-        const __m512i info_b = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), plain & _mm512_cmplt_epu32_mask(indices_b, type_count), indices_b,
-                                                           writer->type_templates, 4);
-        const __m512i classes_a = _mm512_and_si512(info_a, _mm512_set1_epi32(0xff));
-        const __m512i classes_b = _mm512_and_si512(info_b, _mm512_set1_epi32(0xff));
-        const __m512i facts_a = _mm512_srli_epi32(info_a, 8);
-        const __m512i facts_b = _mm512_srli_epi32(info_b, 8);
-        const __mmask16 arithmetic = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ADD)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_SUBTRACT)) |
-                                     _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_SUBSCRIPT));
-        const __mmask16 left_pointer = arithmetic & _mm512_test_epi32_mask(facts_a, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_POINTER));
-        const __mmask16 right_pointer = arithmetic & _mm512_test_epi32_mask(facts_b, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_POINTER));
-        const __mmask16 element = _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_CHECK_VECTOR_ELEMENT));
-        const __mmask16 aggregate_a = _mm512_test_epi32_mask(facts_a, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_AGGREGATE));
-        const __m512i limit = _mm512_set1_epi32(BUSTER_TYPED_CLASS_F64 - BUSTER_TYPED_CLASS_I8);
-        const __mmask16 template_a = _mm512_cmple_epu32_mask(_mm512_sub_epi32(classes_a, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8)), limit);
-        const __mmask16 template_b = _mm512_cmple_epu32_mask(_mm512_sub_epi32(classes_b, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8)), limit);
-        const __mmask16 small = _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
-        const __m512i binaries = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops)), binary_table))));
-        // The last branch's chain: `&x`, `*p`, pointer arithmetic (the twin's), the wrappers, then the computing shapes.
-        const __mmask16 taking_address = plain & _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ADDRESS));
-        const __mmask16 dereference_op = plain & _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE));
-        const __mmask16 dereference = dereference_op & (aggregate | (__mmask16)~reads | template_class);
-        const __mmask16 subscript = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_SUBSCRIPT));
-        const __mmask16 pointer = plain & arithmetic & (__mmask16)~element & left_pointer & (__mmask16)~right_pointer &
-                                  ((__mmask16)~subscript | (__mmask16)~reads | template_class);
-        const __mmask16 wrapper_op = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CAST)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CONVERT)) |
-                                     _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_POSITIVE));
-        const __mmask16 wrapper = plain & wrapper_op & _mm512_cmplt_epu32_mask(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_VECTOR));
-        const __mmask16 computes = plain & (__mmask16)~aggregate & template_class & (__mmask16)~(taking_address | dereference_op | pointer | wrapper_op);
-        const __mmask16 unary_op = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_NEGATIVE)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_BIT_NOT));
-        const __mmask16 truth_op = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_NOT)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CONDITION));
-        const __mmask16 unary = computes & unary_op;
-        const __mmask16 truth = computes & truth_op & (__mmask16)~aggregate_a & _mm512_cmplt_epu32_mask(classes_a, _mm512_set1_epi32(BUSTER_TYPED_CLASS_VECTOR)) &
-                                _mm512_cmpneq_epi32_mask(classes_a, _mm512_set1_epi32(BUSTER_TYPED_CLASS_VOID));
-        const __mmask16 sum = computes & arithmetic & (__mmask16)~subscript & (__mmask16)~element & (__mmask16)~left_pointer & (__mmask16)~right_pointer & template_a &
-                              template_b;
-        const __mmask16 binary = computes & (__mmask16)~arithmetic & (__mmask16)~unary_op & (__mmask16)~truth_op & _mm512_cmpneq_epi32_mask(binaries, zero) &
-                                 template_a & template_b & (__mmask16)~aggregate_a;
-        const __mmask16 taken = read | taking_address | dereference | wrapper | unary | truth | sum | binary;
-        // Their entries: at most three, a value only in a read's first.
-        const __mmask16 narrow = truth & _mm512_cmple_epu32_mask(_mm512_sub_epi32(classes_a, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8)),
-                                                                 _mm512_set1_epi32(BUSTER_TYPED_CLASS_U16 - BUSTER_TYPED_CLASS_I8));
-        const __m512i test = _mm512_mask_blend_epi32(_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_NOT)), _mm512_set1_epi32(BUSTER_TYPED_NE), _mm512_set1_epi32(BUSTER_TYPED_EQ));
-        const __m512i unary_kind = _mm512_mask_blend_epi32(_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_NEGATIVE)), _mm512_set1_epi32(BUSTER_TYPED_NOT), _mm512_set1_epi32(BUSTER_TYPED_NEG));
-        __m512i kind0 = _mm512_mask_blend_epi32(local, _mm512_set1_epi32(BUSTER_TYPED_GLOBAL), _mm512_set1_epi32(BUSTER_TYPED_LOCAL));
-        kind0 = _mm512_mask_mov_epi32(kind0, dereference, _mm512_set1_epi32(BUSTER_TYPED_LOAD));
-        kind0 = _mm512_mask_mov_epi32(kind0, unary, unary_kind);
-        kind0 = _mm512_mask_mov_epi32(kind0, sum | binary, binaries);
-        kind0 = _mm512_mask_mov_epi32(kind0, truth, _mm512_mask_blend_epi32(narrow, _mm512_set1_epi32(BUSTER_TYPED_CONST), _mm512_set1_epi32(BUSTER_TYPED_CONVERT)));
-        const __m512i kind1 = _mm512_mask_blend_epi32(narrow, test, _mm512_set1_epi32(BUSTER_TYPED_CONST));
-        const __m512i class0 = _mm512_mask_mov_epi32(classes, truth, _mm512_mask_blend_epi32(narrow, classes_a, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I32)));
-        const __m512i class12 = _mm512_set1_epi32(BUSTER_TYPED_CLASS_I32);
-        const __m512i kinds = _mm512_or_si512(_mm512_or_si512(kind0, _mm512_slli_epi32(kind1, 8)), _mm512_slli_epi32(test, 16));
-        const __m512i entry_classes = _mm512_or_si512(_mm512_or_si512(class0, _mm512_slli_epi32(class12, 8)), _mm512_slli_epi32(class12, 16));
-        __m512i own = _mm512_maskz_mov_epi32(read | unary | sum | binary | (dereference & reads), one);
-        own = _mm512_mask_mov_epi32(own, truth, _mm512_mask_blend_epi32(narrow, _mm512_set1_epi32(2), _mm512_set1_epi32(3)));
-        __m512i operand_counts = _mm512_maskz_mov_epi32(taking_address | dereference | wrapper | unary | truth, one);
-        operand_counts = _mm512_mask_mov_epi32(operand_counts, sum | binary, _mm512_set1_epi32(2));
-        const __m512i values = _mm512_maskz_mov_epi32(read, _mm512_mask_blend_epi32(local, symbols, locals));
-        // The conversion to the target the scatter gave (check_lower_template_conversion's): in a value's context (these
-        // shapes are never discarded), none where the types' classes and facts make it empty, the lane's state lacking
-        // BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED where the table takes none of it, otherwise a discard, the test and
-        // narrowing of a conversion to _Bool, or one conversion.
-        const __m512i targets = _mm512_maskz_loadu_epi32(active, writer->template_targets + base);
-        const __m512i target_indices = _mm512_srli_epi32(targets, BUSTER_TYPE_INDEX_SHIFT);
-        const __mmask16 targeted = taken & _mm512_cmpneq_epi32_mask(targets, zero);
-        const __m512i target_info = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), targeted & _mm512_cmplt_epu32_mask(target_indices, type_count), target_indices,
-                                                                writer->type_templates, 4);
-        const __m512i target_facts = _mm512_and_si512(_mm512_srli_epi32(target_info, 8), _mm512_set1_epi32(0xff));
-        const __mmask16 target_aggregate = _mm512_test_epi32_mask(target_facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_AGGREGATE));
-        const __m512i target_classes = _mm512_mask_mov_epi32(_mm512_and_si512(target_info, _mm512_set1_epi32(0xff)), target_aggregate, _mm512_set1_epi32(BUSTER_TYPED_CLASS_U64));
-        const __m512i mixed_facts = _mm512_or_si512(facts, target_facts);
-        const __mmask16 empty = _mm512_cmpeq_epi32_mask(classes, target_classes) & _mm512_cmplt_epu32_mask(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASSES)) &
-                                _mm512_testn_epi32_mask(_mm512_xor_si512(facts, target_facts), _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) &
-                                _mm512_testn_epi32_mask(mixed_facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_COMPLEX)) &
-                                _mm512_testn_epi32_mask(target_facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT));
-        const __mmask16 needed = targeted & (__mmask16)~address & _mm512_cmpneq_epi32_mask(types, targets) & (__mmask16)~empty;
-        const __mmask16 target_void = _mm512_cmpeq_epi32_mask(target_classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_VOID));
-        const __m512i f80 = _mm512_set1_epi32(BUSTER_TYPED_CLASS_F80);
-        const __mmask16 refused = needed & (((__mmask16)~target_void & _mm512_test_epi32_mask(mixed_facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX))) |
-                                            _mm512_cmpge_epu32_mask(classes, f80) | _mm512_cmpge_epu32_mask(target_classes, f80));
-        const __mmask16 converting = needed & (__mmask16)~refused;
-        const __mmask16 discard = converting & target_void & _mm512_cmpneq_epi32_mask(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_VOID));
-        const __mmask16 to_bool = converting & (__mmask16)~target_void & _mm512_test_epi32_mask(target_facts, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TYPE_BOOL));
-        const __mmask16 narrow_source = to_bool & _mm512_cmple_epu32_mask(_mm512_sub_epi32(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8)),
-                                                                          _mm512_set1_epi32(BUSTER_TYPED_CLASS_U16 - BUSTER_TYPED_CLASS_I8));
-        const __mmask16 convert = converting & (__mmask16)~target_void & (__mmask16)~to_bool & _mm512_cmpneq_epi32_mask(classes, target_classes);
-        const __m512i bool_kinds = _mm512_mask_blend_epi32(narrow_source,
-                                                           _mm512_set1_epi32(BUSTER_TYPED_CONST | BUSTER_TYPED_NE << 8 | BUSTER_TYPED_CONVERT << 16),
-                                                           _mm512_set1_epi32(BUSTER_TYPED_CONVERT | BUSTER_TYPED_CONST << 8 | BUSTER_TYPED_NE << 16 | BUSTER_TYPED_CONVERT << 24));
-        const __m512i bool_classes = _mm512_mask_blend_epi32(narrow_source,
-                                                             _mm512_or_si512(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I32 << 8 | BUSTER_TYPED_CLASS_U8 << 16)),
-                                                             _mm512_set1_epi32(BUSTER_TYPED_CLASS_I32 | BUSTER_TYPED_CLASS_I32 << 8 | BUSTER_TYPED_CLASS_I32 << 16 | BUSTER_TYPED_CLASS_U8 << 24));
-        __m512i conversion_kinds = _mm512_maskz_mov_epi32(discard, _mm512_set1_epi32(BUSTER_TYPED_DISCARD));
-        conversion_kinds = _mm512_mask_mov_epi32(conversion_kinds, to_bool, bool_kinds);
-        conversion_kinds = _mm512_mask_mov_epi32(conversion_kinds, convert, _mm512_set1_epi32(BUSTER_TYPED_CONVERT));
-        __m512i conversion_classes = _mm512_maskz_mov_epi32(discard, classes);
-        conversion_classes = _mm512_mask_mov_epi32(conversion_classes, to_bool, bool_classes);
-        conversion_classes = _mm512_mask_mov_epi32(conversion_classes, convert, target_classes);
-        __m512i conversions = _mm512_maskz_mov_epi32(discard | convert, one);
-        conversions = _mm512_mask_mov_epi32(conversions, to_bool, _mm512_mask_blend_epi32(narrow_source, _mm512_set1_epi32(3), _mm512_set1_epi32(4)));
-        // The slots: each lane's kinds and classes eight bytes, its own then its conversion's, and its values a row of
-        // eight words, the first a read's and the rest none.
-        const uint64_t slot = (uint64_t)base * BUSTER_CHECK_LOWER_TEMPLATE_MOST;
-        const __mmask8 low = (__mmask8)taken;
-        const __mmask8 high = (__mmask8)(taken >> 8);
-        const __m512i shifts_low = _mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(own)), 3);
-        const __m512i shifts_high = _mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(own, 1)), 3);
-        const __m512i kinds_low = _mm512_sllv_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(conversion_kinds)), shifts_low);
-        const __m512i kinds_high = _mm512_sllv_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(conversion_kinds, 1)), shifts_high);
-        const __m512i classes_low = _mm512_sllv_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(conversion_classes)), shifts_low);
-        const __m512i classes_high = _mm512_sllv_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(conversion_classes, 1)), shifts_high);
-        // A lane's own entries' bytes (`own`, at most three, so that with a conversion's four they fit the slot's eight),
-        // then the conversion's: (own & mask) | conversion, ternary logic 0xea.
-        const __m512i own_mask_low = _mm512_sub_epi64(_mm512_sllv_epi64(_mm512_set1_epi64(1), shifts_low), _mm512_set1_epi64(1));
-        const __m512i own_mask_high = _mm512_sub_epi64(_mm512_sllv_epi64(_mm512_set1_epi64(1), shifts_high), _mm512_set1_epi64(1));
-        _mm512_mask_storeu_epi64(writer->template_slot_kinds + slot, low,
-                                 _mm512_ternarylogic_epi64(own_mask_low, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(kinds)), kinds_low, 0xea));
-        _mm512_mask_storeu_epi64(writer->template_slot_kinds + slot + 64, high,
-                                 _mm512_ternarylogic_epi64(own_mask_high, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(kinds, 1)), kinds_high, 0xea));
-        _mm512_mask_storeu_epi64(writer->template_slot_classes + slot, low,
-                                 _mm512_ternarylogic_epi64(own_mask_low, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(entry_classes)), classes_low, 0xea));
-        _mm512_mask_storeu_epi64(writer->template_slot_classes + slot + 64, high,
-                                 _mm512_ternarylogic_epi64(own_mask_high, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(entry_classes, 1)), classes_high, 0xea));
-        uint64_t* slot_values = writer->template_slot_values + slot;
-        const __m512i values_low = _mm512_cvtepu32_epi64(_mm512_castsi512_si256(values));
-        const __m512i values_high = _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(values, 1));
-        for (uint32_t i = 0; i < 8; i += 1)
-        {
-            const __m512i pick = _mm512_setr_epi64((int64_t)i, 8, 8, 8, 8, 8, 8, 8);
-            _mm512_mask_storeu_epi64(slot_values + (uint64_t)i * BUSTER_CHECK_LOWER_TEMPLATE_MOST, (__mmask8)(0u - ((low >> i) & 1u)), _mm512_permutex2var_epi64(values_low, pick, zero));
-            _mm512_mask_storeu_epi64(slot_values + (uint64_t)(i + 8) * BUSTER_CHECK_LOWER_TEMPLATE_MOST, (__mmask8)(0u - ((high >> i) & 1u)),
-                                     _mm512_permutex2var_epi64(values_high, pick, zero));
-        }
-        // The operands, two a node, their count and the own entries' count; the state's mark.
-        const __m512i operands_a = _mm512_maskz_loadu_epi32(active, graph->operand0 + node);
-        const __m512i operands_b = _mm512_maskz_loadu_epi32(active, graph->operand1 + node);
-        const __mmask16 pairs_low = (__mmask16)_pdep_u32(taken & 0xffu, 0x5555u) | (__mmask16)(_pdep_u32(taken & 0xffu, 0x5555u) << 1);
-        const __mmask16 pairs_high = (__mmask16)_pdep_u32(taken >> 8, 0x5555u) | (__mmask16)(_pdep_u32(taken >> 8, 0x5555u) << 1);
-        _mm512_mask_storeu_epi32(writer->template_children + 2 * (uint64_t)base, pairs_low, _mm512_permutex2var_epi32(operands_a, interleave_low, operands_b));
-        _mm512_mask_storeu_epi32(writer->template_children + 2 * (uint64_t)base + 16, pairs_high, _mm512_permutex2var_epi32(operands_a, interleave_high, operands_b));
-        _mm_mask_storeu_epi8(writer->template_counts + base, taken, _mm512_cvtepi32_epi8(operand_counts));
-        _mm_mask_storeu_epi8(writer->template_own + base, taken, _mm512_cvtepi32_epi8(own));
-        _mm_mask_storeu_epi8(writer->template_total + base, taken, _mm512_cvtepi32_epi8(_mm512_add_epi32(own, conversions)));
-        const __m512i marks = _mm512_mask_or_epi32(_mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_FAST), (__mmask16)~refused, _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_FAST),
-                                                   _mm512_set1_epi32(BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED));
-        _mm_mask_storeu_epi8(writer->template_states + base, taken, _mm512_cvtepi32_epi8(_mm512_or_si512(states, marks)));
-    }
-}
-
-// The vector classification's check (CheckLowerWriter.template_check): the lane at `r` must have the context
-// check_lower_template_child_context gives it, the fast twin must take it with the same evaluated operands and own entries,
-// and check_lower_template_conversion must give it the same entries, total and whether the table takes the conversion.
-static bool check_lower_template_vector_twin(const CheckLowerWriter* writer, uint32_t node, uint32_t r, const CheckLowerTemplateFast* vector)
-{
-    const uint64_t slot = (uint64_t)r * BUSTER_CHECK_LOWER_TEMPLATE_MOST;
-    const TypeId target = writer->template_targets[r];
-    const uint8_t context = check_lower_template_child_context(writer, node, (writer->template_contexts[r] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, target);
-    uint8_t kinds[BUSTER_CHECK_LOWER_TEMPLATE_MOST];
-    uint8_t classes[BUSTER_CHECK_LOWER_TEMPLATE_MOST];
-    uint64_t values[BUSTER_CHECK_LOWER_TEMPLATE_MOST];
-    CheckLowerTemplateEntries twin = {
-        .kinds = kinds,
-        .classes = classes,
-        .values = values,
-    };
-    const bool columns = writer->program->stream->dense_values == NULL && (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0;
-    const CheckLowerTemplateFast fast = columns ? check_lower_template_fast(writer, node, (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, &twin) :
-                                                  (CheckLowerTemplateFast){ .handled = false };
-    const uint32_t own = twin.count;
-    const bool converted = fast.handled && check_lower_template_conversion(writer, writer->program->stream->value_types[node], target, context, &twin);
-    bool same = fast.handled && context == writer->template_contexts[r] && fast.count == vector->count && own == writer->template_own[r] &&
-                twin.count == writer->template_total[r] && converted == ((writer->template_states[r] & BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED) != 0) && !twin.taken_address;
-    for (uint32_t k = 0; same && k < fast.count; k += 1)
-    {
-        same = fast.children[k] == vector->children[k];
-    }
-    for (uint32_t e = 0; same && e < twin.count; e += 1)
-    {
-        same = kinds[e] == writer->template_slot_kinds[slot + e] && classes[e] == writer->template_slot_classes[slot + e] && values[e] == writer->template_slot_values[slot + e];
-    }
-    return same;
-}
-
 // The fast twin's check (CheckLowerWriter.template_check): the general rules must give `node` a template, its own entries
 // and its evaluated operands as `fast` and `entries` do, and give each operand the context and the target the scatter
 // gave it, where the operand is one a template could take.
@@ -1647,42 +1132,7 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
         memset(writer->template_states, 0, span);
         memset(writer->template_contexts, 0, span);
         memset(writer->template_targets, 0, (uint64_t)span * sizeof(TypeId));
-        const bool vector_path = !BUSTER_SCALAR_PATH(writer->scalar) && stream->dense_values == NULL && writer->type_templates != NULL;
-        if (!vector_path || writer->template_check)
-        {
-            check_lower_template_scatter(writer, first, span);
-        }
-        if (vector_path)
-        {
-            if (!writer->template_vector_ready)
-            {
-                check_lower_template_vector_begin(writer);
-                writer->template_vector_ready = true;
-            }
-            if (writer->template_check)
-            {
-                // The scalar scatter's results, which the vector one's must equal for the nodes both leave evaluated and
-                // unshared.
-                memcpy(writer->template_check_states, writer->template_states, span);
-                memcpy(writer->template_check_contexts, writer->template_contexts, span);
-                memcpy(writer->template_check_targets, writer->template_targets, (uint64_t)span * sizeof(TypeId));
-                memset(writer->template_states, 0, span);
-                memset(writer->template_contexts, 0, span);
-                memset(writer->template_targets, 0, (uint64_t)span * sizeof(TypeId));
-            }
-            check_lower_template_scatter_vector(writer, first, span);
-            const uint8_t excluded = BUSTER_CHECK_LOWER_TEMPLATE_SHARED | BUSTER_CHECK_LOWER_TEMPLATE_UNEVALUATED;
-            for (uint32_t r = 0; writer->template_check && r < span; r += 1)
-            {
-                const bool scalar_taken = (writer->template_check_states[r] & excluded) == 0;
-                const bool vector_taken = (writer->template_states[r] & excluded) == 0;
-                const bool same = scalar_taken == vector_taken &&
-                                  (!scalar_taken || ((writer->template_check_contexts[r] == writer->template_contexts[r]) &&
-                                                     writer->template_check_targets[r] == writer->template_targets[r]));
-                writer->template_mismatches += same ? 0 : 1;
-            }
-            check_lower_template_vector(writer, first, span);
-        }
+        check_lower_template_scatter(writer, first, span);
         // Each node on its own, from the first up: its operands' contexts are final before its own turn, and their
         // classifications and closures before its own. Its context with its discard, its template, its entries and its
         // conversion's in its slot, then its entries' offset in node order, which is postorder, and whether its subtree is
@@ -1697,10 +1147,7 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
             const uint32_t node = first + r;
             uint8_t state = writer->template_states[r];
             const TypeId target = writer->template_targets[r];
-            // The vector classification's lanes have their contexts, never discarded, and their conversions.
-            const bool vector = (state & BUSTER_CHECK_LOWER_TEMPLATE_FAST) != 0;
-            const uint8_t context = vector ? writer->template_contexts[r] :
-                                             check_lower_template_child_context(writer, node, (writer->template_contexts[r] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, target);
+            const uint8_t context = check_lower_template_child_context(writer, node, (writer->template_contexts[r] & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, target);
             uint32_t own_count = 0;
             uint32_t total = 0;
             bool closed = false;
@@ -1716,28 +1163,11 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
                     .classes = writer->template_slot_classes + slot,
                     .values = writer->template_slot_values + slot,
                 };
-                // The vector classification's result where it took the node, else the fast twin where it takes it (its
-                // operands' contexts and targets the scatter's table's, which need no comparison), the general rules
-                // otherwise.
+                // The fast twin where it takes the node (its operands' contexts and targets the scatter's table's, which
+                // need no comparison), the general rules otherwise.
                 const bool columns = stream->dense_values == NULL && (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0;
-                CheckLowerTemplateFast fast = { .handled = false };
-                if (vector)
-                {
-                    fast.children[0] = writer->template_children[2 * (uint64_t)r];
-                    fast.children[1] = writer->template_children[2 * (uint64_t)r + 1];
-                    fast.count = writer->template_counts[r];
-                    fast.handled = true;
-                    entries.count = writer->template_own[r];
-                    writer->template_vector_nodes += 1;
-                    if (writer->template_check)
-                    {
-                        writer->template_mismatches += check_lower_template_vector_twin(writer, node, r, &fast) ? 0 : 1;
-                    }
-                }
-                else if (columns)
-                {
-                    fast = check_lower_template_fast(writer, node, (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, &entries);
-                }
+                const CheckLowerTemplateFast fast = columns ? check_lower_template_fast(writer, node, (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0, &entries) :
+                                                              (CheckLowerTemplateFast){ .handled = false };
                 CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
                 TypeId type = 0;
                 if (fast.handled)
@@ -1768,8 +1198,8 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
                 if (use.kind != CHECK_LOWER_TEMPLATE_NONE)
                 {
                     own_count = entries.count;
-                    const bool converted = vector ? (state & BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED) != 0 : check_lower_template_conversion(writer, type, target, context, &entries);
-                    total = vector ? writer->template_total[r] : entries.count;
+                    const bool converted = check_lower_template_conversion(writer, type, target, context, &entries);
+                    total = entries.count;
                     state |= converted ? BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED : 0;
                     closed = true;
                     bool taken_address = entries.taken_address;

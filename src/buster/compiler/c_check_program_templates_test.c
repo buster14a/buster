@@ -28,7 +28,6 @@ struct LowerTemplatesTotals
     uint64_t template_nodes;
     uint64_t template_entries;
     uint64_t template_fast;
-    uint64_t template_vector;
     uint64_t template_mismatches;
     uint64_t differences;
     uint64_t failures;
@@ -160,7 +159,6 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
     totals->template_nodes += templates.template_nodes;
     totals->template_entries += templates.template_entries;
     totals->template_fast += templates.template_fast;
-    totals->template_vector += templates.template_vector;
     totals->template_mismatches += templates.template_mismatches;
     totals->differences += !same;
     return same;
@@ -219,12 +217,11 @@ static bool lower_templates_file(LowerTemplatesTotals* totals, const char* file,
 static void lower_templates_report(const LowerTemplatesTotals* totals)
 {
     printf("lowering-templates-test: files=%" PRIu64 " functions=%" PRIu64 " nodes=%" PRIu64 " templates=%" PRIu64 " (%.2f%%) entries=%" PRIu64
-           " template-entries=%" PRIu64 " (%.2f%%) fast=%" PRIu64 " vector=%" PRIu64 " fast-mismatches=%" PRIu64 " differences=%" PRIu64
-           " failures=%" PRIu64 "\n",
+           " template-entries=%" PRIu64 " (%.2f%%) fast=%" PRIu64 " fast-mismatches=%" PRIu64 " differences=%" PRIu64 " failures=%" PRIu64 "\n",
            totals->files, totals->functions, totals->nodes, totals->template_nodes,
            totals->nodes != 0 ? 100.0 * (double)totals->template_nodes / (double)totals->nodes : 0.0, totals->entries, totals->template_entries,
            totals->entries != 0 ? 100.0 * (double)totals->template_entries / (double)totals->entries : 0.0, totals->template_fast,
-           totals->template_vector, totals->template_mismatches, totals->differences, totals->failures);
+           totals->template_mismatches, totals->differences, totals->failures);
     if (totals->passes != 0)
     {
         printf("lowering-templates-test: passes=%" PRIu64 " tasks_ns=%" PRIu64 " templates_ns=%" PRIu64 " ratio=%.3f\n", totals->passes, totals->tasks_nanoseconds,
@@ -364,9 +361,6 @@ static __attribute__((noinline)) void check_test_lowering_templates(CheckTest* t
     check_test_expect(test, totals.template_nodes * 2 > totals.nodes && totals.template_entries != 0,
                       "node templates take more than half of the fixtures' evaluated nodes");
     check_test_expect(test, totals.template_fast != 0 && totals.template_mismatches == 0, "the templates' fast twin classifies nodes as the general rules do");
-    // The vector classification takes some of them on the vector host path, and none on the scalar one.
-    check_test_expect(test, BUSTER_HOST_VECTOR ? totals.template_vector != 0 : totals.template_vector == 0,
-                      "the templates' vector classification takes nodes on the vector host path alone");
     if (ready)
     {
         rmdir(directory);
