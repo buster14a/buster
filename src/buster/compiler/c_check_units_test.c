@@ -52,7 +52,8 @@
 //   emission's columns, which take the caller's scratch then), write the same objects as without a limit; and either way
 //   leave the address space and the descriptors as they were. Among them a lane's setup fails at its reservations
 //   (which it says: can't reserve the lane's memory), its file cache's after its intern table and the cache's first
-//   arrays were reserved.
+//   arrays were reserved. The chain runs in a child of its own from the test's start, beside the sections before it
+//   (check_units_test_limits_start), and its output is printed in its place.
 // - The jobserver: four units by --lanes 4 under a GNU make jobserver of three tokens (MAKEFLAGS' fifo form), linked into
 //   an executable of more than a megabyte whose path is a FIFO, which the test reads: while the writer writes, the
 //   jobserver holds none of the tokens, which the command's lanes took; once the command ends, it holds every one
@@ -1359,6 +1360,98 @@ static __attribute__((unused)) void check_units_test_limits(CheckUnitsTestTally*
            runs, setups, fallbacks);
 }
 
+// The reservations' chain run beside the sections before it (check_units_test_limits_start): its child, the counts it
+// shares and the file its output goes to.
+typedef struct CheckUnitsTestBeside CheckUnitsTestBeside;
+struct CheckUnitsTestBeside
+{
+    pid_t child;
+    FILE* output;
+    // The child's checks and failures, and whether it ran to the end, in a MAP_SHARED mapping.
+    uint64_t* shared;
+};
+
+// Starts check_units_test_limits in a child of its own: its chain of runs is sequential by construction, each run's
+// limit the last one's peak less a page, and took 9.6 of test-check-units' 14 s on 4 CPUs, while the sections before it
+// in run_check_units_tests, about 4.6 s, don't depend on it. The child measures and limits its own address space, as
+// the test's process did, and keeps its rlimits, directory, standard error and MAKEFLAGS to itself; its output goes to
+// a file that check_units_test_limits_finish prints where the section's was. If it can't start, the finish runs the
+// section in this process instead.
+static __attribute__((unused)) CheckUnitsTestBeside check_units_test_limits_start(const CheckUnitsTestTally* tally, const char* directory)
+{
+    CheckUnitsTestBeside beside = { .child = -1 };
+    beside.output = tmpfile();
+    uint64_t* shared = mmap(NULL, 3 * sizeof(uint64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    beside.shared = shared != MAP_FAILED ? shared : NULL;
+    if (beside.output != NULL && beside.shared != NULL)
+    {
+        fflush(stdout);
+        fflush(stderr);
+        beside.child = fork();
+        if (beside.child == 0)
+        {
+            const int output = fileno(beside.output);
+            bool ready = dup2(output, STDOUT_FILENO) == STDOUT_FILENO && dup2(output, STDERR_FILENO) == STDERR_FILENO;
+            CheckUnitsTestTally own = { .random = tally->random };
+            if (ready)
+            {
+                check_units_test_limits(&own, directory);
+            }
+            fflush(stdout);
+            fflush(stderr);
+            beside.shared[0] = own.checks;
+            beside.shared[1] = own.failures;
+            beside.shared[2] = ready;
+            _exit(0);
+        }
+    }
+    return beside;
+}
+
+// Waits for the reservations' child, adds its checks and failures to the tally and prints its output; or runs the
+// section here if the child didn't start.
+static __attribute__((unused)) void check_units_test_limits_finish(CheckUnitsTestTally* tally, CheckUnitsTestBeside* beside, const char* directory)
+{
+    if (beside->child > 0)
+    {
+        int status = 0;
+        pid_t waited = -1;
+        do
+        {
+            waited = waitpid(beside->child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        const bool ended = waited == beside->child && WIFEXITED(status) && WEXITSTATUS(status) == 0 && beside->shared[2] != 0;
+        fflush(stdout);
+        fflush(stderr);
+        char buffer[4096];
+        size_t length = 0;
+        rewind(beside->output);
+        while ((length = fread(buffer, 1, sizeof(buffer), beside->output)) != 0)
+        {
+            fwrite(buffer, 1, length, stdout);
+        }
+        if (ended)
+        {
+            tally->checks += beside->shared[0];
+            tally->failures += beside->shared[1];
+        }
+        check_units_test_expect(tally, ended, "the reservations' child runs to the end", directory);
+    }
+    else
+    {
+        check_units_test_limits(tally, directory);
+    }
+    if (beside->output != NULL)
+    {
+        fclose(beside->output);
+    }
+    if (beside->shared != NULL)
+    {
+        munmap(beside->shared, 3 * sizeof(uint64_t));
+    }
+    *beside = (CheckUnitsTestBeside){ .child = -1 };
+}
+
 // A broker on the actual release control/reply protocol observes the allocation-failure fallback's ordering. While
 // lane 0 is blocked awaiting worker_budget_release's acknowledgement, scratch must still contain only its pattern:
 // failed parallel reservation writes no workspace, but the serial duplicate-name merge does. Thus returning after
@@ -1953,6 +2046,10 @@ static int run_check_units_tests(int argc, char** argv)
     }
     else if (made)
     {
+#if !BUSTER_SANITIZER_RESOURCES
+        // The reservations' chain, beside the sections before its place (check_units_test_limits_start).
+        CheckUnitsTestBeside limits = check_units_test_limits_start(&tally, directory);
+#endif
         check_units_test_programs(&tally, executable, clang, directory, programs != 0 ? programs : 1);
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
@@ -1965,7 +2062,7 @@ static int run_check_units_tests(int argc, char** argv)
         // the detector at its start. The plain builds, whose peak is the run's own, check every reservation's failure.
         printf("  reservations: not failed in turn under a sanitizer, whose shadow grows the address space\n");
 #else
-        check_units_test_limits(&tally, directory);
+        check_units_test_limits_finish(&tally, &limits, directory);
 #endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);

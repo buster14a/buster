@@ -1261,7 +1261,24 @@ static void tier1_burs_label_vector(uint32_t maximum_depth, const uint32_t* leve
             const __m512i column = tier1_burs_gather_pool(active, _mm512_add_epi32(right_map, right));
             const __m512i entry = _mm512_add_epi32(_mm512_add_epi32(base, _mm512_mullo_epi32(row, width)), column);
             const __m512i state = tier1_burs_gather_pool(active, entry);
+#if __has_feature(memory_sanitizer)
+            // MSan checks a masked scatter's operands' shadow but writes none at its destinations: the elements it
+            // writes keep their old poison, and a later read reports them uninitialized. Store the lanes scalar so
+            // each written state's shadow lands with it.
+            uint32_t scattered_nodes[16];
+            uint32_t scattered_states[16];
+            _mm512_storeu_si512(scattered_nodes, nodes);
+            _mm512_storeu_si512(scattered_states, state);
+            for (uint32_t lane = 0; lane < 16; lane += 1)
+            {
+                if ((uint32_t)active >> lane & 1)
+                {
+                    states[scattered_nodes[lane]] = scattered_states[lane];
+                }
+            }
+#else
             _mm512_mask_i32scatter_epi32(states, active, nodes, state, 4);
+#endif
         }
     }
 }

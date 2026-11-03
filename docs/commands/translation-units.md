@@ -33,7 +33,10 @@ which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
 write would show. Each lane releases what its units shared, into its pool and
-then the pool itself, on the lane once it takes no more units, and the
+then the pool itself, on the lane as soon as it takes no more units, before it
+helps the others' functions (#777); without a link, in a command whose process
+exits after the lanes (main's, which releases no memory), the lane that stops
+taking units last leaves its memory to the exit. The
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
 that lane 0 announces and every lane runs, with a worker-budget lease of its
