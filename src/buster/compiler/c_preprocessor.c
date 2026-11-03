@@ -18560,6 +18560,41 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
     return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
 }
 
+// The end of output token `token`'s outermost expansion, as clang's SourceManager::getExpansionRange(...).getEnd()
+// resolves it (#148's source-location builtins, #1126's review): a function-like invocation's closing parenthesis, an
+// object-like macro's name, followed while that end was itself made by an expansion (PPExpansion.end_origin); an
+// argument's or a generated token's is the end of the expansion that substituted or made it; a file token's is its own
+// location. `origin` is the token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
+static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    bool valid = token < pp->output.count && pp->output.locations != 0;
+    uint32_t location = valid ? pp->output.locations[token] : 0;
+    const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+        {
+            valid = index < pp->substitution_count;
+            origin = valid ? pp->substitutions[index].expansion : 0;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED)
+        {
+            valid = index < pp->generated_count;
+            origin = valid ? pp->generated[index].expansion : 0;
+        }
+        else
+        {
+            valid = kind == 0 && index < pp->history_count;
+            location = valid ? pp->history[index].end : location;
+            origin = valid ? pp->history[index].end_origin : 0;
+        }
+    }
+    valid &= origin == 0;
+    return valid ? location : 0;
+}
+
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current
 // expansion was read; an inexact run instead requests canonical warning classification during the usual replay.
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin)

@@ -1452,11 +1452,15 @@ reads it (`check_input_source_builtin`, `check_input_builtin_constant_prepare`,
 takes, code, static initializers, enumerators and `_Static_assert` alike.
 
 - `__builtin_LINE()` and `__builtin_COLUMN()` are `unsigned int` constants of the
-  call's place as clang's `SourceLocExpr` gives it: where its outermost macro
-  expansion was invoked, or where it was written, the line presumed after
-  `#line` and the column of the keyword's first byte, from 1
-  (`check_input_source_place`: the expansion history, which a unit that deferred
-  it records then, `pp_presumed` and `pp_line_of`).
+  call's place as clang's `SourceLocExpr` gives it. That place is the end of its
+  outermost macro expansion, as `getExpansionRange(...).getEnd()` resolves it:
+  a function-like invocation's closing parenthesis, an object-like macro's
+  name, and for a macro argument the end of the invocation it was passed to.
+  A call written outside any macro is placed where it was written. The line is
+  presumed after `#line`, and the column counts from 1
+  (`check_input_source_place`: `pp_output_expansion_end` over the expansion
+  history, which a unit that deferred it records then, `pp_presumed` and
+  `pp_line_of`).
 - `__builtin_FILE()`, `__builtin_FILE_NAME()` and `__builtin_FUNCTION()` are
   `char *` constants, the addresses of strings the walk makes
   (`check_input_source_string`): the presumed file's name as written (after

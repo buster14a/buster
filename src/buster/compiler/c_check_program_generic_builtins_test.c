@@ -305,6 +305,28 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "mix(__builtin_omp_required_simd_align(double));mix(sizeof(__builtin_FILE()));mix(_Generic(__builtin_LINE(),unsigned:1,default:2));\n"
         "mix(_Generic(__builtin_FILE(),char*:3,default:4));mix(_Generic(__builtin_vectorelements(v),unsigned long:5,default:6));return (int)(h^(h>>32));}\n",
         "generic-source-places-and-type-queries", clang);
+    // A place through macros (#1126's review): clang's SourceLocExpr reads getExpansionRange(...).getEnd(), the outermost
+    // expansion's end: a function-like invocation's closing parenthesis (on a later line too), an object-like macro's
+    // name, a nested one's outer invocation, an argument's invocation (of a builtin and of another macro), in constant
+    // expressions and at run time, before and after a #line. (The first #line keeps the lines the oracle's added macro
+    // would shift.)
+    check_test_program_source(test,
+        "#line 1 \"macro-places.c\"\n"
+        "#define COLUMN() __builtin_COLUMN()\n"
+        "#define LINE() __builtin_LINE()\n"
+        "#define WRAPPED() COLUMN()\n"
+        "#define OBJECT __builtin_COLUMN()\n"
+        "#define WRAPPEDARG(x) COLUMN()\n"
+        "#define ID(x) x\n"
+        "#define WHERE() (__builtin_LINE() * 1000 + __builtin_COLUMN())\n"
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "enum{S=COLUMN()*1000+WRAPPED(),T=OBJECT*1000+WRAPPEDARG(1),U=ID(LINE()\n)};\n"
+        "int tested(int n){h=(unsigned)n;mix(S);mix(T);mix(U);mix(COLUMN());mix(WRAPPED());mix(OBJECT);mix(WRAPPEDARG(42));\n"
+        "mix(ID(__builtin_COLUMN()));mix(ID(COLUMN()));mix(LINE(\n));mix(ID(\n  __builtin_LINE()));mix(WHERE(\n   ));\n"
+        "#line 300 \"moved.c\"\n"
+        "mix(WRAPPED());mix(LINE());mix(ID(WRAPPED()));mix(WHERE());mix(OBJECT);\n"
+        "return (int)(h^(h>>32));}\n",
+        "generic-source-places-through-macros", clang);
     // __builtin_complex (#148): its folds in static data (signed zeros, an infinity, a NaN, a const object's value, long
     // double's and _Float16's) and in an enumerator, and its values at run time, of each real floating type, from
     // qualified, aligned and volatile operands, evaluated once each, in order, and taken apart, multiplied and summed.

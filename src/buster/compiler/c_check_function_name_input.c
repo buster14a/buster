@@ -550,10 +550,12 @@ static const CheckInitString* check_input_function_name(CheckInputReader* reader
     return result;
 }
 
-// The place of builtin call `keyword` as clang's SourceLocExpr gives it (#148): where its outermost macro expansion was
-// invoked, or where it was written, with its presumed line (after #line) and file name, and its column there (1 for a
-// line's first byte). A deferred body's lane can't read the preprocessor's places, whose expansion history and line
-// cursors the reads change: it refuses the body, which source order then reads (check_input_lane_refuse).
+// The place of builtin call `keyword` as clang's SourceLocExpr gives it (#148): the end of its outermost macro expansion
+// (pp_output_expansion_end: a function-like invocation's closing parenthesis, an object-like macro's name, the
+// invocation's for an argument, #1126's review), or where it was written, with its presumed line (after #line) and file
+// name, and its column there (1 for a line's first byte). A deferred body's lane can't read the preprocessor's places,
+// whose expansion history and line cursors the reads change: it refuses the body, which source order then reads
+// (check_input_lane_refuse).
 static bool check_input_source_place(CheckInputReader* reader, uint32_t keyword, uint32_t* line, uint32_t* column, const char** name, uint32_t* name_length)
 {
     Preprocessor* pp = reader->pp;
@@ -561,7 +563,7 @@ static bool check_input_source_place(CheckInputReader* reader, uint32_t keyword,
     check_input_lane_refuse(reader, reader->lane, "a body uses a source-location builtin");
     const bool ready = !reader->lane && keyword < parser->tokens.count && pp_history_ensure(pp);
     const uint32_t output = ready ? parser->tokens.sources[keyword] : BUSTER_PP_NONE;
-    const uint32_t location = output < pp->output.count ? pp_expansion_location(pp, output, pp_history_at(pp, output)) : 0;
+    const uint32_t location = output < pp->output.count ? pp_output_expansion_end(pp, output, pp_history_at(pp, output)) : 0;
     const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     const bool valid = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE;
     if (valid)
