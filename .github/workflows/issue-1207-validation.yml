@@ -1,72 +1,37 @@
-name: Issue 1207 isolated validation
+name: Issue 1207 read-only timing integration
 
 on:
   push:
     branches: [agent/1207-ci-validation]
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 jobs:
-  validate:
+  report:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          ref: 1d8fda04678b84255fd5d781ad35c1f82b3f661a
           persist-credentials: false
-      - name: Apply and validate the proposed changes without changing any branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          base64 --decode issue-1207.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/proposed.patch"
-          printf '%s  %s\n' 38d593fe65070d40bfce7fe9e7783854def585eba70c0de758fde3f796419639 "$RUNNER_TEMP/proposed.patch" | sha256sum --check
-          git apply --check "$RUNNER_TEMP/proposed.patch"
-          git apply --index "$RUNNER_TEMP/proposed.patch"
-          git diff --cached --check
-          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/changes.c -o "$RUNNER_TEMP/changes"
-          "$RUNNER_TEMP/changes" --self-test
-          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
-          "$RUNNER_TEMP/qualification" --self-test
-          cc -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all tools/ci/qualification.c -o "$RUNNER_TEMP/qualification-sanitize"
-          ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/qualification-sanitize" --self-test
-          bash tests/ci/timings.sh
-          bash -n tools/ci/timings.sh tests/ci/timings.sh
-      - name: Validate workflows with pinned actionlint
-        shell: bash
-        run: |
-          set -euo pipefail
-          directory="$RUNNER_TEMP/actionlint"
-          mkdir "$directory"
-          cd "$directory"
-          curl --fail --location --retry 3 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt -o checksums.txt
-          printf '%s  %s\n' 433028cf0ba3c42163ea1a668dedce30fcdbe84fe912b1a5e288c006eab8a4f5 checksums.txt | sha256sum --check
-          curl --fail --location --retry 3 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o actionlint_1.7.12_linux_amd64.tar.gz
-          grep '  actionlint_1.7.12_linux_amd64.tar.gz$' checksums.txt | sha256sum --check
-          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
-          printf 'self-hosted-runner:\n  labels: [ubuntu-26.04, buster-zen5, ryzen-9700x]\n' > config.yml
-          cd "$GITHUB_WORKSPACE"
-          "$directory/actionlint" -version
-          "$directory/actionlint" -shellcheck='' -config-file "$directory/config.yml" .github/workflows/9700x.yml .github/workflows/ci-timings.yml
-      - name: Store validated file blobs for the connector-authored implementation commit
+      - name: Recheck regression fixtures on the implementation commit
+        run: bash tests/ci/timings.sh
+      - name: Exercise the timing collector against actual workflow data
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/validated"
-          git diff --cached --binary > "$RUNNER_TEMP/validated/changes.patch"
-          git diff --cached --name-only -z > "$RUNNER_TEMP/validated/paths"
-          : > "$RUNNER_TEMP/validated/blobs.tsv"
-          while IFS= read -r -d '' file; do
-              jq -Rs '{content: ., encoding: "utf-8"}' "$file" > "$RUNNER_TEMP/blob.json"
-              sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/blobs" --input "$RUNNER_TEMP/blob.json" --jq .sha)
-              test "$sha" = "$(git hash-object -- "$file")"
-              printf '%s\t%s\n' "$sha" "$file" >> "$RUNNER_TEMP/validated/blobs.tsv"
-          done < "$RUNNER_TEMP/validated/paths"
-          cat "$RUNNER_TEMP/validated/blobs.tsv"
+        run: bash tools/ci/timings.sh "$RUNNER_TEMP/ci-timings"
+      - name: Publish read-only baseline
+        run: cat "$RUNNER_TEMP/ci-timings/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue-1207-validated
-          path: ${{ runner.temp }}/validated
+          name: issue-1207-latency-baseline
+          path: |
+            ${{ runner.temp }}/ci-timings/*.json
+            ${{ runner.temp }}/ci-timings/*.tsv
+            ${{ runner.temp }}/ci-timings/*.md
+          if-no-files-found: warn
           retention-days: 7
