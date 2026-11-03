@@ -502,7 +502,7 @@ failures, corpora, and mutations of them checked against clang.
 
 On the 9700X, at `d59d035`, with `--clang`:
 
-- the tests without files: the 202 snippets, the four fixtures, 2,000 random
+- the tests without files: the 202 snippets (357 since #1127), the four fixtures, 2,000 random
   streams, the snippets at every block alignment (12,928 inputs), nine kinds of
   nesting 100,000 levels deep and a run of 100,000 attributes, and the driver's
   cases and its failures (6.8 s);
@@ -541,6 +541,49 @@ group, and a declarator without specifiers at file scope. And each fix of
 #244's second review and of its follow-up, undone, is a mutant `test-parser`
 fails on (29 of them), and so is each of its third review's (23), while the
 unchanged parser passes.
+
+### The first error's whole line (#1127)
+
+The mutations compared only the first error's line until #1127: since, a copy
+whose first error clang files as a parse issue must give clang's whole first
+line, its line, its column and its message. Measured in a cloud container (a
+Xeon, not the 9700X; counts, not timings) with clang 23.1.5, the comparison
+first ran on the parser as it was, then on #1127's:
+
+| Mutations, whole first line | Before | After |
+| --- | ---: | ---: |
+| A 148-line file of stdio, stdarg, `#pragma pack`, bit-fields, K&R, `cleanup` and statement expressions (2,000, seed 1) | 318 | 10 |
+| Lua 5.4.8's files (3,000, seed 2) | 223 | 4 |
+| `sqlite3.c` 3.50.4 (600, seed 3) | | 1 |
+
+Most of the 318 were GNU attributes in glibc's headers: clang expects their
+lists' `)` after the token before (its `ExpectAndConsume`), where it expects a
+group's elsewhere at the token. The rest: a for-statement's `;` (at the token),
+a `;` before a group's closer (`unexpected ';' before ')'`, where clang's
+balanced delimiters close the group), a `)` after a condition, a return
+statement's `;` (no `extraneous ')'` check), a function declarator's body
+before an extraneous `)` but not after an asm label, a keyword where a
+parameter's name would be, an enumerator before its `=`, clang's missing `;`
+after a tag's definition before what can't be a declarator, the builtins'
+commas, brackets before a declarator's name, a field designator, `[[` that
+isn't an attribute, and a do-statement's `while`. A braced initializer in a
+list followed by a postfix operator (`{ {1}[0] }`), which both paths took, is
+now refused at clang's place. What is left: a parameter without declaration
+specifiers (`( * char p`), which clang reads as an implicit int and the parser
+refuses at its first token; a `(` after an asm label, which clang reads as a
+C++-style initializer; and a subscript followed by a string (`a[0] "x"`), which
+the vector path takes (K6 lets a string follow any `]`, for asm operands'
+`[name] "constraint"`) where the scalar parser and clang refuse it.
+
+The driver's own first error (`-fsyntax-only`, the checker's errors among
+them) on 400 copies of the 148-line file, with a token deleted, duplicated or
+swapped in the source rather than in the -E text, as #1127's campaign: 327 and
+333 identical to clang's (seeds 7 and 11) before, 355 and 354 after; most of
+the rest are clang's semantic errors, where the checker's messages differ
+(#1107). The checker words its refusals of declaration specifiers
+(`cannot combine with previous 'double' declaration specifier`) and of numeric
+constants (`invalid digit '9' in octal constant`, at the digit) as clang does
+(`c_check_declspec.c`, `c_check_literal_diagnostic.c`).
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or

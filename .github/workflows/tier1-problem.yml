@@ -59,10 +59,17 @@ jobs:
         run: |
           clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=address,undefined -fno-sanitize-recover=all tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem-sanitize"
           "$RUNNER_TEMP/tier1-problem-sanitize"
-      - name: Seeded bounded wire-format fuzzing
+      - name: Report buster's certified allocations of the seed imports
         run: |
           clang -std=c17 -O2 -Wall -Wextra -Werror -Wno-unused-function tests/tier1-problem/seed.c -o "$RUNNER_TEMP/tier1-problem-seed"
           mkdir "$RUNNER_TEMP/problem-corpus"
           for kind in straight cfg form; do "$RUNNER_TEMP/tier1-problem-seed" "$kind" > "$RUNNER_TEMP/problem-corpus/$kind"; done
-          clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all tests/tier1-problem/fuzz.c -o "$RUNNER_TEMP/tier1-problem-fuzz"
+          clang -std=c17 -O2 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o "$RUNNER_TEMP/tier1-problem-report"
+          # The straight-line seed's allocations, both paths', are reported past their certificates; the others' refusals by reason.
+          "$RUNNER_TEMP/tier1-problem-report" "$RUNNER_TEMP/problem-corpus/straight" "$RUNNER_TEMP/problem-corpus/cfg" "$RUNNER_TEMP/problem-corpus/form" | tee "$RUNNER_TEMP/problem-report.txt"
+          grep -q $'\tok\t.*\tcertified=2$' "$RUNNER_TEMP/problem-report.txt"
+          grep -q $'^tier1-problem-report: functions=3\taccepted=1\trejected=2\tphi=1\tform=1$' "$RUNNER_TEMP/problem-report.txt"
+      - name: Seeded bounded wire-format fuzzing, every allocation certified
+        run: |
+          clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all tests/tier1-problem/fuzz.c -o "$RUNNER_TEMP/tier1-problem-fuzz"
           "$RUNNER_TEMP/tier1-problem-fuzz" -seed=938 -runs=100000 -max_len=8192 "$RUNNER_TEMP/problem-corpus"

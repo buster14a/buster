@@ -542,6 +542,81 @@ stage, though, against Tier 0's 4.8: the tasks still expand the quarter of the
 nodes no template takes (calls, `&&`, `||`, `?:`, increments and compound
 assignments among them), so the templates' coverage has to grow as well.
 
+## Node templates over a body: the vector steps (#1048)
+
+#1201 made two of the pass's three steps data-parallel on the vector host path
+(its commit `43d47466`), with the scalar steps as their twins, and measured
+them on the 9700X:
+
+- **The scatter** (`check_lower_template_scatter_vector`). Each operator
+  linked each operand its rule evaluates, and gave it its target, by scatters
+  in node order; the links read back marked an operand another operator linked
+  shared; each operand's context was its link's mode. Small scalar steps from
+  the last node down took the inherited contexts (a selection's and a comma's
+  right operand), a comma's right operand's target and the operands under each
+  fold.
+- **The classification of the fast twin's common shapes**
+  (`check_lower_template_vector`): a VALUE's read of a local or a global, `&x`,
+  `*p`, the wrappers, the negation and the complement, the truth tests and the
+  scalar binary operators but pointer arithmetic, for nodes of no payload row,
+  with each lane's conversion (from #570's packed classes and facts of its type
+  and its target) and its values in one 64-byte row store. It took 138,821 of
+  the 259,987 nodes the fast twin and it classified on `sqlite3.c` (53%).
+
+`test-lowering-templates`' check compared them with the scalar steps node by
+node: no mismatch on `sqlite3.c`, Lua's 34 units and c-testsuite's subset, and
+every function's entries the same as the tasks'.
+
+The 9700X, `measure-compile`'s medians of 11 runs on `sqlite3.c`, the vector
+path's compile taking the templates
+([run at `89f39ff2`](https://github.com/buster14a/buster/actions/runs/41603617509/job/125815498424)),
+against the scalar steps' run (#1197, the section above):
+
+| row | the scalar steps | the vector steps |
+| --- | ---: | ---: |
+| `lower` | 18.306 ms | 19.683 ms (19.536 to 20.271) |
+| `lower.statements` | 5.281 ms | 5.211 ms |
+| `lower.bodies` | 10.453 ms | 11.888 ms |
+
+The coverage was the same (201,411 nodes, 60.9% of the entries). In perf's
+profile, the vector classification took 2.45% of the compile's samples (about
+2.9 ms) and the vector scatter 2.22% (about 2.65 ms), against the scalar
+scatter's 2.6 ms and the 2.1 ms of the fast twin on the lanes the
+classification took. Each 16 nodes of the range, the classification runs
+about 430 instructions with 9 gathers and 95 mask-register operations, and the
+scatter up to four scatters and eight gathers, many of them chained (a node's
+type, then its type's classes and facts; its object, then its local). On the
+9700X that costs more than the scalar steps' branches and loads, so the steps
+stay scalar and the vector ones are not kept.
+
+The measurements of this section and the one above set what the templates
+need: a pass that touches every node of the range at well under 15 ns a node,
+and coverage well past three quarters of the nodes, since the pass's cost is
+the range's and the splices' savings only the covered nodes'. Even a free pass
+leaves `lower` at about 9.4 ms against Tier 0's 4.8.
+
+## VALUE tasks on the leaf path (#1048)
+
+On the vector path, the tasks' loop has #624's fast paths for an expression
+task: the leaf path (`check_lower_value`), the wrappers and truth tests, and
+the two- and three-node fragments. A standalone VALUE task takes none of them,
+but the expansion. #1205 sent it to the leaf path, which takes a VALUE's read
+of a local or a global, its address and a proven integer constant, under the
+rules #1048's templates were checked against the tasks with. The 9700X's
+correctness job passed with it. Two separate runs of the 9700X job, on the same
+base and about 35 minutes apart, each with `measure-compile`'s medians of 11 on
+`sqlite3.c` and the same options, gave the stage's aggregate rows; neither
+times the VALUE tasks alone:
+
+| row | the expansion (`92081c4a`, [run](https://github.com/buster14a/buster/actions/runs/41619659912/job/125870648949)) | the leaf path (`e33b7cc5`, [run](https://github.com/buster14a/buster/actions/runs/41609944231/job/125837465257)) |
+| --- | ---: | ---: |
+| `lower` | 12.535 ms (12.454 to 12.565) | 12.676 ms (12.574 to 12.830) |
+| `lower.statements` | 8.525 ms (8.351 to 8.561) | 8.615 ms (8.436 to 8.727) |
+
+These show no improvement in `sqlite3.c`'s lowering, though not a regression
+either, and say nothing of other inputs. So VALUE tasks keep the expansion, which
+the guard's comment in `check_lower_drain_body` records.
+
 ## The preparation's node counts and the branches' targets (#1048)
 
 Before the bodies, `check_lower_prepare` bounds the writers' room by counts

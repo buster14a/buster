@@ -1857,17 +1857,6 @@ static uint32_t check_lower_vector_of(const CheckLowerWriter* writer, TypeId typ
     return vector ? check_lower_vector_bytes(writer->program->types, type) : 0;
 }
 
-// Whether a vector result's ABI shape is one Tier 0 emits: its own vector register whole, or the hidden pointer a
-// wider one's takes (LLVM demotes a result of more than four parts, of __int128s' included, to a memory result). LLVM
-// returns a vector wider than the target's registers in as many of them as its parts need (abi_value_result), a shape
-// tier0_aggregate_result_valid has no emit or validate form for.
-static bool check_lower_vector_result(const CheckLowerWriter* writer, TypeId type)
-{
-    const AbiReturn returned = writer->abi_table->results[type_index(type)];
-    return check_lower_vector_of(writer, type) == 0 || returned.kind != BUSTER_ABI_RESULT_REGISTERS ||
-           returned.registers[1] == BUSTER_ABI_REGISTER_NONE;
-}
-
 // Appends an entry of a class the function takes: check_lower_emit's, and the entries of the half-precision classes'
 // (check_lower_half_entry), which check_lower_emit writes through it.
 static inline __attribute__((always_inline)) void check_lower_append(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
@@ -2292,15 +2281,85 @@ static __attribute__((noinline)) void check_lower_vector_brain(CheckLowerWriter*
     }
 }
 
+static void check_lower_element_address(CheckLowerWriter* writer, uint32_t object, uint32_t offset);
+
+// An operator on a vector wider than the target's vector registers where the target hasn't AVX-512 (#1193), as LLVM's
+// legalization splits it for clang's code: its baseline row at the registers' `width` (16 bytes, or 32 with AVX), every
+// one of which is elementwise (check_vector_lower_baseline_piece), applied to each piece in turn. The operands are set
+// into frame temporaries, the last first: a vector's of its bytes, any other's of its class (a splat's scalar, a
+// negation's sign bit); then each piece's operands are loaded from them at its offset (a scalar whole), the row runs and
+// its result is set into the result's temporary at the piece's offset; then the result is read whole. Pushed last first.
+static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class, uint32_t bytes,
+                                                                uint32_t width)
+{
+    Tier0Operation row;
+    const char* reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, op, vector, width, scalar_class, &row);
+    if (reason != NULL)
+    {
+        check_lower_unsupported(writer, reason);
+    }
+    else
+    {
+        const uint32_t index = check_lower_operation_index(writer, &row);
+        const uint32_t operands = row.operand_count;
+        uint32_t temporaries[BUSTER_TIER0_OPERATION_OPERANDS] = { 0 };
+        for (uint32_t j = 0; j < operands; j += 1)
+        {
+            const bool piecewise = row.operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR;
+            temporaries[j] = piecewise ? check_lower_temporary_of(writer, vector) : check_lower_temporary(writer, row.operand_classes[j]);
+        }
+        const uint32_t out = check_lower_temporary_of(writer, vector);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+        for (uint32_t piece = bytes / width; piece-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, width);
+            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
+            for (uint32_t j = operands; j-- > 0;)
+            {
+                if (row.operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, width);
+                    check_lower_element_address(writer, temporaries[j], piece * width);
+                }
+                else
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, row.operand_classes[j], temporaries[j]);
+                }
+            }
+            check_lower_element_address(writer, out, piece * width);
+        }
+        for (uint32_t j = 0; j < operands; j += 1)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, row.operand_classes[j], temporaries[j]);
+            if (j + 1 < operands && row.operand_classes[j + 1] != row.operand_classes[j])
+            {
+                // Tier 0 reads an entry's last operand's class from the entry before it, here the set of the operand after
+                // this one, of another class (a negation's sign bit after its vector): its temporary read and dropped
+                // first make that entry one of this operand's class.
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, row.operand_classes[j], 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, row.operand_classes[j], temporaries[j]);
+            }
+        }
+    }
+}
+
 // An X86 entry of an operator's row at a vector type (check_vector_lower_row), or its refusal: its operands are the
 // stack's when it runs. Half-precision elements have clang's excess precision where the unit's target hasn't AVX512-FP16
-// (check_lower_vector_half_chain), and bf16 elements' operators are check_lower_vector_brain's.
+// (check_lower_vector_half_chain), and bf16 elements' operators are check_lower_vector_brain's. Where the target hasn't
+// AVX-512, an operator wider than its vector registers is split into pieces they hold (check_lower_vector_split).
 static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
 {
     Tier0Operation row;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const uint32_t width = (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+    const uint32_t bytes = check_lower_vector_bytes(writer->program->types, vector);
     if (check_vector_lower_brain(writer->program->types, vector))
     {
         check_lower_vector_brain(writer, op, vector, scalar_class);
+    }
+    else if ((writer->target.features & evex) != evex && bytes > width && bytes % width == 0)
+    {
+        check_lower_vector_split(writer, op, vector, scalar_class, bytes, width);
     }
     else
     {
@@ -5415,8 +5474,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const TypeId result = check_stream_type(stream, node);
     const bool aggregate_result = check_lower_aggregate(writer, result);
     const bool wide_result = check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0;
-    const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) :
-                           !check_lower_vector_result(writer, result) ? "vector results wider than the target's registers" : NULL;
+    const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
@@ -9666,6 +9724,8 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             }
             else if (kind == CHECK_LOWER_EXPRESSION)
             {
+                // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
+                // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
                 const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
                                     check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
@@ -11956,14 +12016,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             function->result_size = (uint32_t)type_size(types, result);
         }
-        else if (!check_lower_vector_result(writer, result))
-        {
-            check_lower_unsupported(writer, "vector results wider than the target's registers");
-        }
         else if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
             // A 128-bit integer returns from its object's 16 bytes, in rax and rdx, as a struct of two eightbytes does, and a
-            // vector from its object's, in xmm0, ymm0 or zmm0: the object comes after the parameters (below).
+            // vector from its object's, in xmm0, ymm0 or zmm0, or split across the target's vector registers where it is
+            // wider than they are (xmm0 and xmm1, xmm0 to xmm3, or ymm0 and ymm1: tier0_vector_result_parts, #1193), as
+            // LLVM returns it: the object comes after the parameters (below).
             function->result_size = check_lower_wide(writer, result) ? 16 : check_lower_vector_of(writer, result);
         }
         uint32_t declared = 0;

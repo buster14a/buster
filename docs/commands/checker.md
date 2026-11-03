@@ -13,6 +13,9 @@ requirements. [Command index](README.md).
   `CheckOptions.level_order`, in stable dependency levels), with scalar
   barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
+  `c_check_declspec.c` and `c_check_literal_diagnostic.c` word its refusals of
+  declaration specifiers that don't combine and of numeric constants as clang
+  does, at clang's places (#1127), and only a refusal runs them;
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s

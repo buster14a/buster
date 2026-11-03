@@ -385,3 +385,43 @@ static Tier1ProblemReason tier1_problem_certify(const Tier1AllocationInput* inpu
     }
     return result;
 }
+
+// #938's harness's allocation of one imported function by buster's current allocator (#939): its adapted problem
+// (tier1_problem_intervals) allocated by both of the allocator's paths, tier1_allocate and its scalar twin, and each
+// allocation gated on its certificate (tier1_problem_certify) before anything may report it. The function's one terminal
+// reason, for tier1_problem_tally: the adapter's refusal; TIER1_PROBLEM_ALLOCATION_REFUSED where a path refuses the
+// problem; TIER1_PROBLEM_CAPACITY where `arena` can't hold an allocation or its check; TIER1_PROBLEM_CERTIFICATE_REJECTED
+// where either path's allocation fails its certificate; TIER1_PROBLEM_ARGUMENT for a missing argument; else
+// TIER1_PROBLEM_OK, with `result` the problem, both allocations (on `arena`) and their certificates' reports. On any other
+// reason `arena` is as it was and `result` untouched.
+typedef struct Tier1ProblemAllocation Tier1ProblemAllocation;
+struct Tier1ProblemAllocation
+{
+    Tier1AllocationInput input;
+    Tier1ProblemAdapterStats stats;
+    // The vector path's, then the scalar twin's.
+    Tier1Allocation allocations[2];
+    Tier1IntervalReport reports[2];
+};
+
+static Tier1ProblemReason tier1_problem_allocate(const Tier1Problem* source, Arena* arena, Tier1ProblemAllocation* result)
+{
+    const uint64_t mark = arena != 0 ? arena->length : 0;
+    Tier1ProblemAllocation made = { 0 };
+    Tier1ProblemReason reason = result != 0 ? tier1_problem_intervals(source, arena, &made.input, &made.stats) : TIER1_PROBLEM_ARGUMENT;
+    for (uint32_t path = 0; reason == TIER1_PROBLEM_OK && path < 2; path += 1)
+    {
+        const Tier1AllocationError allocated = path == 0 ? tier1_allocate(&made.input, arena, &made.allocations[0]) : tier1_allocate_scalar(&made.input, arena, &made.allocations[1]);
+        reason = allocated == TIER1_ALLOCATION_OK ? TIER1_PROBLEM_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_PROBLEM_CAPACITY : TIER1_PROBLEM_ALLOCATION_REFUSED;
+        reason = reason == TIER1_PROBLEM_OK ? tier1_problem_certify(&made.input, &made.allocations[path], arena, &made.reports[path]) : reason;
+    }
+    if (reason == TIER1_PROBLEM_OK)
+    {
+        *result = made;
+    }
+    else if (result != 0 && arena != 0 && arena->length > mark)
+    {
+        arena_pop_to(arena, mark);
+    }
+    return reason;
+}
