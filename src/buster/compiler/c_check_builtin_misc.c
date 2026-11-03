@@ -1067,6 +1067,30 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_CLEAR_PADDING)
+    {
+        // clang's void(void*) of custom checks (#148): a pointer as written (an array isn't one), to a complete object type
+        // that isn't const ("read-only variable is not assignable"), whose padding bits its code zeroes
+        // (check_lower_padding). An incomplete pointee (void's among them) is clang's "variable has incomplete type".
+        const TypeId written = type_strip_aligned(table, input->arguments[0].type);
+        const TypeId pointee = check_action_kind(table, written) == BUSTER_TYPE_KIND_POINTER ? type_element(table, written) : 0;
+        const uint8_t kind = pointee != 0 ? check_action_kind(table, pointee) : 0;
+        if (pointee == 0 || kind == BUSTER_TYPE_KIND_FUNCTION)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (kind == BUSTER_TYPE_KIND_VOID || !check_builtin_misc_source_complete(table, pointee, input))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPLETE, 0);
+        }
+        else if ((type_qualifiers(pointee) & BUSTER_TYPE_CONST) != 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+        }
+        output->action.value.type = BUSTER_TYPE_VOID;
+        output->action.value.category = CHECK_RVALUE;
+        output->action.value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+    }
     else if (id == CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED)
     {
         // HLSL's, which C sees as void(...) (#148): any arguments but void ones, as a variadic call's ("argument type 'void'
@@ -1190,7 +1214,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_CPU_INIT: minimum = maximum = 0; break;
         case CBUILTIN_CPU_IS:
         case CBUILTIN_CPU_SUPPORTS:
-        case CBUILTIN_PRESERVE_ACCESS_INDEX: minimum = maximum = 1; break;
+        case CBUILTIN_PRESERVE_ACCESS_INDEX:
+        case CBUILTIN_CLEAR_PADDING: minimum = maximum = 1; break;
         // void(...), which clang checks as a prototype's variadic arguments outside HLSL: as many as the operands' mask holds.
         case CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED: minimum = 0; maximum = 31; break;
         case CBUILTIN_OPERATOR_NEW:

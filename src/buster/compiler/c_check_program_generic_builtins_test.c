@@ -245,6 +245,20 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: hlsl resource pointer", .source =
           "struct S { int a; };\nvoid f(struct S s, int x)\n{\n__builtin_hlsl_resource_getpointer_typed();\n"
           "__builtin_hlsl_resource_getpointer_typed(s, 1.0f, \"x\", x++, f);\n(void)sizeof(__builtin_hlsl_resource_getpointer_typed(1));\n}\n" },
+        // clear_padding (#148): a pointer as written to a complete object type that isn't const, volatile and _Atomic ones
+        // and a pointer to a variable length array among them.
+        { .name = "generic: clear_padding", .source =
+          "struct S { char c; int i; };\nvoid f(int n, struct S* p, volatile struct S* v, _Atomic(struct S)* a, int (*q)[n], int (*r)[3])\n{\n"
+          "__builtin_clear_padding(p);\n__builtin_clear_padding(v);\n__builtin_clear_padding(a);\n__builtin_clear_padding(q);\n__builtin_clear_padding(r);\n}\n" },
+        { .name = "generic: clear_padding of void", .source = "void f(void* p)\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an incomplete struct", .source = "struct S;\nvoid f(struct S* p)\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an int", .source = "void f(int x)\n{\n__builtin_clear_padding(x);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of const", .source = "void f(const int* p)\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of a function pointer", .source = "void f(int (*p)(void))\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an array", .source = "int a[3];\nvoid f(void)\n{\n__builtin_clear_padding(a);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an incomplete array", .source = "void f(int (*q)[])\n{\n__builtin_clear_padding(q);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of two", .source = "void f(int* p)\n{\n__builtin_clear_padding(p, p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding's value", .source = "int f(int* p)\n{\nreturn __builtin_clear_padding(p);\n}\n", .rejected = true },
         { .name = "generic: hlsl resource pointer of void", .source = "void g(void);\nvoid f(void)\n{\n__builtin_hlsl_resource_getpointer_typed(g());\n}\n", .rejected = true },
         { .name = "generic: hlsl resource pointer's value", .source = "int* f(void)\n{\nreturn __builtin_hlsl_resource_getpointer_typed();\n}\n", .rejected = true },
         { .name = "generic: xray typed event of two", .source = "void f(void)\n{\n__xray_typedevent(1, \"x\");\n}\n", .rejected = true },
@@ -496,6 +510,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "static int calls;static unsigned next(unsigned v){calls++;return v;}\n"
         "int tested(int n){unsigned u=(unsigned)n|1u;return (int)((__builtin_popcount)(next(u))+((__builtin_clz))(u)*100+(__builtin_bswap32)(u)%1000*10000)+calls*7;}\n",
         "generic-builtin-names-in-parentheses", clang);
+    // __builtin_clear_padding (#148): the bytes of objects filled with ones, then cleared, against clang's build: a struct's
+    // holes and tail, bit-fields' unused bits and an unnamed one, a union's bytes no member holds, an x87 long double's last
+    // six, a _BitInt's high bits, an atomic struct's, an ext vector's tail, an anonymous member's, arrays of structs in a
+    // loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "struct A{char c;int i;short s;};struct B{int x:3;int:4;unsigned y:9;char z;long double ld;};union U{char c;int i;struct{char a;short b;}s;};\n"
+        "struct K{char k[3];};struct C{struct A a[2];_Complex long double z;_Atomic(struct K) at;_BitInt(37) bi;};typedef int V __attribute__((ext_vector_type(3)));\n"
+        "struct D{V v;char tail;};struct E{char c;struct{char d;long e;};};struct F{char c;int a[2][2];struct{char p:1;unsigned long q:50;}bits[2];};\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define T(decl) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(&v);bytes((const void*)&v,sizeof v);}while(0)\n"
+        "static struct A big[300];\n"
+        "int tested(int n){h=(unsigned)n;T(struct A v);T(struct B v);T(union U v);T(struct C v);T(struct D v);T(struct E v);T(long double v);T(struct F v);\n"
+        "T(struct A v[3]);T(struct A v[2][3]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
+        "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
+        "generic-clear-padding", clang);
     // clang's type traits of C (#148), their values in code: of complete, incomplete and variably modified types.
     check_test_program_source(test,
         "struct T{int x;};\n"

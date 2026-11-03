@@ -44,6 +44,14 @@ struct CBuiltinMiscLowerCall
     uint32_t argument_types[4];
     uint32_t result_type;
     uint32_t result_object;
+    // __builtin_clear_padding's stores (c_check_program_lower.c's check_lower_padding): each a byte offset << 32, its
+    // bytes << 8 and the mask of the bits it keeps (0 for a run of zeros, else one byte's AND).
+    const uint64_t* padding;
+    uint32_t padding_count;
+    // Its elements, through arrays of arrays, each of padding_stride bytes, which a loop clears in turn (none for a variable
+    // length array's), or 1.
+    uint64_t padding_elements;
+    uint64_t padding_stride;
 };
 
 #include "c_builtin_bits_lower.c"
@@ -566,6 +574,72 @@ static void cbuiltin_misc_lower_length(CBuiltinLowerRecipe* recipe, const CBuilt
     cbuiltin_lower_local(recipe, index);
 }
 
+// __builtin_clear_padding's stores (#148), as clang's PaddingClearer makes them, in byte order: a run of zeros as stores of
+// 8, 4, 2 and 1 bytes, and a byte that keeps some of its bits as its load ANDed with their mask, each at the pointer's
+// argument plus its offset (CBuiltinMiscLowerCall.padding).
+static void cbuiltin_misc_lower_padding_stores(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t base)
+{
+    for (uint32_t i = 0; i < call->padding_count; i += 1)
+    {
+        const uint64_t entry = call->padding[i];
+        const uint32_t offset = (uint32_t)(entry >> 32);
+        const uint32_t bytes = (uint32_t)(entry >> 8) & 0xffffffu;
+        const uint32_t keep = (uint32_t)entry & 0xffu;
+        if (keep != 0)
+        {
+            cbuiltin_misc_lower_offset(recipe, base, offset);
+            cbuiltin_misc_lower_offset(recipe, base, offset);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            cbuiltin_lower_constant(recipe, keep);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, 0);
+        }
+        for (uint32_t at = 0; keep == 0 && at < bytes;)
+        {
+            const uint32_t left = bytes - at;
+            const uint32_t width = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+            const uint32_t class = width == 8 ? BUSTER_TYPED_CLASS_U64 : width == 4 ? BUSTER_TYPED_CLASS_U32 : width == 2 ? BUSTER_TYPED_CLASS_U16 : BUSTER_TYPED_CLASS_U8;
+            cbuiltin_misc_lower_offset(recipe, base, offset + at);
+            cbuiltin_lower_constant(recipe, 0);
+            if (width != 8)
+            {
+                cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, class, 0);
+            }
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, class, 0);
+            at += width;
+        }
+    }
+}
+
+// The stores of one object at the pointer's argument, or of an array's elements in a loop: a temporary from the pointer to
+// its end by the elements' stride, each element's stores at it (`first` is the recipe's place in the stream).
+static void cbuiltin_misc_lower_padding(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t first)
+{
+    if (call->padding_elements <= 1 && call->padding_count != 0)
+    {
+        cbuiltin_misc_lower_padding_stores(recipe, call, call->arguments[0]);
+    }
+    else if (call->padding_count != 0)
+    {
+        const uint32_t base = cbuiltin_lower_temporary(recipe);
+        const uint32_t end = cbuiltin_lower_temporary(recipe);
+        cbuiltin_lower_local(recipe, call->arguments[0]);
+        cbuiltin_lower_set(recipe, base);
+        cbuiltin_lower_immediate(recipe, end, BUSTER_TYPED_ADD, call->arguments[0], call->padding_elements * call->padding_stride);
+        const uint32_t head = first + recipe->count;
+        cbuiltin_lower_local(recipe, base);
+        cbuiltin_lower_local(recipe, end);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+        const uint32_t done = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+        cbuiltin_misc_lower_padding_stores(recipe, call, base);
+        cbuiltin_lower_immediate(recipe, base, BUSTER_TYPED_ADD, base, call->padding_stride);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
+        cbuiltin_misc_lower_patch(recipe, done, first);
+    }
+}
+
 static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call, bool vector)
 {
     (void)vector;
@@ -601,6 +675,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_FRAME_ADDRESS:
         case CBUILTIN_RETURN_ADDRESS:
         case CBUILTIN_DWARF_CFA: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
+        case CBUILTIN_CLEAR_PADDING: minimum = maximum = 1; break;
         default:
             if (cbuiltin_bits(call->id) || cbuiltin_align(call->id))
             {
@@ -688,6 +763,10 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         else if (call->id == CBUILTIN_STRLEN)
         {
             cbuiltin_misc_lower_length(&recipe, call, buffer->count);
+        }
+        else if (call->id == CBUILTIN_CLEAR_PADDING)
+        {
+            cbuiltin_misc_lower_padding(&recipe, call, buffer->count);
         }
         else if (call->id == CBUILTIN_ALLOCA)
         {

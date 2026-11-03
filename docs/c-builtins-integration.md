@@ -1594,6 +1594,34 @@ refuses each by name, as clang's code generation does for x86:
 
 `__has_builtin` answers 1 for both, as clang's does.
 
+`__builtin_clear_padding(p)` (0x454, #148) zeroes the padding bits of the
+object p points to, as clang's `PaddingClearer` does.
+
+- **Sema.** p is a pointer as written (an array isn't one) to a complete object
+  type that isn't const. Volatile and `_Atomic` pointees are fine.
+- **Bits.** The bits no scalar, bit-field or vector of the object holds are
+  padding:
+  - a record's holes and tail, and an unnamed bit-field;
+  - a union's bits that none of its members holds;
+  - an x87 long double's last 48;
+  - a `_BitInt`'s bits past its width;
+  - an atomic type's bits past its value's;
+  - a vector's past its elements (a bool ext vector's past one bit each).
+
+  `check_lower_padding` walks the type with an explicit stack and sets each
+  held bit in a bitmap of the object's.
+- **Stores.** A byte with no bit held is a zero, in runs stored 8, 4, 2 and 1
+  bytes at a time. A byte with some is its load ANDed with their mask. An
+  array's elements, through arrays of arrays, are cleared in a loop by their
+  element's stores. A variable length array is left as it is, as clang's code
+  leaves it.
+- **Limits.** An element past 4 KiB, or one whose stores pass a builtin's
+  entries (about 40 runs or bytes), is refused by name.
+- **Difference.** Clang's walk doesn't look through a typedef of an array
+  type (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps such
+  an array's padding. The type table here has no typedef sugar, so the
+  padding is cleared.
+
 `__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;
