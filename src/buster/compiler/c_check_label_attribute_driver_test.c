@@ -105,6 +105,17 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "fallthrough after a return", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: return 0; __attribute__((fallthrough)); case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "fallthrough in an if's else", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: if (y) return 1; else __attribute__((fallthrough)); case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "fallthrough before default", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: g(); __attribute__((fallthrough)); default: return 1;\n}\nreturn 0;\n}\n" },
+        // #1126's review: clang looks through blocks without executable statements to the fallthrough before them: a plain
+        // label on a null statement, an empty block or another such label, and a block of one, before a case or one that
+        // begins a block; but not a label on a statement or on the case itself.
+        { "fallthrough before a label on a null statement", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: ; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a label on an empty block", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: { ; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before two labels on a null statement", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: there: ; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a block of a label", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { here: ; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a block that begins with a case", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { case 2: return 1; }\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a label on a block that begins with a case", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: { case 2: return 1; }\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a label on a call", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: g(); case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a label on a null statement and a call", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: ; g(); case 2: return 1;\n}\nreturn 0;\n}\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/label-attributes.c", directory);

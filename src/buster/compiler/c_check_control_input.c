@@ -667,11 +667,64 @@ static bool check_input_fallthrough_within(const Parser* parser, uint32_t token,
     return at == root;
 }
 
+// What a statement that runs after a fallthrough is (check_input_fallthrough_item): a switch's case or default label
+// (`PLACED`), one without a statement (`EMPTY`: a null statement, an empty compound, a plain label on one), or any other.
+#define BUSTER_CHECK_FALLTHROUGH_OTHER 0u
+#define BUSTER_CHECK_FALLTHROUGH_PLACED 1u
+#define BUSTER_CHECK_FALLTHROUGH_EMPTY 2u
+
+// Classifies statement `item` (its top token) for check_input_fallthrough_placed, as clang's CFG check
+// (FallthroughMapper::checkFallThroughIntoBlock) looks back from a case's block: a block without executable statements is
+// looked through to the ones before it (#1126's review), so a null statement, a compound of empty statements and a plain
+// label on an empty statement are EMPTY; a compound is its first statement that isn't; a case or default label is
+// PLACED; and a plain label directly on a case label is not (clang takes such a label's block as the case's own and
+// doesn't look through it), nor is any other statement. `depth` bounds the nesting it follows, as clang's bracket depth
+// does.
+static uint32_t check_input_fallthrough_item(const CheckInputReader* reader, uint32_t item, uint32_t depth)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint8_t role = item < count ? parser->tree.roles[item] : PARSE_ROLE_NONE;
+    uint32_t result = BUSTER_CHECK_FALLTHROUGH_OTHER;
+    if (item < count && parser->tokens.kinds[item] == PARSE_KIND_SEMI && (item == 0 || !check_input_fallthrough_within(parser, item - 1, item)))
+    {
+        result = BUSTER_CHECK_FALLTHROUGH_EMPTY;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CASE)
+    {
+        result = BUSTER_CHECK_FALLTHROUGH_PLACED;
+    }
+    else if (role == PARSE_ROLE_CLOSE_BLOCK && depth < 256)
+    {
+        // The compound's items in order (its children but its opening brace), its first that isn't empty deciding; an
+        // all-empty one is empty.
+        result = BUSTER_CHECK_FALLTHROUGH_EMPTY;
+        for (uint32_t child = reader->first_child[item]; result == BUSTER_CHECK_FALLTHROUGH_EMPTY && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+        {
+            result = parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK ? check_input_fallthrough_item(reader, child, depth + 1) : result;
+        }
+    }
+    else if (role == PARSE_ROLE_LABEL && depth < 256)
+    {
+        // A plain label's statement: its child after it (the name is before it).
+        uint32_t statement = BUSTER_CHECK_NONE;
+        for (uint32_t child = reader->first_child[item]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+        {
+            statement = statement == BUSTER_CHECK_NONE && child > item ? child : statement;
+        }
+        const bool case_label = statement < count && parser->tree.roles[statement] == PARSE_ROLE_CLOSE_CASE;
+        result = statement < count && !case_label ? check_input_fallthrough_item(reader, statement, depth + 1) : BUSTER_CHECK_FALLTHROUGH_OTHER;
+    }
+    return result;
+}
+
 // Whether a fallthrough null statement (`token`, its `;`) directly precedes a switch label, as clang's analysis of the
-// function's CFG has it: the statement that runs after it, past null statements, out of compound statements, the
+// function's CFG has it: the statement that runs after it, past statements without executable ones
+// (check_input_fallthrough_item: null statements, empty compounds, plain labels on them), out of compound statements, the
 // branches of an `if` and a switch's end (the switch's own next statement), but never a loop's body, which goes back to
-// its condition, is a case or default label (another switch's too). A plain label, any other statement or the
-// function's end is not. The walk goes up one statement at a time, its parents later tokens.
+// its condition, is a case or default label (another switch's too), or begins with one. A plain label on a case label
+// or on any other statement, any other statement or the function's end is not. The walk goes up one statement at a
+// time, its parents later tokens.
 static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
@@ -686,20 +739,18 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
         const uint8_t kind = parent < count ? parser->tokens.kinds[parent] : 0;
         if (role == PARSE_ROLE_CLOSE_BLOCK)
         {
-            // The compound's next item: the first later token whose parent is the compound's brace, past null statements
-            // (a `;` with nothing under it).
+            // The compound's next item: the first later token whose parent is the compound's brace, past statements
+            // without executable ones (check_input_fallthrough_item).
             uint32_t next = statement + 1;
-            bool found = false;
-            while (!found && next < parent)
+            uint32_t kind_of = BUSTER_CHECK_FALLTHROUGH_EMPTY;
+            while (kind_of == BUSTER_CHECK_FALLTHROUGH_EMPTY && next < parent)
             {
-                const bool item = parser->tree.parents[next] == parent;
-                const bool empty = item && parser->tokens.kinds[next] == PARSE_KIND_SEMI && (next == 0 || !check_input_fallthrough_within(parser, next - 1, next));
-                found = item && !empty;
-                next += !found;
+                kind_of = parser->tree.parents[next] == parent ? check_input_fallthrough_item(reader, next, 0) : BUSTER_CHECK_FALLTHROUGH_EMPTY;
+                next += kind_of == BUSTER_CHECK_FALLTHROUGH_EMPTY;
             }
-            if (found)
+            if (kind_of != BUSTER_CHECK_FALLTHROUGH_EMPTY)
             {
-                placed = parser->tree.roles[next] == PARSE_ROLE_CLOSE_CASE;
+                placed = kind_of == BUSTER_CHECK_FALLTHROUGH_PLACED;
                 done = true;
             }
             else
