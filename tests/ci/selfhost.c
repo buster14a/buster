@@ -304,7 +304,7 @@ int main(int argc, char **argv)
                 const char *inventory_prefix = strcmp(fault, "inventory-comment") == 0 ? "# " : "";
                 for (size_t i = 0; i < smoke_count; ++i)
                 {
-                    fprintf(inventory, "%s./build/compiler %s%s\n", inventory_prefix, selfhost_smoke[i], strcmp(fault, "inventory-drift") == 0 ? "-old" : "");
+                    fprintf(inventory, "%s\"$BUSTER_COMPILER\" %s%s\n", inventory_prefix, selfhost_smoke[i], strcmp(fault, "inventory-drift") == 0 ? "-old" : "");
                 }
                 close_file(inventory);
                 write_text("first.c", "int first;\n");

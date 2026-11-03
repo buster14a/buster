@@ -13,8 +13,9 @@
 // command of more runs alone, on all of them. A command that doesn't fit yet holds back the ones after it. Each script
 // runs in a bash of its own as GitHub Actions runs a step's `run` with `shell: bash` (`bash --noprofile --norc -e -o
 // pipefail`), in a process group of its own, with standard input from /dev/null and standard output and error into one
-// capture (a memfd) of its own, no other descriptor, and BUSTER_PARALLEL_CPUS set to its CPUs, which a test that starts
-// processes of its own runs at most that many of at once (test_process_cpus). Its report gives each command's heading
+// capture (a memfd) of its own, no other descriptor, BUSTER_PARALLEL_CPUS set to its CPUs, which a test that starts
+// processes of its own runs at most that many of at once (test_process_cpus), and BUSTER_COMPILER set to this
+// executable, which the list's commands run (tools/ci/correctness.tests). Its report gives each command's heading
 // with its outcome, its time and its CPU time (which shows the CPUs it kept busy), then its output, in the list's order,
 // each as soon as it and every command before it have ended; with --github between `::group::` and `::endgroup::`, so
 // that GitHub's log folds each one under its heading, and with an `::error::` annotation for each that failed. Last
@@ -670,8 +671,11 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
 }
 
 // The commands' environment: this process's but for BUSTER_PARALLEL_CPUS, which each command gets of its own, its CPUs,
-// in the slot after the others (`cpus`, which parallel_start writes). Null variables when the arena can't hold them,
-// and then no command starts.
+// in the slot after the others (`cpus`, which parallel_start writes), and BUSTER_COMPILER, which is this executable
+// (/proc/self/exe): a list's commands run the compiler whose runner runs them, whichever configuration's build it is
+// (tools/ci/correctness.tests; CTest runs a configuration's own, build.sh's docs/commands/build.md). Where /proc
+// doesn't say, the environment's BUSTER_COMPILER stays. Null variables when the arena can't hold them, and then no
+// command starts.
 typedef struct ParallelEnvironment ParallelEnvironment;
 struct ParallelEnvironment
 {
@@ -683,20 +687,39 @@ struct ParallelEnvironment
 static void parallel_environment(Arena* arena, ParallelEnvironment* environment)
 {
     static const char name[] = "BUSTER_PARALLEL_CPUS=";
+    static const char compiler_name[] = "BUSTER_COMPILER=";
+    char executable[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable));
+    char* compiler = length > 0 && (uint64_t)length < sizeof(executable)
+                         ? BUSTER_ARENA_PUSH_ARRAY(arena, char, sizeof(compiler_name) + (uint64_t)length)
+                         : 0;
+    if (compiler != 0)
+    {
+        memcpy(compiler, compiler_name, sizeof(compiler_name) - 1);
+        memcpy(compiler + sizeof(compiler_name) - 1, executable, (uint64_t)length);
+        compiler[sizeof(compiler_name) - 1 + (uint64_t)length] = 0;
+    }
     uint64_t count = 0;
     while (environ != 0 && environ[count] != 0)
     {
         count += 1;
     }
-    environment->variables = BUSTER_ARENA_PUSH_ARRAY(arena, char*, count + 2);
+    environment->variables = BUSTER_ARENA_PUSH_ARRAY(arena, char*, count + 3);
     environment->slot = 0;
     for (uint64_t i = 0; environment->variables != 0 && i < count; i += 1)
     {
-        if (strncmp(environ[i], name, sizeof(name) - 1) != 0)
+        const bool cpus = strncmp(environ[i], name, sizeof(name) - 1) == 0;
+        const bool replaced = compiler != 0 && strncmp(environ[i], compiler_name, sizeof(compiler_name) - 1) == 0;
+        if (!cpus && !replaced)
         {
             environment->variables[environment->slot] = environ[i];
             environment->slot += 1;
         }
+    }
+    if (environment->variables != 0 && compiler != 0)
+    {
+        environment->variables[environment->slot] = compiler;
+        environment->slot += 1;
     }
     if (environment->variables != 0)
     {

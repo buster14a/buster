@@ -63,10 +63,11 @@ there at a time, so everything takes one lock:
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
-  includes, for one built as a unit of its own (`build.sh`'s `*_benchmark.c`),
+  includes, for one built as a unit of its own (the build's `*_benchmark.c`),
   or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
   units (the files that define the functions it calls); or the benchmark's own
-  step. A change to `build.sh` runs every one, and so does a push to main, so
+  step. A change to the build's description (`build.sh`, `CMakeLists.txt`,
+  `cmake/`) runs every one, and so does a push to main, so
   that main has each benchmark's numbers at every commit. A new benchmark's
   step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
   others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
@@ -109,13 +110,13 @@ there at a time, so everything takes one lock:
   step that hide its command in each must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
-  `zen5`'s digit, closures through includes, `build.sh`, pushes). It also
-  fails when the hosted test job's shards disagree (`changes_shard_policy`):
-  its matrix's `shard: [1, ..., N]` must count from 1 without a gap, and the
-  same N must be in the job's name, the run step's `--shard
-  "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1 to N of
-  each architecture), since a list and an N that disagree would leave a shard's
-  commands unrun with every job green. Run it
+  `zen5`'s digit, closures through includes, the build's description, pushes).
+  It also fails when the hosted test job's shards disagree
+  (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
+  without a gap, and the same N must be in the job's name, the run step's
+  `--shard "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1
+  to N of each architecture), since a list and an N that disagree would leave a
+  shard's commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
   benchmark's step, the tables or the shards.

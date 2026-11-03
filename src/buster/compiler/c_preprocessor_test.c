@@ -6981,9 +6981,42 @@ static bool pp_test_case_retention(const char* directory)
     return result;
 }
 
+// The tree an executable's path names (pp_buster_tree): the published build/compiler's, a configuration's
+// build/cmake/VARIANT/CONFIG/compiler's, the last build/ of a tree inside another's build/, and two levels up where no
+// build/ directory is in the path; none for an executable in /build itself.
+static bool pp_test_buster_tree(void)
+{
+    static const struct
+    {
+        const char* executable;
+        const char* tree;
+    } cases[] = {
+        { "/home/user/buster/build/compiler", "/home/user/buster" },
+        { "/home/user/buster/build/cmake/native/Release/compiler", "/home/user/buster" },
+        { "/w/build/trees/buster/build/cmake/x86-64-g0/Debug/compiler", "/w/build/trees/buster" },
+        { "/tmp/shifts/main/compiler-688", "/tmp/shifts" },
+        { "/build/compiler", 0 },
+    };
+    bool result = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s", cases[i].executable);
+        const bool found = pp_buster_tree(path);
+        const bool right = cases[i].tree != 0 ? found && strcmp(path, cases[i].tree) == 0 : !found;
+        if (!right)
+        {
+            printf("headers: %s's tree is %s, not %s\n", cases[i].executable, found ? path : "none", cases[i].tree != 0 ? cases[i].tree : "none");
+        }
+        result = result && right;
+    }
+    return result;
+}
+
 static bool pp_test_headers(const char* directory)
 {
     char ours[PATH_MAX];
+    const bool trees = pp_test_buster_tree();
     bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
     {
@@ -7026,7 +7059,7 @@ static bool pp_test_headers(const char* directory)
            failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), order_failures,
            (unsigned long)(4 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
-    return result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
+    return trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
 static bool pp_fuzz_checks(const PPFuzzOptions* options);
