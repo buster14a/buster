@@ -118,7 +118,8 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
 // that the selector's call boundary doesn't take, by the selector's own predicates (tier1_select_call_supported's), so
 // that the report follows the boundary as it grows; and whether it is indirect or variadic, which the boundary takes.
 // An ABI record the boundary refuses, the call's or an argument's, is `abi-record`; an argument without one is named by
-// its type.
+// its type. Every argument is looked at, those past the boundary's limit too (the verifier bounds them all), so that a
+// call past the limit still names its other kinds.
 static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
 {
     const bool call = node < ir->instruction_count && (ir->op[node] == IR_CALL || ir->op[node] == IR_CALL_INDIRECT) && ir->b[node] < ir->call_count;
@@ -132,7 +133,7 @@ static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
         kinds |= (tier1_select_call_abi(ir, node, descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
         kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_MAX_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
         kinds |= (tier1_select_call_arity(descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ARGUMENT_COUNT;
-        for (uint32_t argument = 0; argument < descriptor->argument_count && argument < BUSTER_TIER1_SELECT_MAX_ARGUMENTS; argument += 1)
+        for (uint32_t argument = 0; argument < descriptor->argument_count; argument += 1)
         {
             const uint32_t type = tier1_select_argument_type(ir, descriptor, argument);
             const IrPassed* record = tier1_select_argument_record(ir, descriptor, argument);

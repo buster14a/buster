@@ -159,17 +159,18 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
     check_lanes_test_expect(tally, created, "create the call kinds' IR", NULL);
     if (created)
     {
-        // f(int, double, long double) -> double; (*p)(short, long...) of one argument past the boundary's limit, all
-        // named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's; h(long) of two parameters ->
-        // long double; and a constant.
+        // f(int, double, long double) -> double; (*p)(short, long..., long double) of one argument past the boundary's
+        // limit, the long double, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
+        // h(long) of two parameters -> long double; and a constant.
         function.call_types[0] = IR_I32;
         function.call_types[1] = IR_F64;
         function.call_types[2] = IR_F80;
         function.call_types[3] = IR_I16;
-        for (uint32_t k = 1; k < many; k += 1)
+        for (uint32_t k = 1; k < many - 1; k += 1)
         {
             function.call_types[3 + k] = IR_I64;
         }
+        function.call_types[2 + many] = IR_F80;
         function.call_types[3 + many] = IR_I64;
         function.call_types[4 + many] = IR_I64;
         function.calls[0] = (IrCall){ .type_first = 0, .argument_count = 3, .parameter_count = 3, .result_type = IR_F64 };
@@ -188,11 +189,11 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             function.c[node] = BUSTER_IR_NONE;
         }
         // A double, argument or result, is the boundary's since #141; the long double isn't, nor the short, the 17th
-        // argument, the __int128 result, the record's area or the missing argument.
+        // argument, the __int128 result, the record's area or the missing argument. The 17th is still a long double.
         const uint32_t expected[5] = {
             1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT,
-            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
-                1u << CHECK_TIER1_CALL_OTHER_RESULT,
+            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT |
+                1u << CHECK_TIER1_CALL_NARROW_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
             1u << CHECK_TIER1_CALL_ABI_RECORD,
             1u << CHECK_TIER1_CALL_ARGUMENT_COUNT | 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT,
             0,
@@ -213,7 +214,7 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             check_tier1_print_refusal(stream, (const uint8_t*)"g", 1, outcome);
             fclose(stream);
         }
-        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,narrow-argument,other-result\n") != NULL &&
+        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,long-double-argument,narrow-argument,other-result\n") != NULL &&
                                 strstr(line, "tier1-refused\tg\t") != NULL && strstr(strstr(line, "tier1-refused\tg\t"), "call=") == NULL,
                                 "a refused call's line ends in its kinds, and another refusal's has none", line);
         static CheckTier1Report report;

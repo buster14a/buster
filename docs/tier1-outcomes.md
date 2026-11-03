@@ -91,7 +91,8 @@ call boundary doesn't take, by the selector's own predicates
 - `stack-arguments`: arguments past the boundary's limit
   (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
   the stack, which Tier 1 takes below it;
-- `long-double-`, `narrow-` and `other-argument`;
+- `long-double-`, `narrow-` and `other-argument`: any argument's, one past
+  the limit too;
 - `long-double-` and `other-result`;
 - `argument-count`: arguments that don't match the parameters.
 
