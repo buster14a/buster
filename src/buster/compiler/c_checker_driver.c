@@ -3689,6 +3689,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes.budget = &worker_budget;
+    // A test's hook, in every build (#673): the jobserver tokens a growing team's lane 0 supplies itself after its first
+    // part (CheckProgramLanes.grow_supply), read only when it is set.
+    const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
+    lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
     bool invalid_lanes = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
@@ -4183,8 +4187,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
                                worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
-            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tfallback=%u\n", mode,
-                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, (uint32_t)lanes.again);
+            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tgrown=%u\tworked=%u\tfallback=%u\n", mode,
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, lanes.grown, lanes.worked, (uint32_t)lanes.again);
         }
     }
     worker_budget_close(&worker_budget);

@@ -31,7 +31,9 @@ pays for more than one lane is a round of the flow (a `LaneFlow`, `lane.c`),
 which lane 0 announces and every lane runs, the first of them the bodies'
 parts, a direct call (`check_program_emit_round` and
 `check_program_emit_follow`); the worker budget's slots are taken
-before the round, without waiting, and given back after it. Elsewhere
+before the round, without waiting, and given back after it, and a team the
+jobserver left short of its lanes grows as other recipes give tokens back,
+lane 0 admitting the round's sleeping lanes (`CheckEmitGrowth`, #673). Elsewhere
 (`CheckProgramLanes.flow` null) the emission's lanes are a `lane_run`.
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
@@ -77,7 +79,17 @@ on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
 each (`run_check_command`'s collective call), each lane the same thread
 throughout, no thread created, each object `--lanes 1`'s; then the same on a
-lazy session.
+lazy session. Then a growing team: the first program of 600 functions by
+`--lanes 4` under a jobserver pipe of no token or one, its lane 0 writing none,
+2, 3 or 5 more after its first part (`BUSTER_TEST_WORKER_SUPPLY`): its
+`--time-stages` grant, team and growth, no more lanes taking parts than it
+admitted, its object `--lanes 1`'s, and every token back in the pipe once;
+the growth gate alone around its threshold and bounds, and its release of a
+guardian that took no token; the driver by the default policy on programs of
+4,000 functions (which grow, to `--worker-budget 3` where given) and of 200
+(which ask for more than one lane but don't); and in this process, on a session
+of 4 lanes, a growth to 4 lanes and with `--worker-budget 2` to 2, every
+supplied token back as the command returns.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
