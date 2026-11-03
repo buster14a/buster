@@ -16886,7 +16886,8 @@ static const PPFeature pp_implemented_builtin[] = {
     { "__builtin_COLUMN", 1 }, { "__builtin_FILE", 1 }, { "__builtin_FILE_NAME", 1 }, { "__builtin_FUNCTION", 1 }, { "__builtin_LINE", 1 },
     { "__builtin_omp_required_simd_align", 1 }, { "__builtin_ptrauth_type_discriminator", 1 }, { "__builtin_vectorelements", 1 },
     { "__is_bitwise_cloneable", 1 }, { "__is_destructible", 1 }, { "__is_nothrow_destructible", 1 },
-    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
+    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_variant_environment", 1 },
+    { "__is_target_variant_os", 1 }, { "__is_target_vendor", 1 },
 };
 
 static int pp_compare_feature(const uint8_t* name, uint32_t length, const char* entry)

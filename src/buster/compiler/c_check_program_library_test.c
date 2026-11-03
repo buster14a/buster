@@ -30,7 +30,7 @@ static void check_test_library_note(char* list, size_t capacity, uint32_t* count
 // page too. Then every row of C's languages: an F row of all languages without features is one __has_builtin advertises
 // (the catalog's, the fortified builtins', the list's, powi's), or one whose prototype the checker doesn't decode
 // (custom checking's);
-// and an f row is listed, or needs va_list's reference (stdarg.h's va_start, va_end and va_copy).
+// and an f row is listed.
 static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
 {
     bool ordered = true;
@@ -53,7 +53,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         const CBuiltinLibraryPlain* plain = cbuiltin_library_plains + p;
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(plain->name, plain->length);
         plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && !info->custom_typechecking &&
-                  memchr(info->encoding, 'A', info->encoding_length) == NULL && info->features_length == 0 &&
+                  info->features_length == 0 &&
                   strcmp(info->language_token, cbuiltin_library_plain_languages(plain)) == 0;
         plains &= plain->length == strlen(plain->name) && plain->length <= BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME &&
                   cbuiltin_library_plain(plain->name, plain->length) == plain && (p == 0 || strcmp(cbuiltin_library_plains[p - 1].name, plain->name) < 0);
@@ -110,21 +110,18 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
                 check_test_library_note(missing, sizeof(missing), &unaccounted, info->name);
             }
         }
-        if (c && memchr(info->attributes, 'f', info->attributes_length) != NULL && cbuiltin_library_plain(info->name, info->name_length) == NULL)
+        if ((c || strcmp(info->language_token, "C23_LANG") == 0) && memchr(info->attributes, 'f', info->attributes_length) != NULL &&
+            cbuiltin_library_plain(info->name, info->name_length) == NULL)
         {
-            const bool reference = memchr(info->encoding, 'A', info->encoding_length) != NULL;
             unlisted += 1;
-            if (!reference)
-            {
-                check_test_library_note(missing_plain, sizeof(missing_plain), &plain_unaccounted, info->name);
-            }
+            check_test_library_note(missing_plain, sizeof(missing_plain), &plain_unaccounted, info->name);
         }
     }
     char description[384];
     snprintf(description, sizeof(description),
              "library builtins: clang's F rows are %u advertised and %u of prototypes that don't decode, with %u left (%s)",
              advertised, undecoded, unaccounted, missing);
-    check_test_expect(test, unaccounted == 0 && undecoded != 0, description);
+    check_test_expect(test, unaccounted == 0, description);
     snprintf(description, sizeof(description), "library builtins: clang's f rows of C are %u listed and %u not, %u of them without a reason (%s)",
              BUSTER_CBUILTIN_LIBRARY_PLAIN_COUNT, unlisted, plain_unaccounted, missing_plain);
     check_test_expect(test, plain_unaccounted == 0, description);
@@ -138,7 +135,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         missed &= cbuiltin_library_id(misses[i], length) == CBUILTIN_LIBRARY_COUNT && !cbuiltin_library_source((const uint8_t*)misses[i], length) &&
                   cbuiltin_library_libgcc(misses[i], length) == BUSTER_CBUILTIN_LIBRARY_LIBGCC;
     }
-    missed &= cbuiltin_library_plain("sinx", 4) == NULL && cbuiltin_library_plain("si", 2) == NULL && cbuiltin_library_plain("va_start", 8) == NULL &&
+    missed &= cbuiltin_library_plain("sinx", 4) == NULL && cbuiltin_library_plain("si", 2) == NULL && cbuiltin_library_plain("va_starts", 9) == NULL && cbuiltin_library_plain("va_arg", 6) == NULL &&
               cbuiltin_library_plain("", 0) == NULL;
     const long page = sysconf(_SC_PAGESIZE);
     uint8_t* mapping = page > 0 ? mmap(NULL, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;

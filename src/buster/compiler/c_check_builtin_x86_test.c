@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 558 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 559 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -253,6 +253,7 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_vec_ext_v16qi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 692 },
     { "__builtin_ia32_vec_ext_v4si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 596 },
     { "__builtin_ia32_vec_ext_v8hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 608 },
+    { "_mm_prefetch", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 607 },
     { "__builtin_ia32_vec_set_v4si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 618 },
     { "__builtin_ia32_vec_set_v8hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 672 },
     // #148: the x86 builtins past the inventory (c_builtin_supplementary_scope.inc), by SemaX86.cpp too.
@@ -656,7 +657,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 558, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 559, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];

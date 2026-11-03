@@ -160,9 +160,11 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
 but refused names would remain zero (none is now), and the vector builtins
-the checker checks but no lowering takes (`__builtin_elementwise_clmul`, the
-masked memory builtins and the matrix ones) have `BUSTER_CBUILTIN_CAP_CHECKER`
-alone, so `__has_builtin` answers 0 for them. clang's sized legacy atomics
+the checker checks but no lowering takes (`__builtin_elementwise_clmul` and the
+masked memory builtins) have `BUSTER_CBUILTIN_CAP_CHECKER` alone, so
+`__has_builtin` answers 0 for them. The matrix builtins are an error at every
+call, as clang's are without `-fenable-matrix`, so they have the source
+capability and `__has_builtin` answers 1 for them, as clang's does. clang's sized legacy atomics
 (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog
 resolves each to its family's builtin, with its capabilities
 (`cbuiltin_sized_entry`).
@@ -171,7 +173,10 @@ raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
 `__has_builtin` has them: its row's language modes and required target
 features (the preprocessor guide's "feature queries"; `CBuiltinSourceScope`
-keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's).
+keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's). The
+preprocessor's own builtins it answers 1 for are clang's: the target queries,
+`__is_target_variant_os` and `__is_target_variant_environment` among them,
+which it evaluates as clang's do (0 on Linux).
 
 ## Varargs contracts
 
@@ -1561,11 +1566,12 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 558 audited SemaX86 constraint facts for 530
+`c_check_builtin_x86.c` adds 559 audited SemaX86 constraint facts for 531
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 127
 rounding sets, 91 SAE sets, 64 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 276 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 277 direct ranges,
+`_mm_prefetch`'s hint (0 to 7) the last of them.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -1767,8 +1773,13 @@ the existing families or of new ones:
   takes as the builtin; and the builtins of the dedicated paths
   (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
   declaration too, become calls of their names here.
-  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` in GNU's
-  modes, and stays out of the scope.
+  `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` where
+  the header is included, and without it clang's builtin (a
+  `TARGET_HEADER_BUILTIN` of no features), which is a leaf too: its hint a
+  constant of 0 to 7, SemaX86's range (`c_check_builtin_x86.c`'s last rule,
+  whose error clang defers to reachability), and its code no prefetch, as
+  `__builtin_prefetch`'s has none: a prefetch has no effect a program sees,
+  past its address's evaluation.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's
@@ -1920,7 +1931,9 @@ other generic vector builtins of clang 23 (#148), at catalog identities from
   functions and void here are refused as unsupported, the type table having
   none;
 - the matrix builtins are an error at every call, as clang's are without
-  `-fenable-matrix`, which buster hasn't: no unit has a matrix type.
+  `-fenable-matrix`, which buster hasn't: no unit has a matrix type. Since
+  nothing more could compile, they are implemented as clang's are, and
+  `__has_builtin` answers 1 for them.
 
 `test-checker` compares each family's valid calls and one error each with
 clang's acceptance and first error line (`c_check_builtin_vector_graph_test.c`),
@@ -2041,9 +2054,11 @@ folding, for which its `-pedantic` warns; this doesn't). Pointer results
 (`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
-**Plain names.** `c_builtin_library_plain.inc` lists the 443 `f` rows of C's
-modes but `<stdarg.h>`'s `va_start`, `va_end` and `va_copy`, whose prototypes
-take a `va_list` by reference. Each is a builtin of the unit unless `-fno-builtin`,
+**Plain names.** `c_builtin_library_plain.inc` lists the 446 `f` rows of C's
+modes, `<stdarg.h>`'s `va_start`, `va_end` and `va_copy` among them, whose
+prototypes take a `va_list` by reference (`A`, spelled as its decayed
+`struct __va_list_tag *`): clang's code calls functions of those names, which
+no C library has. Each is a builtin of the unit unless `-fno-builtin`,
 `-ffreestanding` or `-fno-builtin-NAME` says otherwise, one of
 `ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone,
 and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later

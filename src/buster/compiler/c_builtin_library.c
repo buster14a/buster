@@ -19,8 +19,8 @@
 // it computes in float, which the lowering does too (check_lower_library_promoted): a call of ceilf, floorf, truncf,
 // rintf, roundevenf, roundf, fmaxf, fminf, fmaximum_numf, fminimum_numf or frexpf of the arguments converted to float, or
 // of fma of them converted to double, the result converted back to __fp16, and fabsf16's and copysignf16's bits. Its other
-// F rows stay refused, and __has_builtin answers 0 for them: the matrix builtins and C++'s __builtin_trivially_relocate,
-// whose prototypes don't decode (c_builtin_intrinsic_types.c). The FILE builtins (fprintf and its kin) are calls whose
+// F rows stay refused, and __has_builtin answers 0 for them: C++'s __builtin_trivially_relocate, whose prototype doesn't
+// decode (c_builtin_intrinsic_types.c), but which the catalog's miscellaneous builtins check. The FILE builtins (fprintf and its kin) are calls whose
 // prototypes take the unit's FILE (c_check_intrinsic_input.c's check_input_file_type). The alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c),
 // which take them first.
 //
@@ -30,7 +30,8 @@
 // library's function, which calls of it reach as of any function; undeclared, its call declares it implicitly with the
 // row's prototype, which C99 and later make an error and C89 a warning, each naming the prototype and the header
 // (c_check_input.c's implicit library functions). c_builtin_library_plain.inc lists the rows this compiler implements so:
-// all of clang's in C's modes but stdarg.h's va_start, va_end and va_copy. C23's <stdbit.h> functions (stdc_leading_zeros_uc
+// all of clang's in C's modes, stdarg.h's va_start, va_end and va_copy among them, whose va_list reference (A) a call passes
+// as its decayed pointer to a function of the name, as clang's code does. C23's <stdbit.h> functions (stdc_leading_zeros_uc
 // and the others) are C23's alone, and a call of the unit's declaration of one is a bit builtin of its own, computed
 // inline as clang computes it (c_builtin_catalog.c's cbuiltin_stdc_library).
 // Names are bounded slices, which need no terminator or readable padding.
@@ -366,7 +367,9 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
         case 'd': base = longs == 2 ? "__float128" : longs == 1 ? "long double" : "double"; break;
         case 'z': base = sugared ? "__size_t" : "unsigned long"; break;
         case 'w': base = "int"; break;
-        case 'a': base = "struct __va_list_tag *"; break;
+        // A va_list (a) and a reference to one (A, va_start's and its kin's), each its decayed array's pointer on x86-64.
+        case 'a':
+        case 'A': base = "struct __va_list_tag *"; break;
         case 'P': base = named == NULL || named->file == NULL ? NULL : sugared ? "FILE" : named->file; break;
         case 'K': base = named == NULL || named->ucontext == NULL ? NULL : sugared ? "ucontext_t" : named->ucontext; break;
         case 'J': base = named == NULL ? NULL : is_signed ? named->sigjmp_buf : named->jmp_buf; break;
@@ -451,10 +454,11 @@ static __attribute__((unused)) const char* cbuiltin_library_header(const char* t
         { "MALLOC_H", "malloc.h" },
         { "MATH_H", "math.h" },
         { "SETJMP_H", "setjmp.h" },
+        { "STDARG_H", "stdarg.h" },
+        { "STDBIT_H", "stdbit.h" },
         { "STDIO_H", "stdio.h" },
         { "STDLIB_H", "stdlib.h" },
         { "STRINGS_H", "strings.h" },
-        { "STDBIT_H", "stdbit.h" },
         { "STRING_H", "string.h" },
         { "UNISTD_H", "unistd.h" },
         { "WCHAR_H", "wchar.h" },
