@@ -541,18 +541,23 @@ static bool ir_wide_value(IrWideWork* work, uint32_t i)
         } break;
         case IR_PHI:
         {
-            // The low phi keeps the source's predecessor list, its values remapped in place; the high phi's is appended.
-            const uint32_t low = ir_wide_emit(work, IR_PHI, IR_I64, a, b, none);
-            const uint32_t list = work->extra;
-            const uint32_t high = ir_wide_emit(work, IR_PHI, IR_I64, list, b, none);
+            // Each half's predecessor list is appended, its values remapped there: the verifier lets extra's slices
+            // overlap (a call's arguments sharing a phi's words), so a remap in the source's place would rewrite another
+            // reader's entries (#1204's review).
+            const uint32_t low_list = work->extra;
+            const uint32_t high_list = low_list + b * 2;
+            const uint32_t low = ir_wide_emit(work, IR_PHI, IR_I64, low_list, b, none);
+            const uint32_t high = ir_wide_emit(work, IR_PHI, IR_I64, high_list, b, none);
             for (uint32_t p = 0; work->output != 0 && p < b; p += 1)
             {
+                const uint32_t block = f->extra[a + p * 2];
                 const uint32_t value = f->extra[a + p * 2 + 1];
-                work->output->extra[a + p * 2 + 1] = ir_wide_low(work, value);
-                work->output->extra[list + p * 2] = f->extra[a + p * 2];
-                work->output->extra[list + p * 2 + 1] = ir_wide_high(work, value);
+                work->output->extra[low_list + p * 2] = block;
+                work->output->extra[low_list + p * 2 + 1] = ir_wide_low(work, value);
+                work->output->extra[high_list + p * 2] = block;
+                work->output->extra[high_list + p * 2 + 1] = ir_wide_high(work, value);
             }
-            work->extra += b * 2;
+            work->extra += b * 4;
             ir_wide_place(work, i, low, high);
         } break;
         default: supported = false; break;
@@ -602,33 +607,44 @@ static bool ir_wide_use(IrWideWork* work, uint32_t i)
     return supported;
 }
 
-// Any other instruction, its value operands remapped (a phi's and a call's lists in their extra entries' places).
+// Any other instruction, its value operands remapped. A phi's list and a call's arguments are remapped into slices of
+// their own, appended, never in the source's place: the verifier lets extra's slices overlap (a call's arguments
+// sharing a phi's words), and a remap in place would rewrite another reader's entries (#1204's review).
 static void ir_wide_copy(IrWideWork* work, uint32_t i)
 {
     const IrFunction* f = work->source;
+    const uint32_t op = f->op[i];
+    const bool phi = op == IR_PHI;
+    const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
+    const uint32_t list = work->extra;
+    work->extra += phi ? f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : 0;
     const uint32_t mask = ir_value_mask(f, i);
-    const uint32_t a = (mask & 1) != 0 ? ir_wide_low(work, f->a[i]) : f->a[i];
+    const uint32_t a = phi ? list : (mask & 1) != 0 ? ir_wide_low(work, f->a[i]) : f->a[i];
     const uint32_t b = (mask & 2) != 0 ? ir_wide_low(work, f->b[i]) : f->b[i];
     const uint32_t c = (mask & 4) != 0 ? ir_wide_low(work, f->c[i]) : f->c[i];
-    const uint32_t id = ir_wide_emit(work, f->op[i], f->type[i], a, b, c);
+    const uint32_t id = ir_wide_emit(work, op, f->type[i], a, b, c);
     if (work->output != 0)
     {
         IrFunction* output = work->output;
         output->flags[id] = f->flags[i];
         output->alignment_log2[id] = f->alignment_log2[i];
-        if (f->op[i] == IR_PHI)
+        if (phi)
         {
             for (uint32_t p = 0; p < f->b[i]; p += 1)
             {
-                output->extra[f->a[i] + p * 2 + 1] = ir_wide_low(work, f->extra[f->a[i] + p * 2 + 1]);
+                output->extra[list + p * 2] = f->extra[f->a[i] + p * 2];
+                output->extra[list + p * 2 + 1] = ir_wide_low(work, f->extra[f->a[i] + p * 2 + 1]);
             }
         }
-        else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
+        else if (call)
         {
-            const IrCall call = f->calls[f->b[i]];
-            for (uint32_t p = 0; p < call.argument_count; p += 1)
+            // The call's record points at its own arguments' slice. Calls that share a record remap its arguments
+            // alike, each into a slice of its own, the last one the record's.
+            const IrCall source = f->calls[f->b[i]];
+            output->calls[f->b[i]].argument_first = list;
+            for (uint32_t p = 0; p < source.argument_count; p += 1)
             {
-                output->extra[call.argument_first + p] = ir_wide_low(work, f->extra[call.argument_first + p]);
+                output->extra[list + p] = ir_wide_low(work, f->extra[source.argument_first + p]);
             }
         }
     }

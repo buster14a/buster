@@ -20,7 +20,8 @@
 // refusals: an I128 parameter, a division, a conversion to a floating value, a switch, which the split refuses as
 // unsupported; a function without an I128 instruction, returned as it is; and the scan's vector path against its scalar
 // twin on type columns of every length to 200, each ending at a PROT_NONE page, with an I128 at each place; and nine
-// long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported.
+// long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported; and
+// functions whose extra slices overlap, a call's arguments sharing a phi's words, which both split paths keep apart.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -1367,6 +1368,115 @@ static void tier1_wide_test_x87_phis(Tier1WideTest* test, char* text)
     arena_pop_to(&test->output, output_mark);
 }
 
+// Functions whose extra slices overlap, as the verifier lets them (#1204's review): a call's arguments sharing a phi's
+// first word, its predecessor block, which is also the argument's value. The split remaps phis' values and calls'
+// arguments into slices of their own; a remap in the source's place made one reader's rewrite the other's (the phi's
+// predecessor became the argument's remapped value). One case's phi is an i64 the split copies, the other's an I128 the
+// split halves. Each must verify as built, and split by both paths into a function that both verifiers take and that
+// the interpreter runs to the source's buffers; the call is on a branch never taken, the interpreter runs no callee.
+static const char* const tier1_wide_test_shared[2] = {
+    "function (ptr) -> void {\n"
+    "b0:\n"
+    "  %0 = param.ptr 0\n"
+    "  %1 = load.i128 %0 align=16\n"
+    "  %2 = trunc.i64 %1\n"
+    "  %3 = br.void b1\n"
+    "b1:\n"
+    "  %4 = br.void b2\n"
+    "b2:\n"
+    "  %5 = br.void b3\n"
+    "b3:\n"
+    "  %6 = phi.i64 [%2, b2]\n"
+    "  %7 = const.i1 0x0\n"
+    "  %8 = cbr.void %7, b4, b5\n"
+    "b4:\n"
+    "  %9 = call.void @1(%2) fixed=(i64) variadic=0\n"
+    "  %10 = br.void b5\n"
+    "b5:\n"
+    "  %11 = address.ptr %0 offset=256\n"
+    "  %12 = store.void %11, %6 align=8\n"
+    "  %13 = ret.void\n"
+    "}\n",
+    "function (ptr) -> void {\n"
+    "b0:\n"
+    "  %0 = param.ptr 0\n"
+    "  %1 = load.i128 %0 align=16\n"
+    "  %2 = const.i64 0x5\n"
+    "  %3 = br.void b1\n"
+    "b1:\n"
+    "  %4 = br.void b2\n"
+    "b2:\n"
+    "  %5 = br.void b3\n"
+    "b3:\n"
+    "  %6 = phi.i128 [%1, b2]\n"
+    "  %7 = const.i1 0x0\n"
+    "  %8 = cbr.void %7, b4, b5\n"
+    "b4:\n"
+    "  %9 = call.void @1(%2) fixed=(i64) variadic=0\n"
+    "  %10 = br.void b5\n"
+    "b5:\n"
+    "  %11 = address.ptr %0 offset=256\n"
+    "  %12 = store.void %11, %6 align=16\n"
+    "  %13 = ret.void\n"
+    "}\n",
+};
+
+static void tier1_wide_test_shared_slices(Tier1WideTest* test)
+{
+    static uint8_t inputs[BUSTER_TIER1_WIDE_TEST_BUFFER * BUSTER_TIER1_WIDE_TEST_INPUTS];
+    static uint8_t expected[BUSTER_TIER1_WIDE_TEST_BUFFER * BUSTER_TIER1_WIDE_TEST_INPUTS];
+    const uint64_t counts[BUSTER_TIER1_WIDE_TEST_INPUTS] = { 0 };
+    for (uint32_t shared = 0; shared < 2; shared += 1)
+    {
+        const uint64_t output_mark = test->output.length;
+        const char* name = shared == 0 ? "a call's arguments sharing an i64 phi's list" : "a call's arguments sharing an I128 phi's list";
+        IrFunction function;
+        IrDominance dominance = { 0 };
+        bool ok = tier1_wide_test_parse(test, name, tier1_wide_test_shared[shared], &function);
+        // %6 is the phi, %9 the call: the call's arguments start at the phi's first word, its predecessor b2, which is
+        // also the argument's value, %2.
+        ok = ok && tier1_wide_test_expect(test, function.op[6] == IR_PHI && function.op[9] == IR_CALL && function.extra[function.a[6]] == 2, "the shared slices' fixture parses as written");
+        if (ok)
+        {
+            function.calls[function.b[9]].argument_first = function.a[6];
+        }
+        ok = ok && tier1_wide_test_dominance(test, &function, &dominance);
+        const IrCheck verified = ok ? ir_verify(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+        const IrCheck twin = ok ? ir_verify_scalar(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+        ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK && twin.error == IR_OK, "both verifiers take a call's arguments sharing a phi's words");
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_WIDE_TEST_INPUTS; input += 1)
+        {
+            uint8_t* bytes = inputs + (uint64_t)input * BUSTER_TIER1_WIDE_TEST_BUFFER;
+            for (uint32_t byte = 0; byte < BUSTER_TIER1_WIDE_TEST_BUFFER; byte += 1)
+            {
+                bytes[byte] = (uint8_t)tier1_wide_test_next(test);
+            }
+            ok = tier1_wide_test_interpret(test, &function, bytes, 0, expected + (uint64_t)input * BUSTER_TIER1_WIDE_TEST_BUFFER);
+        }
+        for (uint32_t path = 0; ok && path < 2; path += 1)
+        {
+            const uint64_t mark = test->output.length;
+            IrWideResult result = { 0 };
+            const IrCheck split = path == 0 ? ir_wide_split(&function, &test->output, &test->scratch, &result) : ir_wide_split_scalar(&function, &test->output, &test->scratch, &result);
+            bool fine = tier1_wide_test_expect(test, split.error == IR_OK && result.split, "both paths split a function whose slices overlap");
+            IrDominance split_dominance = { 0 };
+            fine = fine && tier1_wide_test_dominance(test, &result.function, &split_dominance);
+            const IrCheck checked = fine ? ir_verify(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+            const IrCheck scalar = fine ? ir_verify_scalar(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+            fine = fine && tier1_wide_test_expect(test, checked.error == IR_OK && scalar.error == IR_OK, "the split of overlapping slices verifies: each reader keeps its own entries");
+            if (!fine)
+            {
+                printf("test-tier1-wide: %s, %s path: split error %u, verifier error %u at %u\n", name, path == 0 ? "vector" : "scalar", (unsigned)split.error, (unsigned)checked.error, checked.instruction);
+            }
+            fine = fine && tier1_wide_test_agrees(test, name, "the split function", &result.function, inputs, counts, expected);
+            tier1_wide_test_expect(test, function.calls[function.b[9]].argument_first == function.a[6] && function.extra[function.a[6]] == 2, "the split leaves the source's shared slice as it was");
+            arena_pop_to(&test->output, mark);
+        }
+        tier1_wide_test_expect(test, test->scratch.length == 0, "the shared slices' checks return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+    }
+}
+
 // The refusals, a function without an I128 instruction, and the scan's twins.
 static void tier1_wide_test_boundaries(Tier1WideTest* test)
 {
@@ -1519,6 +1629,7 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             if (file == 0)
             {
                 tier1_wide_test_boundaries(&test);
+                tier1_wide_test_shared_slices(&test);
                 typed = tier1_wide_test_typed(&test, BUSTER_TIER1_WIDE_TEST_TYPED);
                 printf("test-tier1-wide: Tier 0's 128-bit programs: %u of %u through the split, the optimizer and Tier 1 natively\n", typed, BUSTER_TIER1_WIDE_TEST_TYPED);
                 const uint32_t x87 = tier1_wide_test_x87(&test, BUSTER_TIER1_WIDE_TEST_TYPED);
