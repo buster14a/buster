@@ -61,10 +61,36 @@ test "$(git -C "$work/suite-3" rev-parse HEAD)" = "$pinned" || fail 'a corrupted
 git -C "$work/suite-3" fsck --no-progress > /dev/null 2>&1 || fail 'the checkout is intact'
 unset BUSTER_C_TESTSUITE_URL BUSTER_C_TESTSUITE_COMMIT
 
-# pragma-oracle-cache.sh with a stand-in compiler: a miss builds, a hit doesn't, a corrupted executable is rebuilt, and
-# a changed source or flags is another key.
-mkdir -p "$work/bin"
-cat > "$work/bin/fake-c++" <<'SH'
+# tree-manifest.sh: a tree matches its manifest until a file's contents, a file, or a link changes.
+tree="$work/tree"
+mkdir -p "$tree/bin" "$tree/lib"
+printf 'compiler\n' > "$tree/bin/clang-23"
+ln -s clang-23 "$tree/bin/clang"
+printf 'library\n' > "$tree/lib/libclang-cpp.so"
+bash tools/ci/tree-manifest.sh write "$tree"
+bash tools/ci/tree-manifest.sh check "$tree" || fail 'a tree matches its own manifest'
+printf 'marker\n' > "$tree/.correctness-complete"
+bash tools/ci/tree-manifest.sh check "$tree" || fail 'the markers written after the manifest are not entries'
+printf 'COMPILER\n' > "$tree/bin/clang-23"
+if bash tools/ci/tree-manifest.sh check "$tree" 2> /dev/null; then fail 'a file changed in place was accepted'; fi
+printf 'compiler\n' > "$tree/bin/clang-23"
+printf 'extra\n' > "$tree/lib/extra.so"
+if bash tools/ci/tree-manifest.sh check "$tree" 2> /dev/null; then fail 'an added file was accepted'; fi
+rm "$tree/lib/extra.so"
+ln -sf libclang-cpp.so "$tree/bin/clang"
+if bash tools/ci/tree-manifest.sh check "$tree" 2> /dev/null; then fail 'a link retargeted was accepted'; fi
+ln -sf clang-23 "$tree/bin/clang"
+rm "$tree/lib/libclang-cpp.so"
+if bash tools/ci/tree-manifest.sh check "$tree" 2> /dev/null; then fail 'a removed file was accepted'; fi
+printf 'library\n' > "$tree/lib/libclang-cpp.so"
+bash tools/ci/tree-manifest.sh check "$tree" || fail 'the restored tree matches again'
+
+# pragma-oracle-cache.sh with a stand-in toolchain: a miss builds, a hit doesn't, a corrupted executable is rebuilt,
+# changed flags are another key, a compiler changed in place (its version the same) is refused rather than its old
+# oracle reused, a toolchain staged afresh is another key, and one without a manifest builds without the cache.
+toolchain="$work/toolchain"
+mkdir -p "$toolchain/bin"
+cat > "$toolchain/bin/fake-c++" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = --version ]; then
@@ -77,17 +103,23 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 printf 'build\n' >> "$FAKE_BUILDS"
-printf '#!/bin/sh\necho "oracle %s"\n' "$FAKE_FLAVOR" > "$output"
+printf '#!/bin/sh\necho "oracle %s"\n' "${FAKE_FLAVOR:-one}" > "$output"
 chmod +x "$output"
 SH
-cat > "$work/bin/fake-llvm-config" <<'SH'
+cat > "$toolchain/bin/fake-llvm-config" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = --prefix ]; then
+    echo "$FAKE_PREFIX"
+    exit 0
+fi
 echo "-I/fake/include ${FAKE_FLAGS:-}"
 echo '-L/fake/lib'
 SH
-chmod +x "$work/bin/fake-c++" "$work/bin/fake-llvm-config"
-export CXX="$work/bin/fake-c++" LLVM_CONFIG="$work/bin/fake-llvm-config" FAKE_BUILDS="$work/builds" FAKE_FLAVOR=one
+chmod +x "$toolchain/bin/fake-c++" "$toolchain/bin/fake-llvm-config"
+bash tools/ci/tree-manifest.sh write "$toolchain"
+export CXX="$toolchain/bin/fake-c++" LLVM_CONFIG="$toolchain/bin/fake-llvm-config" FAKE_BUILDS="$work/builds" FAKE_PREFIX="$toolchain"
 : > "$FAKE_BUILDS"
+entries() { find "$BUSTER_CI_CACHE/pragma-oracle" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l; }
 bash tools/ci/pragma-oracle-cache.sh "$work/oracle-1" > /dev/null
 bash tools/ci/pragma-oracle-cache.sh "$work/oracle-2" > "$work/log"
 grep -q 'reusing' "$work/log" || fail 'a matching oracle is reused'
@@ -99,6 +131,21 @@ grep -q 'oracle two' "$work/log" || fail 'a corrupted oracle is rebuilt'
 test "$(wc -l < "$FAKE_BUILDS")" -eq 2 || fail 'the rebuild is a build'
 FAKE_FLAGS=-DOTHER bash tools/ci/pragma-oracle-cache.sh "$work/oracle-4" > /dev/null
 test "$(wc -l < "$FAKE_BUILDS")" -eq 3 || fail 'other flags are another key'
-test "$(find "$BUSTER_CI_CACHE/pragma-oracle" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l)" -eq 2 || fail 'two keys, two entries'
+test "$(entries)" -eq 2 || fail 'two keys, two entries'
+# The compiler replaced at the same path, reporting the same version but building another oracle.
+sed -i 's/FAKE_FLAVOR:-one/FAKE_FLAVOR:-three/' "$toolchain/bin/fake-c++"
+if bash tools/ci/pragma-oracle-cache.sh "$work/oracle-5" > "$work/log" 2>&1; then
+    fail 'a toolchain changed in place reused an oracle another compiler built'
+fi
+grep -q 'differ from its manifest' "$work/log" || fail 'and says why'
+# Staged afresh (a new manifest), it is another key, and its own build.
+bash tools/ci/tree-manifest.sh write "$toolchain"
+bash tools/ci/pragma-oracle-cache.sh "$work/oracle-6" > "$work/log"
+grep -q 'oracle three' "$work/log" || fail 'a toolchain staged afresh builds its own oracle'
+test "$(entries)" -eq 3 || fail 'the new toolchain is a third key'
+rm "$toolchain/.manifest"
+bash tools/ci/pragma-oracle-cache.sh "$work/oracle-7" > "$work/log"
+grep -q 'without the cache' "$work/log" || fail 'a toolchain without a manifest builds without the cache'
+test "$(entries)" -eq 3 || fail 'and keeps nothing'
 cd "$root"
-printf 'caches: downloads, c-testsuite mirror and pragma oracle hit, miss, corruption and changed inputs checked\n'
+printf 'caches: downloads, c-testsuite mirror, tree manifests and pragma oracle hit, miss, corruption and changed inputs checked\n'

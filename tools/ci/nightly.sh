@@ -9,7 +9,9 @@
 #   nightly.sh coordinate DIRECTORY --phase prepare|window --mode run|dry-run
 #                                     nightly-backfill.yml: harvest, plan and dispatch; DIRECTORY/ledger.tsv and report.md
 #
-# NIGHTLY_GH replaces `gh` and NIGHTLY_NOW the clock for tests/ci/nightly.sh, which runs this against fixtures.
+# NIGHTLY_GH replaces `gh` and NIGHTLY_NOW the clock for tests/ci/nightly.sh, which runs this against fixtures;
+# NIGHTLY_ITERATIONS bounds the coordinator's steps (one with NIGHTLY_NOW), NIGHTLY_SLEEP their pause, and
+# NIGHTLY_PREPARATIONS the hosted preparations in flight.
 set -euo pipefail
 shopt -s inherit_errexit
 repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
@@ -372,17 +374,25 @@ load_states()
 
 # The workflow's runs of the last DAYS days: pushes, the daily run and dispatches, every page, as facts. The first
 # step of a job reads a fortnight's (harvest's horizon), later ones a day's: what is in flight or just completed.
+# Any listing that fails fails the whole: a partial list would hide a run in flight, and the planner would dispatch a
+# second one. Each failure returns explicitly, since a caller's condition suspends errexit here.
 load_runs()
 {
     local facts=$1 days=$2 since event
     since=$(date -u -d "@$(( $(now) - days * 86400 ))" +%Y-%m-%d)
     : > "$facts"
     for event in push schedule workflow_dispatch; do
-        "$gh" api --paginate "repos/$repository/actions/workflows/9700x.yml/runs?event=$event&created=%3E%3D$since&per_page=100" | runs_facts >> "$facts"
+        if ! "$gh" api --paginate "repos/$repository/actions/workflows/9700x.yml/runs?event=$event&created=%3E%3D$since&per_page=100" > "$work/runs-$event.json"; then
+            return 1
+        fi
+        if ! runs_facts < "$work/runs-$event.json" >> "$facts"; then
+            return 1
+        fi
     done
     # A run that changed state between pages appears twice; keep its first line.
-    awk -F '\t' '!seen[$2]++' "$facts" > "$facts.unique"
-    mv "$facts.unique" "$facts"
+    if ! awk -F '\t' '!seen[$2]++' "$facts" > "$facts.unique" || ! mv "$facts.unique" "$facts"; then
+        return 1
+    fi
 }
 
 # The completed runs the ledger lacks, with their jobs and records. A run whose jobs or record the API failed to give
@@ -475,15 +485,34 @@ coordinate()
     if [ "$phase" = window ] && sha "${NIGHTLY_SNAPSHOT:-}" && ! cut -f 1,2 "$ledger" | has_line "cycle"$'\t'"$cycle"; then
         printf 'cycle\t%s\t%s\t%s\t%s\n' "$cycle" "$NIGHTLY_SNAPSHOT" "$coordinator" "$(now)" >> "$ledger"
     fi
-    local action verdict line iterations=0
+    local action verdict line iterations=0 limit=${NIGHTLY_ITERATIONS:-} pause=${NIGHTLY_SLEEP:-90}
+    if [ -z "$limit" ] && [ -n "${NIGHTLY_NOW:-}" ]; then
+        limit=1
+    fi
+    # A prepare job that will wait for the window keeps preparing while it waits, as hosted runs complete and free their
+    # slots (the planner admits no hardware before 04:00): every five minutes until the window opens.
+    local waits=false
+    if [ "$phase" = prepare ] && [ "$mode" = run ] && [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
+        waits=true
+    fi
     while :; do
         iterations=$((iterations + 1))
-        # A step's API failure ends a first step, which can't plan without the runs; later, it waits and tries again.
+        # A step's API failure ends a first step, which can't plan without the runs; later, it waits and tries again,
+        # planning nothing on a partial list.
+        local days=1
         if [ "$iterations" -eq 1 ]; then
-            load_runs "$facts" 14
-        elif ! load_runs "$facts" 1; then
-            printf '::warning title=Nightly coordinator::the runs could not be listed; trying again\n'
-            sleep 90
+            days=14
+        fi
+        if ! load_runs "$facts" "$days"; then
+            if [ "$iterations" -eq 1 ]; then
+                printf '::error title=Nightly coordinator::the runs could not be listed\n'
+                exit 1
+            fi
+            printf '::warning title=Nightly coordinator::the runs could not be listed; nothing is planned until they are\n'
+            if [ -n "$limit" ] && [ "$iterations" -ge "$limit" ]; then
+                break
+            fi
+            sleep "$pause"
             continue
         fi
         harvest "$ledger" "$states" "$facts"
@@ -491,7 +520,7 @@ coordinate()
             sed -n 's|^refs/heads/nightly/\([0-9a-f]\{40\}\)$|\1|p' > "$refs" || : > "$refs"
         "$tool" plan --states "$states" --ledger "$ledger" --facts "$facts" --now "$(now)" --main "$main" --mode "$mode" \
             --coordinator "$coordinator" --sequence "$sequence" --pending "$pending" --refs "$refs" --report "$work/report.md" \
-            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" > "$work/plan.tsv"
+            --override "${NIGHTLY_OVERRIDE:-}" --earlier "$earlier_states" --preparations "${NIGHTLY_PREPARATIONS:-3}" > "$work/plan.tsv"
         cat "$work/plan.tsv"
         verdict=''
         while IFS= read -r line; do
@@ -531,11 +560,23 @@ coordinate()
                     ;;
             esac
         done < "$work/plan.tsv"
-        # An override (a manual run's reason) admits past 07:00: the loop then ends when nothing more is admissible.
-        if [ "$verdict" != wait ] || [ "$phase" = prepare ] || { [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -ge "$deadline" ]; } || [ -n "${NIGHTLY_NOW:-}" ]; then
+        if [ -n "$limit" ] && [ "$iterations" -ge "$limit" ]; then
             break
         fi
-        sleep 90
+        if [ "$phase" = prepare ]; then
+            # Preparing until the window opens, five minutes at a time; otherwise one step.
+            if [ "$waits" = false ] || [ "$(now)" -ge "$start" ]; then
+                break
+            fi
+            local remaining=$((start - $(now)))
+            sleep "${NIGHTLY_SLEEP:-$(( remaining < 300 ? remaining : 300 ))}"
+            continue
+        fi
+        # An override (a manual run's reason) admits past 07:00: the loop then ends when nothing more is admissible.
+        if [ "$verdict" != wait ] || { [ -z "${NIGHTLY_OVERRIDE:-}" ] && [ "$(now)" -ge "$deadline" ]; }; then
+            break
+        fi
+        sleep "$pause"
     done
     summary < "$work/report.md"
     publish "$cycle"
@@ -548,9 +589,9 @@ coordinate()
         if [ "$mode" = run ] && [ -n "${NIGHTLY_OVERRIDE:-}" ]; then
             printf 'Override: %s; the window job admits hardware now.\n' "$NIGHTLY_OVERRIDE"
             output window reachable
-        elif [ "$mode" = run ] && [ "$current" -lt "$start" ] && [ "$((start - started))" -le 21300 ]; then
-            printf 'Waiting %s seconds for the window to open.\n' "$((start - current))"
-            if [ -z "${NIGHTLY_NOW:-}" ]; then
+        elif [ "$waits" = true ]; then
+            # The loop prepared until the window opened (or its steps' bound, in tests).
+            if [ "$current" -lt "$start" ] && [ -z "${NIGHTLY_NOW:-}" ]; then
                 sleep "$((start - current))"
             fi
             output window reachable

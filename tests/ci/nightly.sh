@@ -74,6 +74,19 @@ case "$method $endpoint" in
     *)
         printf 'fake gh: unexpected %s %s\n' "$method" "$endpoint" >&2; exit 1 ;;
 esac
+# A fixture FILE.N answers the endpoint's Nth call instead, and FILE.N.fail makes that call fail.
+if [ -n "$fixture" ]; then
+    key=$(basename "$fixture")
+    count=$(( $(cat "$FIXTURES/count-$key" 2> /dev/null || echo 0) + 1 ))
+    printf '%s\n' "$count" > "$FIXTURES/count-$key"
+    if [ -f "$fixture.$count.fail" ]; then
+        printf '{"message":"Server Error","status":"502"}\n'
+        printf 'gh: Server Error (HTTP 502)\n' >&2
+        exit 1
+    elif [ -f "$fixture.$count" ]; then
+        fixture="$fixture.$count"
+    fi
+fi
 if [ -f "$fixture" ]; then
     answer "$fixture"
 elif [ -n "$empty" ]; then
@@ -386,4 +399,37 @@ expect_match "$work/override-window/report.md" 'Override.*validating the coordin
 GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_SNAPSHOT=$head run_coordinator "$work/no-override" window run
 expect_no_match "$fixtures/calls.log" 'hardware=admit' 'without an override 13:00 admits nothing'
 expect_match "$work/override-window/report.md" 'out of scope' 'the report says what the epoch leaves out'
-printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides checked\n'
+# A later step whose run listing fails plans nothing: an admitted run in flight that the failed list would hide isn't
+# dispatched again.
+rm -f "$fixtures"/count-*
+cat > "$fixtures/runs-workflow_dispatch.json" <<JSON
+{"workflow_runs":[{"id":950,"run_attempt":1,"event":"workflow_dispatch","status":"in_progress","conclusion":null,"head_sha":"$head","path":".github/workflows/9700x.yml","head_branch":"nightly/$head","created_at":"2026-11-04T03:12:00Z","updated_at":"2026-11-04T03:12:00Z","head_repository":{"id":1421805693},"display_title":"Nightly snapshot (admit) of $head [20261104.9500.1.admit]"}]}
+JSON
+# The snapshot's push qualified its plain rows: it is ready, so a list that hid the run in flight would admit it again.
+cat > "$fixtures/runs-push.json" <<JSON
+{"workflow_runs":[{"id":951,"run_attempt":1,"event":"push","status":"completed","conclusion":"failure","head_sha":"$head","path":".github/workflows/9700x.yml","head_branch":"main","created_at":"2026-11-03T20:00:00Z","updated_at":"2026-11-03T21:00:00Z","head_repository":{"id":1421805693},"display_title":"code"}]}
+JSON
+cp "$fixtures/jobs-800.json" "$fixtures/jobs-951.json"
+: > "$fixtures/runs-workflow_dispatch.json.2.fail"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9500 NIGHTLY_NOW=$(madrid '2026-11-04 04:20') NIGHTLY_ITERATIONS=3 NIGHTLY_SLEEP=0 NIGHTLY_SNAPSHOT=$head run_coordinator "$work/failed-poll" window run
+expect_match "$work/coordinate.log" 'the runs could not be listed; nothing is planned' 'a failed listing is reported'
+expect_no_match "$fixtures/calls.log" 'hardware=admit' 'and no second hardware run is dispatched beside the one in flight'
+test "$(grep -c 'actions/workflows/9700x.yml/runs?event=workflow_dispatch' "$fixtures/calls.log")" -eq 3 || fail 'the coordinator tries again after a failed listing'
+rm -f "$fixtures/runs-workflow_dispatch.json.2.fail" "$fixtures/runs-push.json" "$fixtures"/count-*
+
+# Before the window, a waiting prepare job refills its hosted preparations as they complete.
+cat > "$fixtures/runs-workflow_dispatch.json" <<JSON
+{"workflow_runs":[]}
+JSON
+cat > "$fixtures/runs-workflow_dispatch.json.2" <<JSON
+{"workflow_runs":[{"id":960,"run_attempt":1,"event":"workflow_dispatch","status":"completed","conclusion":"success","head_sha":"$epoch","path":".github/workflows/9700x.yml","head_branch":"nightly/$epoch","created_at":"2026-11-03T21:11:00Z","updated_at":"2026-11-03T21:20:00Z","head_repository":{"id":1421805693},"display_title":"Nightly backlog (defer) of $epoch [20261104.9600.2.defer]"}]}
+JSON
+cp "$fixtures/jobs-800.json" "$fixtures/jobs-960.json"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9600 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') NIGHTLY_ITERATIONS=2 NIGHTLY_SLEEP=0 NIGHTLY_PREPARATIONS=1 run_coordinator "$work/refill" prepare run
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer .*request=20261104\.9600\.2\.defer$" 'the first step prepares the oldest state, one slot'
+expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$merge -f purpose=backlog -f hardware=defer .*request=20261104\.9600\.3\.defer$" 'the next step refills the slot its completion freed'
+expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and the job still waits for the window'
+rm -f "$fixtures/runs-workflow_dispatch.json.2" "$fixtures"/count-*
+printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls and refilled preparations checked\n'

@@ -113,10 +113,20 @@ on every use, published atomically, and replaced when stale or corrupt:
   (`tools/ci/fetch-c-testsuite.sh`). The checkout fetches it through Git's pack
   protocol, which checks every object's hash.
 - **Pragma oracle:** the executable (`tools/ci/pragma-oracle-cache.sh`), under
-  a key made of its source's SHA-256, the resolved compiler (the staged
-  release's digest-named directory), the compiler's version, llvm-config's
-  flags and the command. It is checked against its recorded SHA-256 and must
-  answer `--version`.
+  a key made of its source's SHA-256, the toolchain's content manifest, the
+  compiler's path and version, llvm-config's flags and the command. It is
+  checked against its recorded SHA-256 and must answer `--version`.
+
+The staged Clang release itself has a content manifest
+(`tools/ci/tree-manifest.sh`): the SHA-256 of every file and the target of
+every link, written when `setup-benchpress.sh` publishes the tree. Every use
+checks the tree against it (about 0.15 s for 600 MB, in 8 processes) and
+stages it afresh from the verified archive when anything differs. A tree
+staged before the manifest is staged afresh once.
+
+The oracle's cache checks the manifest again and keys on its digest. So a
+compiler, header or library changed in place can't reuse an oracle another one
+built: the check refuses the tree, and a fresh staging is another key.
 
 On 2026-11-03 PR jobs, the setup before native tests took about 45 s, nearly
 all of it the 40 s build. The corpus and c-testsuite fetches took 0 to 1 s, and
@@ -307,7 +317,9 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
 3. **Prepare.** Before the window, the coordinator dispatches the snapshot's
    deferred run: every hosted row and the 100,000-input fuzz campaigns, the
    daily diagnostics the old schedule ran. It also dispatches the plain rows of
-   the oldest states that have none, three at a time and forty a cycle.
+   the oldest states that have none, three at a time and forty a cycle. A
+   prepare job that waits for the window plans again every five minutes until
+   it opens, so each completed preparation frees its slot for the next.
 4. **Measure.** Inside the window it admits one 9700X run at a time: the
    snapshot's comprehensive run first, then the oldest ready state. While the
    snapshot's hosted rows are in flight, it keeps room for the snapshot. If
@@ -323,7 +335,9 @@ States move between `not-required`, `complete`, `in-flight`, `ready`,
 and never block later states. Nothing depends on dates but the cycle, so
 unfinished states carry over, and a completion never moves a cursor past an
 earlier gap. Pending dispatches that aren't yet visible as runs prevent
-duplicates. An admitted run older than two hours is cancelled.
+duplicates. A step whose run listing fails, even partly, plans nothing until a
+full listing succeeds; otherwise a run in flight it hid would be dispatched
+again. An admitted run older than two hours is cancelled.
 
 **Time.** The tz database's Europe/Madrid is checked at three points:
 
