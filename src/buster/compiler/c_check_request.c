@@ -47,10 +47,9 @@ struct CheckRequestScan
     // The last -fcf-protection or -fcf-protection=VALUE, unless it is -fcf-protection=none.
     const char* cf_protection;
     // The object and linkage options the producer doesn't implement, refused where the request emits code (#1124), each
-    // family's last option deciding: -fcommon unless -fno-common follows it, the last -fvisibility= or
-    // -fvisibility-ms-compat (check_request_visibility), and -ffunction-sections and -fdata-sections unless their -fno-
-    // forms follow them.
-    const char* common;
+    // family's last option deciding: the last -fvisibility= or -fvisibility-ms-compat (check_request_visibility), and
+    // -ffunction-sections and -fdata-sections unless their -fno- forms follow them. -f[no-]common goes on to
+    // pp_parse_options as any other option does: common definitions are emitted (#147, c_predefines.c).
     const char* visibility;
     const char* function_sections;
     const char* data_sections;
@@ -241,10 +240,6 @@ static bool check_request_scan(CheckRequestScan* scan, const char* argument)
     {
         scan->cf_protection = strcmp(argument, "-fcf-protection=none") == 0 ? NULL : argument;
     }
-    else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
-    {
-        scan->common = strcmp(argument, "-fcommon") == 0 ? argument : NULL;
-    }
     else if (strcmp(argument, "-ffunction-sections") == 0 || strcmp(argument, "-fno-function-sections") == 0)
     {
         scan->function_sections = strcmp(argument, "-ffunction-sections") == 0 ? argument : NULL;
@@ -277,8 +272,7 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
 {
     CheckRequestRefusal result = { .error = CHECK_REQUEST_ACCEPTED };
     const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
-    const char* object = !emits ? NULL : scan->common != NULL ? scan->common : visibility != NULL ? visibility :
-                         scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
+    const char* object = !emits ? NULL : visibility != NULL ? visibility : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
     const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector :
                           scan->cf_protection != NULL ? scan->cf_protection : object;
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;

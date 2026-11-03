@@ -50,7 +50,7 @@ requirements. [Command index](README.md).
   checks against every helper the emitters make; a fence of a constant order is
   the typed stream's `FENCE` (`check_program_direct_fence`), Tier 0's `mfence`
   or nothing, the IR's `fence`, with no helper; `--helper-report` prints each
-  family's direct and helper uses, and `test-checker-driver` runs a
+  family's direct forms and helper calls in the lowered code, and `test-checker-driver` runs a
   store-buffering litmus by both tiers (the guide's "Helper contracts and
   direct forms"). The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,

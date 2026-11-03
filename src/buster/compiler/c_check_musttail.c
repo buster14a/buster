@@ -149,7 +149,7 @@ static uint32_t* check_musttail_noreturns(const CheckInput* input, Arena* scratc
     }
     for (uint32_t d = 0; first != NULL && d < count; d += 1)
     {
-        const CheckInputAttributes* attributes = input->attributes[d];
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, d);
         const uint32_t object = attributes != NULL ? input->objects[d] : 0;
         bool noreturn = false;
         for (uint32_t i = 0; object != 0 && object <= count && i < attributes->count; i += 1)

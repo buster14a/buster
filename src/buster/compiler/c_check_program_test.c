@@ -85,7 +85,8 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     const uint32_t count = base->token_count;
     const uint32_t plans = listed ? plan_count : 0;
     const uint32_t words = (count + 64) / 64;
-    uint8_t* compound_objects = mappings[0] + page - count;
+    // The base's declaration bits, with the compound literals' drawn here.
+    uint8_t* declaration_bits = mappings[0] + page - count;
     uint32_t* initializer_begins = (uint32_t*)(mappings[1] + page - (uint64_t)count * sizeof(uint32_t));
     uint32_t* declaration_tokens = (uint32_t*)(mappings[2] + page - (uint64_t)plans * sizeof(uint32_t));
     uint32_t* plan_first = (uint32_t*)(mappings[3] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -95,7 +96,8 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     for (uint32_t token = 0; token < count; token += 1)
     {
         const uint32_t draw = check_test_random(test);
-        compound_objects[token] = (uint8_t)(draw % 6 == 0);
+        const uint8_t kept = base->declaration_bits != NULL ? (uint8_t)(base->declaration_bits[token] & ~BUSTER_CHECK_BITS_COMPOUND) : 0;
+        declaration_bits[token] = (uint8_t)(kept | (draw % 6 == 0 ? BUSTER_CHECK_BITS_COMPOUND : 0));
         initializer_begins[token] = (draw >> 3) % 5 == 0 ? 0 : (draw >> 3) % 5 == 1 ? count + 1 : 1 + (draw >> 6) % count;
     }
     for (uint32_t i = 0; i < plans; i += 1)
@@ -105,7 +107,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
         declaration_tokens[i] = plans < count ? i * step + draw % step : draw % 9 == 0 ? count + draw % 3 : (draw >> 4) % (count != 0 ? count : 1);
     }
     CheckInput input = *base;
-    input.compound_objects = compound_objects;
+    input.declaration_bits = declaration_bits;
     Arena sparse = arena_reserve(UINT64_C(1) << 20);
     input.initializer_begins = check_sparse_from_values(&sparse, initializer_begins, count);
     const CheckInitializers initializers = { .declaration_tokens = declaration_tokens, .count = plans, .token_count = count };
@@ -131,7 +133,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
     for (uint32_t i = plans; i-- > 0;)
     {
         const uint32_t declaration = declaration_tokens[i];
-        const bool literal = declaration < count && compound_objects[declaration] != 0;
+        const bool literal = declaration < count && check_input_bit(declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         uint32_t statement = BUSTER_CHECK_NONE;
         if (!literal)
         {
@@ -149,7 +151,7 @@ static void check_test_program_plans(CheckTest* test, const CheckInput* base, co
                 expected_token = declaration;
             }
         }
-        expected_compound |= literal && base->static_objects[declaration] == 0;
+        expected_compound |= literal && check_input_bit(base->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) == 0;
         statements[i] = statement;
         same &= !literal || plan_next[i] == BUSTER_CHECK_NONE;
         same &= literal || statement != BUSTER_CHECK_NONE || plan_next[i] == poison;
@@ -269,10 +271,8 @@ static void check_test_program_scans(CheckTest* test)
         uint32_t* declarations = (uint32_t*)(mappings[3] + page - (uint64_t)count * sizeof(uint32_t));
         uint32_t* declaration_bodies = (uint32_t*)(mappings[4] + page - (uint64_t)count * sizeof(uint32_t));
         uint8_t* declaration_kinds = mappings[5] + page - count;
-        uint8_t* static_objects = mappings[6] + page - count;
+        uint8_t* declaration_bits = mappings[6] + page - count;
         uint32_t* objects = (uint32_t*)(mappings[7] + page - (uint64_t)count * sizeof(uint32_t));
-        uint8_t* defined = mappings[8] + page - count;
-        uint8_t* tentative = mappings[9] + page - count;
         CheckOp* ops = (CheckOp*)(mappings[10] + page - (uint64_t)count * sizeof(CheckOp));
         uint32_t* reached = (uint32_t*)(mappings[11] + page - (uint64_t)count * sizeof(uint32_t));
         uint8_t* roles = mappings[12] + page - count;
@@ -289,10 +289,9 @@ static void check_test_program_scans(CheckTest* test)
             declarations[token] = draw % 3 != 0 ? token : (draw >> 4) % count;
             declaration_bodies[token] = draw % 13 != 0 ? (draw >> 6) % count : count + draw % 2;
             declaration_kinds[token] = (uint8_t)(draw % 9 != 0 ? C_BINDING_OBJECT : C_BINDING_OBJECT + 1);
-            static_objects[token] = (uint8_t)((draw >> 9) % 3 == 0);
+            declaration_bits[token] = (uint8_t)(((draw >> 9) % 3 == 0 ? BUSTER_CHECK_BITS_STATIC : 0) | (((draw >> 11) & 1) != 0 ? BUSTER_CHECK_BITS_DEFINED : 0) |
+                                                (((draw >> 12) & 1) != 0 ? BUSTER_CHECK_BITS_TENTATIVE : 0));
             objects[token] = (draw >> 3) % (count + 2);
-            defined[token] = (uint8_t)((draw >> 11) & 1);
-            tentative[token] = (uint8_t)((draw >> 12) & 1);
             ops[token] = (CheckOp)((draw >> 13) % 4 == 0 ? CHECK_OP_BUILTIN_UNARY + (draw >> 15) % (CHECK_OP_COUNT - CHECK_OP_BUILTIN_UNARY) : (draw >> 15) % CHECK_OP_COUNT);
             reached[token] = (draw >> 20) % 3 == 0 ? 0 : 1 + (draw >> 22) % 4;
             roles[token] = (uint8_t)((draw >> 23) % 5 == 0 ? PARSE_ROLE_CLOSE_CASE : (draw >> 23) % 5 == 1 ? PARSE_ROLE_TERMINATOR : PARSE_ROLE_LEAF_RIGHT);
@@ -311,13 +310,11 @@ static void check_test_program_scans(CheckTest* test)
                 .declared_types = declared_types,
                 .declaration_kinds = declaration_kinds,
                 .objects = objects,
-                .static_objects = static_objects,
-                .defined = defined,
-                .tentative = tentative,
+                .declaration_bits = declaration_bits,
                 .initializer_nodes = check_sparse_from_values(&sparse, initializer_nodes, count),
                 .body_declarations = check_sparse_from_values(&sparse, body_declarations, count),
                 .declaration_bodies = check_sparse_from_values(&sparse, declaration_bodies, count),
-                .attributes = attributes,
+                .attributes = check_input_attributes_from(&sparse, attributes, count),
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
@@ -424,7 +421,7 @@ static void check_test_program_scans(CheckTest* test)
             for (uint32_t token = 0; token < count; token += 1)
             {
                 const uint32_t object = objects[token];
-                const bool event = declarations[token] == token && static_objects[token] && object != 0 && object <= count &&
+                const bool event = declarations[token] == token && check_input_bit(declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && object != 0 && object <= count &&
                                    declaration_kinds[token] == C_BINDING_FUNCTION &&
                                    (attributes[token] == &kinds_of_attributes[3] || attributes[token] == &kinds_of_attributes[5]);
                 events_right &= !event || expected_events >= events[0].count || events[0].keys[expected_events] == (((uint64_t)object << 32) | token);
@@ -1432,22 +1429,22 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
     }
     for (uint32_t token = 0; valid && token < count; token += 1)
     {
-        if (input->declarations[token] == token && input->static_objects[token])
+        if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
         {
             const uint32_t object = input->objects[token];
             valid = object != 0 && object <= count;
             if (valid)
             {
                 result->latest_declarations[object] = token;
-                const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+                const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, token) : 0;
                 if (attributes != 0 && attributes->alignment_log2 > alignments[object])
                 {
                     alignments[object] = attributes->alignment_log2;
                 }
-                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
                 {
                     const uint32_t previous = definition[object];
-                    if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
+                    if (previous == BUSTER_CHECK_NONE || !check_input_bit(input->declaration_bits, previous, BUSTER_CHECK_BITS_DEFINED))
                     {
                         definition[object] = token;
                     }
@@ -1504,7 +1501,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);
-            if (plan == 0 && input->tentative[selected] && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            if (plan == 0 && check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_TENTATIVE) && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
             {
                 // Tentative arrays acquire one element at translation-unit end; earlier uses retain their
                 // historical incomplete TypeIds and cannot gain a retroactive sizeof result.
@@ -1664,7 +1661,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         uint32_t key_count = 0;
         for (uint32_t token = 0; keys != 0 && token < count; token += 1)
         {
-            if (input->declarations[token] == token && input->static_objects[token])
+            if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
             {
                 keys[key_count++] = (uint64_t)input->objects[token] << 32 | token;
             }
@@ -1710,7 +1707,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         {
             const uint32_t object = input->objects[token];
             if (input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (input->defined[token] || input->tentative[token]))
+                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
             {
                 expected[object] = 1;
             }
@@ -2090,7 +2087,7 @@ static void check_test_program_initializer_facts(CheckTest* test)
             controls[i] = (CheckControl){ .kind = CHECK_CONTROL_INITIALIZE, .target = i };
             declarations[i] = i;
         }
-        const CheckInput input = { .token_count = COUNT, .static_objects = flags };
+        const CheckInput input = { .token_count = COUNT, .declaration_bits = flags };
         const CheckInitializers initializers = { .plans = plans, .count = COUNT, .declaration_tokens = declarations };
         const CheckProgram program = { .types = &types.table, .input = &input, .initializers = &initializers,
                                        .controls = controls, .control_count = COUNT };
@@ -2229,7 +2226,7 @@ static bool check_test_program_locals(const CheckProgram* program, const CheckLo
         const uint32_t body = check_sparse_get(input->declaration_bodies, token);
         const uint32_t object = input->objects[token];
         if (input->declarations[token] == token && body < count && openings[body] != 0 && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-            input->static_objects[token] == 0 && object <= count)
+            check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) == 0 && object <= count)
         {
             local[object] = 1;
         }
@@ -2442,7 +2439,13 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
                 snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
-                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
+                const bool named = reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0);
+                check_test_expect(test, named, description);
+                if (!named || lowered_ok != machine)
+                {
+                    fprintf(stderr, "test-checker: %s: lowered=%d status=%u reason=\"%s\", expected \"%s\"\n", name, lowered_ok, lowered.status,
+                            lowered.reason != NULL ? lowered.reason : "", reason != NULL ? reason : "");
+                }
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,
@@ -2581,6 +2584,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_copy_test.c"
 #include "c_check_program_folds_test.c"
 #include "c_check_program_fence_test.c"
+#include "c_check_program_atomic_access_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -3288,6 +3292,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_copies(test, clang);
         check_test_program_folds(test, clang);
         check_test_program_fences(test, clang);
+        check_test_program_atomic_accesses(test, clang);
         check_test_program_batch(test);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
@@ -5020,8 +5025,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                     "vla-bound-reference", true, true, 1, 0);
         check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
                                     "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
-        check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                           "typed-asm-goto-target", true, false, 0, 0, "asm goto");
+        check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                    "typed-asm-goto-target", true, true, 0, 0);
     }
     // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
     if (check_test_takes())

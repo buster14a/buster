@@ -476,7 +476,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-tier1-cfg, test-tier1-cfg-source` — `tier1_cfg.c` — [guide](docs/commands/tier1-cfg.md).
 - `test-tier1-frame, test-tier1-frame-execution` — `tier1_frame.c` — [guide](docs/commands/tier1-frame.md).
 - `test-tier1-schedule, benchmark-tier1-schedule` — `tier1_schedule.c` — [guide](docs/commands/tier1-schedule.md).
-- `test-check-units` — `c_checker_driver.c` — [guide](docs/commands/translation-units.md).
+- `test-check-units, benchmark-check-units` — `c_checker_units.c` — [guide](docs/commands/translation-units.md).
 - `test-types, benchmark-types` — `c_types.c` — [guide](docs/commands/types.md).
 - `test-unwind, benchmark-unwind` — `unwind_tier0.c` — [guide](docs/commands/unwind.md).
 - `disassemble, test-x86-disassembler` — `x86_64_disassembler.c` — [guide](docs/commands/x86-disassembler.md).

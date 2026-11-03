@@ -5036,12 +5036,13 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a low eightbyte on the stack with HIGH", 13, false, BUSTER_TIER0_TEST_METADATA },
     { "LOW in registers", 2, false, BUSTER_TIER0_TEST_METADATA },
     { "a low eightbyte's slot past the call's area", 13, false, BUSTER_TIER0_TEST_METADATA },
-    // A vector split across XMM registers (#1193): only xmm0 on, in order, 2 or 4 of 16 bytes or 2 of 32, its bytes
-    // theirs, without HIGH, into an object with room for them.
+    // A vector split across vector registers (#1193, #137): only from the first on, in order, 2 or 4 of 16, 32 or 64 bytes
+    // (a transport vector of more than 64 bytes returns in zmm's), its bytes theirs, without HIGH, into an object with
+    // room for them.
     { "a split vector's registers out of order", 15, true, BUSTER_TIER0_TEST_METADATA },
     { "a split vector in three registers", 15, true, BUSTER_TIER0_TEST_METADATA },
     { "a split vector's size unlike its registers'", 14, true, BUSTER_TIER0_TEST_METADATA },
-    { "a split vector of 64-byte parts", 14, true, BUSTER_TIER0_TEST_METADATA },
+    { "a split vector of 24-byte parts", 14, true, BUSTER_TIER0_TEST_METADATA },
     { "a call's split vector with HIGH", 14, false, BUSTER_TIER0_TEST_METADATA },
     { "a call's split vector object too small for its registers", 15, false, BUSTER_TIER0_TEST_METADATA },
 };
@@ -5289,8 +5290,8 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             callee->function.result_size = 48;
             break;
         case 64:
-            callee->function.result.part_bytes = 64;
-            callee->function.result_size = 128;
+            callee->function.result.part_bytes = 24;
+            callee->function.result_size = 48;
             break;
         case 65:
             caller->call.result.flags |= BUSTER_ABI_FLAG_HIGH;

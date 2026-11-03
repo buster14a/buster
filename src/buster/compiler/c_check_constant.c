@@ -1155,7 +1155,7 @@ static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t
             *job = (CheckConstantAttributes)
             {
                 .owner = owner,
-                .publish = !input->cached && reader->output->attributes[owner] == 0,
+                .publish = !input->cached && check_input_attributes_at(reader->output, owner) == 0,
             };
             valid = check_input_attributes(reader, cursor, input->end, &job->parsed);
         }
@@ -1306,9 +1306,9 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
         if (valid)
         {
             const CheckInputAttributes empty = { 0 };
-            CheckInputAttributes* previous = reader->output->attributes[job->owner];
+            CheckInputAttributes* previous = check_input_attributes_at(reader->output, job->owner);
             valid = check_input_attribute_merge(reader, previous != 0 ? previous : &empty, &job->parsed, combined);
-            reader->output->attributes[job->owner] = valid ? combined : previous;
+            check_input_set_attributes_at(reader->output, job->owner, valid ? combined : previous);
             job->publish = !valid;
         }
     }
@@ -1550,6 +1550,13 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     input->syntax[separator - input->first] = true;
                     check_constant_mark_type(input, separator + 1, close);
                 }
+            }
+            else if (valid && (keyword == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN ||
+                               (keyword == C_NAME_BUILTIN_VECTORELEMENTS && token + 1 < close && check_constant_type_start(parser, token + 1))))
+            {
+                // A query of a type (#148): __builtin_vectorelements' of an expression evaluates nothing of it.
+                input->type_begin[close - input->first] = token + 1;
+                check_constant_mark_type(input, token + 1, close);
             }
             else if (valid && keyword == C_NAME_GENERIC)
             {
@@ -1858,6 +1865,79 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
     return valid;
 }
 
+// A builtin of a constant the walk works out (#148, check_input_source_builtin), at its `)`: __builtin_LINE's and
+// __builtin_COLUMN's place (an unsigned int, check_input_source_place); __builtin_FILE's, __builtin_FILE_NAME's and
+// __builtin_FUNCTION's string's address (a char *, the string the walk made: check_input_source_string); and an unsigned
+// long, __builtin_vectorelements' count of the elements of its vector type, or of its unevaluated operand's, and
+// __builtin_omp_required_simd_align's alignment in bytes for its type, the unit's target's (16, 32 with AVX, 64 with
+// AVX-512F, as clang's getOpenMPDefaultSimdAlign gives it whatever the type).
+static bool check_constant_source_builtin(CheckConstantInput* input, uint32_t token, uint32_t count, const CheckValue* operands, CheckValue* value)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const uint32_t keyword = reader->first_child[token];
+    const uint32_t name = parser->tokens.names[keyword];
+    const uint32_t type_first = input->type_begin[token - input->first];
+    // An expression's type, a comma expression's (__builtin_vectorelements(a, b), #1126's review) its last operand's.
+    const TypeId queried = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, token) : count != 0 ? operands[count - 1].type : 0;
+    bool valid = false;
+    bool address = false;
+    uint64_t number = 0;
+    TypeId type = BUSTER_TYPE_ULONG;
+    if (name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN)
+    {
+        uint32_t line = 0;
+        uint32_t column = 0;
+        const char* file = 0;
+        uint32_t length = 0;
+        valid = count == 0 && check_input_source_place(reader, keyword, &line, &column, &file, &length);
+        number = name == C_NAME_BUILTIN_LINE ? line : column;
+        type = BUSTER_TYPE_UINT;
+    }
+    else if (name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME || name == C_NAME_BUILTIN_FUNCTION)
+    {
+        const uint32_t string = check_sparse_get(reader->string_ids, keyword);
+        type = string != BUSTER_CHECK_NONE ? check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_CHAR)) : 0;
+        valid = count == 0 && type != 0;
+        address = true;
+        number = valid ? reader->output->strings[string].object : 0;
+    }
+    else if (name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN)
+    {
+        // Its operand as clang's CheckUnaryExprOrTypeTraitOperand takes it (#1126's review): an array's base element type,
+        // as alignof's, which must be a complete object type, not void, an incomplete record or a function's.
+        TypeId element = queried != 0 ? type_strip_aligned(reader->types, queried) : 0;
+        while (element != 0 && type_kind_is_array(type_kind(reader->types, element)))
+        {
+            element = type_strip_aligned(reader->types, type_element(reader->types, element));
+        }
+        const uint8_t kind = element != 0 ? type_kind(reader->types, element) : BUSTER_TYPE_KIND_VOID;
+        const uint64_t features = reader->pp->options.target.features;
+        valid = kind != BUSTER_TYPE_KIND_VOID && kind != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(reader->types, element);
+        number = (features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+    }
+    else if (name == C_NAME_BUILTIN_VECTORELEMENTS)
+    {
+        const TypeId base = queried != 0 ? type_unqualified(type_strip_aligned(reader->types, queried)) : 0;
+        const uint8_t kind = base != 0 ? type_kind(reader->types, base) : BUSTER_TYPE_KIND_VOID;
+        valid = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        number = valid ? reader->types->types.extent[type_index(base)] : 0;
+    }
+    if (valid)
+    {
+        *value = (CheckValue)
+        {
+            .type = type,
+            .category = CHECK_RVALUE,
+            .flags = address ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_ICE,
+            .constant_kind = address ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
+            .integer = address ? 0 : number,
+            .object = address ? (uint32_t)number : 0,
+        };
+    }
+    return valid;
+}
+
 static bool check_constant_builtin(CheckConstantInput* input, uint32_t token, CheckValue* value, CheckValue* proof)
 {
     CheckInputReader* reader = input->reader;
@@ -1898,7 +1978,7 @@ static TypeId check_constant_object_alignment(CheckInputReader* reader, uint32_t
     if (first + 1 == end && end <= parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER)
     {
         const uint32_t declaration = reader->output->declarations[first];
-        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? reader->output->attributes[declaration] : 0;
+        const CheckInputAttributes* attributes = declaration < parser->tokens.count ? check_input_attributes_at(reader->output, declaration) : 0;
         if (attributes != 0 && attributes->alignment_log2 > type_alignment_log2(reader->types, type) + 1 &&
             type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
         {
@@ -2375,14 +2455,14 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         {
             // A compound literal's object (check_constant_bind), as the expression walk's leaf at this `}` has it.
             const uint32_t declaration = reader->initializer_declarations[token];
-            valid = declaration < parser->tokens.count && reader->output->compound_objects[declaration] && reader->declared_types[declaration] != 0;
+            valid = declaration < parser->tokens.count && check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && reader->declared_types[declaration] != 0;
             if (valid)
             {
                 input->values[index] = (CheckValue)
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
-                    .flags = reader->static_objects[declaration] ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .flags = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };
@@ -2410,8 +2490,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],
@@ -2658,6 +2738,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     CheckValue argument = input->proof_values[first - input->first];
                     valid = check_constant_speculative_call(input, reader->first_child[token], token, (CBuiltinId)builtin, type, &argument, 1, &proof);
                 }
+            }
+            else if (check_input_source_builtin(parser->tokens.names[reader->first_child[token]]))
+            {
+                valid = check_constant_source_builtin(input, token, count, action.operands, &input->values[index]);
+                proof = input->values[index];
             }
             else
             {
@@ -3132,8 +3217,8 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) |
-                             (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                    .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) |
+                             (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
                     .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                     .integer = enumeration ? reader->enum_values[declaration] : 0,
                     .object = reader->objects[declaration],

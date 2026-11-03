@@ -626,7 +626,8 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
             result = left == BUSTER_IR_NONE ? 0 : values[left];
             break;
         case IR_FENCE:
-            // One thread's accesses in program order, as this runs them: nothing to do.
+            // One thread's accesses in program order, as this runs them: nothing to do. A fence orders other threads' views
+            // of them (#1059).
             break;
         default:
             assert(false);
@@ -932,8 +933,8 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 // nodes. Its load reads p + i (address 0); address 1 is p + 8 and address 2 p + 16; constant 0 is 7. The consumers
 // have no lea for the costed cover to prefer over the fold (an add's: the cover keeps its load apart). A call's shape
 // is planned alone, since this emitter refuses calls (tier1_select_test_call_barriers runs them through the native
-// one); the IR has no atomic access of its own: C's atomic operations reach it as calls. A fence (#1059), a thread
-// fence of seq_cst's mfence or a signal fence's no record, keeps the load's own record before it.
+// one); a fence (#1059), a thread fence of seq_cst's mfence or a signal fence's no record, keeps the load's own record
+// before it. An atomic load is a barrier too, and folds into nothing itself (#1059).
 typedef struct Tier1SelectTestBarrier Tier1SelectTestBarrier;
 struct Tier1SelectTestBarrier
 {
@@ -969,12 +970,15 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
     { "not past a thread fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, BUSTER_IR_FENCE_SEQ_CST, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "not past a signal fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 2 | BUSTER_IR_FENCE_SIGNAL, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "after a fence before the load", { IR_FENCE, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_VOID, IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { BUSTER_IR_FENCE_SEQ_CST, 0, 4, 2, 6 }, { N, 1, N, 5, N }, { N, 0, N, N, N }, 5, 5, 6, true },
+    { "not past an acquire fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, false },
+    { "not an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, { 0, BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
 };
 #undef N
 
 // tier1_select_barriers against its scalar twin and an oracle (each node's last barrier before it, by a scan back), on
-// random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, loads volatile or
-// not, other nodes, and flag bits besides volatile's) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
+// random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, loads volatile,
+// atomic or neither, other nodes, and flag bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
 // page, the entries' page poisoned before them.
 static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
 {
@@ -1014,7 +1018,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             uint32_t before = node;
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
-                                    ops[before - 1] == IR_FENCE || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_VOLATILE) != 0)))
+                                    ops[before - 1] == IR_FENCE || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_OBSERVABLE) != 0)))
             {
                 before -= 1;
             }
@@ -1093,6 +1097,8 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
                 const uint32_t node = 3 + i;
                 tier1_select_test_node(&function, node, shape->op[i], shape->type[i], shape->a[i], shape->b[i], shape->c[i]);
                 function.flags[node] = shape->flags[i];
+                // An atomic access's natural alignment, its i64's, which the verifier requires.
+                function.alignment_log2[node] = (shape->flags[i] & BUSTER_IR_ATOMIC) != 0 ? 3 : 0;
                 const bool pooled = node != shape->consumer && shape->type[i] != IR_VOID;
                 assert(!pooled || next < BUSTER_ARRAY_LENGTH(pool));
                 registers[node] = pooled ? pool[next++] : X86_REGISTER_RAX;

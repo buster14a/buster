@@ -25,6 +25,18 @@
 #define BUSTER_IR_NONE UINT32_MAX
 #define BUSTER_IR_VECTOR_COUNT 16
 #define BUSTER_IR_VOLATILE 1
+// An atomic load or store (#1059): one access of its integer's or pointer's bytes, of a C memory order (BUSTER_IR_ORDER's
+// bits: 0 relaxed to 5 seq_cst, as a fence's), which no pass splits, widens, merges, eliminates, forwards or moves past
+// another access, a call or a fence: a volatile access's guarantees and its order's. Its machine obligations are its
+// type's ordinary access (x86-64's naturally aligned accesses of 1, 2, 4 or 8 bytes are atomic, and its total store order
+// gives a load's and a release store's orders) and, for a seq_cst store, the fence of seq_cst after it, which the
+// producer writes as its own IR_FENCE.
+#define BUSTER_IR_ATOMIC 2
+#define BUSTER_IR_ORDER_SHIFT 2
+#define BUSTER_IR_ORDER (7u << BUSTER_IR_ORDER_SHIFT)
+#define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)
+// The accesses every pass keeps as they are and where they are: a volatile one and an atomic one.
+#define BUSTER_IR_OBSERVABLE (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC)
 #define BUSTER_IR_SLOT_ADDRESS_TAKEN 1
 #define BUSTER_IR_SLOT_VOLATILE 2
 #define BUSTER_IR_SLOT_TEMPORARY 4
@@ -500,6 +512,23 @@ static bool ir_integer(uint32_t type)
 static bool ir_floating(uint32_t type)
 {
     return type >= IR_F32 && type <= IR_F80;
+}
+
+// Whether a load's or a store's flags (BUSTER_IR_ACCESS_FLAGS) give an order to an atomic access alone, and one its kind
+// takes: a load's relaxed, consume, acquire or seq_cst (0x27's bits), a store's relaxed, release or seq_cst (0x29's).
+static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
+{
+    const uint32_t order = (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
+    const uint32_t orders = op == IR_LOAD ? 0x27u : 0x29u;
+    return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
+}
+
+// Whether an atomic access may be of `type` aligned to 1 << `alignment_log2` bytes: an integer's of 1, 2, 4 or 8 bytes,
+// or a pointer's, aligned at least to its size, as x86 makes only a naturally aligned access single-copy atomic.
+static bool ir_atomic_access(uint32_t type, uint8_t alignment_log2)
+{
+    const bool sized = type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR;
+    return sized && alignment_log2 >= (uint32_t)__builtin_ctz(ir_type_bits[type] >> 3);
 }
 
 static bool ir_slice(uint32_t first, uint64_t count, uint32_t total)
@@ -1023,7 +1052,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     {
         check.error = IR_ERROR_OPERAND;
     }
-    else if (((op == IR_LOAD || op == IR_STORE) && ((f->flags[i] & ~BUSTER_IR_VOLATILE) != 0 || f->alignment_log2[i] > 31)) || ((op != IR_LOAD && op != IR_STORE) && (f->flags[i] != 0 || f->alignment_log2[i] != 0)))
+    else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) || ((op != IR_LOAD && op != IR_STORE) && (f->flags[i] != 0 || f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -1086,7 +1115,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 valid = ta == IR_PTR && c < f->address_count && (b == BUSTER_IR_NONE || (b < f->instruction_count && f->type[b] == IR_I64));
             } break;
             case IR_RULE_LOAD:
-            case IR_RULE_STORE: valid = ta == IR_PTR; break;
+            case IR_RULE_STORE: valid = ta == IR_PTR && ((f->flags[i] & BUSTER_IR_ATOMIC) == 0 || ir_atomic_access(op == IR_LOAD ? type : tb, f->alignment_log2[i])); break;
             case IR_RULE_CALL:
             {
                 valid = b < f->call_count && (op == IR_CALL ? a != 0 && a < f->symbol_count : ta == IR_PTR);
@@ -2115,6 +2144,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         if (op == IR_LOAD || op == IR_STORE)
                         {
                             fprintf(output, " align=%" PRIu32 "%s", UINT32_C(1) << f->alignment_log2[i], (f->flags[i] & BUSTER_IR_VOLATILE) != 0 ? " volatile" : "");
+                            const uint32_t order = (f->flags[i] & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
+                            if ((f->flags[i] & BUSTER_IR_ATOMIC) != 0)
+                            {
+                                fprintf(output, " atomic %s", order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
+                            }
                         }
                     } break;
                 }
