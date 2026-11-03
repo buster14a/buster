@@ -698,11 +698,12 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 }
 
 // Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
-// fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's.
+// fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's, and the literal and
+// function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is and cpu_supports.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
-                        id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS;
+                        id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS;
     return result;
 }
 

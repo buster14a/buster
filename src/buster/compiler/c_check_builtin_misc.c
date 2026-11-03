@@ -54,6 +54,10 @@ struct CheckBuiltinMiscAction
     bool string_known;
     const uint8_t* string_bytes;
     uint32_t string_length;
+    // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and whether the
+    // first argument is a function's name alone past parentheses, casts, `&` and `*` (CheckBuiltinCall's, #1126's review).
+    bool string_cast;
+    bool function_named;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -791,7 +795,8 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
     }
     else if (id == CBUILTIN_ALLOW_RUNTIME_CHECK || id == CBUILTIN_ALLOW_SANITIZE_CHECK)
     {
-        if (!input->string_known)
+        // A string literal, parenthesized at most: clang refuses one in a cast (#1126's review).
+        if (!input->string_known || input->string_cast)
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
         }
@@ -828,10 +833,13 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
     }
     else
     {
-        // addressof and function_start take their operand as it is, before any conversion, as the & operator does.
+        // addressof and function_start take their operand as it is, before any conversion, as the & operator does; and
+        // function_start a function's address too (&f, (void *)&f, a cast of f), as clang's getAsBuiltinConstantDeclRef
+        // evaluates its operand to a function at offset 0 (#1126's review): the source names the function alone.
         const CheckValue operand = input->arguments[0];
         const bool start = id == CBUILTIN_FUNCTION_START;
-        if (start && (operand.category != CHECK_FUNCTION || operand.constant_kind != CHECK_CONSTANT_ADDRESS || operand.object == 0))
+        const bool designator = operand.category == CHECK_FUNCTION || (start && input->function_named && operand.category == CHECK_RVALUE && operand.offset == 0);
+        if (start && (!designator || operand.constant_kind != CHECK_CONSTANT_ADDRESS || operand.object == 0))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
         }
@@ -847,7 +855,7 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
         {
             check_action_diagnose(&output->action, CHECK_DIAG_REGISTER_ADDRESS, 0);
         }
-        else if (operand.category != CHECK_LVALUE && operand.category != CHECK_FUNCTION)
+        else if (operand.category != CHECK_LVALUE && !designator)
         {
             check_action_diagnose(&output->action, CHECK_DIAG_LVALUE_REQUIRED, 0);
         }
@@ -860,7 +868,7 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
             output->action.value.flags &= ~(BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL |
                                             BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
             if (!input->context.constant_evaluated && (operand.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && output->action.value.constant_kind == CHECK_CONSTANT_ADDRESS &&
-                output->action.value.object != 0 && operand.category != CHECK_FUNCTION)
+                output->action.value.object != 0 && !designator)
             {
                 output->action.value.constant_kind = CHECK_CONSTANT_NONE;
             }
@@ -1054,7 +1062,7 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
         output->cpu_test = !input->string_known ? 0 : supports ? check_builtin_cpu_lookup(check_builtin_cpu_features, BUSTER_ARRAY_LENGTH(check_builtin_cpu_features),
                                                                                        input->string_bytes, input->string_length) :
                            check_builtin_cpu_lookup(check_builtin_cpu_names, BUSTER_ARRAY_LENGTH(check_builtin_cpu_names), input->string_bytes, input->string_length);
-        if (!input->string_known || (!supports && output->cpu_test == 0))
+        if (!input->string_known || input->string_cast || (!supports && output->cpu_test == 0))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
         }

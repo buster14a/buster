@@ -41,6 +41,12 @@ struct CheckBuiltinCall
     const uint8_t* nan_payload;
     uint32_t nan_payload_length;
     bool nan_payload_known;
+    // Whether an explicit cast was stripped before that literal: clang's literal-only arguments (allow_runtime_check's,
+    // allow_sanitize_check's, cpu_supports' and cpu_is') refuse one, as annotation's doesn't (#1126's review).
+    bool nan_payload_cast;
+    // Whether the first argument is a function's name alone past parentheses, casts, `&` and `*`: an address
+    // __builtin_function_start takes, as clang's getAsBuiltinConstantDeclRef evaluates it (#1126's review).
+    bool function_named;
     bool string_literal_start;
     bool absolute_address_constant;
     bool complex_constant;
@@ -1942,6 +1948,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
             .string_known = witness != NULL && witness->nan_payload_known,
+            .string_cast = witness != NULL && witness->nan_payload_cast,
+            .function_named = witness != NULL && witness->function_named,
             .string_bytes = witness != NULL ? witness->nan_payload : NULL,
             .string_length = witness != NULL ? witness->nan_payload_length : 0,
         };

@@ -137,6 +137,14 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
             leading = false;
         }
     }
+    // The name alone past them (but the groups' closing parentheses) of a function: __builtin_function_start's operand.
+    bool alone = base < end && parser->tokens.kinds[base] == PARSE_KIND_IDENTIFIER;
+    for (uint32_t token = base + 1; alone && token < end; token += 1)
+    {
+        alone = parser->tokens.kinds[token] == PARSE_KIND_R_PAREN && parser->tree.roles[token] == PARSE_ROLE_CLOSE_GROUP;
+    }
+    const TypeId named = alone ? reader->declared_types[base] : 0;
+    evidence->function_named = named != 0 && type_kind(reader->types, type_strip_aligned(reader->types, named)) == BUSTER_TYPE_KIND_FUNCTION;
     const uint32_t object = base < end ? check_input_evidence_object(reader, base) : BUSTER_CHECK_NONE;
     if (object != BUSTER_CHECK_NONE)
     {
@@ -145,6 +153,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
         evidence->base_object = reader->objects[object];
     }
     bool address = false;
+    bool cast = false;
     while (first < end)
     {
         const uint8_t role = parser->tree.roles[first];
@@ -157,6 +166,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
         }
         else if (role == PARSE_ROLE_OPEN_CAST && close > first && close + 1 < end)
         {
+            cast = true;
             first = close + 1;
         }
         else if (kind == PARSE_KIND_AMP && role == PARSE_ROLE_PREFIX && !address)
@@ -187,6 +197,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
             evidence->nan_payload_known = literal && !address && element == BUSTER_TYPE_CHAR && string->byte_count != 0 && string->byte_count - 1 <= UINT32_MAX;
             evidence->nan_payload = evidence->nan_payload_known ? string->bytes : 0;
             evidence->nan_payload_length = evidence->nan_payload_known ? (uint32_t)string->byte_count - 1 : 0;
+            evidence->nan_payload_cast = evidence->nan_payload_known && cast;
             evidence->minimum_alignment = UINT64_C(1) << type_alignment_log2(reader->types, element);
             evidence->alignment_known = true;
             size = string->byte_count;
@@ -229,6 +240,7 @@ static __attribute__((noinline)) void check_input_annotation_evidence(CheckInput
         check_input_builtin_evidence(reader, end + 1, last, &second);
     }
     evidence->nan_payload_known = second.nan_payload_known;
+    evidence->nan_payload_cast = second.nan_payload_cast;
     evidence->nan_payload = second.nan_payload;
     evidence->nan_payload_length = second.nan_payload_length;
 }

@@ -92,6 +92,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "int g;\nvoid* f(void)\n{\nreturn __builtin_function_start(g);\n}\n", .rejected = true },
         { .name = "generic: function_start of a pointer", .source =
           "void* f(void (*q)(void))\n{\nreturn __builtin_function_start(q);\n}\n", .rejected = true },
+        // __builtin_function_start's operand evaluates to a function at offset 0, as clang's getAsBuiltinConstantDeclRef reads
+        // it: a named function's address and its casts are, a conditional's, a null pointer's and an offset one aren't
+        // (#1126's review).
+        { .name = "generic: function_start of a function's address", .source =
+          "void g(void);\nvoid* a = __builtin_function_start(&g);\nvoid* b = __builtin_function_start((&g));\n"
+          "void* c = __builtin_function_start((void (*)(int))g);\nvoid* d = __builtin_function_start((void*)&g);\n"
+          "void* f(void)\n{\nreturn __builtin_function_start(*&g) == __builtin_function_start((char*)&g) ? a : b;\n}\n" },
+        { .name = "generic: function_start of a conditional", .source =
+          "void g(void);\nvoid h(void);\nvoid* f(int y)\n{\nreturn __builtin_function_start(y ? g : h);\n}\n", .rejected = true },
+        { .name = "generic: function_start of a null pointer", .source = "void* a = __builtin_function_start(0);\n", .rejected = true },
+        { .name = "generic: function_start of an offset", .source =
+          "void g(void);\nvoid* a = __builtin_function_start((char*)g + 1);\n", .rejected = true },
+        { .name = "generic: function_start of an offset address", .source =
+          "void g(void);\nvoid* f(void)\n{\nreturn __builtin_function_start((void*)&g + 1);\n}\n", .rejected = true },
+        { .name = "generic: function_start of a cast pointer", .source =
+          "void* f(void (*q)(void))\n{\nreturn __builtin_function_start((void*)q);\n}\n", .rejected = true },
         { .name = "generic: addressof of an rvalue", .source =
           "int* f(void)\n{\nreturn __builtin_addressof(3);\n}\n", .rejected = true },
         { .name = "generic: addressof of a bit-field", .source =
@@ -198,6 +214,21 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: cpu_supports in static data", .source = "static int x = __builtin_cpu_supports(\"avx\");\n", .rejected = true },
         { .name = "generic: cpu_supports in a static assertion", .source = "_Static_assert(__builtin_cpu_supports(\"avx\") || 1, \"\");\n", .rejected = true },
         { .name = "generic: cpu_supports of an unknown feature", .source = "int f(void)\n{\nreturn __builtin_cpu_supports(\"not-a-feature\") + __builtin_cpu_supports((\"avx\"));\n}\n" },
+        // The literal-only arguments refuse an explicit cast, which annotation's string takes, and accept parentheses (#1126's review).
+        { .name = "generic: allow_sanitize_check of a cast literal", .source =
+          "int f(void)\n{\nreturn __builtin_allow_sanitize_check((const char*)\"address\");\n}\n", .rejected = true },
+        { .name = "generic: allow_runtime_check of a cast literal", .source =
+          "int f(void)\n{\nreturn __builtin_allow_runtime_check(((const char*)\"feature\"));\n}\n", .rejected = true },
+        { .name = "generic: cpu_supports of a cast literal", .source =
+          "int f(void)\n{\nreturn __builtin_cpu_supports((const char*)\"sse2\");\n}\n", .rejected = true },
+        { .name = "generic: cpu_supports of a void pointer literal", .source =
+          "int f(void)\n{\nreturn __builtin_cpu_supports((void*)\"sse2\");\n}\n", .rejected = true },
+        { .name = "generic: cpu_is of a cast literal", .source = "int f(void)\n{\nreturn __builtin_cpu_is((char*)\"amd\");\n}\n", .rejected = true },
+        { .name = "generic: cpu_is of a cast parenthesized literal", .source =
+          "int f(void)\n{\nreturn __builtin_cpu_is((const char*)(\"amd\"));\n}\n", .rejected = true },
+        { .name = "generic: literal-only arguments in parentheses", .source =
+          "long f(void)\n{\nreturn __builtin_cpu_is((\"amd\")) + __builtin_cpu_supports(((\"sse2\"))) + __builtin_allow_sanitize_check((\"address\")) +\n"
+          "__builtin_allow_runtime_check((\"x\")) + __builtin_annotation(3L, (const char*)\"note\") + __builtin_annotation(4L, (\"note\"));\n}\n" },
         { .name = "generic: cpu_init of an argument", .source = "void f(void)\n{\n__builtin_cpu_init(1);\n}\n", .rejected = true },
         { .name = "generic: cpu_init's value", .source = "int f(void)\n{\nreturn __builtin_cpu_init();\n}\n", .rejected = true },
         { .name = "generic: complex of qualified and aligned operands", .source =
@@ -307,6 +338,17 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "int (*f)(int)=__builtin_addressof(callee);mix((unsigned)f(n));mix(ps==(void*)callee);mix(__builtin_function_start(callee)==(void*)&callee);"
         "return (int)(h^(h>>32));}",
         "generic-alloca-checks-and-addresses", clang);
+    // __builtin_function_start of a function's address and its casts, in static data and at run time, the function's start
+    // (#1126's review).
+    check_test_program_source(test,
+        "static int callee(int x){return x*5+1;}"
+        "static void* const starts[]={__builtin_function_start(&callee),__builtin_function_start((&callee)),"
+        "__builtin_function_start((int(*)(void))callee),__builtin_function_start((void*)&callee),__builtin_function_start(*&callee)};"
+        "int tested(int n){unsigned r=(unsigned)n;for(int i=0;i<5;i++)r=r*31+(starts[i]==(void*)callee);"
+        "r=r*31+(__builtin_function_start(&callee)==(void*)&callee);r=r*31+(__builtin_function_start((void(*)(void))&callee)==(void*)callee);"
+        "r=r*31+(__builtin_function_start((&callee))==starts[n&3]);int (*f)(int)=(int(*)(int))__builtin_function_start(&callee);"
+        "r=r*31+(unsigned)f(n);return (int)r;}",
+        "generic-function-start-of-addresses", clang);
     // The builtins of a place (#148): __builtin_LINE's and __builtin_COLUMN's, through a macro, in an enumerator, an
     // _Static_assert and a static initializer; __builtin_FILE's, __builtin_FILE_NAME's and __builtin_FUNCTION's strings, at
     // file scope ("" for the function) and in one, after a #line that names the file; and the queries of a type,

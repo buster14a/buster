@@ -56,6 +56,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .context = context,
             .pointer_object = evidence.base_object, .pointer_alignment = evidence.base_alignment,
             .string_known = evidence.nan_payload_known, .string_bytes = evidence.nan_payload, .string_length = evidence.nan_payload_length,
+            .string_cast = evidence.nan_payload_cast, .function_named = evidence.function_named,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

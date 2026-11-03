@@ -1275,7 +1275,9 @@ to 0x3fb (`check_builtin_misc_more`):
   bytes;
 - `allow_runtime_check(s)` is true and `allow_sanitize_check(s)` false, as
   clang -O0's code has them with no sanitizer on, of a string literal (the
-  call's evidence, `CheckBuiltinCall.nan_payload`, as `nan`'s payload is read);
+  call's evidence, `CheckBuiltinCall.nan_payload`, as `nan`'s payload is read),
+  parenthesized at most: as clang's, an explicit cast of it is refused
+  (`CheckBuiltinCall.nan_payload_cast`), where annotation's string takes one;
   `allow_sanitize_check`'s must name one of the seven sanitizers clang takes
   there (`address`, `thread`, `memory`, `hwaddress` and the kernel's three). The
   string never runs, and neither call is a constant expression;
@@ -1285,8 +1287,12 @@ to 0x3fb (`check_builtin_misc_more`):
   designator, not a bit-field, a register variable or a vector's element, an
   address constant where e has one (`int* p = __builtin_addressof(g);`). The
   lowering takes the operand's address, which makes a local addressed;
-- `function_start(f)` is f's address, a `void*`, of a function designator that
-  names a function, an address constant.
+- `function_start(f)` is f's address, a `void*`, an address constant, of an
+  operand that evaluates to a function at offset 0, as clang's
+  `getAsBuiltinConstantDeclRef` reads it: a function designator that names a
+  function, or the function's name alone past parentheses, casts, `&` and `*`
+  (`&f`, `(void*)&f`, `(void (*)(int))f`; `CheckBuiltinCall.function_named`).
+  A pointer variable, a conditional, a null pointer and an offset are refused.
 
 `__builtin_complex(re, im)`, catalog code 0x3fc (`check_builtin_misc_complex`),
 is the complex number re + im·i, of type `_Complex T`, where re and im are of
@@ -1338,6 +1344,7 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;
 `cpu_supports(s)`, a `bool`, tests the bit of the feature the string literal s
+(parenthesized at most, never cast, as `allow_runtime_check`'s)
 names in its word (`__cpu_model.features[0]` at 12, or `__cpu_features2`'s),
 and is false for a feature clang doesn't know, where clang also warns
 (pending here); `cpu_is(s)` compares the model's vendor, type or subtype with
