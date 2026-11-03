@@ -121,7 +121,7 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
         .predefines = &pp_options.predefines,
     };
     valid = valid && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch) &&
-            check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
+            check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, false, &path.output_arena, &path.scratch);
     failure = failure == NULL && !valid ? "its static data or checked program couldn't be prepared, or its definitions selected" : failure;
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);

@@ -1680,6 +1680,69 @@ static void check_test_driver_section_bounds_exact(CheckTest* test, const char* 
     unlink(linked_path);
 }
 
+// #1122's bound section's static members: nothing references a static in a bound section, so selection's edges alone
+// drop it and its section loses a member GNU ld's __stop covers. The bound references in the unit root the section's
+// members, the statics too, as gcc's objects keep them; clang's -c drops them, so the oracle is gcc's output, "24 5".
+static void check_test_driver_section_bounds_static(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "struct entry { long value; };\n"
+                                  "static __attribute__((section(\"st_sec\"), aligned(16))) struct entry s0 = { 7 };\n"
+                                  "static __attribute__((section(\"st_sec\"), aligned(16))) struct entry s1 = { 8 };\n"
+                                  "__attribute__((section(\"st_sec\"), aligned(16))) struct entry g0 = { 9 };\n"
+                                  "extern struct entry __start_st_sec[], __stop_st_sec[];\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    long total = 0;\n"
+                                  "    for (struct entry* e = __start_st_sec; e < __stop_st_sec; e += 1) total += e->value;\n"
+                                  "    printf(\"%ld %ld\\n\", total, (long)(__stop_st_sec - __start_st_sec));\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    static const char expected[] = "24 5\n";
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds-static.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds-static.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-static-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-static-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the static members' fixture is written");
+    char* text = NULL;
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the object keeps the section's statics, and cc's link's bounds cover them");
+    static const char* const option_names[] = { "the direct path covers the statics", "--tier1 covers the statics", "--tier1 --scalar covers the statics" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          option_names[path]);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+}
+
 // #591: member accesses whose lookups take every kind of record's: a struct of 2,000 members, with an anonymous union
 // every 40th and an anonymous struct of two bit-fields every 60th, written, read and their offsets taken; and 300 small
 // structs each read by a function of its own. Both paths must write the same object, which clang links into a program
@@ -6484,6 +6547,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_section_bounds(&test, clang, executable, directory);
                 check_test_driver_section_bounds_exact(&test, clang, executable, directory);
+                check_test_driver_section_bounds_static(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

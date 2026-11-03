@@ -250,7 +250,9 @@ static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* 
     *file = (String8){ 0 };
     // The section runs are laid out before the bytes are saved, so that the save and the writes' restores find the same
     // atoms in the same places (#1122).
-    const bool grouped = executable_bound_sections(link, true, arena);
+    ExecutableShared grouped_shared = { 0 };
+    ExecutableResult grouped_result = { 0 };
+    const bool grouped = executable_bound_sections(link, true, arena, &grouped_shared, &grouped_result) && grouped_result.error == EXECUTABLE_ERROR_NONE;
     dynamic_test_expect(tally, grouped, "room for the sections' runs", 0);
     const uint8_t* saved = grouped ? executable_test_save(link, arena) : 0;
     dynamic_test_expect(tally, saved != 0, "room for the atoms' bytes", 0);
@@ -868,13 +870,18 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
             }
             const AtomId atom = found != 0 ? link->symbols.atom[found] : 0;
             const Elf64_Shdr* section = entry->st_shndx < image->header->e_shnum ? &image->section_headers[entry->st_shndx] : 0;
-            // A TLS symbol's value is its offset in the TLS segment, in its section.
+            // A TLS symbol's value is its offset in the TLS segment, in its section. A bound the linker defines is
+            // its bound atoms' address in their section, as GNU ld's __start_ and __stop_ are.
             const Elf64_Phdr* tls_segment = dynamic_test_segment(image, PT_TLS);
             const bool tls = atom != 0 && link_class_is_tls(link->atoms.class[atom]);
             const uint64_t address = found != 0 ? dynamic_test_address(link, found) : 0;
             const uint64_t value = !tls ? address : tls_segment != 0 ? address - tls_segment->p_vaddr : UINT64_MAX;
-            const bool placed = atom != 0 && section != 0 && entry->st_value == value && entry->st_size == link->symbols.size[found] && address >= section->sh_addr &&
-                                address <= section->sh_addr + section->sh_size;
+            const bool bound = atom == 0 && found != 0 && link->symbols.source[found] == BUSTER_LINK_SOURCE_LINKER &&
+                               link_bound_suffix(link, link->symbols.name[found], 0).length != 0;
+            const bool placed = atom != 0 ? (section != 0 && entry->st_value == value && entry->st_size == link->symbols.size[found] && address >= section->sh_addr &&
+                                             address <= section->sh_addr + section->sh_size)
+                                        : bound && section != 0 && entry->st_value == value && entry->st_size == 0 && address >= section->sh_addr &&
+                                          address <= section->sh_addr + section->sh_size;
             dynamic_test_expect(tally, exported, "a defined entry an export of binding's", i);
             dynamic_test_expect(tally, kind && placed, "an export at its address, size and section", i);
             dynamic_test_expect(tally, versym == 0 || versym[i] == VER_NDX_GLOBAL, "an export unversioned", i);

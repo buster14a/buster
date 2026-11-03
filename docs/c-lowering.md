@@ -161,6 +161,14 @@ definition. Its flags and edges:
   (its address constants, strings and compound literals). A body also selects
   its own block-scope statics, referenced or not, as clang emits every static
   local of a function it emits.
+- **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
+  section, not a member, so no edge reaches the members nothing else does — a
+  static registry entry first — but GNU ld's bounds still cover them. After
+  each reachability pass the members of the input sections that a selected
+  reference's bound names are rooted as `used`, iterated to a fixpoint; a unit
+  whose link is kept for a multi-unit command roots all of its named-section
+  members, since a bound of another unit's may name them, as a `-c` object's
+  members stand for any link's.
 
 The selected bodies, data and the symbols they need become the emission's view,
 in source order whatever order the traversal found them in. `--lower-all`

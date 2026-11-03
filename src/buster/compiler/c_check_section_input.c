@@ -33,10 +33,13 @@
 #define CHECK_SECTION_RELRO 5
 #define CHECK_SECTION_KINDS 6
 
-// A section's flags, as Sema's ASTContext::PragmaSectionFlag has them.
+// A section's flags, as Sema's ASTContext::PragmaSectionFlag has them, and CHECK_SECTION_TLS for a thread-local's use
+// (#1122): one of a name's uses with it doesn't agree with one without it, since a section's atoms are TLS's or the
+// image's, not both.
 #define CHECK_SECTION_READ 0x01u
 #define CHECK_SECTION_WRITE 0x02u
 #define CHECK_SECTION_EXECUTE 0x04u
+#define CHECK_SECTION_TLS 0x08u
 #define CHECK_SECTION_ZERO_INIT 0x10u
 
 // CheckInputSectionEvent.flags.
@@ -47,6 +50,7 @@
 // A definition of its object came before it (CheckInputReader.definition_origins).
 #define CHECK_SECTION_EVENT_DEFINED_BEFORE 0x10u
 #define CHECK_SECTION_EVENT_NAMED 0x20u
+#define CHECK_SECTION_EVENT_TLS 0x40u
 
 static const char* const check_section_kind_names[CHECK_SECTION_KINDS] = { "invalid", "bss", "data", "rodata", "text", "relro" };
 static const uint8_t check_section_kind_flags[CHECK_SECTION_KINDS] =
@@ -375,7 +379,7 @@ static bool check_input_section_pragmas(CheckInputReader* reader, uint8_t* handl
 // (CheckInputReader.section_record_from, which the attribute reader lowers to each section attribute's token). A lane
 // leaves a unit with an event to source order.
 static void check_input_section_declaration(CheckInputReader* reader, uint32_t name, uint32_t position, const CheckInputAttributes* attributes,
-                                            bool function, bool body, bool static_storage, TypeId type)
+                                            bool function, bool body, bool static_storage, bool thread_local, TypeId type)
 {
     const CheckInputAttribute* attribute = NULL;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
@@ -419,7 +423,8 @@ static void check_input_section_declaration(CheckInputReader* reader, uint32_t n
                 .position = position,
                 .flags = (uint8_t)((function ? CHECK_SECTION_EVENT_FUNCTION : 0) | (defined ? CHECK_SECTION_EVENT_DEFINITION : 0) |
                                    (tentative ? CHECK_SECTION_EVENT_TENTATIVE : 0) | (attribute != NULL ? CHECK_SECTION_EVENT_NAMED : 0) |
-                                   (!function && (type & BUSTER_TYPE_CONST) != 0 ? CHECK_SECTION_EVENT_CONSTANT : 0)),
+                                   (!function && (type & BUSTER_TYPE_CONST) != 0 ? CHECK_SECTION_EVENT_CONSTANT : 0) |
+                                   (!function && thread_local ? CHECK_SECTION_EVENT_TLS : 0)),
             };
         }
     }
@@ -640,7 +645,8 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                         defined[object] = 1;
                         if (effective != BUSTER_CHECK_NONE)
                         {
-                            const uint8_t flags = (event->flags & CHECK_SECTION_EVENT_CONSTANT) != 0 ? CHECK_SECTION_READ : CHECK_SECTION_READ | CHECK_SECTION_WRITE;
+                            const uint8_t flags = (uint8_t)(((event->flags & CHECK_SECTION_EVENT_CONSTANT) != 0 ? CHECK_SECTION_READ : CHECK_SECTION_READ | CHECK_SECTION_WRITE) |
+                                                          ((event->flags & CHECK_SECTION_EVENT_TLS) != 0 ? CHECK_SECTION_TLS : 0));
                             check_input_section_unify(reader, sections, table, capacity, reader->section_events[effective].name, flags, BUSTER_CHECK_NONE, e);
                             placements[placement_count++] = (CheckInputSectionPlacement){
                                 .name = reader->section_events[effective].name,
@@ -673,8 +679,9 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                 if (last != BUSTER_CHECK_NONE && defined[object] == 0 && !reader->definition_origins[reader->section_events[last].token] &&
                     tentative_attributed[object] != BUSTER_CHECK_NONE)
                 {
-                    const uint8_t flags = (reader->section_events[last].flags & CHECK_SECTION_EVENT_CONSTANT) != 0 ? CHECK_SECTION_READ :
-                                                                                                                  CHECK_SECTION_READ | CHECK_SECTION_WRITE;
+                    const uint8_t flags = (uint8_t)(((reader->section_events[last].flags & CHECK_SECTION_EVENT_CONSTANT) != 0 ? CHECK_SECTION_READ :
+                                                                                                                            CHECK_SECTION_READ | CHECK_SECTION_WRITE) |
+                                                  ((reader->section_events[last].flags & CHECK_SECTION_EVENT_TLS) != 0 ? CHECK_SECTION_TLS : 0));
                     check_input_section_unify(reader, sections, table, capacity, reader->section_events[tentative_attributed[object]].name, flags,
                                               BUSTER_CHECK_NONE, last);
                     // The definition the unit's end makes, in its last tentative declaration's attribute's section.

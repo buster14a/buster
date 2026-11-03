@@ -658,7 +658,7 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
         .predefines = &source->pp.options.predefines,
     };
     prepared = prepared && check_program(&source->program, &source->parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
-    prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, &path->output_arena, &path->scratch);
+    prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, false, &path->output_arena, &path->scratch);
     source->prepared = prepared && (tier0_initialized || (x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize()));
     return valid;
 }

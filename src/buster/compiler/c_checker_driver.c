@@ -2195,6 +2195,9 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
             case EXECUTABLE_CAUSE_UNSUPPORTED_VERSION:
                 fprintf(out, "error: can't link %s: symbol '%s' has unavailable version %" PRIu64 "\n", path, unsupported, result->value);
                 break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_BOUND:
+                fprintf(out, "error: can't link %s: '%s' bounds an input section whose atoms one output section can't hold\n", path, unsupported);
+                break;
             default: fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path, unsupported); break;
         }
     }
@@ -3134,7 +3137,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         kept != NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3158,7 +3161,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         false, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {

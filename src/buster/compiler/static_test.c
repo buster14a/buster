@@ -175,7 +175,9 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
     *file = (String8){ 0 };
     // The section runs are laid out before the bytes are saved, so that the save and the writes' restores find the same
     // atoms in the same places (#1122).
-    const bool grouped = executable_bound_sections(link, true, arena);
+    ExecutableShared grouped_shared = { 0 };
+    ExecutableResult grouped_result = { 0 };
+    const bool grouped = executable_bound_sections(link, true, arena, &grouped_shared, &grouped_result) && grouped_result.error == EXECUTABLE_ERROR_NONE;
     static_test_expect(tally, grouped, "room for the sections' runs", 0);
     const uint8_t* saved = grouped ? executable_test_save(link, arena) : 0;
     static_test_expect(tally, saved != 0, "room for the atoms' bytes", 0);

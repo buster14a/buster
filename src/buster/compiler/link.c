@@ -933,23 +933,31 @@ static bool link_c_identifier(const uint8_t* bytes, uint64_t length)
     return result;
 }
 
-static String8 link_bound_suffix(const Link* link, NameId name, bool* stop)
+// The suffix of the `length`-byte name `bytes` after __start_ or __stop_, and whether it is __stop_'s: an empty String8
+// for another name, or one whose suffix isn't a C identifier, which no output section name in C can be.
+static String8 link_bound_suffix_bytes(const uint8_t* bytes, uint32_t length, bool* stop)
 {
-    String8 result = { 0 };
-    bool is_stop = false;
-    if (name != 0 && name < link->names.count)
-    {
-        const uint8_t* bytes = link->names.bytes[name];
-        const uint32_t length = link->names.length[name];
-        const bool start_prefix = length > 8 && memcmp(bytes, "__start_", 8) == 0;
-        is_stop = length > 7 && memcmp(bytes, "__stop_", 7) == 0;
-        const uint32_t prefix = start_prefix ? 8 : is_stop ? 7 : length;
-        const String8 suffix = { .pointer = (char*)bytes + prefix, .length = length - prefix };
-        result = link_c_identifier((const uint8_t*)suffix.pointer, suffix.length) ? suffix : (String8){ 0 };
-    }
+    const bool start_prefix = length > 8 && memcmp(bytes, "__start_", 8) == 0;
+    const bool is_stop = length > 7 && memcmp(bytes, "__stop_", 7) == 0;
+    const uint32_t prefix = start_prefix ? 8 : is_stop ? 7 : length;
+    const String8 suffix = { .pointer = (char*)bytes + prefix, .length = length - prefix };
     if (stop != 0)
     {
         *stop = is_stop;
+    }
+    return link_c_identifier((const uint8_t*)suffix.pointer, suffix.length) ? suffix : (String8){ 0 };
+}
+
+static String8 link_bound_suffix(const Link* link, NameId name, bool* stop)
+{
+    String8 result = { 0 };
+    if (name != 0 && name < link->names.count)
+    {
+        result = link_bound_suffix_bytes(link->names.bytes[name], link->names.length[name], stop);
+    }
+    else if (stop != 0)
+    {
+        *stop = false;
     }
     return result;
 }

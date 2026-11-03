@@ -5406,7 +5406,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 if (valid && !is_typedef && i >= reader->section_record_from)
                 {
                     check_input_section_declaration(reader, name, i, attributes, function, function && kind == PARSE_KIND_L_BRACE,
-                                                    !function && reader->static_objects[name], type);
+                                                    !function && reader->static_objects[name], thread_local, type);
                 }
                 more = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
                 if (more)

@@ -150,7 +150,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     CheckProgramSelection selected = { 0 };
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const bool chosen = prepared && bytes.base != 0 &&
-                        check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
+                        check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, false, &path.output_arena, &path.scratch);
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     const bool emitted = chosen && check_program_emit(&code, &selected.program, parser, identifiers, selected.data.capacity, false, lowered, &bytes,
                                                       &path.scratch, NULL, NULL, false, false);
