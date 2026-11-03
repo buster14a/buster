@@ -508,8 +508,8 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 "$BUSTER_COMPILER" test-tier1-liveness
 "$BUSTER_COMPILER" test-tier1-emit
 "$BUSTER_COMPILER" test-tier1-pipeline --cross-check
-# #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
-# interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
+# #179: hand-written IR of AVX-512's masks (and #141's vectors) through Tier 1's selection and CFG consumer, natively
+# against the IR's interpreter where the host has every feature of x86-64-v4 (compiled and checked only elsewhere).
 "$BUSTER_COMPILER" test-tier1-masks
 # #141: the 128-bit integers split into 64-bit halves (ir_wide.c): hand-written and random 128-bit IR and Tier 0's random
 # 128-bit programs through the split, the optimizer and Tier 1 natively, against the IR's interpreter and the programs'
