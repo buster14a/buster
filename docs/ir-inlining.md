@@ -215,7 +215,8 @@ byte the measured executable (the record's `scripts/inlining.sh`):
 - **speedtest1:** 43.29 M of the 44.67 M calls go to callees it inlined at one
   call site or more, 1.37 M to the atomic helpers and 0.01 M to callees without
   a remark.
-- **Lua:** all 37.60 M go to callees it inlined.
+- **Lua:** all but 974 of the 37.60 M go to callees it inlined (`singlestep`,
+  `luaS_newlstr` and the start-up code take the 974).
 
 The match is by callee, not by call site.
 

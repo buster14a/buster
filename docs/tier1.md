@@ -297,7 +297,7 @@ compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 ## Where the gap to clang -O2 is (#1189)
 
 #1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
-[the record](https://github.com/buster14a/buster-performance/tree/23db8f83b857bcc1d50934e895c64ab223341ed3/docs/measurements/tier1-gap-1189-2026-11-03)
+[the record](https://github.com/buster14a/buster-performance/tree/e5575d622665a18dbecbdf46bb4c2f3126b24c6c/docs/measurements/tier1-gap-1189-2026-11-03)
 has the tool, the experiment patches and the counts)
 counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
 scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
@@ -341,7 +341,7 @@ instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
 
 On the 9700X, `measure-tier1-programs` ([the command guide](commands/tier1.md))
 ran in #1230's Benchpress job at `eeeafb6d`, with clang 23.1.4
-([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/23db8f83b857bcc1d50934e895c64ab223341ed3/docs/measurements/tier1-gap-1189-2026-11-03),
+([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/e5575d622665a18dbecbdf46bb4c2f3126b24c6c/docs/measurements/tier1-gap-1189-2026-11-03),
 every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
 
 | Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 |
