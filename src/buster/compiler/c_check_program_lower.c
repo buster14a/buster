@@ -10036,6 +10036,8 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             }
             else if (kind == CHECK_LOWER_EXPRESSION)
             {
+                // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
+                // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
                 const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
                                     check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
