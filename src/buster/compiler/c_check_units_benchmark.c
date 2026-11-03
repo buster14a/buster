@@ -10,16 +10,18 @@
 // the first's: how many times faster its wall time is, and how many times more system time it took. Lanes that
 // serialize on the kernel (#1128: the address space's lock, which arena reservations, commits and discards take) raise
 // the system time, where the wall time on a busy machine may hide it. Fails if a process fails or the program can't be
-// written.
+// written. Counts are whole decimals from 1: at most 4096 units, 100,000 functions, 8 lane counts of at most 4096 lanes
+// each, and 1,000 runs, as time-runs takes.
 
 #define BUSTER_CHECK_UNITS_BENCHMARK_LANE_COUNTS 8
+#define BUSTER_CHECK_UNITS_BENCHMARK_MAX_FUNCTIONS 100000
 
 static int run_check_units_benchmark(int argc, char** argv)
 {
     CheckUnitsTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
     const char* executable = "/proc/self/exe";
-    uint32_t units = 64;
-    uint32_t functions = 200;
+    uint64_t units = 64;
+    uint64_t functions = 200;
     uint64_t runs = 5;
     uint32_t lanes[BUSTER_CHECK_UNITS_BENCHMARK_LANE_COUNTS] = { 1, 2, 4, 8 };
     uint32_t lane_count = 4;
@@ -39,28 +41,34 @@ static int run_check_units_benchmark(int argc, char** argv)
         }
         else if (strcmp(argv[i], "--units") == 0 && i + 1 < argc)
         {
-            units = (uint32_t)strtoul(argv[++i], 0, 0);
+            parsed = profile_count_option(argv[++i], &units) && units <= 4096;
         }
         else if (strcmp(argv[i], "--functions") == 0 && i + 1 < argc)
         {
-            functions = (uint32_t)strtoul(argv[++i], 0, 0);
+            parsed = profile_count_option(argv[++i], &functions) && functions <= BUSTER_CHECK_UNITS_BENCHMARK_MAX_FUNCTIONS;
         }
         else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc)
         {
-            runs = strtoull(argv[++i], 0, 0);
+            parsed = profile_count_option(argv[++i], &runs) && runs <= 1000;
         }
         else if (strcmp(argv[i], "--lanes") == 0 && i + 1 < argc)
         {
-            char* at = argv[++i];
+            // Each count up to its comma, stored only once it parses and there is room for it.
+            const char* at = argv[++i];
             lane_count = 0;
             while (parsed && *at != 0)
             {
-                char* end = at;
-                const unsigned long value = strtoul(at, &end, 10);
-                parsed = end != at && value != 0 && value <= 4096 && lane_count < BUSTER_CHECK_UNITS_BENCHMARK_LANE_COUNTS && (*end == 0 || *end == ',');
-                lanes[lane_count] = (uint32_t)value;
-                lane_count += parsed;
-                at = *end == ',' ? end + 1 : end;
+                const char* comma = strchr(at, ',');
+                const uint64_t length = comma != 0 ? (uint64_t)(comma - at) : strlen(at);
+                uint64_t value = 0;
+                parsed = lane_count < BUSTER_CHECK_UNITS_BENCHMARK_LANE_COUNTS && profile_decimal((String8){ .pointer = (char*)at, .length = length }, &value) &&
+                         value != 0 && value <= 4096 && (comma == 0 || comma[1] != 0);
+                if (parsed)
+                {
+                    lanes[lane_count] = (uint32_t)value;
+                    lane_count += 1;
+                }
+                at += comma != 0 ? length + 1 : length;
             }
             parsed = parsed && lane_count != 0;
         }
@@ -69,7 +77,6 @@ static int run_check_units_benchmark(int argc, char** argv)
             parsed = false;
         }
     }
-    parsed = parsed && units != 0 && units <= 4096 && functions != 0 && runs != 0;
     if (!parsed)
     {
         fprintf(stderr, "usage: benchmark-check-units [--executable PATH] [--units N] [--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]\n");
@@ -91,9 +98,9 @@ static int run_check_units_benchmark(int argc, char** argv)
     char directory[PATH_MAX];
     snprintf(directory, sizeof(directory), "%s/buster-benchmark-check-units-XXXXXX", oracle_temporary_directory());
     const bool made = parsed && mkdtemp(directory) != NULL;
-    const bool written = made && check_units_test_synth(&tally, directory, units, functions);
+    const bool written = made && check_units_test_synth(&tally, directory, (uint32_t)units, (uint32_t)functions);
     // Each list: --lanes N, the options, -c, unit_0.c ... unit_{units - 1}.c, the names shared by every list.
-    const uint64_t list_length = (uint64_t)units + option_count + 3;
+    const uint64_t list_length = units + option_count + 3;
     Arena arena = written ? arena_reserve(64ull << 20) : (Arena){ 0 };
     char** names = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, units);
     char** arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, lane_count * list_length);
@@ -135,7 +142,7 @@ static int run_check_units_benchmark(int argc, char** argv)
     uint64_t failures = !ready;
     if (ready)
     {
-        printf("check units: %u units of %u functions (synth's shape), -c by --lanes", units, functions);
+        printf("check units: %llu units of %llu functions (synth's shape), -c by --lanes", (unsigned long long)units, (unsigned long long)functions);
         for (uint32_t l = 0; l < lane_count; l += 1)
         {
             printf("%s%u", l == 0 ? " " : ", ", lanes[l]);

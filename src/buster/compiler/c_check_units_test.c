@@ -1812,7 +1812,9 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
 }
 
 // benchmark-check-units (#1128), at its smallest: three units by one lane and two, a run each, which must succeed and
-// report both counts against one lane's; and a lane count it can't take, which it must refuse.
+// report both counts against one lane's; and counts it can't take, which it must refuse before writing the program: no
+// lanes, a ninth lane count (which overran the counts' array, #1203's review), runs past time-runs' 1,000 and past 64
+// bits (whose sizes wrapped to nothing), and a count with more than its digits.
 static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* executable, const char* directory)
 {
     char output[PATH_MAX];
@@ -1825,9 +1827,24 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
                                                   strstr(text, "time-runs: done, 0 failed processes") != NULL);
     check_units_test_expect(tally, status == 0 && reported, "the units' benchmark times each lane count", output);
     free(text);
-    char* refused[] = { (char*)executable, "benchmark-check-units", "--lanes", "1,0", NULL };
-    const int refusal = BUSTER_HOST_VECTOR ? check_units_test_run(directory, refused, "/dev/null", "/dev/null", false) : 1;
-    check_units_test_expect(tally, refusal == 1, "the units' benchmark took no lanes as a lane count", directory);
+    const char* const refusals[][2] = {
+        { "--lanes", "1,0" },
+        { "--lanes", "1,2,3,4,5,6,7,8,9" },
+        { "--lanes", "1," },
+        { "--runs", "1001" },
+        { "--runs", "18446744073709551615" },
+        { "--units", "4097" },
+        { "--functions", "4294967297" },
+        { "--units", "2x" },
+    };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        char* refused[] = { (char*)executable, "benchmark-check-units", (char*)refusals[r][0], (char*)refusals[r][1], NULL };
+        const int refusal = BUSTER_HOST_VECTOR ? check_units_test_run(directory, refused, "/dev/null", "/dev/null", false) : 1;
+        char detail[128];
+        snprintf(detail, sizeof(detail), "%s %s", refusals[r][0], refusals[r][1]);
+        check_units_test_expect(tally, refusal == 1, "the units' benchmark took a count it can't", detail);
+    }
     // A command that fails every time, as one with an option the driver doesn't take: the same status each run, which
     // time-runs alone would pass.
     char* failing[] = { (char*)executable, "benchmark-check-units", "--units", "2", "--functions", "2", "--lanes", "1", "--runs", "1", "--", "--no-such-option", NULL };
@@ -1835,7 +1852,7 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
     check_units_test_expect(tally, failed == 1, "the units' benchmark passed a command that fails", directory);
     if (BUSTER_HOST_VECTOR)
     {
-        printf("  benchmark: benchmark-check-units by 1 and 2 lanes; a count of none, and a command that fails, refused\n");
+        printf("  benchmark: benchmark-check-units by 1 and 2 lanes; %u counts it can't take, and a command that fails, refused\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
     }
 }
 
