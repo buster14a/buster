@@ -167,9 +167,14 @@ typedef enum Tier1SelectRule
     // A memory fence (IR_FENCE, #1059) of the order and scope `immediate`: mfence for a thread fence of seq_cst, the one
     // x86-64 needs an instruction for, and no records for the others. No value; no pass moved an access across it.
     TIER1_RULE_FENCE,
-    // The high 64 bits of values[0] times values[1], unsigned (IR_MULHU, #141's 128-bit integers): one operand in rax,
-    // mul of the other, the result in rdx, which the consumers save around it as TIER1_RULE_DIVIDE_RECIPROCAL's.
+    // The high 64 bits of values[0] times values[1], unsigned (IR_INTRINSIC's mulhu, #141's 128-bit integers): one
+    // operand in rax, mul of the other, the result in rdx, which the consumers save around it as
+    // TIER1_RULE_DIVIDE_RECIPROCAL's.
     TIER1_RULE_MULTIPLY_HIGH,
+    // An x86 builtin's bit manipulation of values[0] by values[1] (IR_INTRINSIC's pdep, pext, bzhi and bextr, #141), the
+    // intrinsic `immediate` (BUSTER_IR_INTRINSIC_*): its one VEX instruction of `width` 4 or 8, whose three registers
+    // are its own, the destination's any of them (tier1_select_intrinsic).
+    TIER1_RULE_INTRINSIC,
     // Long double (F80, #141), whose values the CFG consumer keeps in frame objects of their own, one per value, 16 bytes
     // each, and computes on the x87 stack between them, leaving it empty after each node (tier1_emit_cfg_x87): its kind
     // in `scale` (BUSTER_TIER1_X87_*), and in `values` the node's operands that aren't long doubles alone (a load's or a
@@ -821,6 +826,27 @@ static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t sourc
     return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width)->move, destination, source);
 }
 
+// TIER1_RULE_INTRINSIC's record: pdep and pext read their source from vvvv and their mask from rm, bzhi and bextr their
+// source from rm and their index or control from vvvv (the IR's a is the source, b the other).
+static X86Instruction tier1_select_intrinsic(const Tier1SelectHoles* holes)
+{
+    static const uint16_t forms[BUSTER_IR_INTRINSIC_COUNT][2] = {
+        [BUSTER_IR_INTRINSIC_PDEP] = { X86_FORM_PDEP_R32_R32_RM32, X86_FORM_PDEP_R64_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_PEXT] = { X86_FORM_PEXT_R32_R32_RM32, X86_FORM_PEXT_R64_R64_RM64 },
+        [BUSTER_IR_INTRINSIC_BZHI] = { X86_FORM_BZHI_R32_RM32_R32, X86_FORM_BZHI_R64_RM64_R64 },
+        [BUSTER_IR_INTRINSIC_BEXTR] = { X86_FORM_BEXTR_R32_RM32_R32, X86_FORM_BEXTR_R64_RM64_R64 },
+    };
+    const uint32_t operation = holes->immediate < BUSTER_IR_INTRINSIC_COUNT ? (uint32_t)holes->immediate : BUSTER_IR_INTRINSIC_MULHU;
+    const bool deposit = operation == BUSTER_IR_INTRINSIC_PDEP || operation == BUSTER_IR_INTRINSIC_PEXT;
+    return (X86Instruction){
+        .form = forms[operation][holes->width == 8],
+        .reg = holes->destination,
+        .vvvv = deposit ? holes->left : holes->right,
+        .rm = deposit ? holes->right : holes->left,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+    };
+}
+
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 {
     Tier1SelectRecords result = {0};
@@ -1021,6 +1047,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     case TIER1_RULE_UNREACHABLE:
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_UD2 });
+        break;
+    case TIER1_RULE_INTRINSIC:
+        tier1_select_append(&result, tier1_select_intrinsic(holes));
         break;
     case TIER1_RULE_FENCE:
         if (holes->immediate == BUSTER_IR_FENCE_SEQ_CST)
@@ -3581,12 +3610,21 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_MULHU && type == IR_I64)
+    else if (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_MULHU && type == IR_I64)
     {
         base.rule = TIER1_RULE_MULTIPLY_HIGH;
         base.values[0] = a;
         base.values[1] = b;
         base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_INTRINSIC && c > BUSTER_IR_INTRINSIC_MULHU && c < BUSTER_IR_INTRINSIC_COUNT && integer)
+    {
+        base.rule = TIER1_RULE_INTRINSIC;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.immediate = c;
+        base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_LIFETIME)
