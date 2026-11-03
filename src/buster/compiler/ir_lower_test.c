@@ -2685,8 +2685,8 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
-// The expected result of ir_lower_test_depth_types' function, by C.
-static uint64_t ir_lower_test_depth_types_expected(uint64_t p)
+// The expected results of ir_lower_test_depth_types' functions, by C: f, and g = 100 + f.
+static uint64_t ir_lower_test_depth_types_expected(uint64_t p, bool pending)
 {
     uint32_t s = 0;
     for (uint32_t n = (uint32_t)p; n != 0; n -= 1)
@@ -2694,27 +2694,135 @@ static uint64_t ir_lower_test_depth_types_expected(uint64_t p)
         const uint64_t a = (n & 1) != 0 ? 7 : 9;
         s = s + ((n & 2) != 0 ? 3u : 4u) + (uint32_t)a;
     }
-    return s;
+    return pending ? 100 + (uint64_t)s : s;
 }
 
-// #1189: depth 0 of one function's expression stack carries a U64 into one join and an I32 into another, so the
-// lowering gives depth 0 a slot per type, and depth 1 one more. Every depth slot must then be reached by one type's
-// accesses alone, the U64's and the I32's at depth 0 in different slots, the function must compute what C does, and
-// promotion must leave no slot behind and no load or store, its result the same. A plan that let a block's stores and its
-// successor's loads pick different slots, or gave two types one slot again (whose slot then stays in memory), fails here.
-// The joins are in a loop, so the slots' stores and loads repeat across its backedge:
+// One of ir_lower_test_depth_types' functions lowered by both paths: its temporary (depth) slots, `temporaries` of them,
+// each reached by one type's loads and stores alone, `wide` of them i64's and the others i32's; its results at six
+// arguments C's; and promoted by both paths to no slot, load or store, its results the same by the shared IR's
+// interpreter.
+static void ir_lower_test_depth_check(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, bool pending, uint32_t temporaries, uint32_t wide, uint32_t index)
+{
+    static const uint64_t arguments[] =
+    {
+        0,
+        1,
+        2,
+        3,
+        6,
+        11
+    };
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena promoted = arena_reserve(1ull << 20);
+    Arena twin_promoted = arena_reserve(1ull << 20);
+    Arena scratch = arena_reserve(1ull << 20);
+    Arena execution = arena_reserve(1ull << 26);
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    ir_lower_test_expect(tally, ready, "depth-type arenas", 0, index);
+    IrFunction function =
+    {
+        0
+    };
+    const Tier0TestData data =
+    {
+        0
+    };
+    uint8_t globals[1] =
+    {
+        0
+    };
+    if (ready && ir_lower_test_lower(tally, source, result_type, 1, &output, &twin_output, &scratch, &function, 0, index))
+    {
+        // Each temporary slot's access types, a bit per IR type, by the loads' types and the stored values'.
+        uint32_t types[16] =
+        {
+            0
+        };
+        const bool bounded = function.slot_count <= BUSTER_ARRAY_LENGTH(types);
+        for (uint32_t i = 0; bounded && i < function.instruction_count; i += 1)
+        {
+            const bool access = function.op[i] == IR_LOAD || function.op[i] == IR_STORE;
+            const uint32_t address = access ? function.a[i] : BUSTER_IR_NONE;
+            const bool slot = address < function.instruction_count && function.op[address] == IR_STACK_ADDR;
+            const uint32_t s = slot ? function.a[address] : 0;
+            const uint32_t type = function.op[i] == IR_LOAD ? function.type[i] : access ? function.type[function.b[i]] : 0;
+            if (slot && s < function.slot_count && (function.slots[s].flags & BUSTER_IR_SLOT_TEMPORARY) != 0)
+            {
+                types[s] |= 1u << type;
+            }
+        }
+        uint32_t found = 0;
+        uint32_t wides = 0;
+        uint32_t narrows = 0;
+        bool single = bounded;
+        for (uint32_t s = 0; bounded && s < function.slot_count; s += 1)
+        {
+            const bool temporary = (function.slots[s].flags & BUSTER_IR_SLOT_TEMPORARY) != 0;
+            found += temporary;
+            single = single && (!temporary || __builtin_popcount(types[s]) == 1);
+            wides += temporary && types[s] == 1u << IR_I64;
+            narrows += temporary && types[s] == 1u << IR_I32;
+        }
+        ir_lower_test_expect(tally, single && found == temporaries && wides == wide && narrows == temporaries - wide,
+                             "a depth slot per depth and type, each reached by one type alone", 0, index);
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(arguments); k += 1)
+        {
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &arguments[k], 1, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == ir_lower_test_depth_types_expected(arguments[k], pending), "the depth slots' values reach their joins across the loop", 0, index);
+        }
+        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, index);
+        IrFunction promoted_function =
+        {
+            0
+        };
+        const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promoted_function);
+        uint32_t memory = 0;
+        for (uint32_t i = 0; check.error == IR_OK && i < promoted_function.instruction_count; i += 1)
+        {
+            memory += promoted_function.op[i] == IR_LOAD || promoted_function.op[i] == IR_STORE || promoted_function.op[i] == IR_STACK_ADDR;
+        }
+        ir_lower_test_expect(tally, check.error == IR_OK && memory == 0 && promoted_function.slot_count == 0, "promotion takes every depth slot and local: no slot, load or store is left", 0, index);
+        // The promoted function has phis, which this executor doesn't take: the shared IR's interpreter runs it.
+        const IrInterpreterFunction code = { .symbol = 1, .function = &promoted_function };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
+        for (uint32_t k = 0; check.error == IR_OK && k < BUSTER_ARRAY_LENGTH(arguments); k += 1)
+        {
+            const InterpreterValue argument = { .low = arguments[k] };
+            const InterpreterResult result = ir_interpret(&program, 1, &argument, 1, 0, &execution);
+            const uint64_t value = result_type == IR_I32 ? (uint32_t)result.value.low : result.value.low;
+            ir_lower_test_expect(tally, result.status == INTERPRETER_OK && value == ir_lower_test_depth_types_expected(arguments[k], pending), "the promoted function computes the same", 0, index);
+        }
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
+// #1189: one depth of a function's expression stack carries values of different types into different blocks, so the
+// lowering gives it a slot per type. A plan that let a block's stores and its successor's loads pick different slots, or
+// gave two types one slot again (whose slot then stays in memory), fails ir_lower_test_depth_check.
+//
+// f's depth 0 carries a U64 into one `?:` join and an I32 into another, and its depth 1 an I32, the joins in a loop:
 //     int f(int p) { int s = 0; for (int n = p; n != 0; n = n - 1) { long a = n & 1 ? 7 : 9;
 //                                                                     s = s + (n & 2 ? 3 : 4) + (int)a; } return s; }
+// g is f's loop in a GNU statement expression under a pending 100L, so depth 0's U64 crosses the loop's backedge in its
+// slot and the joins' values are a depth higher, depth 1 a U64's and an I32's:
+//     long g(int p) { return 100L + ({ int s = 0; for (...) { ... } s; }); }
 static void ir_lower_test_depth_types(IrLowerTestTally* tally)
 {
-    // Locals: p (the parameter), s, n and a.
-    static const uint8_t kinds[] =
+    // Locals: p (the parameter), s, n and a. f's 4 and 32 are its loop's head and exit, 13 and 22 its joins; g's are 5
+    // and 33, 14 and 23.
+    static const uint8_t f_kinds[] =
     {
         BUSTER_TYPED_CONST,
         BUSTER_TYPED_SET_LOCAL,
         BUSTER_TYPED_LOCAL,
         BUSTER_TYPED_SET_LOCAL,
-        // 4: the loop's head, the backedge's target.
         BUSTER_TYPED_LOCAL,
         BUSTER_TYPED_BRANCH_FALSE,
         BUSTER_TYPED_LOCAL,
@@ -2724,7 +2832,6 @@ static void ir_lower_test_depth_types(IrLowerTestTally* tally)
         BUSTER_TYPED_CONST,
         BUSTER_TYPED_JUMP_VALUE,
         BUSTER_TYPED_CONST,
-        // 13: the join of a U64 at depth 0.
         BUSTER_TYPED_SET_LOCAL,
         BUSTER_TYPED_LOCAL,
         BUSTER_TYPED_LOCAL,
@@ -2733,9 +2840,7 @@ static void ir_lower_test_depth_types(IrLowerTestTally* tally)
         BUSTER_TYPED_BRANCH_FALSE,
         BUSTER_TYPED_CONST,
         BUSTER_TYPED_JUMP_VALUE,
-        // 21: entered with an I32 at depth 0.
         BUSTER_TYPED_CONST,
-        // 22: the join of I32s at depths 0 and 1.
         BUSTER_TYPED_LOCAL,
         BUSTER_TYPED_CONVERT,
         BUSTER_TYPED_ADD,
@@ -2746,11 +2851,10 @@ static void ir_lower_test_depth_types(IrLowerTestTally* tally)
         BUSTER_TYPED_SUB,
         BUSTER_TYPED_SET_LOCAL,
         BUSTER_TYPED_JUMP,
-        // 32: the loop's exit.
         BUSTER_TYPED_LOCAL,
         BUSTER_TYPED_RETURN
     };
-    static const uint8_t classes[] =
+    static const uint8_t f_classes[] =
     {
         BUSTER_TYPED_CLASS_I32,
         BUSTER_TYPED_CLASS_I32,
@@ -2787,7 +2891,7 @@ static void ir_lower_test_depth_types(IrLowerTestTally* tally)
         BUSTER_TYPED_CLASS_I32,
         BUSTER_TYPED_CLASS_I32
     };
-    static const uint64_t values[] =
+    static const uint64_t f_values[] =
     {
         0,
         1,
@@ -2824,7 +2928,128 @@ static void ir_lower_test_depth_types(IrLowerTestTally* tally)
         1,
         0
     };
-    _Static_assert(BUSTER_ARRAY_LENGTH(kinds) == BUSTER_ARRAY_LENGTH(classes) && BUSTER_ARRAY_LENGTH(kinds) == BUSTER_ARRAY_LENGTH(values), "one class and value per entry");
+    static const uint8_t g_kinds[] =
+    {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_AND,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_AND,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONVERT,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SUB,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_CONVERT,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN
+    };
+    static const uint8_t g_classes[] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64
+    };
+    static const uint64_t g_values[] =
+    {
+        100,
+        0,
+        1,
+        0,
+        2,
+        2,
+        33,
+        2,
+        1,
+        0,
+        13,
+        7,
+        14,
+        9,
+        3,
+        1,
+        2,
+        2,
+        0,
+        22,
+        3,
+        23,
+        4,
+        3,
+        0,
+        0,
+        0,
+        1,
+        2,
+        1,
+        0,
+        2,
+        5,
+        1,
+        0,
+        0,
+        0
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(f_kinds) == BUSTER_ARRAY_LENGTH(f_classes) && BUSTER_ARRAY_LENGTH(f_kinds) == BUSTER_ARRAY_LENGTH(f_values), "one class and value per entry");
+    _Static_assert(BUSTER_ARRAY_LENGTH(g_kinds) == BUSTER_ARRAY_LENGTH(g_classes) && BUSTER_ARRAY_LENGTH(g_kinds) == BUSTER_ARRAY_LENGTH(g_values), "one class and value per entry");
     static const uint8_t local_classes[4] =
     {
         BUSTER_TYPED_CLASS_I32,
@@ -2847,115 +3072,33 @@ static void ir_lower_test_depth_types(IrLowerTestTally* tally)
             X86_REGISTER_RDI
         },
     };
-    const Tier0Function source =
+    const Tier0Function f =
     {
-        .kinds = kinds,
-        .classes = classes,
-        .values = values,
-        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .kinds = f_kinds,
+        .classes = f_classes,
+        .values = f_values,
+        .count = BUSTER_ARRAY_LENGTH(f_kinds),
         .local_classes = local_classes,
         .local_flags = local_flags,
         .local_count = 4,
         .parameter_count = 1,
         .parameters = &parameter,
     };
-    static const uint64_t arguments[] =
+    const Tier0Function g =
     {
-        0,
-        1,
-        2,
-        3,
-        6,
-        11
+        .kinds = g_kinds,
+        .classes = g_classes,
+        .values = g_values,
+        .count = BUSTER_ARRAY_LENGTH(g_kinds),
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 4,
+        .parameter_count = 1,
+        .parameters = &parameter,
     };
-    Arena output = arena_reserve(1ull << 20);
-    Arena twin_output = arena_reserve(1ull << 20);
-    Arena promoted = arena_reserve(1ull << 20);
-    Arena twin_promoted = arena_reserve(1ull << 20);
-    Arena scratch = arena_reserve(1ull << 20);
-    Arena execution = arena_reserve(1ull << 26);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
-    ir_lower_test_expect(tally, ready, "depth-type arenas", 0, 0);
-    IrFunction function =
-    {
-        0
-    };
-    const Tier0TestData data =
-    {
-        0
-    };
-    uint8_t globals[1] =
-    {
-        0
-    };
-    if (ready && ir_lower_test_lower(tally, &source, IR_I32, 1, &output, &twin_output, &scratch, &function, 0, 0))
-    {
-        // Each temporary slot's access types, a bit per IR type, by the loads' types and the stored values'.
-        uint32_t types[8] =
-        {
-            0
-        };
-        uint32_t temporaries = 0;
-        bool bounded = function.slot_count <= BUSTER_ARRAY_LENGTH(types);
-        for (uint32_t i = 0; bounded && i < function.instruction_count; i += 1)
-        {
-            const bool access = function.op[i] == IR_LOAD || function.op[i] == IR_STORE;
-            const uint32_t address = access ? function.a[i] : BUSTER_IR_NONE;
-            const bool slot = address < function.instruction_count && function.op[address] == IR_STACK_ADDR;
-            const uint32_t s = slot ? function.a[address] : 0;
-            const uint32_t type = function.op[i] == IR_LOAD ? function.type[i] : access ? function.type[function.b[i]] : 0;
-            if (slot && s < function.slot_count && (function.slots[s].flags & BUSTER_IR_SLOT_TEMPORARY) != 0)
-            {
-                types[s] |= 1u << type;
-            }
-        }
-        uint32_t wide = 0;
-        uint32_t narrow = 0;
-        bool single = bounded;
-        for (uint32_t s = 0; bounded && s < function.slot_count; s += 1)
-        {
-            const bool temporary = (function.slots[s].flags & BUSTER_IR_SLOT_TEMPORARY) != 0;
-            temporaries += temporary;
-            single = single && (!temporary || __builtin_popcount(types[s]) == 1);
-            wide += temporary && types[s] == 1u << IR_I64;
-            narrow += temporary && types[s] == 1u << IR_I32;
-        }
-        ir_lower_test_expect(tally, single && temporaries == 3 && wide == 1 && narrow == 2,
-                             "a depth slot per depth and type: depth 0's U64 and I32 in slots of their own, depth 1's in a third", 0, 0);
-        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(arguments); k += 1)
-        {
-            bool fault = false;
-            const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &arguments[k], 1, &execution, &fault);
-            ir_lower_test_expect(tally, !fault && actual == ir_lower_test_depth_types_expected(arguments[k]), "the depth slots' values reach their joins across the loop", 0, k);
-        }
-        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 0);
-        IrFunction promoted_function =
-        {
-            0
-        };
-        const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promoted_function);
-        uint32_t memory = 0;
-        for (uint32_t i = 0; check.error == IR_OK && i < promoted_function.instruction_count; i += 1)
-        {
-            memory += promoted_function.op[i] == IR_LOAD || promoted_function.op[i] == IR_STORE || promoted_function.op[i] == IR_STACK_ADDR;
-        }
-        ir_lower_test_expect(tally, check.error == IR_OK && memory == 0 && promoted_function.slot_count == 0, "promotion takes every depth slot and local: no slot, load or store is left", 0, 0);
-        // The promoted function has phis, which this executor doesn't take: the shared IR's interpreter runs it.
-        const IrInterpreterFunction code = { .symbol = 1, .function = &promoted_function };
-        const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
-        for (uint32_t k = 0; check.error == IR_OK && k < BUSTER_ARRAY_LENGTH(arguments); k += 1)
-        {
-            const InterpreterValue argument = { .low = arguments[k] };
-            const InterpreterResult result = ir_interpret(&program, 1, &argument, 1, 0, &execution);
-            ir_lower_test_expect(tally, result.status == INTERPRETER_OK && (uint32_t)result.value.low == ir_lower_test_depth_types_expected(arguments[k]), "the promoted function computes the same", 0, k);
-        }
-    }
-    arena_release(&output);
-    arena_release(&twin_output);
-    arena_release(&promoted);
-    arena_release(&twin_promoted);
-    arena_release(&scratch);
-    arena_release(&execution);
+    // f: depth 0's i64 and i32, depth 1's i32. g: depth 0's i64, depth 1's i64 and i32, depth 2's i32.
+    ir_lower_test_depth_check(tally, &f, IR_I32, false, 3, 1, 0);
+    ir_lower_test_depth_check(tally, &g, IR_I64, true, 4, 2, 1);
 }
 
 // Defined after the production interpreter, optimizers and selector in ir_stack_test.c: exercise their real contracts.
