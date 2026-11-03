@@ -7,7 +7,7 @@
 // the `assemble` command too, into GNU as's sections, symbols and relocations (the existing comparator's); and the
 // program linked from it must print what the one linked from GNU as's object prints, and succeed. Every refusal is then
 // a named gap of the compilers' ordinary output, rather than one a user meets. The x86-64-v4 programs run where the
-// host has AVX-512 (F, BW, DQ and VL); elsewhere their objects are still compared.
+// host has every feature of x86-64-v4; elsewhere their objects are still compared.
 
 // #1115's fixtures, each compared with GNU as by --cross-check: the TLS models' relocation modifiers in both cases and
 // syntaxes, on instructions and on .long (with GNU as's prefixes written as statements, data16 and rex64, and its
@@ -552,8 +552,13 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
         { .name = "O3-v4", .flags = { "-O3", "-march=x86-64-v4", "-fPIE" }, .architecture = X86_ARCH_V4 },
     };
     static const char* const targets[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=x86-64-v4" };
-    const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
-    const bool runs_v4 = (x86_target_native().features & avx512) == avx512;
+    // The x86-64-v4 programs run where the host has every feature of x86-64-v4, not only AVX-512's: clang's code for it
+    // takes FMA's vfmadd231sd, and a virtual CPU can show AVX512F, BW, DQ and VL with FMA or another of v3's masked
+    // (#1223's review). Elsewhere their objects are still compared.
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    asm_test_check(test, parsed, "the corpus's x86-64-v4 target", 0);
+    const bool runs_v4 = parsed && (x86_target_native().features & v4.features) == v4.features;
     const bool gnu_padding = asm_test_gas_pads_like_2_47(test, directory);
     Arena files = arena_reserve(1ull << 28);
     uint32_t passed = 0;

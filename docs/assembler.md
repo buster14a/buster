@@ -1071,7 +1071,9 @@ and relocations (the comparator above). The program linked from it (by the
 compiler that wrote it, with `-pthread`) must then print what the program
 linked from GNU as's object prints, and succeed. The programs check their own
 exactly representable results too. The x86-64-v4 programs run where the host
-has AVX-512 F, BW, DQ and VL; elsewhere their objects are still compared.
+has every feature of x86-64-v4 (its whole parsed target, not only AVX-512 F, BW,
+DQ and VL: clang's code for it takes FMA); elsewhere their objects are still
+compared.
 
 Where GNU as pads code unlike binutils 2.47 (2.42 orders its long NOPs
 otherwise; `asm_test_gas_pads_like_2_47`), GNU as's code padding is taken as
