@@ -1398,18 +1398,27 @@ static uint32_t x86_semantics_register_number(uint8_t value)
     return (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3u) : (value & 15u);
 }
 
-// A VSIB operand's data element and index: a gather's or scatter's last letter and the one before it (vpgatherdq:
-// dword indices, qword elements).
+// A VSIB operand's data element and index: an integer gather's or scatter's last letter and the one before it
+// (vpgatherdq: dword indices, qword elements), a floating one's last letter, s or d, and the one before its p (vgatherqps:
+// qword indices, floats).
+static bool x86_semantics_vsib_floating(const char* mnemonic, size_t length)
+{
+    return length >= 3 && mnemonic[length - 2] == 'p' && (mnemonic[length - 1] == 's' || mnemonic[length - 1] == 'd');
+}
+
 static uint32_t x86_semantics_vsib_element(uint32_t form)
 {
     const char* mnemonic = x86_form_descriptions[form].mnemonic;
-    return mnemonic[strlen(mnemonic) - 1] == 'q' ? 8 : 4;
+    const size_t length = strlen(mnemonic);
+    const bool floating = x86_semantics_vsib_floating(mnemonic, length);
+    return mnemonic[length - 1] == (floating ? 'd' : 'q') ? 8 : 4;
 }
 
 static uint32_t x86_semantics_vsib_index(uint32_t form)
 {
     const char* mnemonic = x86_form_descriptions[form].mnemonic;
-    return mnemonic[strlen(mnemonic) - 2] == 'q' ? 8 : 4;
+    const size_t length = strlen(mnemonic);
+    return mnemonic[length - (x86_semantics_vsib_floating(mnemonic, length) ? 3 : 2)] == 'q' ? 8 : 4;
 }
 
 // A random record of the form: random registers (vvvv's too), the memory operand RIP-relative into the data page when
