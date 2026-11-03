@@ -74,4 +74,6 @@ requirements. [Command index](README.md).
   with the scripts from a pinned buster-performance commit and the other inputs
   by their hashes. Against the record, its clang builds link with clang rather
   than `cc`, and each run's counters are its own rather than `perf stat`'s of
-  one run per build.
+  one run per build. `correctness.tests` checks its dispatch on every run: an
+  incomplete command prints its usage, and one without its inputs fails its
+  first build.
