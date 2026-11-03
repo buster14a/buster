@@ -191,9 +191,11 @@ The default `test-checker` run deals them to its parts too. The checks:
   data and a jump table, the baseline, AVX2 (`-march=x86-64-v3`) and AVX-512
   (`-march=x86-64-v4`, `znver5`) targets, a function's `target("avx2")`
   attribute, `-funsigned-char`, `-D` and `-std=c11`, and the scalar path, both
-  the request's and `--scalar` among the options (the driver's `--scalar`).
-  Where `-c` refuses, both must refuse the same way: wider vectors than the
-  target's registers at the emission, an `always_inline` callee whose target
+  the request's and `--scalar` among the options (the driver's `--scalar`),
+  and vectors wider than the target's registers, split across them (32 bytes
+  for the baseline, 64 for AVX2: #1193). Where `-c` refuses, both must refuse
+  the same way: a 32-byte variable shift for the baseline, which SSE2 has no
+  instruction to split into, at the emission, an `always_inline` callee whose target
   the caller lacks at the target-feature check, and `-fshort-enums` at the
   request. The first case runs again last, after the other targets, and must
   make the same object again: one preparation's configuration never reaches the

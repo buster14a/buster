@@ -8,7 +8,9 @@
 // realign its frame (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their
 // operators, calls, members, arrays, globals, casts to and from integers of their bytes and nontemporal stores, and their
 // divisions' floating-point flags under FENV_ACCESS; and _Atomic vectors of 4 to 64 bytes, their atomic loads, stores,
-// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets.
+// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets, and
+// #1193 their vectors wider than the targets' registers: results split across them, with clang's code both ways, and
+// operators split into pieces they hold.
 // Unsupported operations and widths are refused by name. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
@@ -487,6 +489,30 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "C t=s.v+2;s.v=t;FOLD(s);V a={n,-n},b=narrow(a);V out[2]={a,b};out[0]=out[1];FOLD(out);\n"
           "v16su x;fill(&x,64,n);wide(x);v16su z=hold;FOLD(z);return (int)h;}\n"
         },
+        // #1193: vectors of 32 and 64 bytes returned split across the target's registers (xmm0 and xmm1, xmm0 to xmm3,
+        // ymm0 and ymm1) or whole, by the program's functions, by the harness's (clang's) to the program and by the
+        // program's to the harness through pointers.
+        { "baseline-wide-results",
+          "typedef int W8 __attribute__((vector_size(32)));typedef double W16 __attribute__((vector_size(64)));typedef unsigned char W64 __attribute__((vector_size(64)));\n"
+          "W8 external_wide8(W8,int);W16 external_wide16(W16,int);int external_apply_wide8(W8(*)(W8,int),int);int external_apply_wide16(W16(*)(W16,int),int);\n"
+          "static W8 own8(W8 a,int k){a[k&7]=k*5;W8 b=a;return b;}static W16 own16(W16 a,int k){a[k&7]=k*0.5;return a;}\n"
+          "static W64 bytes64(int n){W64 v;fill(&v,64,n);v[(unsigned)n%64]=7;return v;}static W8 chain8(W8 a,int k){return own8(external_wide8(a,k),k+1);}\n"
+          "int tested(int n){unsigned h=2166136261u;W8 a;W16 d;fill(&a,32,n);filld((double*)&d,8,n);\n"
+          "W8 r[]={own8(a,n),external_wide8(a,n),chain8(a,n)};FOLD(r);W16 s[]={own16(d,n),external_wide16(d,n),own16(external_wide16(d,n+1),n)};FOLD(s);\n"
+          "W64 b=bytes64(n);FOLD(b);int e[]={external_apply_wide8(own8,n),external_apply_wide16(own16,n),external_apply_wide8(external_wide8,n)};FOLD(e);return (int)h;}\n"
+        },
+        // #1193: operators on vectors wider than the target's registers, split into pieces they hold as LLVM splits them:
+        // integers of each element size, unsigned compares, splats, negations (a float's through its sign bit) and floats.
+        { "baseline-wide-operators",
+          "typedef long long v8di __attribute__((vector_size(64)));\n"
+          "int tested(int n){unsigned h=2166136261u;v8si a,b;v16su u,v;v8sf f,g;v8df d,e;v64qi c,q;v16hi k,l;v4di x,y;\n"
+          "fill(&a,32,n);fill(&b,32,n+1);fill(&u,64,n+2);fill(&v,64,n+3);fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);filld((double*)&d,8,n);filld((double*)&e,8,n+2);\n"
+          "fill(&c,64,n+4);fill(&q,64,n+5);fill(&k,32,n+6);fill(&l,32,n+7);fill(&x,32,n+8);fill(&y,32,n+9);g+=1.0f;e+=1.0;\n"
+          "v8si r[]={a+b,a-b,a*b,a&b,a|b,a^b,~a,-b,a<b,a==b,a>=b,a+n};FOLD(r);v16su t[]={u+v,u-v,u*v,u<v,u>=v,u!=v,u+(unsigned)n,~u};FOLD(t);\n"
+          "v8sf w[]={f+g,f-g,f*g,f/g,-f,f+2.5f};FOLD(w);v8si fc[]={f<g,f>=g,f==g,f!=g};FOLD(fc);v8df z[]={d+e,d-e,d*e,d/e,-d,d*1.5};FOLD(z);v8di dc[]={d<e,d>=e};FOLD(dc);\n"
+          "v64qi m[]={c+q,c-q,c<q,c==q,~c,c+(signed char)n};FOLD(m);v16hi o[]={k+l,k*l,k<l,-k};FOLD(o);v4di p[]={x+y,x-y,-x,x^y,x+(long long)n};FOLD(p);\n"
+          "v16su mem[2]={u,v};mem[(unsigned)n&1]+=u;FOLD(mem);return (int)h;}\n"
+        },
         { "baseline-floating-pressure",
           "static double consume(double a,double b,double c,double d,double e,double f,double g,double h,double i,double j,double k,double l,double m,double o,double p,double q,v4si v){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+v[1];}\n"
           "int tested(int n){v4si a={n,1,2,3},b={4,n,5,6};return (int)consume(n,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15,a*b+a);}\n"
@@ -540,12 +566,9 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         }
         if (parsed)
         {
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));int tested(V a,V b){V c;c=a+b;return c[0];}",
-                                               "baseline-wide-vector-operator", true, false, 0, 0,
-                                               "vector operations wider than the target's registers", &target);
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a){return a;}",
-                                               "baseline-wide-vector-result", true, false, 0, 0,
-                                               "vector results wider than the target's registers", &target);
+            // A wide operator's pieces are refused by their own reason (#1193).
+            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a/b;}",
+                                               "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
                                                "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
         }
