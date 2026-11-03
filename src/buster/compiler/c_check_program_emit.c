@@ -264,11 +264,46 @@ struct CheckEmitBoard
 // (check_program_emit_follow) until lane 0 ends the flow (lane_flow_end).
 #define BUSTER_CHECK_EMIT_ROUND_BODIES 1u
 
+// A team that grows while it runs (#673's tail): in a command's flow, an emission whose GNU make jobserver gave it fewer
+// lanes than its bodies pay for, as when another recipe held the spare tokens as it started. Its parts are cut for every
+// lane it may take (BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE each) and taken in one order, the costliest first and the
+// others in source order, a place in it a take of
+// `ticket`: by lane 0 alone, then in a
+// round of all those lanes once it has admitted another (check_program_emit_growing), in which each lane past the
+// admitted ones sleeps until lane 0 admits it (check_program_emit_admitted). Between its parts, lane 0 reads whether the
+// jobserver has spare tokens, at most every BUSTER_CHECK_EMIT_GROW_NANOSECONDS, and takes them under a lease of its own,
+// up to BUSTER_CHECK_EMIT_GROW_LEASES in all, when the parts left pay for it (check_program_emit_grow): `rest` holds the
+// tokens of the parts from each place in the order on. `admission` is the lanes admitted, shifted left by two, with bit
+// 1 set once lane 0 has no part left to take, so that the lanes still asleep leave (bit 0 is lane_sleep's).
+typedef struct CheckEmitGrowth CheckEmitGrowth;
+struct CheckEmitGrowth
+{
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint64_t ticket;
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint32_t admission;
+    uint64_t parts;
+    const uint32_t* order;
+    uint64_t* rest;
+};
+// About 100 µs: a team grows that much later than the tokens it takes are spare, at worst, plus a part's time; and a team
+// that never grows reads the clock once per part and the jobserver once per interval.
+#define BUSTER_CHECK_EMIT_GROW_NANOSECONDS 100000ull
+// The bodies' tokens whose emission on one lane takes about as long as a growth's guardian takes to start
+// (worker_budget_grow: 161 to 164 µs on the 9700X, #937), at about 10 ns a token (sqlite3.c's on one lane).
+#define BUSTER_CHECK_EMIT_GROW_TOKENS 16384u
+#define BUSTER_CHECK_EMIT_GROW_LEASES 8u
+// A growing team's parts per lane it may take, a quarter of a round's (BUSTER_LANE_PARTS_PER_LANE): each part costs lane
+// 0, which takes most of a team's parts that grows late or never, some of one lane's locality. On the 9700X, sqlite3.c's
+// -c under a jobserver without a spare token took 0.83% more wall time than one lane's emission with 64 parts per lane,
+// 0.70% with 32 and 0.20% with 16 (medians of 22 runs).
+#define BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE 16u
+// The first of a test's supplied tokens (CheckProgramLanes.grow_supply).
+#define BUSTER_CHECK_EMIT_SUPPLY_BYTE 0xa0u
+
 // The C driver's --tier1 (c_check_tier1.c, #138's piece for #140): each body Tier 1's pipeline takes compiled by it,
 // explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
-#define BUSTER_CHECK_TIER1_STEPS 7
+#define BUSTER_CHECK_TIER1_STEPS 8
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
 {
@@ -456,11 +491,18 @@ struct CheckProgramLanes
     // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
     // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
     struct CheckUnitsLane* units_lane;
-    // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
-    // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
-    // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
-    // the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
+    // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first part, as
+    // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
+    uint32_t grow_supply;
+    // What the last emission ran: its lanes (a growing team's at its end) and parts, the lanes a growing team admitted
+    // after it started, the lanes that took a part of the bodies that made its output (1 for the calling thread alone, a
+    // serial retry's among them; on the units' board, the helping lanes too; 0 without bodies), the lane that took the
+    // squeezed part (its index plus one, 0 for none), and whether it ran them again on one lane and why; with `timing`, how long its steps took:
+    // from its start to the lanes' (the lowering's preparation and the access column), the lanes' run (with their
+    // threads' start), and from the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
     uint32_t active;
+    uint32_t grown;
+    uint32_t worked;
     uint32_t parts;
     uint32_t squeezed;
     CheckProgramAgain again;
@@ -618,6 +660,8 @@ struct CheckEmitRun
     CheckEmitPart* parts;
     uint32_t part_count;
     CheckEmitLane* lane_states;
+    // A growing team's (CheckEmitGrowth), which its round's lanes take the parts by; null for any other run.
+    CheckEmitGrowth* growth;
     // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
@@ -802,6 +846,51 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     return outcome;
 }
 
+// What a symbol's declarations make of it for GNU's common attribute (#147, check_program_emit's commons): the attribute,
+// a section attribute, which keeps it a definition of its own, an initializer's definition, which clang's
+// isVarDeclStrongDefinition makes a strong one, a tentative definition, without which the unit defines none, and the
+// nocommon attribute, which keeps -fcommon's from it. Its symbol is a common one where a tentative definition is all
+// that defines it, without a section, the attribute or -fcommon without nocommon make it one, and its flags have it
+// global (not weak or of internal linkage), of an object (not a thread-local) and no alias's
+// (check_program_emit_common).
+#define BUSTER_CHECK_EMIT_COMMON 0x01u
+#define BUSTER_CHECK_EMIT_COMMON_SECTION 0x02u
+#define BUSTER_CHECK_EMIT_COMMON_DEFINED 0x04u
+#define BUSTER_CHECK_EMIT_COMMON_TENTATIVE 0x08u
+#define BUSTER_CHECK_EMIT_NOCOMMON 0x10u
+
+// The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
+// tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
+// scalar path, `scalar`, takes every token), which only a unit with a common attribute, or compiled with -fcommon, pays
+// for.
+static void check_program_emit_commons(const CheckProgram* program, uint8_t* commons, bool scalar)
+{
+    (void)scalar;
+    const CheckInput* input = program->input;
+    for (uint32_t first = 0; first < input->token_count; first += 64)
+    {
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
+                                        check_input_scan_nonzero(input->static_objects, first, input->token_count);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const bool declares = input->declarations[token] == token && (input->defined[token] || input->tentative[token]);
+            const uint32_t object = declares ? input->objects[token] : 0;
+            const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+            commons[symbol] |= symbol == 0 ? 0 : input->defined[token] ? BUSTER_CHECK_EMIT_COMMON_DEFINED : BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
+        }
+    }
+}
+
+// Whether a symbol's declarations (`bits`, check_program_emit_commons') make it a common one, with -fcommon's `all`.
+static bool check_program_emit_common(uint8_t bits, bool all)
+{
+    const bool asked = (bits & BUSTER_CHECK_EMIT_COMMON) != 0 || (all && (bits & BUSTER_CHECK_EMIT_NOCOMMON) == 0);
+    return asked && (bits & (BUSTER_CHECK_EMIT_COMMON_SECTION | BUSTER_CHECK_EMIT_COMMON_DEFINED | BUSTER_CHECK_EMIT_COMMON_TENTATIVE)) ==
+                        BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
+}
+
 // A part of the bodies on lane `lane`: their lowering (check_lower_part), then each one's Tier 0 code, the lane's
 // function access column given, and its code after Tier 0 (check_program_emit_code) until one of them fails.
 static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
@@ -983,8 +1072,39 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     lanes->squeezed = index + 1;
 }
 
-// Every lane's entry: the parts by cost (CheckEmitRun.costs), taken costliest first. A lane prepares its writer when it
-// takes its first part, so that one that takes none spends nothing on it.
+// Part `part` of the bodies, cut by CheckEmitRun.boundaries, on lane `index`, whose state is `lane`. A lane prepares its
+// writer when it takes its first part, so that one that takes none spends nothing on it.
+static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index, uint32_t part)
+{
+    CheckEmitPart* result = run->parts + part;
+    result->lower.first = (uint32_t)run->boundaries[part];
+    result->lower.end = (uint32_t)run->boundaries[part + 1];
+    const uint32_t squeeze = run->lanes->squeeze_body;
+    if (squeeze != 0 && squeeze - 1 >= result->lower.first && squeeze - 1 < result->lower.end)
+    {
+        check_program_emit_squeezed(run, lane, result, index);
+    }
+    else
+    {
+        lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, index);
+        lane->prepared = true;
+        if (lane->ready)
+        {
+            check_program_emit_part(run, lane, result);
+        }
+        else
+        {
+            check_program_emit_part_refused(result);
+        }
+    }
+    if (run->lanes->slow_lane == index + 1)
+    {
+        const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)run->lanes->slow_microseconds * 1000 };
+        nanosleep(&pause, NULL);
+    }
+}
+
+// Every lane's entry: the parts by cost (CheckEmitRun.costs), taken costliest first.
 static void check_program_emit_lane(void* argument)
 {
     CheckEmitRun* run = argument;
@@ -993,33 +1113,7 @@ static void check_program_emit_lane(void* argument)
     const uint64_t parts = lane_parts_by_cost(run->costs, run->body_count, run->boundaries, run->orders[index]);
     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
     {
-        const uint32_t part = run->orders[index][taken];
-        CheckEmitPart* result = run->parts + part;
-        result->lower.first = (uint32_t)run->boundaries[part];
-        result->lower.end = (uint32_t)run->boundaries[part + 1];
-        const uint32_t squeeze = run->lanes->squeeze_body;
-        if (squeeze != 0 && squeeze - 1 >= result->lower.first && squeeze - 1 < result->lower.end)
-        {
-            check_program_emit_squeezed(run, lane, result, index);
-        }
-        else
-        {
-            lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, index);
-            lane->prepared = true;
-            if (lane->ready)
-            {
-                check_program_emit_part(run, lane, result);
-            }
-            else
-            {
-                check_program_emit_part_refused(result);
-            }
-        }
-        if (run->lanes->slow_lane == index + 1)
-        {
-            const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)run->lanes->slow_microseconds * 1000 };
-            nanosleep(&pause, NULL);
-        }
+        check_program_emit_take(run, lane, index, run->orders[index][taken]);
     }
     if (index == 0)
     {
@@ -1042,13 +1136,172 @@ static bool check_program_emit_round(LaneFlow* flow, CheckEmitRun* run, uint32_t
     return started;
 }
 
+// How many more lanes a growing team (CheckEmitGrowth) of `admitted` lanes, of up to `lanes`, admits now, under the
+// lease `lease`: as many as the jobserver has spare tokens, up to the lanes it may take and the parts left, if the parts
+// left pay for the guardian's start: their tokens on `admitted` lanes less on that many more (rest × more / (admitted ×
+// (admitted + more))) at least BUSTER_CHECK_EMIT_GROW_TOKENS, or whatever they pay with --lanes N (every_lane).
+static uint32_t check_program_emit_grow(const CheckEmitRun* run, const CheckEmitGrowth* growth, uint32_t admitted, uint32_t lanes, WorkerBudget* budget,
+                                        WorkerBudgetLease* lease)
+{
+    const uint64_t ticket = __atomic_load_n(&growth->ticket, __ATOMIC_RELAXED);
+    const uint64_t left = ticket < growth->parts ? growth->parts - ticket : 0;
+    uint64_t more = lanes - admitted;
+    more = left < more ? left : more;
+    const uint32_t spare = more != 0 ? worker_budget_available(budget) : 0;
+    more = spare < more ? spare : more;
+    const uint64_t rest = left != 0 ? growth->rest[ticket] : 0;
+    const bool pays = run->lanes->every_lane || rest * more >= (uint64_t)BUSTER_CHECK_EMIT_GROW_TOKENS * admitted * (admitted + more);
+    *lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
+    const uint32_t granted = more != 0 && pays ? worker_budget_grow(budget, (uint32_t)more, lease) : 0;
+    // A guardian that took none (another recipe took the tokens since FIONREAD) goes at once, rather than hold a lease
+    // of the team's. One that took fewer stays: its start is paid, and each token it holds is a lane's.
+    if (granted == 0)
+    {
+        worker_budget_release(lease);
+    }
+    return granted;
+}
+
+// A test's `count` tokens for the jobserver's writer `fd` (CheckProgramLanes.grow_supply), as another recipe returning
+// them would write them: each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index, up to BUSTER_CHECK_EMIT_MAX_LANES of
+// them. Out of line, so that lane 0's loop carries none of it.
+static __attribute__((noinline)) void check_program_emit_supply(int fd, uint32_t count)
+{
+    uint8_t bytes[BUSTER_CHECK_EMIT_MAX_LANES];
+    const uint32_t total = count < BUSTER_CHECK_EMIT_MAX_LANES ? count : BUSTER_CHECK_EMIT_MAX_LANES;
+    for (uint32_t i = 0; i < total; i += 1)
+    {
+        bytes[i] = (uint8_t)(BUSTER_CHECK_EMIT_SUPPLY_BYTE + i);
+    }
+    uint32_t done = 0;
+    bool writing = true;
+    while (writing && done < total)
+    {
+        const ssize_t written = write(fd, bytes + done, total - done);
+        done += written > 0 ? (uint32_t)written : 0;
+        writing = written > 0 || (written < 0 && errno == EINTR);
+    }
+}
+
+// Lane 0's growing team (CheckEmitGrowth, whose `rest` has room for a place per part and one more) of up to `lanes` of
+// the flow's lanes, `admitted` of them as it starts, its first lease leases[0]: the parts cut for `lanes` lanes
+// (parts_by_cost), taken by lane 0 alone until it admits another lane, then in a round of `lanes` lanes. Each growth's
+// lease goes in `leases` after the others, `*lease_count` of them. When lane 0 finds no part left it closes the
+// admission, and the round ends as every round does, once every lane has met. Returns the lanes it admitted.
+static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, CheckEmitGrowth* growth, uint32_t lanes, uint32_t admitted, WorkerBudget* budget,
+                                           WorkerBudgetLease* leases, uint32_t* lease_count)
+{
+    const uint64_t parts = parts_cut_by_cost(run->costs, run->body_count, (uint64_t)BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE * lanes, run->boundaries, run->orders[0]);
+    // The costliest part first, as in every lane's order, then the others in source order: lane 0 alone takes most of
+    // them, and in source order its lowering and code keep more of one lane's locality than in cost order.
+    uint32_t* order = run->orders[0];
+    const uint32_t costliest = order[0];
+    uint64_t next = 1;
+    for (uint32_t part = 0; part < parts; part += 1)
+    {
+        if (part != costliest)
+        {
+            order[next] = part;
+            next += 1;
+        }
+    }
+    growth->parts = parts;
+    growth->order = order;
+    // The tokens of the parts from each place in the order on, its last place's first.
+    uint64_t rest = 0;
+    growth->rest[parts] = 0;
+    for (uint64_t place = parts; place > 0; place -= 1)
+    {
+        const uint32_t part = order[place - 1];
+        const uint64_t first = run->boundaries[part];
+        const uint64_t end = run->boundaries[part + 1];
+        rest += end > first ? run->costs[end - 1] - (first != 0 ? run->costs[first - 1] : 0) : 0;
+        growth->rest[place - 1] = rest;
+    }
+    run->part_count = (uint32_t)parts;
+    __atomic_store_n(&growth->ticket, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&growth->admission, admitted << 2, __ATOMIC_RELAXED);
+    bool round = admitted > 1;
+    if (round)
+    {
+        lane_flow_round_begin(flow, BUSTER_CHECK_EMIT_ROUND_BODIES, run, lanes);
+    }
+    CheckEmitLane* lane = run->lane_states;
+    uint32_t supply = run->lanes->grow_supply;
+    uint32_t count = *lease_count;
+    uint64_t polled = 0;
+    uint64_t taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED);
+    for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
+    {
+        check_program_emit_take(run, lane, 0, order[taken]);
+        if (supply != 0)
+        {
+            check_program_emit_supply(budget->write_fd, supply);
+            supply = 0;
+        }
+        const bool open = admitted < lanes && count < BUSTER_CHECK_EMIT_GROW_LEASES;
+        const uint64_t now = open ? check_program_lanes_now() : polled;
+        if (now - polled >= BUSTER_CHECK_EMIT_GROW_NANOSECONDS)
+        {
+            polled = now;
+            WorkerBudgetLease* lease = leases + count;
+            const uint32_t more = check_program_emit_grow(run, growth, admitted, lanes, budget, lease);
+            count += lease->child > 0 ? 1 : 0;
+            admitted += more;
+            if (more != 0 && round)
+            {
+                lane_publish(&growth->admission, admitted << 2);
+            }
+            else if (more != 0)
+            {
+                __atomic_store_n(&growth->admission, admitted << 2, __ATOMIC_RELAXED);
+                lane_flow_round_begin(flow, BUSTER_CHECK_EMIT_ROUND_BODIES, run, lanes);
+                round = true;
+            }
+        }
+    }
+    *lease_count = count;
+    if (round)
+    {
+        lane_publish(&growth->admission, (admitted << 2) | 2u);
+        lane_flow_round_end(flow);
+    }
+    return admitted;
+}
+
+// A lane of a growing team's round past lane 0 (CheckEmitGrowth): asleep until lane 0 admits it, then the parts left, or
+// none once lane 0 has closed the admission.
+static void check_program_emit_admitted(CheckEmitRun* run)
+{
+    CheckEmitGrowth* growth = run->growth;
+    const uint32_t index = lane_index();
+    uint32_t admission = __atomic_load_n(&growth->admission, __ATOMIC_ACQUIRE) & ~1u;
+    while (admission >> 2 <= index && (admission & 2u) == 0)
+    {
+        admission = lane_sleep(&growth->admission, admission);
+    }
+    const uint64_t parts = growth->parts;
+    const uint32_t* const order = growth->order;
+    CheckEmitLane* lane = run->lane_states + index;
+    uint64_t taken = admission >> 2 > index ? __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED) : parts;
+    for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
+    {
+        check_program_emit_take(run, lane, index, order[taken]);
+    }
+}
+
 // The flow's other lanes: each round's bodies' parts on its lanes, until lane 0 ends the flow.
 static void check_program_emit_follow(LaneFlow* flow)
 {
-    void* run = NULL;
-    for (uint32_t round = lane_flow_next(flow, &run); round != 0; round = lane_flow_next(flow, &run))
+    void* argument = NULL;
+    for (uint32_t round = lane_flow_next(flow, &argument); round != 0; round = lane_flow_next(flow, &argument))
     {
-        if (run != NULL)
+        CheckEmitRun* run = argument;
+        if (run != NULL && run->growth != NULL)
+        {
+            check_program_emit_admitted(run);
+        }
+        else if (run != NULL)
         {
             check_program_emit_lane(run);
         }
@@ -1760,6 +2013,17 @@ static bool check_program_emit_file_asm(CheckProgramFileAsm* file_asm, CheckProg
     return valid;
 }
 
+// Returns an emission's `count` leases (worker_budget_release): false if one of them couldn't return its tokens.
+static bool check_program_emit_return(WorkerBudgetLease* leases, uint32_t count)
+{
+    bool result = true;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result = worker_budget_release(leases + i) && result;
+    }
+    return result;
+}
+
 static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                      const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
                                      CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes,
@@ -1896,24 +2160,49 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint32_t asked = lane_session_asked();
         active = asked < active ? asked : active;
     }
-    WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+    // The jobserver's slots, taken without waiting (worker_budget_acquire). A team it gives fewer lanes than these, in a
+    // command's flow whose lanes started, grows as other recipes' tokens come back (CheckEmitGrowth), up to the explicit
+    // cap: its parts are cut for every lane it may take, and each growth is a lease of its own.
+    WorkerBudgetLease leases[BUSTER_CHECK_EMIT_GROW_LEASES];
+    for (uint32_t i = 0; i < BUSTER_CHECK_EMIT_GROW_LEASES; i += 1)
+    {
+        leases[i] = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
+    }
+    uint32_t lease_count = 1;
+    const uint32_t wanted = active;
     if (valid && count != 0 && lanes != NULL && lanes->budget != NULL)
     {
-        active = worker_budget_acquire(lanes->budget, active, &lease);
+        active = worker_budget_acquire(lanes->budget, active, leases);
     }
-    const uint64_t part_room = active > 1 ? (uint64_t)BUSTER_LANE_PARTS_PER_LANE * active : 1;
+    const uint32_t granted = active;
+    uint32_t room = active;
+    if (valid && count != 0 && lanes != NULL && lanes->budget != NULL && active < wanted && board == NULL && lanes->flow != NULL &&
+        lanes->budget->mode == WORKER_BUDGET_JOBSERVER)
+    {
+        const uint32_t cap = worker_budget_cap(lanes->budget);
+        const uint32_t flow_lanes = lane_flow_lanes(lanes->flow);
+        room = wanted < cap ? wanted : cap;
+        room = flow_lanes < room ? flow_lanes : room;
+        room = active > room ? active : room;
+    }
+    const bool growing = room > active;
+    const uint64_t per_lane = growing ? BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE : BUSTER_LANE_PARTS_PER_LANE;
+    const uint64_t part_room = room > 1 ? per_lane * room : 1;
     // On the board, a state for the sharing lane and one for each lane that may take its parts, its place plus one.
-    const uint32_t states = board != NULL && active > 1 ? (board->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? board->lanes + 1 : BUSTER_CHECK_EMIT_MAX_LANES) : active;
+    const uint32_t states = board != NULL && active > 1 ? (board->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? board->lanes + 1 : BUSTER_CHECK_EMIT_MAX_LANES) : room;
     run.parts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitPart, part_room) : 0;
     run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, states) : 0;
-    run.boundaries = valid && active > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
-    // Each lane's order of the parts, or on the board the one order every lane takes them in.
-    for (uint32_t lane = 0; valid && active > 1 && lane < (board != NULL ? 1 : active); lane += 1)
+    run.boundaries = valid && room > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
+    // Each lane's order of the parts, or on the board and for a growing team the one order every lane takes them in.
+    for (uint32_t lane = 0; valid && room > 1 && lane < (board != NULL || growing ? 1 : active); lane += 1)
     {
         run.orders[lane] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, part_room + 1);
         valid = run.orders[lane] != 0;
     }
-    valid = valid && run.parts != 0 && run.lane_states != 0 && (active == 1 || run.boundaries != 0);
+    CheckEmitGrowth growth = { 0 };
+    growth.rest = valid && growing ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
+    run.growth = growing ? &growth : NULL;
+    valid = valid && run.parts != 0 && run.lane_states != 0 && (room == 1 || run.boundaries != 0) && (!growing || growth.rest != 0);
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     CheckProgramAgain again = CHECK_PROGRAM_AGAIN_NONE;
     if (lanes != NULL)
@@ -1921,6 +2210,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->squeezed = 0;
     }
     const uint64_t lanes_begin = timing ? check_program_lanes_now() : 0;
+    uint32_t worked = 0;
     if (valid && count != 0)
     {
         memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
@@ -1931,9 +2221,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint64_t bytes_before = bytes->length;
         const uint64_t scratch_before = scratch->length;
         const uint64_t columns_before = columns->length;
-        if (active > 1)
+        const bool laned = active > 1 || growing;
+        if (laned)
         {
-            if (board != NULL)
+            if (growing)
+            {
+                active = check_program_emit_growing(lanes->flow, &run, &growth, room, active, lanes->budget, leases, &lease_count);
+            }
+            else if (board != NULL)
             {
                 check_program_emit_shared(&run, board, lanes->board_lane, active, lanes->board_pause_microseconds);
             }
@@ -1947,7 +2242,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
             }
-            valid = worker_budget_release(&lease);
+            valid = check_program_emit_return(leases, lease_count);
+            for (uint32_t lane = 0; lanes != NULL && lane < states; lane += 1)
+            {
+                worked += run.lane_states[lane].prepared ? 1 : 0;
+            }
             for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
                 const CheckEmitPart* part = run.parts + p;
@@ -1971,9 +2270,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         else
         {
-            valid = worker_budget_release(&lease);
+            valid = check_program_emit_return(leases, lease_count);
         }
-        if (valid && (active == 1 || again != CHECK_PROGRAM_AGAIN_NONE))
+        if (valid && (!laned || again != CHECK_PROGRAM_AGAIN_NONE))
         {
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
@@ -1989,10 +2288,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // lanes' run is one stage, and they read none (CheckLowerShared.timed, false since check_lower_prepare).
             shared.timed = stage_clock != NULL;
             check_program_emit_alone(&run);
+            worked = 1;
         }
     }
-    // Also return a lease when an active-lane allocation failed before dispatch. A returned lease is a no-op.
-    valid = worker_budget_release(&lease) && valid;
+    // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
+    valid = check_program_emit_return(leases, lease_count) && valid;
     if (lanes != NULL && lanes->budget != NULL && lanes->budget->return_failed)
     {
         result->status = CHECK_PROGRAM_BACKEND;
@@ -2002,6 +2302,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (lanes != NULL)
     {
         lanes->active = active;
+        lanes->grown = active - granted;
+        lanes->worked = worked;
         lanes->parts = run.part_count;
         lanes->again = again;
         lanes->prepare_ns = lanes_begin - started;
@@ -2052,7 +2354,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t* symbol_aliases = valid && program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     bool retaining = false;
-    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0;
+    // Each symbol's common attribute (#147) and what keeps it from being a common one: BUSTER_CHECK_EMIT_COMMON and the
+    // others' bits (check_program_emit_commons).
+    uint8_t* commons = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    bool common = false;
+    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0 &&
+            commons != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
@@ -2065,6 +2372,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(weak, 0, (uint64_t)program->symbol_count + 1);
         memset(retained, 0, (uint64_t)program->symbol_count + 1);
+        memset(commons, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
         // declaration's attributes and keeps parameters' retain obligations as well as static declarations'.
@@ -2139,16 +2447,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     // definition), and makes it one of its own (check_program_sections).
                     retained[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_RETAIN;
                     retaining |= retained[symbol];
-                    if (!attribute->ignored && symbol != 0 && kind == CHECK_ATTRIBUTE_COMMON)
-                    {
-                        // The typed source contract retains this obligation. Until common symbols (SHN_COMMON), which
-                        // neither the link representation nor the object writer has, are published, refusing code
-                        // emission is required. A dropped definition has no object-format obligation of its own.
-                        result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (common)";
-                        result->token = attribute->name_token;
-                        valid = false;
-                    }
+                    // A common attribute makes its object's tentative definition a common symbol, and a section
+                    // attribute keeps it a definition of its own (check_program_emit_commons).
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_COMMON ? BUSTER_CHECK_EMIT_COMMON : 0;
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SECTION ? BUSTER_CHECK_EMIT_COMMON_SECTION : 0;
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_NOCOMMON ? BUSTER_CHECK_EMIT_NOCOMMON : 0;
+                    common |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_COMMON;
                 }
             }
         }
@@ -2205,6 +2509,32 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, attributes_mark);
+    common |= program->input->common_tentatives;
+    if (valid && common)
+    {
+        check_program_emit_commons(program, commons, BUSTER_SCALAR_PATH(scalar));
+    }
+    // An alias of a variable whose definition is a common symbol (#147, #1126's review): clang's integrated assembler
+    // refuses it ("Common symbol 'x' cannot be used in assignment expr"), and a common's storage is the linker's, which no
+    // symbol of -c's object can be placed in. It is refused at its attribute, as -c's output would be wrong.
+    for (uint32_t k = 0; valid && common && k < program->alias_count; k += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + k;
+        const uint32_t base = alias->kind == CHECK_PROGRAM_ALIAS && alias->error == CHECK_PROGRAM_ALIAS_OK ? alias->base : 0;
+        const SymbolId taken = base != 0 && base < program->object_count ? program->object_symbols[base] : 0;
+        const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == base ? taken : 0;
+        const uint32_t declaration = symbol != 0 ? program->object_declarations[base] : BUSTER_CHECK_NONE;
+        const CheckInput* input = program->input;
+        const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] != C_BINDING_FUNCTION && !input->thread_local[declaration] &&
+                              input->linkage[declaration] == 2 && !weak[symbol] && (symbol_aliases == 0 || symbol_aliases[symbol] == 0);
+        if (variable && check_program_emit_common(commons[symbol], input->common_tentatives))
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "an alias of a common symbol, which clang's assembler refuses";
+            result->token = alias->attribute;
+            valid = false;
+        }
+    }
     // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
     // retain attribute for the counting pass to look for.
     uint32_t retained_count = 0;
@@ -2549,12 +2879,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     alias->kind == CHECK_PROGRAM_WEAKREF ? (uint8_t)(kind | BUSTER_LINK_SYMBOL_WEAK) :
                     alias->kind == CHECK_PROGRAM_IFUNC ? (uint8_t)(BUSTER_LINK_SYMBOL_IFUNC | BUSTER_LINK_SYMBOL_GLOBAL | (flags & BUSTER_LINK_SYMBOL_VISIBILITY)) :
                                                          (uint8_t)(alias->type | (flags & (BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)));
+            // A common attribute's object (#147), or with -fcommon any, a tentative definition of external linkage that
+            // nothing else makes a definition of its own (check_program_emit_common): no initializer, section, weak
+            // attribute, alias or thread-local storage.
+            const bool is_common = check_program_emit_common(commons[s + 1], program->input->common_tentatives) && alias == NULL &&
+                                   kind == BUSTER_LINK_SYMBOL_OBJECT && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
+            flags = is_common ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON) : flags;
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
-                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
+                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1) ||
+                  parser->tokens.names[object - 1] == C_NAME_BUILTIN_FILE || parser->tokens.names[object - 1] == C_NAME_BUILTIN_FILE_NAME ||
+                  parser->tokens.names[object - 1] == C_NAME_BUILTIN_FUNCTION))
         {
-            // A string literal's, or a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__), which clang
-            // makes a private constant as it makes a literal's.
+            // A string literal's, a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__) or the string a
+            // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
+            // it makes a literal's.
             char spelling[48];
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
@@ -2604,7 +2943,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const CheckLowerRuntime runtime = (CheckLowerRuntime)result->lowered.runtime_order[r];
         const char* spelling = check_lower_runtime_names[runtime];
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
-        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) ==
+        // libgcc's CPU model's objects are data, every other runtime entry a function (check_lower_runtime_object).
+        const uint8_t kind = check_lower_runtime_object(runtime) ? BUSTER_LINK_SYMBOL_NOTYPE : BUSTER_LINK_SYMBOL_FUNCTION;
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | kind, BUSTER_LINK_SOURCE_NONE) ==
                                  result->lowered.runtime_symbols[runtime];
     }
     // The jump tables' symbols, then their labels' (CheckProgramLowered.case_symbol_base): local, with names a source

@@ -737,6 +737,78 @@ static void worker_budget_test_clean_spawn(WorkerBudgetTest* test)
                               "internal dispatch recognizes ordinary commands and refuses malformed guardians");
 }
 
+// A running team's growth (#673's tail): no growth and no guardian without a spare token; then each growth a lease of
+// its own, bounded by what it asks for and by what the pipe holds as it asks, the start's request, grant and return state
+// unchanged, and every lease's tokens back once each. Without a jobserver, and on a dry run, no growth at all.
+static void worker_budget_test_grow(WorkerBudgetTest* test)
+{
+    static const uint8_t first[] = { 0, 0xff, 'g' };
+    static const uint8_t later[] = { 0x80, 1 };
+    static const uint8_t all[] = { 0, 0xff, 'g', 0x80, 1 };
+    int fds[2] = { -1, -1 };
+    const bool opened = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0;
+    worker_budget_test_expect(test, opened, "synthetic growth pipe is available");
+    if (opened)
+    {
+        char flags[128];
+        snprintf(flags, sizeof(flags), " -j --jobserver-auth=%d,%d", fds[0], fds[1]);
+        WorkerBudget budget;
+        worker_budget_initialize(&budget, flags, 8);
+        WorkerBudgetLease leases[4];
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            leases[i] = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
+        }
+        const uint32_t granted = worker_budget_acquire(&budget, 8, leases);
+        const uint32_t empty = worker_budget_grow(&budget, 7, leases + 1);
+        worker_budget_test_expect(test, granted == 1 && empty == 0 && leases[1].child < 0 && worker_budget_available(&budget) == 0,
+                                  "without a spare token a team neither grows nor starts a guardian");
+        const bool supplied = write(fds[1], first, sizeof(first)) == sizeof(first);
+        const uint32_t spare = worker_budget_available(&budget);
+        const uint32_t bounded = supplied ? worker_budget_grow(&budget, 2, leases + 1) : 0;
+        worker_budget_test_expect(test, spare == 3 && bounded == 2 && worker_budget_available(&budget) == 1, "a growth takes no more tokens than it asks for");
+        const bool returned = write(fds[1], later, sizeof(later)) == sizeof(later);
+        const uint32_t rest = returned ? worker_budget_grow(&budget, 5, leases + 2) : 0;
+        worker_budget_test_expect(test, rest == 3 && worker_budget_available(&budget) == 0, "a later growth takes the tokens spare as it asks");
+        worker_budget_test_expect(test, budget.requested == 8 && budget.granted == 1 && !budget.return_failed && budget.mode == WORKER_BUDGET_JOBSERVER,
+                                  "growth keeps the start's request, grant and return state");
+        bool released = true;
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            released = worker_budget_release(leases + i) && released;
+        }
+        worker_budget_test_expect(test, released && !budget.return_failed && worker_budget_test_tokens(fds[0], all, sizeof(all)),
+                                  "every growth's lease returns its exact tokens once");
+        worker_budget_close(&budget);
+    }
+    // A dry run's jobserver, whose tokens a growth must leave alone, and no jobserver at all.
+    const bool dry = opened && write(fds[1], first, sizeof(first)) == sizeof(first);
+    for (uint32_t way = 0; dry && way < 2; way += 1)
+    {
+        char flags[128] = { 0 };
+        if (way == 0)
+        {
+            snprintf(flags, sizeof(flags), "n --jobserver-auth=%d,%d", fds[0], fds[1]);
+        }
+        WorkerBudget budget;
+        worker_budget_initialize(&budget, flags, 8);
+        WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+        const uint32_t grown = worker_budget_grow(&budget, 4, &lease);
+        worker_budget_test_expect(test, grown == 0 && lease.child < 0 && worker_budget_available(&budget) == 0 && worker_budget_test_available(fds[0]) == 3,
+                                  way == 0 ? "a dry run never grows" : "without a jobserver a team never grows");
+        worker_budget_close(&budget);
+    }
+    worker_budget_test_expect(test, !dry || worker_budget_test_tokens(fds[0], first, sizeof(first)), "the dry run's and plain budgets leave the pipe as it was");
+    if (fds[0] >= 0)
+    {
+        close(fds[0]);
+    }
+    if (fds[1] >= 0)
+    {
+        close(fds[1]);
+    }
+}
+
 static bool worker_budget_test(void)
 {
     WorkerBudgetTest test = { 0 };
@@ -765,6 +837,7 @@ static bool worker_budget_test(void)
     worker_budget_test_reused_descriptors(&test);
     worker_budget_test_dry_run(&test);
     worker_budget_test_clean_spawn(&test);
+    worker_budget_test_grow(&test);
     sigaction(SIGTERM, NULL, &after);
     sigprocmask(SIG_SETMASK, NULL, &after_mask);
     bool same_mask = true;

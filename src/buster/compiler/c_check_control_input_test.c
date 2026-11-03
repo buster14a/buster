@@ -431,8 +431,11 @@ static void check_test_control_walks(CheckTest* test)
                               "same-name labels resolve in their own function across body gaps");
             check_test_expect(test, owners[1][60] == 50 && owners[1][65] == 50 && bodies[1][108] == BUSTER_CHECK_NONE && targets[1][108] == BUSTER_CHECK_NONE,
                               "case ownership and asm-goto exclusion retain their independent meanings");
+            // The switch's body, 66, is a fallthrough alone, which no label follows (clang's analysis of the CFG runs:
+            // this reader has no preprocessor, so no -w); 136's fallthrough has no switch.
             check_test_expect(test, bodies[1][190] == BUSTER_CHECK_NONE && inputs[1].label_address_count == 1 && indirect[1] == 1 &&
-                                   inputs[1].report_count == 2 && reports[1][0].token == 136 && reports[1][1].token == 191,
+                                   inputs[1].report_count == 3 && reports[1][0].token == 66 && reports[1][0].message == CHECK_INPUT_FALLTHROUGH_PLACEMENT &&
+                                   reports[1][1].token == 136 && reports[1][1].message == CHECK_INPUT_FALLTHROUGH_SWITCH && reports[1][2].token == 191,
                               "body expiry, computed-goto counts and second-pass diagnostic order match independent expectations");
         }
     }
