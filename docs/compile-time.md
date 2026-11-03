@@ -636,7 +636,8 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   which the identifiers' carry little but a type and an object: columns and
   payload rows, as the stream's values have, would take about 8 MB less.
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
-  8.3 MB, written at declarations, most of whose bits would fit one byte.
+  8.3 MB, written at declarations, most of whose bits would fit one byte. Seven
+  of them are one now ("The declaration bits", below).
 - **The `attributes` column.** A pointer a token, 5.7 MB, for 2,457 tokens'
   attributes, and four passes read it whole. It is a wide sparse column now
   ("The attributes column", below).
@@ -795,6 +796,21 @@ record](https://github.com/buster14a/buster-performance/tree/41457e6769eff22baa2
   What the reader keeps to the peak lowers it; the rare columns, which their
   few writes spread over about 30 MB of huge pages, cost that much clearing
   instead (in base pages, the reader's reads of them take 6,800 more faults).
+
+### The declaration bits (#1167)
+
+Seven of the reader's byte columns held a flag or two at its declarations:
+`defined`, `tentative`, `static_objects`, `registers`, `thread_local`,
+`compound_objects` and `linkage`. At the peak, each took its 700 KiB of huge
+pages on `sqlite3.c`, the empty ones too, since the written ones share their
+pages. They are one byte a token now, `CheckInput.declaration_bits`: a bit each
+(`BUSTER_CHECK_BITS_DEFINED` and the others) and the linkage, 0 to 2, in the top
+two. `check_input_bit`, `check_input_set_bit`, `check_input_linkage` and
+`check_input_set_linkage` read and write them, and the scans test a bit of 64
+tokens' bytes at once (`check_input_scan_bit`, `check_input_scan_linkage`), as
+they tested the columns' bytes. The expressions' walk gathers a declaration's
+byte once for its three flags. `declaration_kinds`, `function_flags`,
+`explicit_abis` and the constant warnings' two columns stay columns of their own.
 
 ## The checker's graph and program passes (#530)
 
@@ -1043,9 +1059,9 @@ every token) and visits only them:
   static declarations, per static object, rather than from every declaring
   token into two object-sized columns.
 - **The emission's setup.** `check_program_object_access` finds the defining
-  tokens in the `defined` and `tentative` bytes, rather than reading four
-  columns at every declaring token; the attributes' passes visit only the
-  declaring tokens that have attributes.
+  tokens in the `defined` and `tentative` bytes (bits of one byte since #1167),
+  rather than reading four columns at every declaring token; the attributes'
+  passes visit only the declaring tokens that have attributes.
 
 **What is left.**
 - **The initializers' walks.** Most of `check-declarations` is now
