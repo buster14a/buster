@@ -4291,12 +4291,13 @@ the oracle.
   5.6%), which are no operators, are below it too. The dispatch that #1038
   found the walk's cost in (one long chain of tests a token) is gone with the
   classes.
-- **The graph by passes (stages 2 and 4), probed and not built.** The
-  numbering is measured by `benchmark-checker-bindings`' `expression-numbering`
-  line (`PPOptions.expression_numbering`, `check_input_expression_numbering`):
-  after the coded walk, it numbers every acting token again in postorder, as
-  such a pass would before writing any node. Each value goes to its consumer's
-  list (the nearest ancestor that isn't a LIST, a GROUP or a SEPARATOR the walk
+- **The graph by passes (stages 2 and 4): a scalar probe, and the bound a
+  vector pass has to beat.** The numbering is probed by
+  `benchmark-checker-bindings`' `expression-numbering` line
+  (`PPOptions.expression_numbering`, `check_input_expression_numbering`): after
+  the coded walk, it numbers every acting token again in postorder, as such a
+  pass would before writing any node. Each value goes to its consumer's list
+  (the nearest ancestor that isn't a LIST, a GROUP or a SEPARATOR the walk
   didn't visit), each operator's operands are read from its own list, a
   terminator makes a discard a value, and the walk's visits are barriers that
   take the walk's own nodes and value chains. Each node a class numbered is
@@ -4308,9 +4309,17 @@ the oracle.
   with no difference; written plainly it takes 3.21 ms warm, 10.2 ns a node,
   where the operators and lists it would replace take 1.06 ms of the same
   runs. (On the VM, with sqlite 3.53.2's amalgamation: 6.4 ms warm, 20.5 ns a
-  node.) So the numbering is right; it doesn't pay:
-  - it costs three times the per-token actions it would replace, before a
-    node is written;
+  node.) What that shows, and what it doesn't:
+  - the consumer lists number the graph as the walk does, so a pass by them is
+    exact;
+  - this probe, a scalar loop of parent walks and list appends, costs three
+    times the per-token actions it would replace, before a node is written;
+  - it is not the stages' data-parallel design (node counts by class and a
+    prefix sum for the ids, the consumers by pointer jumping, operands by
+    segmented scans and gathers), which isn't built or measured. To pay on
+    `sqlite3.c`, such a numbering and the operators' writes together have to
+    take less than the operators' and lists' 1.06 ms warm, about 3.4 ns for
+    each of the walk's nodes;
   - the walk's visits are its barriers: each makes as many nodes as it
     decides, and reads its operands' columns, so the ids after it are known
     only once it has run. On `sqlite3.c` they are 6,639 to 7,800, one in 58 to
@@ -4319,7 +4328,8 @@ the oracle.
   - the nodes' recording is no barrier: nothing reads it before
     `check_graph_record_finish`.
 
-  So the operators stay per token.
+  The operators stay per token until a vector numbering is built and
+  measured against that bound; the stages stay open in #1038.
 - **The graph's first node.** The walk's first node, in `sqlite3.c` a string
   at token 14, touches every graph column for the first time: each starts a
   huge page the kernel clears. That one node took 3.2 ms of the walk on the VM
