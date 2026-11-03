@@ -620,13 +620,16 @@ that poison every caller-saved register (`tier1_call_test.c`):
   floating value's xmm row (#141) and a mask's opmask row (#179), and the
   float, stack-argument and mask tests check it too.
 
-Measured with #1116's 32-bit moves ([the record](https://github.com/buster14a/buster-performance/tree/f33ee4f927a8ac3d31402ea0fc51c95874e5d754/docs/measurements/tier1-code-quality-1116-2026-11-02)):
+Measured with #1116's 32-bit moves, after #1117, at `6e1e6121` against main `b70deb47`
+([the record](https://github.com/buster14a/buster-performance/tree/8498be9205a6a96b083d2090dad66b6ee58ef487/docs/measurements/tier1-code-quality-1116-2026-11-03)):
 
-- **Lua 5.4.8 by `--tier1 -c`:** `call_stores` go from 4,940 to 2,575, `call_loads` from 4,940 to 4,289, and `.text` from
-  289,595 to 265,526 bytes.
-- **The frozen `sqlite3.c`:** `call_stores` go from 13,929 to 8,370.
-- **speedtest1 by `--tier1`, on the 9700X:** 2.0% fewer instructions and 1.2% less time.
-- **Compile time:** `--tier1 -c` of `sqlite3.c` takes 0.1% more instructions, for the scan.
+- **Lua 5.4.8 by `--tier1 -c`**, all 1,104 functions Tier 1's: `call_stores` go from 5,956 to 3,165, `call_loads` from
+  5,956 to 5,207, and `.text` from 289,580 to 260,789 bytes, against clang -O0's 273,461.
+- **The frozen `sqlite3.c`**, 2,666 of 2,668 functions Tier 1's: `call_stores` go from 28,027 to 15,079.
+- **speedtest1 by `--tier1`, on the 9700X:** 3.2% fewer instructions and 1.3% less time. Lua's interpreter runs 3.0%
+  and 3.8% fewer instructions on its tables and strings scripts, and as many on the other three.
+- **Compile time:** `--tier1 -c` of `sqlite3.c` takes 0.17% more instructions and 0.77% more time, all of it in the
+  backend. About half is the emitter's own (the scan, `tier1_emit_owed`, and its callers).
 
 An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value
