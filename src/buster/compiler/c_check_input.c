@@ -240,13 +240,15 @@ static bool check_input_target_supported(const PPOptions* options)
 #define BUSTER_CHECK_ENUM_LISTED 2
 
 // The note a report carries, if any: clang's note at the earlier attribute of an incompatible multiversioning pair, at
-// the declaration that caused a function to be multiversioned, or at a naked function's attribute.
+// the declaration that caused a function to be multiversioned, at a naked function's attribute, or at a redefined label's
+// first definition.
 typedef enum CheckInputNoteKind
 {
     CHECK_INPUT_NOTE_NONE,
     CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE,
     CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED,
     CHECK_INPUT_NOTE_ATTRIBUTE_HERE,
+    CHECK_INPUT_NOTE_PREVIOUS_DEFINITION,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -6369,10 +6371,13 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
-            // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes.
+            // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes. A
+            // label's name is right before its colon, whose child it is but after attributes (`[[x]] l:`, #147), whose closer
+            // the parser makes its parent.
             const bool label_name = role == PARSE_ROLE_OPERAND && parent < parser->tokens.count &&
                                     (parser->tree.roles[parent] == PARSE_ROLE_LABEL || parser->tokens.kinds[parent] == PARSE_KIND_GOTO ||
-                                     (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_AMPAMP));
+                                     (parser->tree.roles[parent] == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_AMPAMP) ||
+                                     (kind == PARSE_KIND_IDENTIFIER && i + 1 < parser->tokens.count && parser->tree.roles[i + 1] == PARSE_ROLE_LABEL));
             reader->ignored[i] |= label_name || role == PARSE_ROLE_LABEL || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_SWITCH || role == PARSE_ROLE_OPEN_CASE;
         }
         if (syntactic && !reader->ignored[i] && role == PARSE_ROLE_OPEN_GROUP && i + 1 < parser->tokens.count && parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_BLOCK)

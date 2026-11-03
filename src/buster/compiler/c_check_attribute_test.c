@@ -408,9 +408,69 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
     }
 }
 
+// The vocabulary of attributes clang knows (#147, c_check_attribute_clang.inc): each list in its names' byte order without
+// repeats, which its binary search needs; the spellings within the 64 bytes a lookup builds; and each list's ends and a name
+// between them found, a name between two of them not, and a scoped C23 spelling found under each of its scopes' spellings.
+static void check_test_attribute_vocabulary(CheckTest* test)
+{
+    for (uint32_t standard = 0; standard < 2; standard += 1)
+    {
+        const CheckInputClangAttribute* list = standard != 0 ? check_input_clang_c23_attributes : check_input_clang_gnu_attributes;
+        const uint32_t count = standard != 0 ? BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) : BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes);
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t shorter = i != 0 && list[i - 1].length < list[i].length ? list[i - 1].length : list[i].length;
+            const int order = i != 0 ? memcmp(list[i - 1].name, list[i].name, shorter) : -1;
+            unordered += order > 0 || (order == 0 && list[i - 1].length >= list[i].length) || list[i].length >= 64 ? 1u : 0u;
+            found += check_input_attribute_listed(list, count, (String8){ (char*)list[i].name, list[i].length }) ? 1u : 0u;
+        }
+        check_test_expect(test, count > 256 && unordered == 0 && found == count, "attribute vocabulary: ordered, bounded and each name found");
+    }
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes) == 366 && BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) == 283,
+                      "attribute vocabulary: clang 23.1.5's 366 GNU names and 283 C23 spellings");
+    static const struct
+    {
+        const char* scope;
+        const char* name;
+        bool scoped;
+        bool standard;
+        bool known;
+    } cases[] = {
+        { "", "aligned", false, false, true },
+        { "", "NSObject", false, false, true },
+        { "", "__const", false, false, true },
+        { "", "externally_visible", false, false, false },
+        { "", "alignedx", false, false, false },
+        { "", "", false, false, false },
+        { "", "deprecated", false, true, true },
+        { "", "unsequenced", false, true, false },
+        { "", "aligned", false, true, false },
+        { "gnu", "aligned", true, true, true },
+        { "__gnu__", "aligned", true, true, false },
+        { "clang", "noderef", true, true, true },
+        { "_Clang", "noderef", true, true, true },
+        { "gnu", "noderef", true, true, false },
+        { "invented", "aligned", true, true, false },
+        { "gnu", "invented", true, true, false },
+        { "gnu", "an_attribute_name_of_sixty_bytes_which_no_lookup_can_build_x", true, true, false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        const String8 scope = { (char*)cases[i].scope, strlen(cases[i].scope) };
+        const String8 name = { (char*)cases[i].name, strlen(cases[i].name) };
+        char description[160];
+        snprintf(description, sizeof(description), "attribute vocabulary: %s%s%s (%s) is %s", cases[i].scope, cases[i].scoped ? "::" : "", cases[i].name,
+                 cases[i].standard ? "C23" : "GNU", cases[i].known ? "known" : "unknown");
+        check_test_expect(test, check_input_attribute_clang_knows(scope, name, cases[i].scoped, cases[i].standard) == cases[i].known, description);
+    }
+}
+
 static __attribute__((noinline)) void check_test_attributes(CheckTest* test, const char* clang)
 {
     check_test_attribute_storage(test);
+    check_test_attribute_vocabulary(test);
     check_test_attribute_arguments(test);
     check_test_attribute_abis(test);
     const CheckAttributeFixture fixtures[] =
@@ -675,21 +735,14 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .last_kind = CHECK_ATTRIBUTE_ALIAS,
             .text = "target",
         },
+        // WebAssembly's export_name, which clang doesn't know for x86-64 and ignores with -Wunknown-attributes' warning (#147).
         {
-            .name = "WebAssembly export spelling retained without native symbol renaming",
+            .name = "WebAssembly export spelling ignored on x86-64",
             .source = "__attribute__((export_name(\"entry_point\"))) void entry(void) {}\n",
-            .count = 1,
-            .last_kind = CHECK_ATTRIBUTE_EXPORT_NAME,
-            .text = "entry_point",
-            .ignored = true,
         },
         {
-            .name = "scoped WebAssembly export spelling retained on native output",
+            .name = "scoped WebAssembly export spelling ignored on x86-64",
             .source = "[[clang::export_name(\"entry_point\")]] void entry(void) {}\n",
-            .count = 1,
-            .last_kind = CHECK_ATTRIBUTE_EXPORT_NAME,
-            .text = "entry_point",
-            .ignored = true,
         },
         {
             .name = "section metadata",
@@ -1054,23 +1107,40 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .rejected = true,
             .values = { 48 },
         },
+        // An attribute clang doesn't know it ignores with a warning (#147): none of it is kept.
         {
-            .name = "unknown attribute is explicit",
+            .name = "an attribute clang doesn't know is ignored",
             .source = "int x __attribute__((invented_semantics(3)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,
-            .error_word = "invented_semantics",
         },
         {
-            .name = "unknown C23 namespace is explicit",
+            .name = "an unknown C23 namespace's attribute is ignored",
             .source = "[[invented::aligned(16)]] int x;\n",
-            .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,
-            .error_word = "aligned",
         },
         {
-            .name = "unscoped GNU layout name is not ISO packed",
+            .name = "unscoped GNU layout name is not ISO packed, and ignored",
             .source = "struct [[packed]] S { int x; };\n",
+        },
+        {
+            .name = "a GNU name clang doesn't know is ignored beside one it does",
+            .source = "int x __attribute__((externally_visible, aligned(8)));\n",
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_ALIGNED,
+            .base = BUSTER_TYPE_INT,
+            .size = 4,
+            .alignment = 4,
+            .declared_alignment = 4,
+            .values = { 8 },
+        },
+        {
+            .name = "C23's unsequenced, which clang doesn't know, is ignored",
+            .source = "[[unsequenced]] int f(void);\n",
+        },
+        // One clang applies that the checker doesn't take is refused by name.
+        {
+            .name = "an attribute clang applies and the checker doesn't take is refused",
+            .source = "int f(void) __attribute__((availability(macos, introduced = 10.4)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,
-            .error_word = "packed",
+            .error_word = "availability",
         },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };

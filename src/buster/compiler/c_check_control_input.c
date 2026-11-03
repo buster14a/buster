@@ -132,21 +132,17 @@ static bool check_input_declaration_after(const Parser* parser, uint32_t token)
            (kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
 }
 
-// GNU attributes right after a named label's colon (#147): the label's, as clang's parser takes every GNU attribute there
-// in C, whatever follows it (a null statement, another statement, a declaration, C23's attributes, which are the next
-// item's). Each is read as a declaration's are; clang's error is reported for the first that clang refuses on a label
-// (check_input_label_refusal; musttail's by its reading, check_input_attribute_musttail), and clang takes the others,
-// which mean nothing for a label here. Their tokens are then the label's, which no declaration or statement reads again.
-static void check_input_label_attributes(CheckInputReader* reader, uint32_t first)
+// A label's attributes from `first` to `after` (#147): GNU ones right after a named label's colon, as clang's parser takes
+// every GNU attribute there in C, whatever follows it (a null statement, another statement, a declaration, C23's
+// attributes, which are the next item's), and a statement's before a label's name (`[[x]] l:`), which clang's labeled
+// statement gives its label. Each is read as a declaration's are; clang's error is reported for the first that clang
+// refuses on a label (check_input_label_refusal; musttail's by its reading, check_input_attribute_musttail), and clang
+// takes the others, which mean nothing for a label here. Their tokens are then the label's, which no declaration or
+// statement reads again.
+static void check_input_label_attributes(CheckInputReader* reader, uint32_t first, uint32_t after)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    uint32_t after = first;
-    while (after + 1 < count && parser->tokens.kinds[after] == PARSE_KIND_ATTRIBUTE && parser->tree.roles[after + 1] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER)
-    {
-        const uint32_t close = parser->tree.parents[after + 1];
-        after = close > after + 1 && close < count ? close + 1 : count;
-    }
     // A name clang refuses on a label is its error whatever the reading would make of the attributes (several of them,
     // minsize and nomerge among them, this reads nowhere else): each list item's name, after its opener or a comma.
     uint32_t refused = BUSTER_CHECK_NONE;
@@ -173,7 +169,7 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
         valid = attribute->keyword || check_input_label_refusal(check_input_attribute_name(reader, attribute->name)) == NULL;
         if (!valid)
         {
-            check_input_report(reader, attribute->name_token, CHECK_INPUT_LABEL_ATTRIBUTE);
+            check_input_report(reader, attribute->first, CHECK_INPUT_LABEL_ATTRIBUTE);
         }
     }
     for (uint32_t token = first; token < after; token += 1)
@@ -247,7 +243,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
             valid = empty;
             if (!valid)
             {
-                check_input_report(reader, attribute->name_token, CHECK_INPUT_FALLTHROUGH_STATEMENT);
+                check_input_report(reader, attribute->first, CHECK_INPUT_FALLTHROUGH_STATEMENT);
             }
         }
         else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->standard && !attribute->keyword)
@@ -263,7 +259,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         else
         {
             valid = false;
-            check_input_report(reader, attribute->name_token, CHECK_INPUT_STATEMENT_ATTRIBUTE);
+            check_input_report(reader, attribute->first, CHECK_INPUT_STATEMENT_ATTRIBUTE);
         }
     }
     return valid;
@@ -272,7 +268,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
 // A block item's attributes before a statement rather than a declaration, read as the statement's (their tokens then
 // ignored, so that check_input's walk takes no declaration for them), with clang's rules
 // (check_input_statement_attribute_kinds): before a null statement, a statement's keyword or brace, or an expression when
-// they are GNU ones of clang's statement attributes alone, which the parser then reads as a statement's
+// they are C23's alone or GNU ones of clang's statement attributes alone, which the parser then reads as a statement's
 // (check_input_statement_attribute_names). A null statement's are recorded at its `;` for fallthrough's consumer, and a
 // return's musttail for c_check_musttail.c and check_program. GNU attributes right after a named label are the label's
 // (check_input_label_attributes); C23's there are the statement's. Outside a function a null statement's attributes are
@@ -290,11 +286,30 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
                                            next == PARSE_KIND_FOR || next == PARSE_KIND_GOTO || next == PARSE_KIND_CONTINUE || next == PARSE_KIND_BREAK ||
                                            next == PARSE_KIND_CASE || next == PARSE_KIND_DEFAULT || next == PARSE_KIND_L_BRACE);
     const bool empty = after < count && next == PARSE_KIND_SEMI;
+    // GNU attributes among them make it a declaration unless each is one of clang's statement attributes; C23's alone
+    // leave it to what follows (#147's `[[x]] y += 1;`), as the parser reads them (parse_scalar_attributed_statement).
+    bool gnu = false;
+    for (uint32_t token = first; token < after; token += 1)
+    {
+        gnu |= parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE;
+    }
     const bool expression = after < count && !empty && !keyword && !check_input_declaration_after(parser, after) &&
-                            check_input_statement_attribute_names(reader, first, after);
+                            (!gnu || check_input_statement_attribute_names(reader, first, after));
+    // Before a label's name, the statement's attributes are its label's.
+    const bool named = expression && next == PARSE_KIND_IDENTIFIER && after + 1 < count && parser->tree.roles[after + 1] == PARSE_ROLE_LABEL;
     if (label)
     {
-        check_input_label_attributes(reader, first);
+        uint32_t end = first;
+        while (end + 1 < count && parser->tokens.kinds[end] == PARSE_KIND_ATTRIBUTE && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER)
+        {
+            const uint32_t close = parser->tree.parents[end + 1];
+            end = close > end + 1 && close < count ? close + 1 : count;
+        }
+        check_input_label_attributes(reader, first, end);
+    }
+    else if (named && body)
+    {
+        check_input_label_attributes(reader, first, after);
     }
     else if (empty && !body)
     {
@@ -396,6 +411,17 @@ static uint32_t check_input_label_scope(const CheckInputReader* reader, const Ch
     return locals->scopes != NULL && locals->scopes[token] != 0 ? locals->scopes[token] - 1 : check_sparse_get(reader->output->declaration_bodies, token);
 }
 
+// The name of a label table entry: a label's colon's first child, or a reserved &&name's (its prefix's). After attributes
+// (`[[x]] l:`, #147) the colon's first child is their closer, which the parser makes the name's parent, and the name is
+// right before the colon.
+static uint32_t check_input_label_name(const CheckInputReader* reader, uint32_t entry)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t child = reader->first_child[entry];
+    const bool attributed = child < parser->tokens.count && parser->tree.roles[child] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+    return attributed ? entry - 1 : child;
+}
+
 // The label of `scope` spelled `name` in check_input_controls' table (`capacity` slots), or BUSTER_CHECK_NONE.
 static uint32_t check_input_find_label(const CheckInputReader* reader, const CheckLocalLabels* locals, const uint32_t* labels, uint64_t capacity, uint32_t scope,
                                        uint32_t name)
@@ -406,7 +432,7 @@ static uint32_t check_input_find_label(const CheckInputReader* reader, const Che
     while (result == BUSTER_CHECK_NONE && labels[slot] != 0)
     {
         const uint32_t target = labels[slot] - 1;
-        const uint32_t target_name = reader->first_child[target];
+        const uint32_t target_name = check_input_label_name(reader, target);
         result = check_input_label_scope(reader, locals, target) == scope && parser->tokens.names[target_name] == name ? target : BUSTER_CHECK_NONE;
         slot = (slot + 1) & (capacity - 1);
     }
@@ -1743,7 +1769,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
             }
             else if (role == PARSE_ROLE_LABEL)
             {
-                const uint32_t name_token = reader->first_child[token];
+                const uint32_t name_token = check_input_label_name(reader, token);
                 if (body == BUSTER_CHECK_NONE || name_token >= count || parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
                 {
                     if (!prefix || token < limit)
@@ -1767,12 +1793,20 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                     while (!ambiguous && labels[slot] != 0)
                     {
                         const uint32_t old = labels[slot] - 1;
-                        const uint32_t old_name = reader->first_child[old];
+                        const uint32_t old_name = check_input_label_name(reader, old);
                         if (check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
                         {
                             if (!prefix || token < limit)
                             {
+                                // With clang's note at the first definition's name, a local label's at its name in its list
+                                // (its scope), which declares it.
+                                const uint32_t before = reader->output->report_count;
                                 check_input_report(reader, name_token, CHECK_INPUT_LABEL_REDEFINITION);
+                                if (reader->output->report_count != before)
+                                {
+                                    reader->output->reports[before].note_token = local != BUSTER_CHECK_NONE ? scope : old_name;
+                                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+                                }
                             }
                             break;
                         }

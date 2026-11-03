@@ -208,6 +208,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_types.c`, `src/buster/compiler/c_types_test.c`, `src/buster/compiler/c_types_benchmark.c`, `docs/c-types.md` | Original type table, hash-consing, record layout, conversion kernels, compatibility, composite types and printer, and their tests, benchmark and documentation; Default, with the public-domain SplitMix64 reference below. They follow clang 23's behaviour: clang's source (`ASTContext`, `ItaniumRecordLayoutBuilder`, `SemaExpr`'s conversions, `mergeTypes`, `TypePrinter`) was read for its rules and none of it is copied. clang runs externally as the tests' oracle on C the tests generate, and is not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `src/buster/compiler/c_check_*.c`, `src/buster/compiler/c_checker*.c`, `docs/c-checker.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/) | Original semantic actions, scalar/vector expression checker, source/declaration and binding-event adapters, literal decoder, static-data producer, command, tests, benchmarks and documentation; Default. Existing project type, parser, binding, arena, Link and ELF-writer interfaces are reused. Fixtures and deterministic generated source/expressions are authored for this module; Clang runs externally as an acceptance/diagnostic, numeric-conversion and object-byte/relocation oracle, with no Clang implementation or external corpus imported. C conversion and constant-expression rules and ELF layouts are specification facts; the documentation records the supported subset and oracle configuration. The benchmark's generators, timing, counter and sample-selection helpers are original. |
+| `src/buster/compiler/c_check_attribute_clang.inc` | Derived LLVM data, not first-party: the attribute spellings clang 23.1.5 knows in C for x86-64 Linux; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's attribute vocabulary (#147)" below has its inputs and procedure. |
 | `src/buster/compiler/c_parser.c`, `src/buster/compiler/c_parser_test.c`, `docs/c-parser.md` | Original parser (the vector path's kernels and their scalar twins, the checks, the scalar parser, the postorder and the driver), its tests and documentation; Default, with the public-domain SplitMix64 reference below. The kernels are ported from this project's own spike, #186 (branch `claude/spike-186-k2-spills` at `e896031`), under Default too. The tree's construction follows Bar-On and Vishkin's published algorithm (1985), referenced, not copied. The diagnostics follow clang 23's behaviour: their messages are clang's texts for the same errors and their places are where clang reports them, as clang's output shows, and the tokens allowed after a tag's body follow clang's `Parser::isValidAfterTypeSpecifier`, read for its rule; no clang code is copied. The predeclared typedef names are clang's (names only). clang runs externally as the tests' oracle on the tests' snippets, generated inputs and corpora, which are read at run time and not vendored. |
 | `docs/c-parser-fragments.md` | Original record of the expression-fragment experiment (#104–#107), its measurements and its decision; Default. The experiment's code, removed by that decision, was original under Default too. Salter's operator-fragment discussion and Carbon's postorder bracketing are design references recorded in the document; no historical Zig implementation or external test fixture was copied. External corpora were runtime test inputs. |
 | `src/buster/compiler/c_parser_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c`, by way of #186's spike benchmark, retain MIT. |
@@ -623,3 +624,34 @@ LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
   (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
   every row's test against clang's code over every bit and value of the
   model. Its use as an oracle copies none of its code.
+
+### Clang's attribute vocabulary (#147)
+
+`src/buster/compiler/c_check_attribute_clang.inc` is derived LLVM data, not
+first-party material: the spellings of the attributes clang knows in C, by which
+the checker ignores the others with clang's `-Wunknown-attributes` warning
+(`c_check_attribute.c`). It keeps the LLVM Project's
+`Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Generator:** clang 23.1.5 for `x86_64-pc-linux-gnu`, apt.llvm.org's
+  `clang-23` and `libclang-cpp23`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92` (built from
+  llvm-project commit `a738f2737189`).
+- **Inputs:** the candidate names were the identifier-shaped strings of that
+  package's `libclang-cpp.so.23.1`, without a keyword's surrounding
+  underscores, without the preprocessor's own operators (`__has_*`,
+  `defined`, `_Pragma`, `__is_target_*` and the like) and without the
+  function-like macros clang predefines. Only the strings were read.
+- **Rows taken:** each candidate whose `__has_attribute` clang answers
+  nonzero under `-std=gnu17` (366 GNU names), and each spelling, plain or
+  scoped by `gnu::`, `clang::` or `msvc::`, whose `__has_c_attribute` clang
+  answers nonzero under `-std=gnu23` (283 C23 spellings), each list in byte
+  order. [The checker guide](docs/c-checker.md)'s "Attributes clang doesn't
+  know (#147)" records the procedure; the file's sha256 is
+  `39f2c159c86a110a0d2395ace205f3315d116301559610676559a1d6b87d73d3`.
+- **Cross-check:** the lists were compared with `clang/include/clang/Basic/Attr.td`
+  at `llvmorg-23.1.1`, read for its spellings and their targets, none of it
+  copied. `test-checker-driver` asks the clang it runs every row again
+  (`check_test_driver_unknown_attributes` in
+  `c_check_label_attribute_driver_test.c`), which copies none of its code.

@@ -241,6 +241,14 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
     return result;
 }
 
+// An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
+static String8 check_warning_attribute_normalized(String8 name)
+{
+    const bool surrounded = name.length >= 4 && name.pointer[0] == '_' && name.pointer[1] == '_' && name.pointer[name.length - 1] == '_' &&
+                            name.pointer[name.length - 2] == '_';
+    return surrounded ? (String8){ name.pointer + 2, name.length - 4 } : name;
+}
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
@@ -303,6 +311,24 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_BUILTIN_HEADER:
             result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of its header", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE:
+        {
+            // clang spells a GNU attribute's name as written, and a C23 attribute's normalized: its name and a scope of its
+            // own without a keyword's surrounding underscores, gnu's and clang's (_Clang) as theirs, another scope as written.
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 attribute = standard ? check_warning_attribute_normalized(name) : name;
+            const String8 written = check_driver_warning_name(pp, scope_name);
+            const String8 normalized = check_warning_attribute_normalized(written);
+            const bool gnu = normalized.length == 3 && memcmp(normalized.pointer, "gnu", 3) == 0;
+            const bool clang = (normalized.length == 5 && memcmp(normalized.pointer, "clang", 5) == 0) ||
+                               (written.length == 6 && memcmp(written.pointer, "_Clang", 6) == 0);
+            const String8 scope = gnu ? (String8){ "gnu", 3 } : clang ? (String8){ "clang", 5 } : written;
+            result = scope_name != 0 ? check_warning_text(scratch, "unknown attribute '%.*s::%.*s' ignored", (int)scope.length, scope.pointer,
+                                                          (int)attribute.length, attribute.pointer) :
+                                       check_warning_text(scratch, "unknown attribute '%.*s' ignored", (int)attribute.length, attribute.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_UNDEFINED_INTERNAL:
             result = check_warning_text(scratch, "function '%.*s' has internal linkage but is not defined", (int)name.length, name.pointer);
             break;

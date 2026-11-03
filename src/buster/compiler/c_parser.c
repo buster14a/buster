@@ -1241,6 +1241,9 @@ typedef enum ParseMode
 // GNU attributes seen at a block-item boundary, classified only to resolve declaration/expression ambiguity.
 #define BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE 0x2000000u
 #define BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE 0x4000000u
+// A GNU attribute specifier, even an empty one, seen there: after one, the names decide, and C23's attributes alone don't.
+#define BUSTER_PARSE_FRAME_GNU_ATTRIBUTE 0x10000000u
+#define BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES (BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE | BUSTER_PARSE_FRAME_GNU_ATTRIBUTE)
 // GNU attributes came after a bit-field's width (`int x : 3 __attribute__((packed))`, the member's): more of them, or
 // what ends the member's declarator, may follow, and nothing else. A flag and not a mode of its own, which cost the scalar
 // parser instructions on every token (#430's review): a new mode's values moved the switch's cases, and a second call of
@@ -1642,6 +1645,16 @@ static bool parse_scalar_keyword_statement(const ParseScalar* parser, uint32_t t
     return kind == PARSE_KIND_RETURN || kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
            kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CASE ||
            kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE;
+}
+
+// Whether `token`, after a block item's C23 attributes, starts the statement they are of rather than a declaration, as
+// clang reads them: a statement's keyword, or what starts no declaration (clang's isDeclarationStatement), but the null
+// statement's `;` (above): an expression statement's first token, a label's name, asm, or a block's `}`, where clang
+// expects the statement (parse_scalar_block_attribute_end).
+static bool parse_scalar_attributed_statement(const ParseScalar* parser, uint32_t token)
+{
+    const uint8_t kind = token < parser->count ? parser->kinds[token] : PARSE_KIND_SEMI;
+    return parse_scalar_keyword_statement(parser, token) || (kind != PARSE_KIND_SEMI && !parse_scalar_starts_declaration(parser, token, true));
 }
 
 BUSTER_INLINE void parse_scalar_bind_name(ParseScalar* parser, uint32_t name, uint8_t meaning)
@@ -3035,14 +3048,15 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
             frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
             frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
-            frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+            frame->flags = (frame->flags & ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES) | BUSTER_PARSE_FRAME_GNU_ATTRIBUTE;
         }
-        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_keyword_statement(parser, parse_scalar_after_attributes(parser, i)))
+        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_attributed_statement(parser, parse_scalar_after_attributes(parser, i)))
         {
             // C23 attributes before a statement's keyword, which clang reads as that statement's (#147's
-            // [[clang::musttail]] return): read as GNU's are at a block item, the keyword after them deciding.
+            // [[clang::musttail]] return), or before what starts no declaration (an expression statement's `[[x]] y += 1;`,
+            // #147's unknown attributes): read as GNU's are at a block item, the token after them deciding.
             parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
-            frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+            frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
         }
         else if ((parse_scalar_starts_declaration(parser, i, true) || kind == PARSE_KIND_STATIC_ASSERT) && waiting && !labeled)
         {
@@ -3069,6 +3083,43 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
     }
 }
 
+// The token after a block item's attributes (parse_scalar_block_attribute), which isn't another's: whether they start a
+// declaration or the statement they are of. `head` after a control head or a label, `attributes` GNU ones that are each a
+// statement's, `gnu` any GNU one.
+static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step, bool head, bool attributes, bool gnu)
+{
+    const uint8_t kind = parser->kinds[i];
+    const bool statement = kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
+                           kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK ||
+                           kind == PARSE_KIND_RETURN || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE ||
+                           kind == PARSE_KIND_SEMI || kind == PARSE_KIND_ASM ||
+                           (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
+    const bool expression = !gnu && kind != PARSE_KIND_R_BRACE && !parse_scalar_starts_declaration(parser, i, true);
+    frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
+    if (kind == PARSE_KIND_R_BRACE && ((!head && attributes) || !gnu))
+    {
+        // A statement's attributes before a block's end, which clang's statement reader expects a statement after (C23's
+        // after a label's name too).
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (!head && !attributes && !statement && !expression)
+    {
+        parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
+        // An attribute has already started the declaration: an extension marker is not a specifier here.
+        frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
+    }
+    else if (kind == PARSE_KIND_EXTENSION)
+    {
+        frame->statement = PARSE_ITEM_EXPRESSION;
+        parse_scalar_begin_expression(frame, false, false, step);
+    }
+    else
+    {
+        frame->mode = PARSE_MODE_ITEM;
+        step->again = true;
+    }
+}
+
 // Clang's statement reader distinguishes `__attribute__((noinline)) f();` from a declaration beginning with other
 // attributes. Statement keywords and labels decide directly; after a control head only a statement is permitted.
 // A named label consumes its own attributes before its statement. None of these places uses a compound body's
@@ -3082,10 +3133,7 @@ static void parse_scalar_block_attribute(ParseScalar* parser, uint32_t i, ParseF
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
         frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
-    }
-    else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_keyword_statement(parser, parse_scalar_after_attributes(parser, i)))
-    {
-        parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
+        frame->flags |= BUSTER_PARSE_FRAME_GNU_ATTRIBUTE;
     }
     else
     {
@@ -3094,34 +3142,29 @@ static void parse_scalar_block_attribute(ParseScalar* parser, uint32_t i, ParseF
         const bool head = waiting && top->kind != PARSE_KIND_CASE;
         const bool attributes = (frame->flags & BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE) != 0 &&
                                 (frame->flags & BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE) == 0;
-        const bool statement = kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
-                               kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK ||
-                               kind == PARSE_KIND_RETURN || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE ||
-                               kind == PARSE_KIND_SEMI || kind == PARSE_KIND_ASM ||
-                               (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
-        frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
-        if (kind == PARSE_KIND_R_BRACE && !head && attributes)
+        // GNU's attributes decide by their names (clang: a declaration's unless each is a statement's); C23's alone by the
+        // token after them, which starts an expression statement where it starts no declaration.
+        const bool gnu = (frame->flags & BUSTER_PARSE_FRAME_GNU_ATTRIBUTE) != 0;
+        const bool label = waiting && top->kind == PARSE_KIND_COLON;
+        if (parse_scalar_standard_attribute(parser, i) && gnu && !label)
         {
-            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
+            // C23 attributes after GNU ones, which clang reads no further: an expression's `[[` after a control head or
+            // where the GNU ones are a statement's, and a declaration's misplaced list where they are a declaration's.
+            // After a label's name GNU's are the label's, and C23's then the statement's.
+            parse_scalar_error(parser, i, waiting || attributes ? PARSE_MESSAGE_EXPECTED_EXPRESSION : PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED,
+                               BUSTER_PARSE_AT_TOKEN);
         }
-        else if (!head && !attributes && !statement)
+        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_attributed_statement(parser, parse_scalar_after_attributes(parser, i)))
         {
-            parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
-            // An attribute has already started the declaration: an extension marker is not a specifier here.
-            frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
-        }
-        else if (kind == PARSE_KIND_EXTENSION)
-        {
-            frame->statement = PARSE_ITEM_EXPRESSION;
-            parse_scalar_begin_expression(frame, false, false, step);
+            parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
         }
         else
         {
-            frame->mode = PARSE_MODE_ITEM;
-            step->again = true;
+            parse_scalar_block_attribute_end(parser, i, frame, step, head, attributes, gnu);
         }
     }
 }
+
 
 // A declaration's specifiers have ended at `i`: a declarator, or the declaration's end, comes. A declaration without a
 // type specifier has an implicit int, which C99 and later make an error (but C23's `auto`, which infers the type).

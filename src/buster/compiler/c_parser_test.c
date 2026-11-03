@@ -439,6 +439,21 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { L: }\n", "", 0 },
     { "void f(void) { a: int x; }\n", "", 0 },
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
+    // C23 attributes alone at a block item are a statement's where the token after them starts no declaration, as clang's
+    // isDeclarationStatement decides (#147); after GNU ones clang reads no more of them, and before a block's end it expects
+    // the statement.
+    { "void f(int x) { [[x]] x += 1; [[gnu::y]] f(x); if (x) [[z]] x = 2; [[w]]; [[v]] (void)x; [[u]] *&x = 3; [[t]] asm(\"\"); [[s]] [[r]] x++; }\n", "", 0 },
+    { "typedef int T; void f(void) { [[x]] T y = 1; [[x]] const int z = 2; [[x]] __extension__ z; [[x]] return; }\n", "", 0 },
+    { "void f(int x) { l: __attribute__((unused)) [[y]] x++; }\n", "", 0 },
+    { "void f(int x) { [[x]] }\n", "1:23: expected statement", 0 },
+    { "void f(int x) { if (x) [[y]] }\n", "1:30: expected statement", 0 },
+    { "void f(int x) { l: [[y]] }\n", "1:26: expected statement", 0 },
+    { "void f(int x) { { [[x]] } x++; }\n", "1:25: expected statement", 0 },
+    { "void f(int x) { __attribute__((nomerge)) [[y]] x++; }\n", "1:42: expected expression", 0 },
+    { "void f(int x) { __attribute__((nomerge)) [[y]] return; }\n", "1:42: expected expression", 0 },
+    { "void f(int x) { __attribute__((aligned(4))) [[y]] int z; }\n", "1:45: an attribute list cannot appear here", 0 },
+    { "void f(int x) { if (x) __attribute__((aligned(4))) [[y]] x++; }\n", "1:52: expected expression", 0 },
+    { "void f(int x) { switch (x) { case 1: __attribute__((nomerge)) [[y]] x++; } }\n", "1:63: expected expression", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
     { "typedef int U; typedef enum E : unsigned short { A } T; typedef enum : const U { B } V, W; int n = sizeof(T) + sizeof(V) + sizeof(W);\n", "", 0 },

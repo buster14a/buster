@@ -44,7 +44,6 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_NOCOMMON,
     CHECK_ATTRIBUTE_TLS_MODEL,
     CHECK_ATTRIBUTE_ASM_LABEL,
-    CHECK_ATTRIBUTE_EXPORT_NAME,
     CHECK_ATTRIBUTE_CALLING_CONVENTION,
     CHECK_ATTRIBUTE_NORETURN,
     CHECK_ATTRIBUTE_RETURNS_TWICE,
@@ -244,7 +243,6 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "alias", CHECK_ATTRIBUTE_ALIAS, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "ifunc", CHECK_ATTRIBUTE_IFUNC, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "section", CHECK_ATTRIBUTE_SECTION, CHECK_ATTRIBUTE_STRING, 1, 1 },
-    { "export_name", CHECK_ATTRIBUTE_EXPORT_NAME, CHECK_ATTRIBUTE_STRING, 1, 1 },
     { "weak", CHECK_ATTRIBUTE_WEAK, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "weakref", CHECK_ATTRIBUTE_WEAKREF, CHECK_ATTRIBUTE_STRING, 0, 1 },
     { "common", CHECK_ATTRIBUTE_COMMON, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -810,12 +808,6 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                 check_input_attribute_equal(attribute->text, "initial-exec") || check_input_attribute_equal(attribute->text, "local-exec");
         error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
     }
-    if (valid && attribute->kind == CHECK_ATTRIBUTE_EXPORT_NAME)
-    {
-        // export_name selects a WebAssembly export. The supported x86-64 output has no such namespace; retain
-        // the decoded name and its source range, with the same deliberate no-effect disposition as native Clang.
-        attribute->ignored = true;
-    }
     if (!valid)
     {
         check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
@@ -946,6 +938,89 @@ static const char* check_input_label_refusal(String8 name)
     return result;
 }
 
+// clang 23's attribute vocabulary for C on x86-64 Linux (#147, c_check_attribute_clang.inc): the names of its GNU spellings,
+// and its C23 spellings (`name`, `scope::name`), each in byte order.
+typedef struct CheckInputClangAttribute CheckInputClangAttribute;
+struct CheckInputClangAttribute
+{
+    const char* name;
+    uint32_t length;
+};
+
+static const CheckInputClangAttribute check_input_clang_gnu_attributes[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE(name) { name, sizeof(name) - 1 },
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE(spelling)
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+static const CheckInputClangAttribute check_input_clang_c23_attributes[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE(name)
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE(spelling) { spelling, sizeof(spelling) - 1 },
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+// Whether `text` is one of the `count` names of `list`, in byte order: a binary search.
+static bool check_input_attribute_listed(const CheckInputClangAttribute* list, uint32_t count, String8 text)
+{
+    bool result = false;
+    uint32_t lower = 0;
+    uint32_t upper = count;
+    while (lower < upper)
+    {
+        const uint32_t middle = lower + (upper - lower) / 2;
+        const uint32_t length = list[middle].length;
+        const uint64_t common = text.length < length ? text.length : length;
+        int order = common != 0 ? memcmp(text.pointer, list[middle].name, common) : 0;
+        order = order != 0 ? order : (text.length > length) - (text.length < length);
+        result |= order == 0;
+        upper = order <= 0 ? middle : upper;
+        lower = order > 0 ? middle + 1 : lower;
+    }
+    return result;
+}
+
+// Whether clang knows an attribute the checker has no rule for (#147): a GNU spelling's `name` (its surrounding underscores
+// gone, as check_input_attribute_name reads it) in its GNU vocabulary, and a C23 one's in its C23 vocabulary, its scope
+// normalized as clang's: gnu's and __gnu__'s as gnu, clang's, _Clang's and __clang__'s as clang. Such an attribute is
+// refused by name, as one clang applies; one clang doesn't know it ignores, with its warning (check_input_attribute_read_item).
+static bool check_input_attribute_clang_knows(String8 scope, String8 name, bool scoped, bool standard)
+{
+    bool result = false;
+    if (!standard)
+    {
+        result = check_input_attribute_listed(check_input_clang_gnu_attributes, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes), name);
+    }
+    else
+    {
+        // A spelling of at most 64 bytes: clang's longest is 53 (c_check_attribute_clang.inc).
+        char spelling[64];
+        const bool gnu = check_input_attribute_equal(scope, "gnu");
+        const bool clang = check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
+        const String8 normalized = gnu ? (String8){ "gnu", 3 } : clang ? (String8){ "clang", 5 } : scope;
+        const uint64_t length = scoped ? normalized.length + 2 + name.length : name.length;
+        if (length < sizeof(spelling))
+        {
+            uint64_t at = 0;
+            if (scoped)
+            {
+                memcpy(spelling, normalized.pointer, normalized.length);
+                memcpy(spelling + normalized.length, "::", 2);
+                at = normalized.length + 2;
+            }
+            memcpy(spelling + at, name.pointer, name.length);
+            result = check_input_attribute_listed(check_input_clang_c23_attributes, BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes),
+                                                  (String8){ spelling, length });
+        }
+    }
+    return result;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;
@@ -955,10 +1030,15 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     bool namespace_known = true;
     bool scoped = false;
     bool clang_scope = false;
+    bool unknown = false;
+    String8 scope = { 0 };
+    uint32_t scope_name = 0;
     if (valid && standard && i + 2 < end && parser->tokens.kinds[i + 1] == PARSE_KIND_COLON && parser->tokens.kinds[i + 2] == PARSE_KIND_COLON)
     {
-        const String8 scope = check_input_attribute_name(reader, parser->tokens.names[i]);
-        clang_scope = check_input_attribute_equal(scope, "clang");
+        scope_name = parser->tokens.names[i];
+        scope = check_input_attribute_name(reader, scope_name);
+        // clang's scope is spelled `clang` or `_Clang` (a keyword's underscores are already gone from `__clang__`).
+        clang_scope = check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
         namespace_known = check_input_attribute_equal(scope, "gnu") || clang_scope;
         scoped = true;
         i += 3;
@@ -1003,7 +1083,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         attribute.end = i;
         valid &= i == end || parser->tokens.kinds[i] == PARSE_KIND_COMMA;
-        if (valid && rule != 0)
+        // An attribute clang doesn't know it ignores with a warning, whatever this checker's rules say of the name (GNU's
+        // externally_visible and access, C23's unsequenced).
+        const bool known = valid && check_input_attribute_clang_knows(scope, name, scoped, standard);
+        if (valid && rule != 0 && known)
         {
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
@@ -1022,12 +1105,31 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
             }
         }
-        else if (valid)
+        else if (valid && known)
         {
+            // One clang applies that this checker doesn't take: refused by name.
             check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             valid = false;
         }
-        if (valid)
+        else if (valid)
+        {
+            // One clang doesn't know (#147), which it ignores with -Wunknown-attributes' warning at the attribute's first
+            // token (its scope's), as the C23 one's spelling normalized: none of it is kept.
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE,
+                .kind = CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE,
+                .token = attribute.first,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = attribute.first + 1,
+                .payload = { .name = attribute.name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = scope_name | (standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+            unknown = true;
+        }
+        if (valid && !unknown)
         {
             const bool numeric = attribute.schema == CHECK_ATTRIBUTE_INTEGER || attribute.schema == CHECK_ATTRIBUTE_INTEGER_LIST ||
                                  attribute.schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;

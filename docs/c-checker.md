@@ -4632,7 +4632,8 @@ so shadows an outer one and the function's label of the same name, and a goto
 from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
 name in the list, reported as the block ends; a second definition in the scope
-is "redefinition of label" at its name; and a name that a block's lists declare
+is "redefinition of label" at its name, with clang's "previous definition is
+here" at the first (a local label's at its name in the list); and a name that a block's lists declare
 twice is ambiguous where it is defined or used, and undeclared at both of its
 declarations. Clang reports that last one's ambiguity first, the driver in
 source order. A unit without a list builds none of it; the vector path's mask
@@ -4781,6 +4782,91 @@ region reader takes a musttail return for a return, inside a statement expressio
 frame is where its first was; `musttail-external-callees`, tail calls of the harness's clang functions and of the C
 library's `isatty`; and `musttail-vectors`, for x86-64-v4. `test-checker-driver` compares every error's place and
 message and the exit status with clang's on 41 fixtures (`c_check_musttail_driver_test.c`).
+
+## Attributes clang doesn't know (#147)
+
+Clang ignores an attribute it doesn't know, with `-Wunknown-attributes`'
+warning (on by default; `-Werror=unknown-attributes` makes it an error, and
+`-Wno-unknown-attributes` and `-w` silence it). The checker does too: it keeps
+nothing of such an attribute and warns where clang warns. Before this
+change, it refused such a declaration by name.
+
+- **What clang knows.** `c_check_attribute_clang.inc` lists clang's
+  vocabulary for C on x86-64 Linux: the GNU names whose `__has_attribute` is
+  nonzero (a keyword's surrounding underscores removed) and the C23 spellings
+  whose `__has_c_attribute` is nonzero under `-std=gnu23`, plain or scoped.
+  `check_input_attribute_clang_knows` looks a name up by binary search: a GNU
+  one as written without its underscores, and a C23 one with its scope
+  normalized (`gnu`, and `clang` for `clang` or `_Clang`). An attribute clang
+  knows is applied by the checker's rule where it has one; where it has none
+  it is still refused by name, as before. An attribute clang doesn't know
+  gives the warning event `CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE` and isn't
+  appended, whatever the checker's rules say of its name. GCC's own
+  `externally_visible`, `optimize` and `access`, C23's `unsequenced` (which
+  clang 23 doesn't take) and WebAssembly's `export_name` (which clang knows
+  only for that target) are among them.
+- **The warning.** It is at the attribute's first token, a C23 one's scope,
+  and names it as clang does: `unknown attribute 'X' ignored`, a GNU name as
+  written, a C23 one normalized (`'gnu::invented'` for
+  `[[__gnu__::__invented__]]`) and another scope's as written
+  (`c_check_warning_render.c`). Its group is `-Wunknown-attributes`, under
+  `-Wattributes` (`c_check_diagnostic.c`).
+- **Statements.** C23 attributes alone before a statement are the
+  statement's where the next token starts no declaration, as clang's
+  `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
+  (`parse_scalar_attributed_statement`), and the checker's statement
+  attributes too. GNU ones still make it a declaration, unless each is one of
+  clang's statement attributes. A C23 attribute refused on a statement is
+  named as clang normalizes it, at its first token
+  (`'gnu::aligned' attribute cannot be applied to a statement`). Before a
+  label's name a statement's attributes are the label's (`[[x]] l:`), read
+  as GNU ones after its colon are (`check_input_label_attributes`); their
+  closer is the name's parent in the tree, so a label's name is the token
+  before its colon there (`check_input_label_name`). The
+  parser reports clang's errors for C23 attributes after GNU ones and
+  before a block's `}`.
+- **Not modeled.** Clang's "did you mean" suggestion for a name close to one
+  it knows (`no_sanitize_undefined`, which suggests `no_sanitize`) is
+  missing: it needs clang's spelling list and its edit-distance correction.
+  `[[__clang__::x]]` is clang's parse error, which the checker doesn't
+  report. C23 attributes before GNU ones at a block item
+  (`[[y]] __attribute__((nomerge)) x++;`) are a statement's when the GNU
+  ones are statement attributes, where clang also requires the C23 ones to
+  be, and so reads a declaration.
+- **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
+  order and lookups and what each kind of name keeps
+  (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
+  lines with clang's for a source of every kind of unknown attribute
+  (declarations, members, labels and statements, beside known ones), on both
+  paths, with no option, `-Wno-unknown-attributes`,
+  `-Werror=unknown-attributes` and `-w`. It also asks clang every listed
+  spelling again (`check_test_driver_unknown_attributes`).
+
+The vocabulary is regenerated where clang's changes, from the installed
+`clang` and its `libclang-cpp`, in a scratch directory:
+
+```sh
+export LC_ALL=C
+LIB=$(ldd "$(readlink -f "$(command -v clang)")" | awk '/libclang-cpp/{print $3}')
+strings -n 3 "$LIB" | tr -c 'A-Za-z0-9_\n' '\n' | grep -E '^[A-Za-z_][A-Za-z0-9_]{1,60}$' | sed 's/^__\(.*\)__$/\1/' | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u > candidates.txt
+clang -dM -E -x c /dev/null | awk '{print $2}' | grep '(' | sed 's/(.*//' > function-macros.txt
+grep -vE '^(__has_|__building_module$|_Pragma$|__is_target_|__is_identifier$|__identifier$|defined$|__pragma$|__embed|__assume$)' candidates.txt | grep -vxF -f function-macros.txt > names.txt
+awk '{print NR " __has_attribute(" $1 ")"}' names.txt > gnu-query.c
+clang -E -P -ferror-limit=0 -std=gnu17 -x c gnu-query.c 2>/dev/null | awk 'NF==2 && $2!=0 {print $1}' > gnu-lines.txt
+awk 'NR==FNR{k[$1]=1;next} (FNR in k){print}' gnu-lines.txt names.txt > gnu.txt
+{ awk '{print $1; print "gnu::" $1; print "clang::" $1; print "msvc::" $1}' gnu.txt; awk '{print "gnu::" $1; print "clang::" $1; print "msvc::" $1; print $1}' names.txt; } | sort -u > c23-candidates.txt
+awk '{print NR " __has_c_attribute(" $1 ")"}' c23-candidates.txt > c23-query.c
+clang -E -P -ferror-limit=0 -std=gnu23 -x c c23-query.c 2>/dev/null | awk 'NF==2 && $2!=0 {print $1}' > c23-lines.txt
+awk 'NR==FNR{k[$1]=1;next} (FNR in k){print}' c23-lines.txt c23-candidates.txt > c23.txt
+```
+
+Each query is numbered by its line, so an answer is matched with its name
+even where a name is a macro or clang reports an error for it. `gnu.txt` and
+`c23.txt` are the two lists, in the file's macros
+(`BUSTER_CHECK_CLANG_GNU_ATTRIBUTE("name")` and
+`BUSTER_CHECK_CLANG_C23_ATTRIBUTE("spelling")`), under its header; update
+THIRD_PARTY_NOTICES.md's record, the counts `test-checker` checks, and
+compare the lists with `Attr.td` before taking them.
 
 ## Ignorable and unsupported pragmas
 

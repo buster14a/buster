@@ -1196,28 +1196,34 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         }
                         else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT) && named)
                         {
-                            // An attribute on a label or a statement that clang refuses there (#147), spelled as written
-                            // (a scope's `gnu::` too) and worded as clang's: a label's subjects by its name without a GNU
-                            // keyword's underscores (check_input_label_refusal).
+                            // An attribute on a label or a statement that clang refuses there (#147), from its first token
+                            // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
+                            // normalizes it (its name without a keyword's underscores, `gnu::` and `clang::` for theirs),
+                            // which its list's opener, the nearest shallower token before it, tells (`[` or `(`); a label's
+                            // subjects by its name without a GNU keyword's underscores (check_input_label_refusal).
                             // `::` is one token in C23 and two colons before it.
                             const bool scoped = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
                             const uint32_t at = !scoped ? token : parser->tokens.kinds[token + 2] == PARSE_KIND_COLON && token + 3 < count ? token + 3 : token + 2;
                             const uint32_t scope = scoped ? parser->tokens.names[token] : 0;
                             const uint32_t name = parser->tokens.names[at];
-                            const InternSpan span = pp->table->spans[name];
-                            String8 bare = { (char*)pp->table->records + span.offset, span.length };
-                            if (bare.length >= 4 && bare.pointer[0] == '_' && bare.pointer[1] == '_' && bare.pointer[bare.length - 1] == '_' && bare.pointer[bare.length - 2] == '_')
+                            uint32_t opener = token;
+                            while (opener > 0 && parser->tree.depths[opener - 1] >= parser->tree.depths[token])
                             {
-                                bare.pointer += 2;
-                                bare.length -= 4;
+                                opener -= 1;
                             }
+                            const bool standard = opener > 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_L_SQUARE;
+                            const String8 written = { (char*)intern_bytes(pp->table, name), intern_length(pp->table, name) };
+                            const String8 bare = check_warning_attribute_normalized(written);
+                            const String8 spelled = standard ? bare : written;
+                            String8 scope_text = scope != 0 ? check_warning_attribute_normalized((String8){ (char*)intern_bytes(pp->table, scope), intern_length(pp->table, scope) })
+                                                            : (String8){ "", 0 };
+                            scope_text = check_input_attribute_equal(scope_text, "_Clang") ? (String8){ "clang", 5 } : scope_text;
                             const char* refusal = kind == CHECK_INPUT_LABEL_ATTRIBUTE ? check_input_label_refusal(bare) : NULL;
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", scope != 0 ? (int)intern_length(pp->table, scope) : 0,
-                                                 scope != 0 ? (const char*)intern_bytes(pp->table, scope) : "", scope != 0 ? "::" : "", (int)intern_length(pp->table, name),
-                                                 (const char*)intern_bytes(pp->table, name), ending);
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
+                                                 scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
                         {
@@ -1340,13 +1346,18 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                         {
-                            // A label's errors name it, as clang's do.
+                            // A label's errors name it, as clang's do; a redefinition's with its note at the first.
                             const uint32_t name = parser->tokens.names[token];
                             const CheckInputMessage label = input->reports[index].message;
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
-                                                 label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
-                                                 label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
-                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            const uint32_t previous = input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ? input->reports[index].note_token : count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = "previous definition is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                        label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
+                                                        label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
