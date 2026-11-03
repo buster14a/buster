@@ -1,8 +1,8 @@
 name: Self-host qualification
 
 # The qualification runs entirely on GitHub-hosted runners, so that it never
-# takes the shared 9700X from other work. It runs when the gate, the build
-# script or the correctness inventory changes, on the daily schedule (to catch
+# takes the shared 9700X from other work. It runs when the gate, the build's
+# description or the correctness inventory changes, on the daily schedule (to catch
 # compiler drift), and on manual dispatch. It is not a required per-PR check.
 on:
   pull_request:
@@ -14,6 +14,8 @@ on:
       - 'tools/ci/setup-hosted.sh'
       - 'src/buster/compiler/host_isa.h'
       - 'build.sh'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
   push:
     branches: [main]
     paths:
@@ -24,6 +26,8 @@ on:
       - 'tools/ci/setup-hosted.sh'
       - 'src/buster/compiler/host_isa.h'
       - 'build.sh'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
   schedule:
     - cron: '47 5 * * *'
   workflow_dispatch:
@@ -156,10 +160,13 @@ jobs:
           # Redirect before consuming; process substitution would hide an exporter failure.
           ./build.sh print-sources > "$artifacts/sources.argv"
           ./build.sh print-compile-flags > "$artifacts/flags.argv"
-          ./build.sh 2>&1 | tee "$artifacts/build.log"
-          sha256sum build/compiler tools/ci/selfhost.c >> "$artifacts/metadata.txt"
+          ./build.sh --config Release 2>&1 | tee "$artifacts/build.log"
+          # The Release configuration's own executable, which build/compiler is too.
+          compiler=$(./build.sh print-output --config Release)
+          test build/compiler -ef "$compiler"
+          sha256sum "$compiler" tools/ci/selfhost.c >> "$artifacts/metadata.txt"
           clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/selfhost.c -o "$artifacts/qualify"
-          "$artifacts/qualify" "$PWD/build/compiler" "$artifacts/sources.argv" "$artifacts/flags.argv" "$artifacts/result" 900 2>&1 | tee "$artifacts/qualification.log"
+          "$artifacts/qualify" "$compiler" "$artifacts/sources.argv" "$artifacts/flags.argv" "$artifacts/result" 900 2>&1 | tee "$artifacts/qualification.log"
           test -s "$artifacts/result/PASS"
 
       - name: Publish the qualification summary

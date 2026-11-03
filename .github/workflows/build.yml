@@ -1,0 +1,104 @@
+name: Build
+
+# The build's own regressions, on GitHub's runners rather than the 9700X, since they time nothing: fresh, unchanged,
+# edited, failed, interrupted and switched builds, the settings, the presets, the print commands, shifts and lexer
+# variants (tools/ci/build_regression.c, docs/commands/build.md); and build.sh's now() under locales whose decimal
+# point isn't a period (#409).
+on:
+  pull_request:
+    paths:
+      - build.sh
+      - CMakeLists.txt
+      - CMakePresets.json
+      - 'cmake/**'
+      - tools/ci/build_regression.c
+      - tools/ci/setup-build-tools.sh
+      - tools/ci/setup-hosted.sh
+      - .github/workflows/build.yml
+  push:
+    branches: [main]
+    paths:
+      - build.sh
+      - CMakeLists.txt
+      - CMakePresets.json
+      - 'cmake/**'
+      - tools/ci/build_regression.c
+      - tools/ci/setup-build-tools.sh
+      - tools/ci/setup-hosted.sh
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  regressions:
+    name: Fresh, incremental, failed and switched builds (Clang 23, native)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install official Clang 23.1.4, CMake and Ninja
+        run: bash tools/ci/setup-hosted.sh
+
+      - name: Check the build's regressions
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/build-regression" tools/ci/build_regression.c
+          TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/build-regression"
+
+  now:
+    # build.sh times its builds from $EPOCHREALTIME, which bash writes with the locale's decimal point: a comma in
+    # es_ES, and in ps_AF the first byte of U+066B alone. This runs build.sh's own now() under both, so that no edit
+    # brings back a substitution that takes out a period alone (#409). Its now() is the only reader of $EPOCHREALTIME.
+    name: build.sh's now() under decimal points other than a period
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Run now() under C, es_ES and ps_AF
+        shell: bash
+        run: |
+          set -euo pipefail
+          locales="$RUNNER_TEMP/locales"
+          mkdir -p "$locales"
+          # localedef exits with 1 for warnings alone; the locale's directory is what counts.
+          for name in es_ES ps_AF; do
+              localedef -i "$name" -f UTF-8 "$locales/$name.UTF-8" || true
+              test -d "$locales/$name.UTF-8"
+          done
+          readers="$(grep -n EPOCHREALTIME build.sh | grep -v '^[0-9]*: *#' || true)"
+          [ "$(printf '%s\n' "$readers" | grep -c .)" = 1 ] && grep -q 'printf -v' <<< "$readers" || { echo "::error::build.sh must read \$EPOCHREALTIME in now() alone:"; echo "$readers"; exit 1; }
+          sed -n '/^now()$/,/^}$/p' build.sh > "$RUNNER_TEMP/now.sh"
+          grep -q EPOCHREALTIME "$RUNNER_TEMP/now.sh"
+          grep -q '^now()$' "$RUNNER_TEMP/now.sh"
+          # Each locale's own separator must reach $EPOCHREALTIME, or the check would pass in C. The old
+          # ${EPOCHREALTIME/./} failed about one run in ten under es_ES and every run under ps_AF.
+          for case in C.UTF-8:. es_ES.UTF-8:, ps_AF.UTF-8:$'\xd9'; do
+              LOCPATH="$locales" LC_ALL="${case%%:*}" bash -c '
+                  source "$1"
+                  [[ "$EPOCHREALTIME" == *"$2"* ]] || { echo "::error::$LC_ALL: \$EPOCHREALTIME is $EPOCHREALTIME"; exit 1; }
+                  for i in $(seq 100); do
+                      now start
+                      sleep 0.001
+                      now end
+                      [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || { echo "::error::$LC_ALL: now() wrote $start and $end"; exit 1; }
+                      t=$((end - start))
+                      (( t >= 1000 && t < 1000000 )) || { echo "::error::$LC_ALL: now() measured $t us"; exit 1; }
+                  done
+                  echo "$LC_ALL: 100 times, the last $t us"' _ "$RUNNER_TEMP/now.sh" "${case#*:}"
+          done
