@@ -616,7 +616,9 @@ that poison every caller-saved register (`tier1_call_test.c`):
   `main`, and gdb steps every instruction of it.
 - **Every fixture's records**, and every caller of the pipeline test's, show
   each call-save store loaded back before the code branches, returns or traps
-  (`tier1_emit_test_saves_loaded`).
+  (`tier1_emit_test_saves_loaded`). That covers a general register's row, a
+  floating value's xmm row (#141) and a mask's opmask row (#179), and the
+  float, stack-argument and mask tests check it too.
 
 Measured with #1116's 32-bit moves ([the record](https://github.com/buster14a/buster-performance/tree/f33ee4f927a8ac3d31402ea0fc51c95874e5d754/docs/measurements/tier1-code-quality-1116-2026-11-02)):
 

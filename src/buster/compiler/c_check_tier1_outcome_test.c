@@ -217,7 +217,7 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
                                 strstr(line, "tier1-refused\tg\t") != NULL && strstr(strstr(line, "tier1-refused\tg\t"), "call=") == NULL,
                                 "a refused call's line ends in its kinds, and another refusal's has none", line);
         static CheckTier1Report report;
-        report.calls[CHECK_TIER1_CALL_FLOATING_ARGUMENT] = 3;
+        report.calls[CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT] = 3;
         report.calls[CHECK_TIER1_CALL_ABI_RECORD] = 1;
         char printed[8192] = { 0 };
         stream = fmemopen(printed, sizeof(printed) - 1, "w");
@@ -226,7 +226,7 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             check_tier1_print_report(stream, &report);
             fclose(stream);
         }
-        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.floating-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
+        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.long-double-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
                                 strstr(printed, "selection.call.indirect") == NULL,
                                 "the report counts refused calls by kind", NULL);
     }

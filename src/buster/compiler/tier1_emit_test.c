@@ -29,6 +29,8 @@ struct Tier1EmitTest
     uint8_t* allowed;
     const uint8_t* native_allowed;
     uint64_t native_skipped;
+    // The floating fixtures' compiles whose calls save an xmm register (#1116's check of their rows).
+    uint32_t vector_saves;
 };
 
 // A requested output policy may exceed the current CPU. The policy/encoding checks still run; only the native call skips.
@@ -371,39 +373,87 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     }
 }
 
-// Whether emitted record `r` is a general register's call-save store (load), exactly as tier1_emit_call_save makes it.
-static bool tier1_emit_test_call_save(const Tier1EmitResult* emitted, uint32_t r, bool load)
+// The call-save row that emitted record `r` stores to or loads from, as a bit of the rows' set, with *load saying which;
+// 0 for any other record. The rows are a general register's (bits 0 to 15: tier1_emit_call_save's mov), an xmm
+// register's (bits 16 to 31: a floating value's movsd, #141) and an opmask register's (bits 32 to 39: a mask's kmov of
+// its width, #179), the latter two the CFG consumer's. Each row is the frame's, apart from every spill slot, so its
+// displacement tells it from a spill of the same register.
+static uint64_t tier1_emit_test_save_row(const Tier1EmitResult* emitted, uint32_t r, bool* load)
 {
     const X86Instruction* record = &emitted->code.records[r];
-    const bool row = record->reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((emitted->prepared.call_save_mask >> record->reg) & 1) != 0;
-    const X86Instruction save = row ? tier1_emit_call_save(emitted, record->reg, load) : (X86Instruction){ .form = X86_FORM_NONE };
-    return row && record->form == save.form && record->rm == save.rm && record->mode == save.mode && record->displacement == save.displacement;
+    const uint16_t form = record->form & BUSTER_X86_FORM_NUMBER;
+    const Tier1EmitPrepared* prepared = &emitted->prepared;
+    const bool memory = record->mode == BUSTER_X86_MEMORY_BASE && record->rm == emitted->frame.base_register;
+    const uint32_t reg = record->reg;
+    uint64_t row = 0;
+    *load = false;
+    if (memory && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((prepared->call_save_mask >> reg) & 1) != 0 && (form == X86_FORM_MOV_RM64_R64 || form == X86_FORM_MOV_R64_RM64) &&
+        record->displacement == tier1_emit_call_save(emitted, reg, false).displacement)
+    {
+        row = 1ull << reg;
+        *load = form == X86_FORM_MOV_R64_RM64;
+    }
+    const uint32_t vector_row = emitted->general && reg < 16 && ((prepared->vector_save_mask >> reg) & 1) != 0 ? tier1_emit_cfg_vector_save_row(emitted, reg) : UINT32_MAX;
+    if (memory && vector_row < emitted->frame.count && (form == X86_FORM_MOVSD_XM64_X || form == X86_FORM_MOVSD_X_XM64) && record->displacement == emitted->frame.offset[vector_row])
+    {
+        row = 1ull << (16 + reg);
+        *load = form == X86_FORM_MOVSD_X_XM64;
+    }
+    const uint32_t mask_row = emitted->general && reg < 8 && ((prepared->mask_save_mask >> reg) & 1) != 0 ? tier1_emit_cfg_mask_save_row(emitted, reg) : UINT32_MAX;
+    for (uint32_t width = 1; memory && mask_row < emitted->frame.count && width <= 8; width *= 2)
+    {
+        const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+        const bool kmov = (form == forms->store || form == forms->load) && record->displacement == emitted->frame.offset[mask_row];
+        row = kmov ? 1ull << (32 + reg) : row;
+        *load = kmov ? form == forms->load : *load;
+    }
+    return row;
 }
 
-// The call-save stores among records [first, end).
+// The general registers' call-save stores among records [first, end).
 static uint32_t tier1_emit_test_save_stores(const Tier1EmitResult* emitted, uint32_t first, uint32_t end)
 {
     uint32_t stores = 0;
     for (uint32_t r = first; r < end && r < emitted->code.count; r += 1)
     {
-        stores += tier1_emit_test_call_save(emitted, r, false);
+        bool load = false;
+        const uint64_t row = tier1_emit_test_save_row(emitted, r, &load);
+        stores += row != 0 && row < (1ull << 16) && !load;
     }
     return stores;
 }
 
-// Whether every call-save store is loaded back (#1116): a call owes its saved registers' loads until something needs
-// them, but each value it stores lives past it, so a load of that register from its row follows before the code leaves
-// the straight-line run it is in (a branch, a return, a trap or an indirect jump). A store whose load is lost is the
-// failure owing loads could introduce; this checks each store, not a total.
+// Whether the records store to some xmm call-save row where the frame has any (prepared's vector_save_mask), and to some
+// opmask one where it has any (mask_save_mask): so tier1_emit_test_saves_loaded reads those rows' stores, not none. Not
+// every row: the masks count each fragment that covers a call's definition phase, a floating result's among them, which
+// its call doesn't store.
+static bool tier1_emit_test_saves_seen(const Tier1EmitResult* emitted)
+{
+    uint64_t seen = 0;
+    for (uint32_t r = 0; r < emitted->code.count; r += 1)
+    {
+        bool load = false;
+        const uint64_t row = tier1_emit_test_save_row(emitted, r, &load);
+        seen |= load ? 0 : row;
+    }
+    const bool vectors = emitted->prepared.vector_save_mask == 0 || ((seen >> 16) & 0xffff) != 0;
+    const bool masks = emitted->prepared.mask_save_mask == 0 || ((seen >> 32) & 0xff) != 0;
+    return !emitted->general || (vectors && masks);
+}
+
+// Whether every call-save store is loaded back (#1116), of a general, an xmm or an opmask register: a call owes its
+// general registers' loads until something needs them, and loads the others back right after it, but each value it
+// stores lives past it, so a load of that register from its row follows before the code leaves the straight-line run it
+// is in (a branch, a return, a trap or an indirect jump). A store whose load is lost is the failure owing loads could
+// introduce; this checks each store, not a total.
 static bool tier1_emit_test_saves_loaded(const Tier1EmitResult* emitted)
 {
-    uint32_t pending = 0;
+    uint64_t pending = 0;
     bool loaded = true;
     uint32_t branch = 0;
     for (uint32_t r = 0; r < emitted->code.count; r += 1)
     {
-        const X86Instruction* record = &emitted->code.records[r];
-        const uint16_t form = record->form & BUSTER_X86_FORM_NUMBER;
+        const uint16_t form = emitted->code.records[r].form & BUSTER_X86_FORM_NUMBER;
         while (branch < emitted->code.branch_count && emitted->code.branches[branch] < r)
         {
             branch += 1;
@@ -411,8 +461,9 @@ static bool tier1_emit_test_saves_loaded(const Tier1EmitResult* emitted)
         const bool leaves = form == X86_FORM_RET || form == X86_FORM_UD2 || form == X86_FORM_JMP_RM64 || (branch < emitted->code.branch_count && emitted->code.branches[branch] == r);
         loaded &= !leaves || pending == 0;
         pending = leaves ? 0 : pending;
-        pending |= tier1_emit_test_call_save(emitted, r, false) ? 1u << record->reg : 0;
-        pending &= tier1_emit_test_call_save(emitted, r, true) ? ~(1u << record->reg) : ~0u;
+        bool load = false;
+        const uint64_t row = tier1_emit_test_save_row(emitted, r, &load);
+        pending = load ? pending & ~row : pending | row;
     }
     return loaded && pending == 0;
 }

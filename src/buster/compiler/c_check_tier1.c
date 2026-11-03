@@ -136,12 +136,10 @@ static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
         {
             const uint32_t type = tier1_select_argument_type(ir, descriptor, argument);
             const IrPassed* record = tier1_select_argument_record(ir, descriptor, argument);
-            kinds |= record != 0 ? (tier1_select_record_supported(record, type) ? 0 : 1u << CHECK_TIER1_CALL_ABI_RECORD) : tier1_select_call_argument(type) ? 0 :
-                     type == IR_F32 || type == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_ARGUMENT : type == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT :
-                     type == IR_I1 || type == IR_I8 || type == IR_I16 ? 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT : 1u << CHECK_TIER1_CALL_OTHER_ARGUMENT;
+            const uint32_t shape = type == IR_F80 ? CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT : type == IR_I1 || type == IR_I8 || type == IR_I16 ? CHECK_TIER1_CALL_NARROW_ARGUMENT : CHECK_TIER1_CALL_OTHER_ARGUMENT;
+            kinds |= record != 0 ? (tier1_select_record_supported(record, type) ? 0 : 1u << CHECK_TIER1_CALL_ABI_RECORD) : tier1_select_call_argument(type) ? 0 : 1u << shape;
         }
-        kinds |= tier1_select_call_result(result) ? 0 : result == IR_F32 || result == IR_F64 ? 1u << CHECK_TIER1_CALL_FLOATING_RESULT : result == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT :
-                 1u << CHECK_TIER1_CALL_OTHER_RESULT;
+        kinds |= tier1_select_call_result(result) ? 0 : result == IR_F80 ? 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT : 1u << CHECK_TIER1_CALL_OTHER_RESULT;
     }
     return kinds;
 }

@@ -66,18 +66,18 @@ typedef enum CheckTier1Fallback
 // refusals say which shape to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell
 // apart. A call has every kind it has, so the kinds' counts can sum past the calls'. Stack arguments are the arguments
 // past the boundary's limit (BUSTER_TIER1_SELECT_MAX_ARGUMENTS), not every argument the ABI passes on the stack, which
-// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's.
+// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's. The boundary
+// takes floating arguments and results (#141), with or without a record, so no kind names them: a float with a record it
+// refuses is an ABI record's.
 typedef enum CheckTier1CallKind
 {
     CHECK_TIER1_CALL_INDIRECT,
     CHECK_TIER1_CALL_VARIADIC,
     CHECK_TIER1_CALL_ABI_RECORD,
     CHECK_TIER1_CALL_STACK_ARGUMENTS,
-    CHECK_TIER1_CALL_FLOATING_ARGUMENT,
     CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT,
     CHECK_TIER1_CALL_NARROW_ARGUMENT,
     CHECK_TIER1_CALL_OTHER_ARGUMENT,
-    CHECK_TIER1_CALL_FLOATING_RESULT,
     CHECK_TIER1_CALL_LONG_DOUBLE_RESULT,
     CHECK_TIER1_CALL_OTHER_RESULT,
     CHECK_TIER1_CALL_ARGUMENT_COUNT,
@@ -85,8 +85,8 @@ typedef enum CheckTier1CallKind
 } CheckTier1CallKind;
 
 static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT] = {
-    "indirect", "variadic", "abi-record", "stack-arguments", "floating-argument", "long-double-argument", "narrow-argument", "other-argument",
-    "floating-result", "long-double-result", "other-result", "argument-count",
+    "indirect", "variadic", "abi-record", "stack-arguments", "long-double-argument", "narrow-argument", "other-argument", "long-double-result",
+    "other-result", "argument-count",
 };
 
 // These two domains have no upstream error enum: the adapter's exact refusal/capacity reason.

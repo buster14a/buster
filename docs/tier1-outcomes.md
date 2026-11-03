@@ -91,9 +91,13 @@ call boundary doesn't take, by the selector's own predicates
 - `stack-arguments`: arguments past the boundary's limit
   (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
   the stack, which Tier 1 takes below it;
-- `floating-`, `long-double-`, `narrow-` and `other-argument`;
-- `floating-`, `long-double-` and `other-result`;
+- `long-double-`, `narrow-` and `other-argument`;
+- `long-double-` and `other-result`;
 - `argument-count`: arguments that don't match the parameters.
+
+Floating arguments and results are the boundary's (#141), with a record or
+without, so no kind names them: a float whose record the boundary refuses is
+an `abi-record`.
 
 `--tier1-report` counts the refused calls by kind as `selection.call.KIND`. A
 call counts under every kind it has, so the kinds' counts can sum past
