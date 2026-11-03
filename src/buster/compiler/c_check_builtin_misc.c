@@ -1149,7 +1149,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_CPU_IS:
         case CBUILTIN_CPU_SUPPORTS: minimum = maximum = 1; break;
         case CBUILTIN_OPERATOR_NEW:
-        case CBUILTIN_OPERATOR_DELETE: minimum = 0; maximum = UINT32_MAX; break;
+        case CBUILTIN_OPERATOR_DELETE:
+            // C++'s alone, refused with any arguments, before their count can reach the operands' 32-bit mask.
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+            break;
         default:
             if (cbuiltin_bits(input->id))
             {
@@ -1185,9 +1188,9 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches, and
         // addressof's and function_start's are their designators. allow_runtime_check's and allow_sanitize_check's string
         // and annotation's second argument are their literals (CheckBuiltinMiscAction.string_known), never converted.
-        // Every call of a builtin x86 refuses (operator_new and operator_delete, pointer authentication's) is refused before
-        // its arguments are read. trivially_relocate's size and
-        // the xray events' arguments, lvalue-converted here, convert to their parameters (check_builtin_misc_last).
+        // Every call of a builtin x86 refuses is refused before its arguments are read: pointer authentication's after
+        // their arity, here, and operator_new's and operator_delete's, of any arity, before the mask above. trivially_relocate's
+        // size and the xray events' arguments, lvalue-converted here, convert to their parameters (check_builtin_misc_last).
         const bool refused = input->id >= CBUILTIN_OPERATOR_NEW && input->id <= CBUILTIN_PTRAUTH_STRIP;
         const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
                               input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || input->id == CBUILTIN_CPU_IS ||

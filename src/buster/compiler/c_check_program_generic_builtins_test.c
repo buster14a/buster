@@ -157,6 +157,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: relocate of enums, arrays and vectors", .source = "enum E { X };\ntypedef int V __attribute__((vector_size(16)));\nvoid f(enum E* a, enum E* b, int (*c)[3], int (*d)[3], V* v, V* w)\n{\n__builtin_trivially_relocate(a, b, 1.5);\n__builtin_trivially_relocate(c, d, 1);\n__builtin_trivially_relocate(v, w, 1);\n}\n" },
         { .name = "generic: operator_new in C", .source = "void* f(void)\n{\nreturn __builtin_operator_new(4);\n}\n", .rejected = true },
         { .name = "generic: operator_delete in C", .source = "void f(void* p)\n{\n__builtin_operator_delete(p);\n}\n", .rejected = true },
+        // More arguments than the operands' 32-bit mask has bits: refused before the mask is made (#1126's review).
+        { .name = "generic: operator_new of 33 arguments", .source = "void* f(void)\n{\nreturn __builtin_operator_new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);\n}\n", .rejected = true },
+        { .name = "generic: operator_delete of 33 arguments", .source = "void f(void)\n{\n__builtin_operator_delete(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);\n}\n", .rejected = true },
         { .name = "generic: ptrauth_auth", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth(p, 0, 0);\n}\n", .rejected = true },
         { .name = "generic: ptrauth_auth_and_resign", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth_and_resign(p, 0, 0, 0, 0);\n}\n", .rejected = true },
         { .name = "generic: ptrauth_auth_load_relative_and_sign", .source = "void* f(void* p)\n{\nreturn __builtin_ptrauth_auth_load_relative_and_sign(p, 0, 0, 0, 0, 0);\n}\n", .rejected = true },
