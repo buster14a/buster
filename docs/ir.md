@@ -39,10 +39,9 @@ The stable printer's text is read back by `ir_parse.c` (#175).
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
-the SSA promoter's transactional refusal of a function with vectors, not
-successful promotion, and promotion of one whose only SIMD values are masks,
-which the promoter takes (#179); ordinary corpus mode continues to require
-promotion. The shared
+promotion of a function with vectors (#141) and of one whose only SIMD values
+are masks (#179), as ordinary corpus mode requires promotion of every
+function. The shared
 interpreter executes vector/mask operations with sparse wide payloads while
 retaining the 16-byte scalar value API. First-class vector entry values and
 vector/mask calls remain unsupported. Native selection of vectors is
@@ -124,6 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
+| `mulhu` | `a,b` are `i64`, result `i64`: the high 64 bits of their unsigned 128-bit product (#141), which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); a pure operation the optimizer doesn't fold |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -160,7 +160,10 @@ fixed parameters; additional variadic arguments must be nonvoid. `symbol_count`
 is an exclusive bound supplied by the translation unit; `UINT32_MAX` permits any
 nonzero, nonsentinel link ID. Zero is reserved by `link.c` and is rejected for
 both direct calls and symbol addresses. A call that passes or returns an
-aggregate by value has ABI records (`IrCall.abi`, below); the typed stream loses
+aggregate by value has ABI records (`IrCall.abi`, below), and so does one that
+passes an aggregate the convention ignores, as an empty struct of no bytes is,
+which a call without records would place in a register by its type (#141); the
+typed stream loses
 the named/variadic parameter boundary, as described below.
 
 ### Labels and `br_indirect`
@@ -542,9 +545,17 @@ The adapter finds block boundaries, compares incoming stack shapes exactly,
 classifies 16 entries at once (one at a time in the twin), counts output, then
 emits into final-sized columns. Stack replay and irregular calls/control flow
 are shared ordered work. Locals begin in typed slots. Only expression-stack
-depths live across block boundaries receive temporary slots. Values are spilled
-before outgoing edges and reloaded in the receiving block; `JUMP_VALUE` therefore
-preserves conditional-expression arms even with an outer expression still live.
+depths live across block boundaries receive temporary slots, one for each depth
+and IR type that some block's incoming shape has (#1189), so that each slot holds
+one type and promotes. Every block is entered with one shape, so a block's
+stores and its successors' loads agree on each depth's type. One slot per depth
+held several types in a function whose `&&`, `||` and `?:` results differ in type
+at one depth, as Lua's `luaV_execute`'s do, and stayed in memory: each truth value
+a store, a load and its slot's address, which removing took 1.2% of speedtest1's
+`--tier1` instructions and 1.3% of Lua's (the Tier 1 guide's "Where the gap to
+clang -O2 is"). Values are spilled before outgoing edges and reloaded in the
+receiving block; `JUMP_VALUE` therefore preserves conditional-expression arms
+even with an outer expression still live.
 
 A separate preheader materializes slot addresses and initializes parameters.
 Backedges to source entry zero skip that initialization. The typed stream's U64

@@ -773,6 +773,206 @@ static const char check_test_tier1_records_source[] =
     "    return 0;\n"
     "}\n";
 
+// The wide values' fixture (#141): long double values, parameters and results, in a loop's phis and through a variadic
+// definition's va_arg; aggregates returned in the x87's registers (a struct of a long double in st0, a _Complex long
+// double in st0 and st1) and passed on the stack, and one of the memory class through the hidden pointer; and 128-bit
+// integers within the bodies (a high product and a loop's shifts, products and xors). Each crosses between this unit
+// (Tier 1's) and the other (clang -O2's) both ways, as arguments and results, and printf takes the long doubles.
+static const char check_test_tier1_wide_header[] =
+    "#include <stdio.h>\n"
+    "#include <complex.h>\n"
+    "typedef struct { long double x; } L1;\n"
+    "typedef struct { long double x; long n; } LN;\n"
+    "L1 b_make_L1(int seed);\n"
+    "_Complex long double b_make_C(int seed);\n"
+    "long b_check_L1(L1 s);\n"
+    "long b_check_C(_Complex long double c);\n"
+    "long double b_mix(long double a, int k, long double b);\n"
+    "long b_back(int seed);\n"
+    "L1 a_twist_L1(L1 s, int k);\n"
+    "_Complex long double a_twist_C(_Complex long double c, int k);\n"
+    "LN a_pair(long double x, long n);\n"
+    "long double a_poly(long double x, int n);\n"
+    "long double a_sum(int n, ...);\n"
+    "long a_mulhi(long a, long b);\n"
+    "long a_wide_loop(int n);\n";
+
+static const char check_test_tier1_wide_other_source[] =
+    "#include \"tier1-wide.h\"\n"
+    "L1 b_make_L1(int seed) { L1 r = { seed * 1.5L + 0.125L }; return r; }\n"
+    "_Complex long double b_make_C(int seed) { return (seed + 0.5L) + (seed * 2 - 1.25L) * I; }\n"
+    "long b_check_L1(L1 s) { return (long)(s.x * 1024); }\n"
+    "long b_check_C(_Complex long double c) { return (long)(__real__ c * 1024) * 31 + (long)(__imag__ c * 1024); }\n"
+    "long double b_mix(long double a, int k, long double b) { return a / (k + 1) + b; }\n"
+    "long b_back(int seed) { L1 s = a_twist_L1(b_make_L1(seed), seed); _Complex long double c = a_twist_C(b_make_C(seed), seed); LN p = a_pair(s.x, seed);\n"
+    "    return b_check_L1(s) * 7 + b_check_C(c) + (long)(p.x * 64) + p.n + (long)(a_poly(1.5L, seed + 2) * 16) + (long)(a_sum(3, 1.25L, 2.5L, (long double)seed) * 8); }\n";
+
+static const char check_test_tier1_wide_source[] =
+    "#include \"tier1-wide.h\"\n"
+    "#include <stdarg.h>\n"
+    "L1 a_twist_L1(L1 s, int k) { L1 r = { s.x * k + b_mix(s.x, k, 0.25L) }; return r; }\n"
+    "_Complex long double a_twist_C(_Complex long double c, int k) { return c * (long double)k + (__real__ c - __imag__ c) * I; }\n"
+    "LN a_pair(long double x, long n) { LN r = { x / 3, n * 5 }; return r; }\n"
+    "long double a_poly(long double x, int n) { long double s = 0; for (int i = 0; i < n; i += 1) { s = s * x + (long double)i; if (s > 1e30L) s = s / 1e20L; } return s; }\n"
+    "long double a_sum(int n, ...) { va_list ap; va_start(ap, n); long double s = 0; for (int i = 0; i < n; i += 1) s += va_arg(ap, long double) * (i + 1); va_end(ap); return s; }\n"
+    "long a_mulhi(long a, long b) { return (long)(((__int128)a * b) >> 64); }\n"
+    "long a_wide_loop(int n) { unsigned __int128 acc = 1; for (int i = 1; i <= n; i += 1) { acc = acc * (unsigned)(i + 3) + ((unsigned __int128)i << 70); acc ^= acc >> 33; } return (long)(acc ^ (acc >> 64)); }\n"
+    "int main(void) {\n"
+    "    for (int seed = 0; seed < 6; seed += 1) printf(\"%ld %ld\\n\", b_back(seed), a_mulhi(seed * 0x123456789abcdefL, -0x7edcba9876543210L - seed));\n"
+    "    L1 s = a_twist_L1(b_make_L1(3), 4); _Complex long double c = a_twist_C(b_make_C(2), 5);\n"
+    "    printf(\"%.10Lg %.10Lg %.10Lg %ld\\n\", s.x, __real__ c, __imag__ c, a_wide_loop(40));\n"
+    "    printf(\"%.10Lg\\n\", a_sum(4, 1.0L, 2.0L, 3.0L, 0.5L));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The convention's rarer shapes' fixture (#141): by-value aggregates whose low eightbyte is padding (HIGH: eightbyte 1
+// alone in a register or a stack slot) or whose high one is (in a register alone, or LOW: on the stack in one slot), and
+// SPLIT ones, a part in a register and the other in a stack slot, where an _Atomic scalar takes a register clang doesn't
+// count: an integer pair split between r9 and the stack, and a double and a long split between rdi and the stack, each
+// way round; and ones the convention ignores, passed and returned nowhere: an empty struct, and one of unnamed
+// bit-fields. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results:
+// the other unit's b_empty, by --tier1, once passed its empty struct's address in rdi, x's register (a call without
+// records, ir_typed_aggregate_call).
+static const char check_test_tier1_shapes_header[] =
+    "#include <stdio.h>\n"
+    "typedef struct { long x; long : 64; } Low;\n"
+    "typedef struct { long : 64; long y; } High;\n"
+    "typedef struct { int : 32; int : 32; float f; int i; } HighMixed;\n"
+    "typedef struct { double d; long l; } DL;\n"
+    "typedef struct { long l; double d; } LD;\n"
+    "typedef struct { long a, b; } LL;\n"
+    "typedef struct {} Empty;\n"
+    "typedef struct { int : 32; } Bits;\n"
+    "long b_low(Low s);\n"
+    "long b_high(High s);\n"
+    "long b_high_mixed(HighMixed s);\n"
+    "long b_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t);\n"
+    "long b_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t);\n"
+    "long b_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t);\n"
+    "long b_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t);\n"
+    "long b_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t);\n"
+    "Low b_make_low(long x);\n"
+    "High b_make_high(long y);\n"
+    "HighMixed b_make_high_mixed(int k);\n"
+    "long b_back(int k);\n"
+    "long a_low(Low s);\n"
+    "long a_high(High s);\n"
+    "long a_high_mixed(HighMixed s);\n"
+    "long a_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t);\n"
+    "long a_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t);\n"
+    "long a_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t);\n"
+    "long a_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t);\n"
+    "long a_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t);\n"
+    "Low a_make_low(long x);\n"
+    "High a_make_high(long y);\n"
+    "HighMixed a_make_high_mixed(int k);\n"
+    "long b_empty(Empty e, long x);\n"
+    "long b_bits(long a, Bits b, long c);\n"
+    "Empty b_make_empty(long x);\n"
+    "long a_empty(Empty e, long x);\n"
+    "long a_bits(long a, Bits b, long c);\n"
+    "Empty a_make_empty(long x);\n"
+    "long a_empty_chain(long x);\n";
+
+static const char check_test_tier1_shapes_other_source[] =
+    "#include \"tier1-shapes.h\"\n"
+    "long b_low(Low s) { return a_low(s) * 2 + s.x; }\n"
+    "long b_high(High s) { return a_high(s) * 2 + s.y; }\n"
+    "long b_high_mixed(HighMixed s) { return a_high_mixed(s) * 2 + s.i; }\n"
+    "long b_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t) { return a_low_stack(a, b, c, d, e, u, s, t) + s.x; }\n"
+    "long b_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t) { return a_high_stack(a, b, c, d, e, u, s, t) + s.y; }\n"
+    "long b_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t) { return a_split_int(a, b, c, d, u, s, t) + s.a - s.b; }\n"
+    "long b_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t) { return a_split_sse(a, b, c, d, e, f, g, u, s, t) + s.l; }\n"
+    "long b_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t) { return a_split_ld(a, b, c, d, e, f, g, u, s, t) + s.l; }\n"
+    "Low b_make_low(long x) { Low r = { x * 11 }; return r; }\n"
+    "High b_make_high(long y) { High r; r.y = y * 13; return r; }\n"
+    "HighMixed b_make_high_mixed(int k) { HighMixed r; r.f = k * 1.25f; r.i = k * 3; return r; }\n"
+    "long b_back(int k) { return a_make_low(k).x * 3 + a_make_high(k + 1).y * 5 + a_make_high_mixed(k + 2).i + (long)(a_make_high_mixed(k).f * 8); }\n"
+    "long b_empty(Empty e, long x) { return a_empty(e, x) * 2 + x; }\n"
+    "long b_bits(long a, Bits b, long c) { return a_bits(a, b, c) + 1; }\n"
+    "Empty b_make_empty(long x) { Empty e = { }; (void)x; return e; }\n";
+
+static const char check_test_tier1_shapes_source[] =
+    "#include \"tier1-shapes.h\"\n"
+    "long a_low(Low s) { return s.x * 3 + 1; }\n"
+    "long a_high(High s) { return s.y * 5 + 2; }\n"
+    "long a_high_mixed(HighMixed s) { return (long)(s.f * 4) + s.i * 7; }\n"
+    "long a_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t) { return a + b * 2 + c * 3 + d * 4 + e * 5 + u * 6 + s.x * 7 + t * 8; }\n"
+    "long a_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t) { return a + b * 2 + c * 3 + d * 4 + e * 5 + u * 6 + s.y * 9 + t * 10; }\n"
+    "long a_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t) { return a + b * 2 + c * 3 + d * 4 + u * 5 + s.a * 6 + s.b * 7 + t * 8; }\n"
+    "long a_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t) { return (long)(a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + u * 8 + s.d * 9) + s.l * 11 + t * 13; }\n"
+    "long a_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t) { return (long)(a + b + c + d + e + f + g + u * 2 + s.d * 3) + s.l * 17 + t * 19; }\n"
+    "Low a_make_low(long x) { Low r = { x * 3 }; return r; }\n"
+    "High a_make_high(long y) { High r; r.y = y * 5; return r; }\n"
+    "HighMixed a_make_high_mixed(int k) { HighMixed r; r.f = k * 0.5f; r.i = k * 9; return r; }\n"
+    "long a_empty(Empty e, long x) { (void)e; return x * 3 + 2; }\n"
+    "long a_bits(long a, Bits b, long c) { Bits copy = b; (void)copy; return a * 5 + c; }\n"
+    "Empty a_make_empty(long x) { Empty e; (void)x; return e; }\n"
+    "long a_empty_chain(long x) { Empty e = b_make_empty(x); Bits b = { }; return b_empty(e, x) + b_bits(x, b, x + 1) + a_empty(a_make_empty(x), x); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (int k = 1; k < 4; k += 1)\n"
+    "    {\n"
+    "        Low l = b_make_low(k);\n"
+    "        High h = b_make_high(k + 1);\n"
+    "        HighMixed m = b_make_high_mixed(k + 2);\n"
+    "        LL p = { k, k * 2 };\n"
+    "        DL q = { k * 1.5, k * 3 };\n"
+    "        LD r = { k * 4, k * 2.25 };\n"
+    "        printf(\"%ld %ld %ld %ld\\n\", b_low(l), b_high(h), b_high_mixed(m), b_back(k));\n"
+    "        printf(\"%ld %ld %ld\\n\", b_low_stack(1, 2, 3, 4, 5, k, l, 6), b_high_stack(1, 2, 3, 4, 5, k, h, 7), b_split_int(1, 2, 3, 4, k, p, 8));\n"
+    "        printf(\"%ld %ld\\n\", b_split_sse(1, 2, 3, 4, 5, 6, 7, k, q, 9), b_split_ld(1, 2, 3, 4, 5, 6, 7, k, r, 10));\n"
+    "        printf(\"%ld %ld %ld\\n\", a_make_low(k).x, a_make_high(k).y, (long)a_make_high_mixed(k).i);\n"
+    "        Empty e = { };\n"
+    "        printf(\"%ld %ld\\n\", b_empty(e, k), a_empty_chain(k));\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// The vectors' fixture (#141), for x86-64-v4: vectors of each width, v4i32, v8i32 and v16i32 (unsigned among them),
+// passed and returned by value, as aggregates in a vector register whole (an xmm, ymm or zmm one), between this unit
+// (Tier 1's) and the other (clang -O2's) both ways, with the operations, comparisons and constants between. Its hash,
+// a_fold's, is unsigned, so that the oracle's output is a defined program's: a signed one overflows (#1204's review).
+static const char check_test_tier1_vectors_header[] =
+    "#include <stdio.h>\n"
+    "typedef int V4 __attribute__((vector_size(16)));\n"
+    "typedef unsigned U8 __attribute__((vector_size(32)));\n"
+    "typedef int V16 __attribute__((vector_size(64)));\n"
+    "V4 b_v4(V4 a, int k);\n"
+    "U8 b_u8(U8 a, U8 b);\n"
+    "V16 b_v16(V16 a, long k, V4 c);\n"
+    "unsigned long b_back(int k);\n"
+    "V4 a_v4(V4 a, int k);\n"
+    "U8 a_u8(U8 a, U8 b);\n"
+    "V16 a_v16(V16 a, long k, V4 c);\n"
+    "unsigned long a_fold(V16 v, U8 u, V4 w);\n";
+
+static const char check_test_tier1_vectors_other_source[] =
+    "#include \"tier1-vectors.h\"\n"
+    "V4 b_v4(V4 a, int k) { V4 s = { k, k, k, k }; return a - s; }\n"
+    "U8 b_u8(U8 a, U8 b) { return (a ^ b) + a_u8(b, a); }\n"
+    "V16 b_v16(V16 a, long k, V4 c) { return a_v16(a, k + 1, c) + a; }\n"
+    "unsigned long b_back(int k) { V4 w = { k, 2, 3, 4 }; U8 u = { 9u, 8u, 7u, 6u, 5u, 4u, 3u, (unsigned)k }; V16 v = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, k }; return a_fold(a_v16(v, k, a_v4(w, k)), a_u8(u, u), w); }\n";
+
+static const char check_test_tier1_vectors_source[] =
+    "#include \"tier1-vectors.h\"\n"
+    "V4 a_v4(V4 a, int k) { V4 s = { 1, 2, 3, 4 }; V4 m = a < s; return (a + s) ^ (m & b_v4(s, k)); }\n"
+    "U8 a_u8(U8 a, U8 b) { U8 m = a >= b; return a * b - (a | b) + m; }\n"
+    "V16 a_v16(V16 a, long k, V4 c) { V16 s = { 7, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987 }; V16 m = a != s; return a * s + (m & ~a) - (V16){ c[0], c[1], c[2], c[3] }; }\n"
+    "unsigned long a_fold(V16 v, U8 u, V4 w) { unsigned long h = 0; for (int i = 0; i < 16; i += 1) h = h * 31 + v[i]; for (int i = 0; i < 8; i += 1) h = h * 37 + u[i]; for (int i = 0; i < 4; i += 1) h = h * 41 + w[i]; return h; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (int k = 0; k < 4; k += 1)\n"
+    "    {\n"
+    "        V4 w = { k, -k, k * 7, 100 - k };\n"
+    "        U8 u = { 1u, 2u, 3u, (unsigned)k, 0xffffffffu, 9u, 4u, 0x80000000u };\n"
+    "        V16 v = { k, 1, -2, 3, 4, -5, 6, 7, 8, 9, -10, 11, 12, 13, 14, 15 };\n"
+    "        printf(\"%lu %lu\\n\", a_fold(a_v16(v, k, w), a_u8(u, b_u8(u, u)), a_v4(w, k)), b_back(k));\n"
+    "        printf(\"%lu\\n\", a_fold(b_v16(v, k, w), b_u8(u, u), b_v4(w, k)));\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
 // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
 static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
 {
@@ -2220,10 +2420,13 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
     unlink(reference);
 }
 
-// The by-value aggregates' fixture (#789): its unit by --tier1 -c, by each path with and without rematerialization, every
-// function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both prints; and
-// both units by --tier1, every function of both Tier 1's (the other unit's va_arg of an aggregate among them), print it too.
-static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
+// A fixture of two units sharing a header, `name`.h (#789, #141): its unit by --tier1 -c, by each path with and without
+// rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
+// build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the
+// checks' messages. `option` (as -march=x86-64-v4), where it isn't NULL, every build takes, and only where the host can
+// (`runs`) are the programs run: elsewhere the builds are checked alone.
+static void check_test_driver_tier1_units(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* what, const char* header_source,
+                                          const char* unit_source, const char* other_source, const char* option, bool runs)
 {
     char header[512];
     char unit[512];
@@ -2231,17 +2434,23 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang, 
     char other_object[512];
     char reference[512];
     char both[512];
-    snprintf(header, sizeof(header), "%s/tier1-records.h", directory);
-    snprintf(unit, sizeof(unit), "%s/tier1-records.c", directory);
-    snprintf(other, sizeof(other), "%s/tier1-records-other.c", directory);
-    snprintf(other_object, sizeof(other_object), "%s/tier1-records-other.o", directory);
-    snprintf(reference, sizeof(reference), "%s/tier1-records-clang", directory);
-    snprintf(both, sizeof(both), "%s/tier1-records-both", directory);
-    const bool written = parse_test_write(header, check_test_tier1_records_header, sizeof(check_test_tier1_records_header) - 1) &&
-                         parse_test_write(unit, check_test_tier1_records_source, sizeof(check_test_tier1_records_source) - 1) &&
-                         parse_test_write(other, check_test_tier1_records_other_source, sizeof(check_test_tier1_records_other_source) - 1);
-    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
-    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+    char message[256];
+    snprintf(header, sizeof(header), "%s/%s.h", directory, name);
+    snprintf(unit, sizeof(unit), "%s/%s.c", directory, name);
+    snprintf(other, sizeof(other), "%s/%s-other.c", directory, name);
+    snprintf(other_object, sizeof(other_object), "%s/%s-other.o", directory, name);
+    snprintf(reference, sizeof(reference), "%s/%s-clang", directory, name);
+    snprintf(both, sizeof(both), "%s/%s-both", directory, name);
+    const bool written = parse_test_write(header, header_source, strlen(header_source)) && parse_test_write(unit, unit_source, strlen(unit_source)) &&
+                         parse_test_write(other, other_source, strlen(other_source));
+    // The option, where there is one, after each command's first argument.
+    const uint32_t optioned = option != NULL ? 1 : 0;
+    char* reference_arguments[8] = { (char*)clang, "-O0", (char*)option };
+    char* other_arguments[9] = { (char*)clang, "-O2", (char*)option };
+    char* const reference_tail[] = { "-o", reference, unit, other, NULL };
+    char* const other_tail[] = { "-c", "-o", other_object, other, NULL };
+    memcpy(reference_arguments + 2 + optioned, reference_tail, sizeof(reference_tail));
+    memcpy(other_arguments + 2 + optioned, other_tail, sizeof(other_tail));
     char* text = NULL;
     const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
     free(text);
@@ -2249,43 +2458,194 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang, 
     const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
     free(text);
     char expected[4096] = { 0 };
-    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
-    check_test_expect(test, ran, "clang's builds of the by-value aggregates' fixture run");
+    const bool ran = referenced && other_built && (!runs || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
+    snprintf(message, sizeof(message), "clang's builds of the %s fixture run", what);
+    check_test_expect(test, ran, message);
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
     {
         for (uint32_t path = 0; path < 2; path += 1)
         {
             char object[512];
             char program[512];
-            snprintf(object, sizeof(object), "%s/tier1-records-%u-%u.o", directory, rematerialize, path);
-            snprintf(program, sizeof(program), "%s/tier1-records-%u-%u", directory, rematerialize, path);
+            snprintf(object, sizeof(object), "%s/%s-%u-%u.o", directory, name, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/%s-%u-%u", directory, name, rematerialize, path);
             CheckTestTier1Build build;
-            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
-            check_test_expect(test, compiled, "the by-value aggregates' unit compiles by --tier1, every function Tier 1's");
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, option, &build);
+            snprintf(message, sizeof(message), "the %s unit compiles by --tier1, every function Tier 1's (rematerialize %u, path %u)", what, rematerialize, path);
+            check_test_expect(test, compiled, message);
             char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
             char* link_text = NULL;
             const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
             free(link_text);
             char actual[4096] = { 0 };
-            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
-                              "Tier 1's aggregates pass to and from clang -O2's code as arguments and results");
+            snprintf(message, sizeof(message), "the %s unit's Tier 1 code passes to and from clang -O2's as clang -O0's does (rematerialize %u, path %u)", what, rematerialize, path);
+            check_test_expect(test, linked && (!runs || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
             unlink(object);
             unlink(program);
         }
     }
-    char* both_arguments[] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", "-o", both, unit, other, NULL };
+    char* both_arguments[11] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", (char*)option };
+    char* const both_tail[] = { "-o", both, unit, other, NULL };
+    memcpy(both_arguments + 5 + optioned, both_tail, sizeof(both_tail));
     text = NULL;
     const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
     free(text);
     char actual[4096] = { 0 };
-    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
-                      "both units of the by-value aggregates' fixture by --tier1, every function Tier 1's, print clang's build's output");
+    snprintf(message, sizeof(message), "both units of the %s fixture by --tier1, every function Tier 1's, print clang's build's output", what);
+    check_test_expect(test, both_built && (!runs || (check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
     unlink(header);
     unlink(unit);
     unlink(other);
     unlink(other_object);
     unlink(reference);
     unlink(both);
+}
+
+// The by-value aggregates' fixture (#789), the other unit's va_arg of an aggregate among its functions.
+static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-records", "by-value aggregates'", check_test_tier1_records_header, check_test_tier1_records_source,
+                                  check_test_tier1_records_other_source, NULL, true);
+}
+
+// The wide values' fixture (#141).
+static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source,
+                                  NULL, true);
+}
+
+// Stack-passed vectors' alignment (#1204's review). A call whose 32- or 64-byte vector argument goes on the stack (its
+// eight vector registers already taken by doubles) needs rsp aligned to 32 or 64 bytes at the call, past the ABI's 16:
+// Tier 1's frame realigns itself to it, in a fixed frame and in one with an alloca, whose allocations and calls' areas
+// keep it, whatever rsp its own caller gives it. Each sink (clang's, naked) returns its first stack argument's address
+// modulo the vector's size, and each Tier 1 function is called from rsp 64-aligned and 16, 32 and 48 bytes below that,
+// with allocas of several sizes: the expected output is the ABI's, all zeros. clang's own build can't be the oracle:
+// clang 23 rounds an alloca to 16 bytes in a realigned frame, misplacing the same call's argument (by 16 at -O0; at -O2
+// its vmovaps there faults).
+static const char check_test_tier1_stack_vectors_source[] =
+    "typedef float V8 __attribute__((vector_size(32)));\n"
+    "typedef float V16 __attribute__((vector_size(64)));\n"
+    "unsigned long b_sink8(double, double, double, double, double, double, double, double, V8);\n"
+    "unsigned long b_sink16(double, double, double, double, double, double, double, double, V16);\n"
+    "unsigned long b_sink8_after(double, double, double, double, double, double, double, double, V8, char*);\n"
+    "unsigned long b_sink16_after(double, double, double, double, double, double, double, double, V16, char*);\n"
+    "unsigned long a_fixed8(V8* p, int n, double d) { return b_sink8(d, d + 1, d + 2, d + 3, d + 4, d + 5, d + 6, d + n, *p); }\n"
+    "unsigned long a_fixed16(V16* p, int n, double d) { return b_sink16(d, d + 1, d + 2, d + 3, d + 4, d + 5, d + 6, d + n, *p); }\n"
+    "unsigned long a_dynamic8(V8* p, int n, double d) { char* q = __builtin_alloca(n); q[0] = (char)n; return b_sink8_after(d, d, d, d, d, d, d, d, *p, q); }\n"
+    "unsigned long a_dynamic16(V16* p, int n, double d) { char* q = __builtin_alloca(n); q[0] = (char)n; return b_sink16_after(d, d, d, d, d, d, d, d, *p, q); }\n";
+
+static const char check_test_tier1_stack_vectors_other_source[] =
+    "#include <stdio.h>\n"
+    "typedef float V8 __attribute__((vector_size(32)));\n"
+    "typedef float V16 __attribute__((vector_size(64)));\n"
+    "typedef unsigned long (*F)(void*, int, double);\n"
+    "unsigned long a_fixed8(V8* p, int n, double d);\n"
+    "unsigned long a_fixed16(V16* p, int n, double d);\n"
+    "unsigned long a_dynamic8(V8* p, int n, double d);\n"
+    "unsigned long a_dynamic16(V16* p, int n, double d);\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink8(double a, double b, double c, double d, double e, double f, double g, double h, V8 x)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $31, %eax\\n\\tret\"); }\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink16(double a, double b, double c, double d, double e, double f, double g, double h, V16 x)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $63, %eax\\n\\tret\"); }\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink8_after(double a, double b, double c, double d, double e, double f, double g, double h, V8 x, char* q)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $31, %eax\\n\\tret\"); }\n"
+    "__attribute__((naked, noinline)) unsigned long b_sink16_after(double a, double b, double c, double d, double e, double f, double g, double h, V16 x, char* q)\n"
+    "{ __asm__(\"lea 8(%rsp), %rax\\n\\tand $63, %eax\\n\\tret\"); }\n"
+    "// f(p, n, d) from rsp 64-aligned less `below` bytes (a multiple of 16, as the ABI keeps it): f in rdi, p in rsi, n in\n"
+    "// edx, below in rcx (the fourth integer argument), d in xmm0.\n"
+    "__attribute__((naked, noinline)) unsigned long b_call(F f, void* p, int n, double d, long below)\n"
+    "{ __asm__(\"push %rbp\\n\\tmov %rsp, %rbp\\n\\tand $-64, %rsp\\n\\tsub %rcx, %rsp\\n\\tmov %rdi, %rax\\n\\tmov %rsi, %rdi\\n\\tmov %edx, %esi\\n\\t\"\n"
+    "          \"call *%rax\\n\\tmov %rbp, %rsp\\n\\tpop %rbp\\n\\tret\"); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    V8 x = { 1, 2, 3, 4, 5, 6, 7, 8 };\n"
+    "    V16 y = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };\n"
+    "    unsigned long r[4] = { 0, 0, 0, 0 };\n"
+    "    for (long below = 0; below < 64; below += 16)\n"
+    "    {\n"
+    "        for (int n = 1; n < 100; n += 13)\n"
+    "        {\n"
+    "            r[0] |= b_call((F)a_fixed8, &x, n, 0.5, below);\n"
+    "            r[1] |= b_call((F)a_fixed16, &y, n, 0.5, below);\n"
+    "            r[2] |= b_call((F)a_dynamic8, &x, n, 0.5, below);\n"
+    "            r[3] |= b_call((F)a_dynamic16, &y, n, 0.5, below);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lu %lu %lu %lu\\n\", r[0], r[1], r[2], r[3]);\n"
+    "    return 0;\n"
+    "}\n";
+
+// The stack-passed vectors' check (above): its unit by --tier1 -march=x86-64-v4, every function Tier 1's, by each path
+// with and without rematerialization, linked with its other unit (clang -O2's), prints zeros where the host can run it.
+static void check_test_driver_tier1_stack_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory, bool host)
+{
+    char unit[512];
+    char other[512];
+    char other_object[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-stack-vectors.c", directory);
+    snprintf(other, sizeof(other), "%s/tier1-stack-vectors-other.c", directory);
+    snprintf(other_object, sizeof(other_object), "%s/tier1-stack-vectors-other.o", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_stack_vectors_source, strlen(check_test_tier1_stack_vectors_source)) &&
+                         parse_test_write(other, check_test_tier1_stack_vectors_other_source, strlen(check_test_tier1_stack_vectors_other_source));
+    char* other_arguments[] = { (char*)clang, "-O2", "-march=x86-64-v4", "-c", "-o", other_object, other, NULL };
+    char* text = NULL;
+    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, other_built, "clang builds the stack-passed vectors' other unit");
+    for (uint32_t rematerialize = 0; other_built && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char object[512];
+            char program[512];
+            char message[256];
+            snprintf(object, sizeof(object), "%s/tier1-stack-vectors-%u-%u.o", directory, rematerialize, path);
+            snprintf(program, sizeof(program), "%s/tier1-stack-vectors-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, "-march=x86-64-v4", &build);
+            snprintf(message, sizeof(message), "the stack-passed vectors' unit compiles by --tier1, every function Tier 1's (rematerialize %u, path %u)", rematerialize, path);
+            check_test_expect(test, compiled, message);
+            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+            text = NULL;
+            const bool linked = compiled && check_test_driver_spawn(link_arguments, &text) == 0;
+            free(text);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "Tier 1's calls place 32- and 64-byte vectors on the stack at their alignment, in fixed and dynamic frames (rematerialize %u, path %u)",
+                     rematerialize, path);
+            const bool aligned = linked && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, "0 0 0 0\n") == 0));
+            check_test_expect(test, aligned, message);
+            if (linked && host && !aligned)
+            {
+                fprintf(stderr, "check: stack-passed vectors' residues: %s", actual);
+            }
+            unlink(object);
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(other);
+    unlink(other_object);
+}
+
+// The vectors' fixture (#141), for x86-64-v4, run where the host has every feature of it: both compilers' code is
+// x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review). Then
+// the stack-passed vectors' check, on the same hosts.
+static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
+                                  check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
+    check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
+}
+
+// The convention's rarer shapes' fixture (#141).
+static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
+                                  check_test_tier1_shapes_other_source, NULL, true);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

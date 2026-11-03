@@ -12,18 +12,17 @@ static bool pp_test_source_feature_matrix(void)
         { "c_static_assert", 2011 }, { "c_thread_local", 2011 }, { "c_fixed_enum", 2023 },
     };
     static const char* const attributes[] = {
-        "alias", "aligned", "cleanup", "constructor", "destructor", "ext_vector_type", "fallthrough", "gnu_inline", "ifunc", "mode", "naked",
-        "overloadable", "packed", "retain", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak", "weakref",
+        "alias", "aligned", "cleanup", "common", "constructor", "destructor", "ext_vector_type", "fallthrough", "gnu_inline", "ifunc", "mode", "naked",
+        "nocommon", "overloadable", "packed", "retain", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak", "weakref",
     };
     static const char* const refused[] = {
-        "common",
         "always_inline", "noinline", "format", "unused", "noreturn", "nodiscard", "maybe_unused", "deprecated", "not_an_attribute",
     };
     static const struct { const char* name; uint32_t value; } c_attributes[] = {
         { "fallthrough", 201910 }, { "gnu::aligned", 1 }, { "gnu::packed", 1 }, { "gnu::vector_size", 1 },
         { "gnu::section", 1 }, { "gnu::visibility", 1 }, { "clang::ext_vector_type", 1 },
         { "gnu::cleanup", 1 }, { "gnu::constructor", 1 }, { "gnu::destructor", 1 }, { "gnu::weak", 1 }, { "clang::overloadable", 1 },
-        { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 }, { "gnu::retain", 1 },
+        { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 }, { "gnu::retain", 1 }, { "gnu::common", 1 }, { "gnu::nocommon", 1 },
         { "nodiscard", 0 }, { "maybe_unused", 0 }, { "deprecated", 0 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },
     };
@@ -239,8 +238,13 @@ static bool pp_test_builtin_targets(const char* directory)
                                          cbuiltin_source_intrinsic(name, info->name_length) || cbuiltin_fortify_source(name, info->name_length) ||
                                          cbuiltin_library_source(name, info->name_length) || cbuiltin_library_plain(info->name, info->name_length) != NULL;
                 const uint32_t ours = pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, info->name_length);
-                // __has_constexpr_builtin answers 1 only where clang's does: for the folds buster has of clang's (#148).
-                const char* constant = answer + 1 < end ? answer + 1 : end;
+                // __has_constexpr_builtin answers 1 only where clang's does: for the folds buster has of clang's (#148). Its
+                // answer follows __has_builtin's, which can be a version (201802L, __builtin_operator_new's).
+                const char* constant = answer;
+                while (constant < end && *constant != ' ')
+                {
+                    constant += 1;
+                }
                 const bool clang_constant = result && constant < end && *constant == ' ' && constant[1] != '0';
                 const uint32_t ours_constant = pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, info->name_length);
                 const bool right = (implemented ? (ours != 0) == clang_yes : ours == 0) && (ours_constant == 0 || clang_constant);
