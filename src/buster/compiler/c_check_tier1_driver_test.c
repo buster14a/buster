@@ -931,7 +931,8 @@ static const char check_test_tier1_shapes_source[] =
 
 // The vectors' fixture (#141), for x86-64-v4: vectors of each width, v4i32, v8i32 and v16i32 (unsigned among them),
 // passed and returned by value, as aggregates in a vector register whole (an xmm, ymm or zmm one), between this unit
-// (Tier 1's) and the other (clang -O2's) both ways, with the operations, comparisons and constants between.
+// (Tier 1's) and the other (clang -O2's) both ways, with the operations, comparisons and constants between. Its hash,
+// a_fold's, is unsigned, so that the oracle's output is a defined program's: a signed one overflows (#1204's review).
 static const char check_test_tier1_vectors_header[] =
     "#include <stdio.h>\n"
     "typedef int V4 __attribute__((vector_size(16)));\n"
@@ -940,25 +941,25 @@ static const char check_test_tier1_vectors_header[] =
     "V4 b_v4(V4 a, int k);\n"
     "U8 b_u8(U8 a, U8 b);\n"
     "V16 b_v16(V16 a, long k, V4 c);\n"
-    "long b_back(int k);\n"
+    "unsigned long b_back(int k);\n"
     "V4 a_v4(V4 a, int k);\n"
     "U8 a_u8(U8 a, U8 b);\n"
     "V16 a_v16(V16 a, long k, V4 c);\n"
-    "long a_fold(V16 v, U8 u, V4 w);\n";
+    "unsigned long a_fold(V16 v, U8 u, V4 w);\n";
 
 static const char check_test_tier1_vectors_other_source[] =
     "#include \"tier1-vectors.h\"\n"
     "V4 b_v4(V4 a, int k) { V4 s = { k, k, k, k }; return a - s; }\n"
     "U8 b_u8(U8 a, U8 b) { return (a ^ b) + a_u8(b, a); }\n"
     "V16 b_v16(V16 a, long k, V4 c) { return a_v16(a, k + 1, c) + a; }\n"
-    "long b_back(int k) { V4 w = { k, 2, 3, 4 }; U8 u = { 9u, 8u, 7u, 6u, 5u, 4u, 3u, (unsigned)k }; V16 v = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, k }; return a_fold(a_v16(v, k, a_v4(w, k)), a_u8(u, u), w); }\n";
+    "unsigned long b_back(int k) { V4 w = { k, 2, 3, 4 }; U8 u = { 9u, 8u, 7u, 6u, 5u, 4u, 3u, (unsigned)k }; V16 v = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, k }; return a_fold(a_v16(v, k, a_v4(w, k)), a_u8(u, u), w); }\n";
 
 static const char check_test_tier1_vectors_source[] =
     "#include \"tier1-vectors.h\"\n"
     "V4 a_v4(V4 a, int k) { V4 s = { 1, 2, 3, 4 }; V4 m = a < s; return (a + s) ^ (m & b_v4(s, k)); }\n"
     "U8 a_u8(U8 a, U8 b) { U8 m = a >= b; return a * b - (a | b) + m; }\n"
     "V16 a_v16(V16 a, long k, V4 c) { V16 s = { 7, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987 }; V16 m = a != s; return a * s + (m & ~a) - (V16){ c[0], c[1], c[2], c[3] }; }\n"
-    "long a_fold(V16 v, U8 u, V4 w) { long h = 0; for (int i = 0; i < 16; i += 1) h = h * 31 + v[i]; for (int i = 0; i < 8; i += 1) h = h * 37 + u[i]; for (int i = 0; i < 4; i += 1) h = h * 41 + w[i]; return h; }\n"
+    "unsigned long a_fold(V16 v, U8 u, V4 w) { unsigned long h = 0; for (int i = 0; i < 16; i += 1) h = h * 31 + v[i]; for (int i = 0; i < 8; i += 1) h = h * 37 + u[i]; for (int i = 0; i < 4; i += 1) h = h * 41 + w[i]; return h; }\n"
     "int main(void)\n"
     "{\n"
     "    for (int k = 0; k < 4; k += 1)\n"
@@ -966,8 +967,8 @@ static const char check_test_tier1_vectors_source[] =
     "        V4 w = { k, -k, k * 7, 100 - k };\n"
     "        U8 u = { 1u, 2u, 3u, (unsigned)k, 0xffffffffu, 9u, 4u, 0x80000000u };\n"
     "        V16 v = { k, 1, -2, 3, 4, -5, 6, 7, 8, 9, -10, 11, 12, 13, 14, 15 };\n"
-    "        printf(\"%ld %ld\\n\", a_fold(a_v16(v, k, w), a_u8(u, b_u8(u, u)), a_v4(w, k)), b_back(k));\n"
-    "        printf(\"%ld\\n\", a_fold(b_v16(v, k, w), b_u8(u, u), b_v4(w, k)));\n"
+    "        printf(\"%lu %lu\\n\", a_fold(a_v16(v, k, w), a_u8(u, b_u8(u, u)), a_v4(w, k)), b_back(k));\n"
+    "        printf(\"%lu\\n\", a_fold(b_v16(v, k, w), b_u8(u, u), b_v4(w, k)));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
