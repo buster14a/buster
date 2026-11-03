@@ -708,9 +708,9 @@ callgrind counted the tasks' loop with what it calls (`check_lower_drain`) on
 fell from 124.4 M instructions to 110.2 M. This session's Xeon put the vector
 path's `lower.statements` 5% lower, at medians of 15 alternating runs.
 
-The 9700X ran the same base twice, two separate runs of `measure-compile`'s
-medians of 11 on `sqlite3.c` with perf's counters of 11 compiles. The steps were
-on at `3fee64da`
+The 9700X ran the same base twice, main at `a4a2182a` merged with each head, in
+two separate runs of `measure-compile`'s medians of 11 on `sqlite3.c` with
+perf's counters of 11 compiles. The steps were on at `3fee64da`
 ([run](https://github.com/buster14a/buster/actions/runs/41650771613/job/125972558973))
 and off at `2309a558`, which is the base's tree plus a source comment
 ([run](https://github.com/buster14a/buster/actions/runs/41655565084/job/125989536872)):
@@ -725,24 +725,27 @@ and off at `2309a558`, which is the base's tree plus a source comment
 | the compile's user cycles | 525.7 M | 526.1 M |
 | the compile's user branch misses | 3.07 M | 3.09 M |
 
-The steps removed 19.2 M of the compile's instructions, 1.6%, but no cycles and
-no branch misses. Their `lower.statements` median was 0.14 ms lower. That is
-within the spread of main's own separate runs on earlier bases: 8.34, 8.49 and
-8.53 ms in the two sections above.
+The steps removed 19.2 M of the compile's instructions, 1.6%. The runs show no
+reliable reduction in its cycles (0.08%) or its branch misses (0.6%). The
+steps' `lower.statements` median was 0.14 ms lower. That is within the spread
+of main's own separate runs on earlier bases: 8.34, 8.49 and 8.53 ms in the two
+sections above. These are two runs on one input, not an interleaved A/B. So the
+steps aren't kept, and their code stays in #1235's history (`3828a06c`,
+`3fee64da`).
 
-So the instructions the steps removed ran beside the loop's critical path,
-which they kept. That path is each node's chain of dependent loads:
+Why fewer instructions didn't give fewer cycles, these counters don't say. The
+hypothesis that #1048's next step tests is that the loop on Zen 5 waits on each
+node's chain of dependent loads, which the steps kept:
 
 - the node's op and payload row;
 - its type, then its type's class and facts;
 - its object, then its local;
 - its operand, then the operand's type.
 
-On Zen 5 the tasks' loop is bound by those chains, not by its instruction count
-or its branches, as on this session's Xeon it was in part. The steps aren't
-kept, and their code stays in #1235's history (`3828a06c`, `3fee64da`). A step
-that pays has to shorten the chain each node waits on, or overlap the chains of
-several nodes, which one node at a time doesn't.
+The instructions the steps removed would then have run beside that chain.
+Samples of the lowering's load misses and their latency by line on the 9700X
+would confirm it or rule it out. If it holds, a step that pays has to shorten
+the chain each node waits on, or overlap the chains of several nodes.
 
 ## Against clang -O0's objects
 
