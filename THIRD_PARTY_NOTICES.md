@@ -219,6 +219,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_check_body_bindings.c`, `src/buster/compiler/c_check_body_bindings_test.c`, `docs/c-body-bindings.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-body-bindings-2026-10-23/) | Original independent body-event views, scalar/vector translation, file fallbacks, source/guarded fixtures and pipeline measurements; Default. Reuses the original binding kernels, retained source/checker test helpers, measurement helpers and frozen generated checker inputs. No external implementation or corpus is imported. |
 | `src/buster/compiler/c_parser_binding_trace.c`, `src/buster/compiler/c_parser_bindings.c`, `src/buster/compiler/c_parser_bindings_test.c`, `src/buster/compiler/c_parser_bindings_benchmark.c` | Original parser-to-binding source-event adapter, declaration columns, scope fixtures, seeded source generator and source benchmark; Default. Existing project grammar, arenas and original binding benchmark helpers are reused. Clang is an external acceptance oracle. SQLite 3.53.4, Zig 0.14.1 libc and c-testsuite at `5c7275656d751de0e68b2d340a95b5681858ed07` are external validation inputs, read at run time and not incorporated; input identities are recorded in `docs/c-bindings.md`. |
 | `build.sh`, `.gitignore`, `.gitattributes`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
+| `CMakeLists.txt`, `CMakePresets.json`, `cmake/*.cmake`, `tools/ci/build_regression.c`, `tools/ci/setup-build-tools.sh`, `.github/workflows/build.yml` | Original CMake build description, presets, post-link/print/call-graph scripts, regression checks and tool staging for #1182; Default. They use CMake's and Ninja's documented interfaces; no CMake module or third-party build code is copied. CI downloads the official CMake 4.4.3 and Ninja 1.13.2 releases, verified by SHA-256, as external tools; they are not vendored. |
 | `tools/ci/sanitizers.sh`, `tests/sanitizers/`, `src/buster/compiler/fuzz.c`, `tests/fuzz/` and the sanitizer/fuzz sections of `docs/ci.md` | Original detector canaries, compressed-ID tail regression, runtime policy, child-report audit, in-process compiler callback, entry overrides, crash/replay control, dictionary, C seeds and documentation; Default. Clang sanitizer and libFuzzer documentation supplies public flags and API contracts. The system's matching compiler-rt/libFuzzer runtimes and GitHub artifact action run externally and are not vendored. Legacy Buster was inspected for interface and coverage comparison only; no legacy implementation or fixture was copied. |
 | `src/buster/compiler/foreign_strings.c`, `src/buster/compiler/foreign_strings_link.c`, `src/buster/compiler/foreign_strings_test.c`, `src/buster/compiler/foreign_strings_output_test.c`, `src/buster/compiler/foreign_strings_benchmark.c`, `docs/foreign-string-merging.md` | Original string pooling, reference remapping, fixtures, measurements and documentation; Default. Existing masked-load, hashing, arena and ELF interfaces are reused. LLVM ELF symbol-address handling was consulted for semantics; no implementation or fixtures were copied. GNU ld and lld run externally on original fixtures. |
 | `src/buster/compiler/foreign_driver.c`, `src/buster/compiler/foreign_driver_test.c`, `src/buster/compiler/foreign_driver_symbols_test.c`, `src/buster/compiler/foreign_driver_dedup_test.c`, `src/buster/compiler/foreign_driver_pipeline_test.c`, `docs/foreign-driver.md`, `docs/foreign-interpreter.md` | Original raw linker command, ordered-argument and named-symbol selection adapters, guarded and command/runtime fixtures and documentation; Default. Existing project resolver, conversion, transformations, writer and test helpers are reused. GNU ld, lld, GCC and system runtimes are external test inputs/tools; their implementation is not incorporated. |
@@ -581,3 +582,44 @@ Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
 and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
 `CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
 as behavior references. No LLVM implementation or test fixtures were copied.
+
+### The CPU model's names and values (#148)
+
+`src/buster/compiler/c_builtin_cpu.inc` is derived LLVM data, not first-party
+material: the names `__builtin_cpu_supports` and `__builtin_cpu_is` take, and
+the CPU model's bits and values clang's code tests them against. It keeps the
+LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Input:** `llvm/include/llvm/TargetParser/X86TargetParser.def`, as
+  installed by apt.llvm.org's `llvm-23-dev`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92` (LLVM
+  23.1.5, built from llvm-project commit `a738f2737189`), at
+  `/usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def`, sha256
+  `cc59e275156d08b658cf23bc950237ee288a54477b16c08b4cbb00242fa60f50`.
+- **Rows taken:** the strings and ABI values of its `X86_FEATURE_COMPAT` and
+  `X86_MICROARCH_LEVEL` rows (a feature's word is the value divided by 32, its
+  bit the remainder), and of its `X86_VENDOR`, `X86_CPU_TYPE` and
+  `X86_CPU_SUBTYPE` rows, aliases included. The rows keep the input's order,
+  the features' first, and nothing else of it is copied.
+- **Generator:** `tools/generate_x86_cpu_model.c`, which is original project
+  code under the default terms. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_model.c -o build/generate_x86_cpu_model
+  build/generate_x86_cpu_model --self-test
+  build/generate_x86_cpu_model /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def "llvm-23-dev 1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92 (apt.llvm.org)" "$(sha256sum /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def | cut -d' ' -f1)" > c_builtin_cpu.inc.new
+  ```
+
+  The generator succeeds only when it has read the whole input and written
+  and flushed the whole table. `--self-test` checks this against a synthetic
+  input, a write to `/dev/full`, an unreadable input and a malformed row.
+  The output's sha256 is
+  `fe9cf559b3168f24d27e2a228c980af2c0a4b0bab8d552b37422f9ffb47588d7`. Its 183
+  rows are byte-identical to the table that first came in with #148. That
+  table was read from an earlier clang 23.1's code for a call of each name,
+  with no record of its exact inputs.
+- **Oracle:** clang runs externally in `test-checker-driver`
+  (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
+  every row's test against clang's code over every bit and value of the
+  model. Its use as an oracle copies none of its code.

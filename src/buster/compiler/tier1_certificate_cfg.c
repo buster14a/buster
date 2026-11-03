@@ -155,7 +155,9 @@ static bool tier1_cert_cfg_shape(const Tier1CfgInput* input, const Tier1CfgAlloc
             const uint32_t in_degree = input->predecessor_offsets[s + 1] - input->predecessor_offsets[s];
             const uint8_t placement = result->edge_placements[e];
             valid = result->edge_move_offsets[e] <= result->edge_move_offsets[e + 1] && placement <= TIER1_CFG_EDGE_SPLIT;
-            valid = valid && (result->edge_move_offsets[e] == result->edge_move_offsets[e + 1]) == (placement == TIER1_CFG_EDGE_EMPTY);
+            // An edge its consumer copies along (Tier1CfgInput.edge_copies, #141's long doubles) is placed without moves.
+            const bool copies = input->edge_copies != 0 && input->edge_copies[e] != 0;
+            valid = valid && (result->edge_move_offsets[e] == result->edge_move_offsets[e + 1] && !copies) == (placement == TIER1_CFG_EDGE_EMPTY);
             valid = valid && (placement != TIER1_CFG_EDGE_PREDECESSOR || out_degree == 1) && (placement != TIER1_CFG_EDGE_SUCCESSOR || in_degree == 1);
         }
     }

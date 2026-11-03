@@ -48,6 +48,9 @@ test -f /usr/lib/x86_64-linux-gnu/libzstd.a
 toolbin="$RUNNER_TEMP/buster-test-tools"
 mkdir -p "$toolbin"
 printf '%s\n' "$toolbin" "$llvm/bin" >> "$GITHUB_PATH"
+# The pinned CMake and Ninja that build.sh drives, rather than the image's.
+build_tools=$(bash "$(dirname "$0")/setup-build-tools.sh" "$RUNNER_TEMP/build-tools")
+printf '%s\n' "$build_tools" >> "$GITHUB_PATH"
 printf 'BUSTER_CLANG_RESOURCE_DIR=%s\n' "$llvm/lib/clang/23" >> "$GITHUB_ENV"
 # The pragma oracle links the official libclang-cpp shared object; it must load
 # that same release at execution time rather than any runner-provided library.

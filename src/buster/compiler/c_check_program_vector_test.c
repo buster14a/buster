@@ -8,7 +8,9 @@
 // realign its frame (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their
 // operators, calls, members, arrays, globals, casts to and from integers of their bytes and nontemporal stores, and their
 // divisions' floating-point flags under FENV_ACCESS; and _Atomic vectors of 4 to 64 bytes, their atomic loads, stores,
-// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets.
+// exchanges and compare-exchanges and calls both ways. #775 also covers SSE2/v2/v3 and AVX-only function targets, and
+// #1193 their vectors wider than the targets' registers: results split across them, with clang's code both ways, and
+// operators split into pieces they hold.
 // Unsupported operations and widths are refused by name. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
@@ -81,6 +83,35 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "v4si s=n>2?a:b;v4si t=(a,b);v4si u=({v4si k=a+1;k*2;});FOLD(s);FOLD(t);FOLD(u);"
             "v8si wide=(v8si){1,2,3,4,5,6,7,n};v4di cast=(v4di)wide;cast[1]^=(long long)n<<40;FOLD(cast);"
             "v16qu bytes=(v16qu)a;bytes[3]=(unsigned char)n;FOLD(bytes);"
+            "return (int)h;}",
+        },
+        {
+            // Vectors Tier 0 has no class for (#137), which the producer passes, returns, copies and stores by their bytes
+            // (check_lower_transport_type): of 1 and 2 bytes, of bools (an initializer's element at run time among them),
+            // clang's extended ones of 2 bytes and one of 128, as parameters, results, va_arg's, members, an array's
+            // elements, globals and an _Atomic's value, and elements of the ones whose elements are bytes.
+            "vector-transport",
+            "typedef signed char t1 __attribute__((vector_size(1)));typedef char t2 __attribute__((vector_size(2)));typedef short t2s __attribute__((vector_size(2)));"
+            "typedef _Bool b8 __attribute__((ext_vector_type(8)));typedef _Bool b16 __attribute__((ext_vector_type(16)));typedef _Bool b64 __attribute__((ext_vector_type(64)));"
+            "typedef unsigned char e2 __attribute__((ext_vector_type(2)));typedef int w32 __attribute__((vector_size(128)));"
+            "struct tr{t2 b[2];t2s d;b8 c;t1 a;};"
+            "static t2 pick2(t2 a,t2 b,int k){return k?a:b;}static t1 back1(t1 a){t1 r=a;return r;}"
+            "static b8 back8(b8 a,b16 b,b64 c,b64*out){*out=c;(void)b;return a;}static e2 backe(e2 a){return a;}"
+            "static w32 backw(w32 a,int k){w32 r=a;r[k&31]=k;return r;}static struct tr backs(struct tr s,t1 x){s.a=x;s.b[1]=s.b[0];return s;}"
+            "static t2 variadic(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);t2 a=__builtin_va_arg(ap,t2);b8 b=__builtin_va_arg(ap,b8);"
+            "t2s c=__builtin_va_arg(ap,t2s);b64 d=__builtin_va_arg(ap,b64);__builtin_va_end(ap);a[0]^=*(char*)&b^*(char*)&c^*(char*)&d;return a;}"
+            "static _Atomic(t2) atomic2;static t2 global2={3,4};static b8 globalb={1,0,1,1,0,0,0,1};"
+            "int tested(int n){unsigned h=2166136261u;"
+            "t2 a={(char)n,2},b;fill(&b,2,n);t2 c=pick2(a,b,n&1);FOLD(c);a[1]=(char)(n*3);FOLD(a);"
+            "t1 o;fill(&o,1,n+1);t1 p=back1(o);FOLD(p);"
+            "b8 m={1,0,(_Bool)(n&1),1,0,1,0,0};b16 q;fill(&q,2,n+2);b64 r,s;fill(&r,8,n+3);b8 k=back8(m,q,r,&s);FOLD(k);FOLD(s);"
+            "e2 e={(unsigned char)n,0x20};e2 f=backe(e);FOLD(f);"
+            "w32 w;fill(&w,128,n+4);w32 x=backw(w,n);FOLD(x);int y=x[n&31];FOLD(y);"
+            "struct tr t;fill(&t,sizeof(t),n+5);struct tr u=backs(t,o);FOLD(u);"
+            "t2s z;fill(&z,2,n+6);t2 v=variadic(4,c,m,z,r);FOLD(v);"
+            "atomic2=c;t2 g=atomic2;FOLD(g);"
+            "global2=n&2?global2:c;FOLD(global2);FOLD(globalb);"
+            "t2 arr[3]={a,b,c};t2 el=arr[(unsigned)n%3];FOLD(el);char ch=el[1];FOLD(ch);"
             "return (int)h;}",
         },
         {
@@ -326,9 +357,34 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
-            "vector-of-2-bytes",
-            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n},b={2};a=b;return a[0];}",
-            "vector types of other than 4, 8, 16, 32 or 64 bytes",
+            // Vectors passed by their bytes (#137, check_lower_transport_type): nothing computes with their values yet.
+            "vector-arithmetic-of-2-bytes",
+            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n},b={2};a=a+b;return a[0];}",
+            "arithmetic on vectors of 1 or 2 bytes",
+            2,
+        },
+        {
+            "vector-conversion-of-2-bytes",
+            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n,1};return (short)a;}",
+            "conversions or splats of vectors of 1 or 2 bytes",
+            1,
+        },
+        {
+            "vector-of-bool-element",
+            "typedef _Bool b8 __attribute__((ext_vector_type(8)));int tested(int n){b8 a={(_Bool)n,1};return a[n&7];}",
+            "elements of vectors of bool",
+            1,
+        },
+        {
+            "vector-of-bool-arithmetic",
+            "typedef _Bool b8 __attribute__((ext_vector_type(8)));int tested(int n){b8 a={(_Bool)n,1},b=~a;return *(unsigned char*)&b;}",
+            "arithmetic on vectors of bool",
+            2,
+        },
+        {
+            "vector-arithmetic-past-64-bytes",
+            "typedef int w32 __attribute__((vector_size(128)));int tested(int n){w32 a={n},b=a+a;return b[0];}",
+            "arithmetic on vectors of more than 64 bytes",
             2,
         },
         {
@@ -483,9 +539,51 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         { "baseline-narrow-and-wide-transport",
           "typedef int V __attribute__((vector_size(8)));typedef unsigned char C __attribute__((vector_size(4)));\n"
           "static v16su hold;static void wide(v16su a){v16su b=a;hold=b;}static V narrow(V a){return a+3;}\n"
+          "static v16su back(v16su a){return a;}static v8sf half(v8sf a){return a;}static v8df pair(v8df a,v16su b){hold=b;return a;}\n"
           "int tested(int n){unsigned h=2166136261u;struct S{C v;unsigned guard;} s={{1,2,3,(unsigned char)n},0xdeadbeef};\n"
           "C t=s.v+2;s.v=t;FOLD(s);V a={n,-n},b=narrow(a);V out[2]={a,b};out[0]=out[1];FOLD(out);\n"
-          "v16su x;fill(&x,64,n);wide(x);v16su z=hold;FOLD(z);return (int)h;}\n"
+          "v16su x;fill(&x,64,n);wide(x);v16su z=hold;FOLD(z);v16su y=back(x);FOLD(y);v8sf f;fillf((float*)&f,8,n);v8sf g=half(f);FOLD(g);\n"
+          "v8df d;fill(&d,64,n+3);v8df e=pair(d,y);FOLD(e);FOLD(hold);return (int)h;}\n"
+        },
+        { "baseline-transport",
+          "typedef char t2 __attribute__((vector_size(2)));typedef _Bool b8 __attribute__((ext_vector_type(8)));typedef _Bool b64 __attribute__((ext_vector_type(64)));\n"
+          "typedef int w32 __attribute__((vector_size(128)));static t2 pick2(t2 a,t2 b,int k){return k?a:b;}static b64 back64(b8 a,b64 b,b8*out){*out=a;return b;}\n"
+          "static w32 backw(w32 a,int k){w32 r=a;r[k&31]=k;return r;}\n"
+          "int tested(int n){unsigned h=2166136261u;t2 a={(char)n,2},b;fill(&b,2,n);t2 c=pick2(a,b,n&1);FOLD(c);b8 m={1,0,(_Bool)(n&1),1,0,1,0,0},k;\n"
+          "b64 r;fill(&r,8,n+3);b64 s=back64(m,r,&k);FOLD(k);FOLD(s);w32 w;fill(&w,128,n+4);w32 x=backw(w,n);FOLD(x);return (int)h;}\n"
+        },
+        // Three doubles' and three longs' extended vectors, whose elements LLVM returns a register each at 16 bytes (xmm0,
+        // xmm1 and st0; rax, rdx and rcx: tier0_element_parts, #137), wider vectors' registers at the other levels.
+        { "baseline-element-results",
+          "typedef double d3 __attribute__((ext_vector_type(3)));typedef long l3 __attribute__((ext_vector_type(3)));\n"
+          "static d3 pick(d3 a,d3 b,int k){return k?a:b;}static l3 back(l3 a){l3 r=a;return r;}\n"
+          "int tested(int n){unsigned h=2166136261u;double v[4]={1.5*n,-2.25,3.125,0};d3 a,b;__builtin_memcpy(&a,v,32);b=a;b[2]=(double)n;\n"
+          "long double guard=n;for(int i=0;i<3;i++){d3 c=pick(a,b,(n+i)&1);__builtin_memcpy(v,&c,24);FOLD(v);}\n"
+          "long w[4]={7,-8,n,0};l3 d;__builtin_memcpy(&d,w,32);l3 e=back(d);__builtin_memcpy(w,&e,24);FOLD(w);guard*=2;double g=(double)guard;FOLD(g);return (int)h;}\n"
+        },
+        // #1193: vectors of 32 and 64 bytes returned split across the target's registers (xmm0 and xmm1, xmm0 to xmm3,
+        // ymm0 and ymm1) or whole, by the program's functions, by the harness's (clang's) to the program and by the
+        // program's to the harness through pointers.
+        { "baseline-wide-results",
+          "typedef int W8 __attribute__((vector_size(32)));typedef double W16 __attribute__((vector_size(64)));typedef unsigned char W64 __attribute__((vector_size(64)));\n"
+          "W8 external_wide8(W8,int);W16 external_wide16(W16,int);int external_apply_wide8(W8(*)(W8,int),int);int external_apply_wide16(W16(*)(W16,int),int);\n"
+          "static W8 own8(W8 a,int k){a[k&7]=k*5;W8 b=a;return b;}static W16 own16(W16 a,int k){a[k&7]=k*0.5;return a;}\n"
+          "static W64 bytes64(int n){W64 v;fill(&v,64,n);v[(unsigned)n%64]=7;return v;}static W8 chain8(W8 a,int k){return own8(external_wide8(a,k),k+1);}\n"
+          "int tested(int n){unsigned h=2166136261u;W8 a;W16 d;fill(&a,32,n);filld((double*)&d,8,n);\n"
+          "W8 r[]={own8(a,n),external_wide8(a,n),chain8(a,n)};FOLD(r);W16 s[]={own16(d,n),external_wide16(d,n),own16(external_wide16(d,n+1),n)};FOLD(s);\n"
+          "W64 b=bytes64(n);FOLD(b);int e[]={external_apply_wide8(own8,n),external_apply_wide16(own16,n),external_apply_wide8(external_wide8,n)};FOLD(e);return (int)h;}\n"
+        },
+        // #1193: operators on vectors wider than the target's registers, split into pieces they hold as LLVM splits them:
+        // integers of each element size, unsigned compares, splats, negations (a float's through its sign bit) and floats.
+        { "baseline-wide-operators",
+          "typedef long long v8di __attribute__((vector_size(64)));\n"
+          "int tested(int n){unsigned h=2166136261u;v8si a,b;v16su u,v;v8sf f,g;v8df d,e;v64qi c,q;v16hi k,l;v4di x,y;\n"
+          "fill(&a,32,n);fill(&b,32,n+1);fill(&u,64,n+2);fill(&v,64,n+3);fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);filld((double*)&d,8,n);filld((double*)&e,8,n+2);\n"
+          "fill(&c,64,n+4);fill(&q,64,n+5);fill(&k,32,n+6);fill(&l,32,n+7);fill(&x,32,n+8);fill(&y,32,n+9);g+=1.0f;e+=1.0;\n"
+          "v8si r[]={a+b,a-b,a*b,a&b,a|b,a^b,~a,-b,a<b,a==b,a>=b,a+n};FOLD(r);v16su t[]={u+v,u-v,u*v,u<v,u>=v,u!=v,u+(unsigned)n,~u};FOLD(t);\n"
+          "v8sf w[]={f+g,f-g,f*g,f/g,-f,f+2.5f};FOLD(w);v8si fc[]={f<g,f>=g,f==g,f!=g};FOLD(fc);v8df z[]={d+e,d-e,d*e,d/e,-d,d*1.5};FOLD(z);v8di dc[]={d<e,d>=e};FOLD(dc);\n"
+          "v64qi m[]={c+q,c-q,c<q,c==q,~c,c+(signed char)n};FOLD(m);v16hi o[]={k+l,k*l,k<l,-k};FOLD(o);v4di p[]={x+y,x-y,-x,x^y,x+(long long)n};FOLD(p);\n"
+          "v16su mem[2]={u,v};mem[(unsigned)n&1]+=u;FOLD(mem);return (int)h;}\n"
         },
         { "baseline-floating-pressure",
           "static double consume(double a,double b,double c,double d,double e,double f,double g,double h,double i,double j,double k,double l,double m,double o,double p,double q,v4si v){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+v[1];}\n"
@@ -495,7 +593,10 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#include <emmintrin.h>\n"
           "int tested(int n){unsigned h=2166136261u;__m128i a,b;__m128 f,g;fill(&a,16,n);fill(&b,16,n+1);fill(&f,16,n+2);fill(&g,16,n+3);\n"
           "__m128i r[]={_mm_add_epi32(a,b),_mm_shuffle_epi32(a,0x1b),_mm_shufflehi_epi16(a,0x4e),_mm_shufflelo_epi16(b,0xb1),_mm_slli_si128(a,3),_mm_srli_si128(a,15),_mm_srli_si128(b,16),_mm_packs_epi32(a,b),_mm_packus_epi16(a,b),_mm_madd_epi16(a,b),_mm_mulhi_epi16(a,b),_mm_mul_epu32(a,b),_mm_insert_epi16(a,n*31,6),_mm_cvtps_epi32(f),_mm_slli_epi16(a,n&15),_mm_srli_epi16(b,n&15),_mm_srai_epi16(a,n&15),_mm_slli_epi32(a,n&31),_mm_srli_epi32(b,n&31),_mm_srai_epi32(a,n&31),_mm_slli_epi64(a,n&63),_mm_srli_epi64(b,n&63)};FOLD(r);\n"
-          "__m128 m[]={_mm_shuffle_ps(f,g,0x1b),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);return (int)h;}\n"
+          "__m128 m[]={_mm_shuffle_ps(f,g,0x1b),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);\n"
+          // #1193: the sign masks and the scalar conversions to integers, of NaNs and values past int's range too.
+          "__m128d c=_mm_castps_pd(f),k=_mm_castps_pd(g);int s[]={_mm_movemask_epi8(a),_mm_movemask_ps(f),_mm_movemask_pd(c),_mm_cvttss_si32(f),_mm_cvtss_si32(g),"
+          "_mm_cvttsd_si32(c),_mm_cvtsd_si32(k)};FOLD(s);long long l[]={_mm_cvttss_si64(f),_mm_cvtss_si64(g),_mm_cvttsd_si64(k),_mm_cvtsd_si64(c)};FOLD(l);return (int)h;}\n"
         },
     };
     const X86Target native = x86_target_native();
@@ -537,12 +638,9 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         }
         if (parsed)
         {
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));int tested(V a,V b){V c;c=a+b;return c[0];}",
-                                               "baseline-wide-vector-operator", true, false, 0, 0,
-                                               "vector operations wider than the target's registers", &target);
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a){return a;}",
-                                               "baseline-wide-vector-result", true, false, 0, 0,
-                                               "vector results wider than the target's registers", &target);
+            // A wide operator's pieces are refused by their own reason (#1193).
+            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a/b;}",
+                                               "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
                                                "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
         }

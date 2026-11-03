@@ -301,6 +301,7 @@ static IrError ssa_ir_layout(SsaIrWork* work)
         memset(work->phi_offsets, 0, ((uint64_t)f->block_count + 1) * 4);
         work->sizes = (IrSizes){
             .constant_count = f->constant_count,
+            .vector_constant_count = f->vector_constant_count,
             .address_count = f->address_count,
             .call_type_count = f->call_type_count,
             .parameter_count = f->parameter_count,
@@ -416,6 +417,11 @@ static void ssa_ir_copy_metadata(const SsaIrWork* work, IrFunction* f)
     if (input->constant_count != 0)
     {
         memcpy(f->constants, input->constants, (uint64_t)input->constant_count * sizeof(IrConstant));
+    }
+    // A vector constant's payload (#141), which its IR_VCONST indexes as before.
+    if (input->vector_constant_count != 0)
+    {
+        memcpy(f->vector_constants, input->vector_constants, (uint64_t)input->vector_constant_count * sizeof(IrSimdValue));
     }
     if (input->address_count != 0)
     {
@@ -652,12 +658,8 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
     }
-    // A function with vectors stays unpromoted (#141's); one whose only SIMD values are masks promotes (#179), its masks'
-    // slots as any scalar's.
-    if (check.error == IR_OK && ir_function_has_vectors(input))
-    {
-        check.error = IR_ERROR_UNSUPPORTED;
-    }
+    // A function with SIMD values promotes as any other: its masks' slots (#179) and its vectors' (#141) as any scalar's,
+    // each read and written whole at its own type (ssa_ir_classify).
     if (check.error == IR_OK)
     {
         check.error = ir_cfg_validated(input, scratch, scratch, &work.cfg);

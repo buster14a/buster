@@ -14,7 +14,8 @@
 // macros, those `config(implies)` defines and `config(implies without it)` doesn't, where config(T) is -march=x86-64
 // with exactly the features T. The macros no single feature owns must be the two c_predefines.c writes itself.
 //
-// With --clang (predefines_test_run):
+// With --clang, each a check of test-preprocessor's own (pp_test_sections: predefines_test_tables, the slices of
+// predefines_test_options, predefines_test_dump and predefines_test_attributes):
 //   - tables: the generator's tables must be the compiled ones, field by field;
 //   - options: our predefines (pp_predefines, after pp_parse_options) must be `clang -dM -E`'s for the same options,
 //     line for line but for the version macros of clang's patch release and __BUSTER__, and both must accept or reject
@@ -302,24 +303,6 @@ static void predefines_test_drop_versions(char* text)
     if (to != 0)
     {
         *to = 0;
-    }
-}
-
-// Clang advertises flag-output constraints, which the C driver does not yet support. Remove only clang's fixed
-// definition from the oracle text; retaining an unexpected definition on our side still fails the comparison.
-static void predefines_test_drop_clang_asm_flag(char* text)
-{
-    static const char line[] = "#define __GCC_ASM_FLAG_OUTPUTS__ 1\n";
-    char* start = text;
-    while (start != 0 && *start != 0)
-    {
-        if (strncmp(start, line, sizeof(line) - 1) == 0)
-        {
-            memmove(start, start + sizeof(line) - 1, strlen(start + sizeof(line) - 1) + 1);
-            break;
-        }
-        char* end = strchr(start, '\n');
-        start = end != 0 ? end + 1 : 0;
     }
 }
 
@@ -1247,11 +1230,6 @@ static bool predefines_test_compare(const PredefinesTestJob* clang, const char* 
         uint32_t reported = 0;
         for (uint32_t i = 0, j = 0; result && (i < our_count || j < their_count);)
         {
-            if (j < their_count && strcmp(their_lines[j], "#define __GCC_ASM_FLAG_OUTPUTS__ 1") == 0)
-            {
-                j += 1;
-                continue;
-            }
             const int order = i == our_count ? 1 : j == their_count ? -1 : strcmp(our_lines[i], their_lines[j]);
             if (order != 0 && reported < 4)
             {
@@ -1279,8 +1257,9 @@ static uint64_t predefines_test_random(uint64_t* state)
 }
 
 // Every CPU, every feature flag (on and off, on x86-64 and on CPUs with the most features), the option sets, and
-// `random` random combinations from `seed`, against `clang -dM -E` with the same options.
-static bool predefines_test_options(const char* directory, uint64_t seed, uint32_t random)
+// `random` random combinations from `seed`, against `clang -dM -E` with the same options: the sets whose place in their
+// list is `slice` modulo `slices`, so that test-preprocessor's parts (pp_test_sections) can share them out.
+static bool predefines_test_options(const char* directory, uint64_t seed, uint32_t random, uint32_t slice, uint32_t slices)
 {
     char empty[4200];
     snprintf(empty, sizeof(empty), "%s/predefines-empty.c", directory);
@@ -1445,19 +1424,31 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
         BUSTER_PREDEFINES_TEST_SET("%s", copy_line);
     }
 #undef BUSTER_PREDEFINES_TEST_SET
+    // The slice's sets, each a job in their order.
+    uint32_t sliced = 0;
     for (uint32_t s = 0; result && s < set_count; s += 1)
     {
-        PredefinesTestJob* job = predefines_test_job(&jobs);
-        result = job != 0 && predefines_test_words(&jobs, job, "-dM -E") && predefines_test_words(&jobs, job, sets[s]) && predefines_test_words(&jobs, job, "-x c") &&
-                 predefines_test_input(&jobs, job, empty);
+        if (s % slices == slice)
+        {
+            PredefinesTestJob* job = predefines_test_job(&jobs);
+            result = job != 0 && predefines_test_words(&jobs, job, "-dM -E") && predefines_test_words(&jobs, job, sets[s]) && predefines_test_words(&jobs, job, "-x c") &&
+                     predefines_test_input(&jobs, job, empty);
+            sliced += 1;
+        }
     }
     result = result && predefines_test_run_jobs(&jobs, 0);
     uint32_t failures = 0;
+    uint32_t job = 0;
     for (uint32_t s = 0; result && s < set_count; s += 1)
     {
-        failures += !predefines_test_compare(&jobs.jobs[s], sets[s], empty);
+        if (s % slices == slice)
+        {
+            failures += !predefines_test_compare(&jobs.jobs[job], sets[s], empty);
+            job += 1;
+        }
     }
-    printf("predefines: %u of %u option sets differ from clang -dM (%u random from seed %llu)\n", failures, set_count, random, (unsigned long long)seed);
+    printf("predefines: %u of %u option sets differ from clang -dM (slice %u of %u of %u sets, %u random from seed %llu)\n", failures, sliced, slice + 1, slices,
+           set_count, random, (unsigned long long)seed);
     predefines_test_jobs_release(&jobs);
     free(sets);
     unlink(empty);
@@ -1547,7 +1538,6 @@ static bool predefines_test_dump(const char* directory)
         {
             predefines_test_drop_versions(ours);
             predefines_test_drop_versions(clang->output);
-            predefines_test_drop_clang_asm_flag(clang->output);
         }
         // -E -P's text: compared without its blank lines and trailing spaces.
         const bool same = done && clang->status == 0 && clang->output != 0 &&
@@ -1903,12 +1893,3 @@ static bool predefines_test_attributes(const char* directory)
     return result && failures == 0 && checked == ((uint64_t)function_count + 1) * BUSTER_ARRAY_LENGTH(units);
 }
 
-// The checks --clang runs (see the file's comment).
-static bool predefines_test_run(const char* directory, uint64_t seed)
-{
-    bool result = predefines_test_tables(directory);
-    result &= predefines_test_options(directory, seed, 400);
-    result &= predefines_test_dump(directory);
-    result &= predefines_test_attributes(directory);
-    return result;
-}

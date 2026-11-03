@@ -559,12 +559,18 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                                     PARSE_KIND_RETURN };
     // The names whose tokens the syntax bits mark, each as its bit.
     const uint32_t syntax_names[] = { C_NAME_BUILTIN_VA_ARG, C_NAME_BUILTIN_CONVERTVECTOR, C_NAME_BUILTIN_BIT_CAST, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR,
-                                      C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_NORETURN, C_NAME_NONNULL, C_NAME_NULLABLE,
-                                      C_NAME_NULLABLE_RESULT, C_NAME_NULL_UNSPECIFIED, C_NAME_FUNC, C_NAME_FUNCTION, C_NAME_PRETTY_FUNCTION };
+                                      C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_BUILTIN_LINE, C_NAME_BUILTIN_COLUMN,
+                                      C_NAME_BUILTIN_FILE, C_NAME_BUILTIN_FILE_NAME, C_NAME_BUILTIN_FUNCTION, C_NAME_BUILTIN_VECTORELEMENTS,
+                                      C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN, C_NAME_NORETURN, C_NAME_NONNULL, C_NAME_NULLABLE,
+                                      C_NAME_NULLABLE_RESULT, C_NAME_NULL_UNSPECIFIED, C_NAME_FUNC, C_NAME_FUNCTION, C_NAME_PRETTY_FUNCTION,
+                                      C_NAME_BUILTIN_AVAILABLE, C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR };
     const uint8_t syntax_bits[] = { BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED,
-                                    BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
+                                    BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED,
+                                    BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED,
+                                    BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
                                     BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
-                                    BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING };
+                                    BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING,
+                                    BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED };
     const uint8_t role_values[] = { PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_SEPARATOR,
                                     PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_SPECIFIER, PARSE_ROLE_MEMBER, PARSE_ROLE_TAG,
                                     PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_RETURN, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE,
@@ -705,6 +711,9 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             expected.vector_members += kinds[i] == PARSE_KIND_PERIOD && roles[i] == PARSE_ROLE_MEMBER_OPERATOR;
             expected.operands += roles[i] == PARSE_ROLE_OPERAND;
             expected.calls += roles[i] == PARSE_ROLE_CLOSE_CALL || roles[i] == PARSE_ROLE_CLOSE_FUNCTION;
+            // The place's and the type queries' builtins are counted in the first group, the constants', by their span of
+            // names (__builtin_COLUMN's to __builtin_vectorelements', with the two others the syntax names add).
+            expected.groups[0] += names[i] >= C_NAME_BUILTIN_COLUMN && names[i] <= C_NAME_BUILTIN_VECTORELEMENTS;
             switch (names[i])
             {
                 case 7: case 9: expected.groups[0] += 1; break;
@@ -1063,6 +1072,211 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
     char description[200];
     snprintf(description, sizeof(description), "the coded walk's identifiers' leaves by both paths: %u of %u entries differ", differences, entries);
     check_test_expect(test, ready && differences == 0 && entries != 0, description);
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], 2 * page);
+        }
+    }
+}
+
+// The coded walk's literals' values (check_input_expression_literals, #1038) by both paths, and against the literals'
+// parser: random chunks of up to 200 acting tokens, a literal's class among others, over up to 200 tokens whose spellings
+// lie in three ranges of source, each ending at a PROT_NONE page, so a gather past a spelling's last aligned word faults,
+// the last spelling of each range at its very end. The spellings are plain decimals and others close to them (leading
+// zeros, ten digits, suffixes, hexadecimals, separators, splices, letters), characters, unnamed and named tokens, the
+// preprocessor's ints about INT_MAX, and spellings in no range. Both paths must give the same values; a plain value must be
+// what check_literal_number makes of the spelling (an int of that value and nothing else), and every plain decimal of the
+// spellings must be found.
+static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    enum
+    {
+        SOURCE_0,
+        SOURCE_1,
+        SOURCE_2,
+        KINDS,
+        LOCATIONS,
+        ENDS,
+        NAMES,
+        SOURCES,
+        TOKENS,
+        CLASSES,
+        COLUMNS,
+    };
+    uint8_t* mappings[COLUMNS];
+    bool ready = true;
+    for (uint32_t i = 0; i < COLUMNS; i += 1)
+    {
+        mappings[i] = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "guarded literal columns' allocation");
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    ready &= scratch.base != 0;
+    const uint32_t literal = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+    static const char* const others[] = { "0123", "00", "1234567890", "0x1f", "12u", "7L", "9ll", "1.5", "1e3", "12'34", "1\\\n2", "12a", "0b1", "4294967296" };
+    static Preprocessor pp;
+    static CheckInputLiterals results[2];
+    PPRange ranges[3];
+    uint32_t differences = 0;
+    uint32_t wrong = 0;
+    uint32_t missed = 0;
+    uint32_t plain = 0;
+    uint32_t entries = 0;
+    for (uint32_t round = 0; ready && round < 400; round += 1)
+    {
+        const uint32_t count = 1 + check_test_random(test) % 200;
+        const uint32_t acting = check_test_random(test) % (count + 1);
+        uint8_t* kinds = check_test_scan_column(mappings[KINDS] + page, count, 1);
+        uint32_t* locations = check_test_scan_column(mappings[LOCATIONS] + page, count, 4);
+        uint32_t* ends = check_test_scan_column(mappings[ENDS] + page, count, 4);
+        // Each range's spellings, a space after each but its last, which ends where its page does: up to 120 bytes.
+        uint8_t text[3][160];
+        uint32_t lengths[3] = { 0 };
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t r = check_test_random(test) % 3;
+            const uint32_t form = check_test_random(test) % 8;
+            char spelling[16];
+            uint32_t length = 0;
+            if (form < 4)
+            {
+                const uint32_t digits = 1 + check_test_random(test) % BUSTER_CHECK_LITERAL_PLAIN_DIGITS;
+                for (uint32_t d = 0; d < digits; d += 1)
+                {
+                    spelling[length++] = (char)('0' + (d == 0 && digits > 1 ? 1 + check_test_random(test) % 9 : check_test_random(test) % 10));
+                }
+            }
+            else
+            {
+                const char* other = form == 4 ? "0" : others[check_test_random(test) % BUSTER_ARRAY_LENGTH(others)];
+                length = (uint32_t)strlen(other);
+                memcpy(spelling, other, length);
+            }
+            const bool room = lengths[r] + length + 1 < 120;
+            const uint32_t kind = check_test_random(test) % 16;
+            kinds[i] = kind == 0 ? BUSTER_PP_KIND_INTEGER : kind == 1 ? C_TOKEN_CHAR_CONSTANT : C_TOKEN_NUMERIC_CONSTANT;
+            if (kinds[i] == BUSTER_PP_KIND_INTEGER)
+            {
+                const uint32_t around = (uint32_t)INT32_MAX - 2 + check_test_random(test) % 5;
+                locations[i] = 0;
+                ends[i] = check_test_random(test) % 2 == 0 ? around : check_test_random(test) % 1000;
+            }
+            else if (room)
+            {
+                memcpy(text[r] + lengths[r], spelling, length);
+                locations[i] = r * 100000 + lengths[r];
+                ends[i] = locations[i] + length;
+                lengths[r] += length;
+                text[r][lengths[r]++] = ' ';
+            }
+            else
+            {
+                // A spelling in no range.
+                locations[i] = 900000 + i;
+                ends[i] = locations[i] + length;
+            }
+        }
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            // The range ends at its page's end: its last byte is a spelling's, or else the space after one.
+            const uint32_t length = lengths[r] > 1 && text[r][lengths[r] - 1] == ' ' ? lengths[r] - 1 : lengths[r];
+            uint8_t* bytes = mappings[SOURCE_0 + r] + page - length;
+            memcpy(bytes, text[r], length);
+            ranges[r] = (PPRange){ .base = r * 100000, .length = length, .bytes = bytes };
+        }
+        pp.ranges = ranges;
+        pp.range_count = 3;
+        pp.output.kinds = kinds;
+        pp.output.locations = locations;
+        pp.output.values = ends;
+        pp.output.count = count;
+        Parser parser = { 0 };
+        parser.tokens.count = count;
+        parser.tokens.names = check_test_scan_column(mappings[NAMES] + page, count, 4);
+        parser.tokens.sources = check_test_scan_column(mappings[SOURCES] + page, count, 4);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            parser.tokens.names[i] = check_test_random(test) % 10 == 0 ? C_NAME_TRUE : 0;
+            parser.tokens.sources[i] = check_test_random(test) % count;
+        }
+        CheckInputReader reader = { 0 };
+        reader.parser = &parser;
+        reader.pp = &pp;
+        uint32_t* tokens = check_test_scan_column(mappings[TOKENS] + page, acting, 4);
+        uint32_t* classes = check_test_scan_column(mappings[CLASSES] + page, acting, 4);
+        for (uint32_t i = 0; i < acting; i += 1)
+        {
+            tokens[i] = check_test_random(test) % count;
+            classes[i] = check_test_random(test) % 3 != 0 ? literal : BUSTER_CHECK_EXPRESSION_ACTS | (check_test_random(test) % BUSTER_CHECK_EXPRESSION_CODES) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+        }
+        uint32_t found[2];
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            memset(&results[scalar], 0xa5, sizeof(results[scalar]));
+            found[scalar] = check_input_expression_literals(&reader, tokens, classes, acting, &results[scalar], scalar != 0);
+        }
+        uint32_t expected = 0;
+        for (uint32_t i = 0; i < acting; i += 1)
+        {
+            expected += classes[i] == literal;
+        }
+        differences += found[0] != expected || found[1] != expected;
+        uint32_t at = 0;
+        for (uint32_t i = 0; i < acting && found[0] == expected && found[1] == expected; i += 1)
+        {
+            if (classes[i] == literal)
+            {
+                const uint32_t value = results[1].values[at];
+                differences += results[0].values[at] != value;
+                // The literals' parser on the token's spelling, as check_input_literal spells it.
+                const uint32_t token = tokens[i];
+                const uint32_t source = parser.tokens.sources[token];
+                const uint8_t kind = kinds[source];
+                uint8_t spelled[24];
+                uint32_t length = 0;
+                const uint8_t* bytes = NULL;
+                if (kind == BUSTER_PP_KIND_INTEGER)
+                {
+                    length = (uint32_t)snprintf((char*)spelled, sizeof(spelled), "%u", ends[source]);
+                    bytes = spelled;
+                }
+                else if (locations[source] < 900000)
+                {
+                    const PPRange* range = &ranges[locations[source] / 100000];
+                    bytes = range->bytes + (locations[source] - range->base);
+                    length = ends[source] - locations[source];
+                }
+                CheckLiteral parsed = { 0 };
+                if (bytes != NULL && kind != C_TOKEN_CHAR_CONSTANT)
+                {
+                    check_literal_number(bytes, length, &scratch, &parsed);
+                }
+                bool digits_only = bytes != NULL && kind == C_TOKEN_NUMERIC_CONSTANT && length >= 1 && length <= BUSTER_CHECK_LITERAL_PLAIN_DIGITS &&
+                                   (bytes[0] != '0' || length == 1);
+                for (uint32_t d = 0; digits_only && d < length; d += 1)
+                {
+                    digits_only = bytes[d] >= '0' && bytes[d] <= '9';
+                }
+                const bool fits = parsed.valid && parsed.type == BUSTER_TYPE_INT && parsed.bit_width == 0 && !parsed.real && !parsed.imaginary && parsed.high == 0;
+                const bool named = parser.tokens.names[token] != 0;
+                wrong += value != BUSTER_CHECK_NONE && (named || !fits || parsed.integer != value);
+                missed += value == BUSTER_CHECK_NONE && !named && (digits_only || (kind == BUSTER_PP_KIND_INTEGER && fits));
+                plain += value != BUSTER_CHECK_NONE;
+                entries += 1;
+                at += 1;
+            }
+        }
+    }
+    char description[240];
+    snprintf(description, sizeof(description),
+             "the coded walk's literals' values by both paths: %u of %u entries differ, %u plain values the literals' parser doesn't give, %u plain "
+             "decimals missed (%u plain)", differences, entries, wrong, missed, plain);
+    check_test_expect(test, ready && differences == 0 && wrong == 0 && missed == 0 && entries != 0 && plain != 0, description);
+    arena_release(&scratch);
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {
         if (mappings[i] != MAP_FAILED)
