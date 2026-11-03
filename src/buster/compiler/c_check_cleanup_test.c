@@ -122,6 +122,15 @@ static __attribute__((noinline)) void check_test_cleanup_sources(CheckTest* test
         { .name = "switch into a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { switch (n) {\nint a __attribute__((cleanup(f)));\ncase 1:;\n} }\n", .rejected = true },
         { .name = "computed goto out of a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { void *t[] = { &&l };\n{ int a __attribute__((cleanup(f)));\ngoto *t[0]; }\nl:;\n}\n", .rejected = true },
         { .name = "computed goto into a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { void *t[] = { &&l };\n{ int a __attribute__((cleanup(f)));\nl:; }\ngoto *t[0];\n}\n", .rejected = true },
+        // An asm goto's targets are its own labels (#1126's review): it may neither leave a cleanup's scope nor enter a
+        // cleanup's or a variable-length array's, as clang's JumpScopeChecker has it, but it may leave an array's.
+        { .name = "asm goto out of a cleanup's scope", .source = "void f(int *p);\nint g(void) { { int a __attribute__((cleanup(f))) = 7;\nasm goto(\"jmp %l0\" : : : : out); }\nout: return 1; }\n", .rejected = true },
+        { .name = "asm goto's second label out of a cleanup's scope", .source = "void f(int *p);\nint g(void) { { int a __attribute__((cleanup(f))) = 7;\nasm goto(\"\" : : : : in, out); in: a++; }\nout: return 0; }\n", .rejected = true },
+        { .name = "asm goto into a cleanup's scope", .source = "void f(int *p);\nint g(void) { asm goto(\"jmp %l0\" : : : : in);\n{ int a __attribute__((cleanup(f))) = 7;\nin: return a; } }\n", .rejected = true },
+        { .name = "asm goto into an array's scope", .source = "int g(int n) { asm goto(\"jmp %l0\" : : : : in);\n{ int a[n]; a[0] = 1;\nin: return a[0]; } }\n", .rejected = true },
+        { .name = "asm goto out of an array's scope", .source = "int g(int n) { { int a[n]; a[0] = 1; asm goto(\"jmp %l0\" : : : : out); }\nout: return 1; }\n" },
+        { .name = "asm goto within a cleanup's scope", .source = "void f(int *p);\nint g(int n) { { int x __attribute__((cleanup(f))) = 7; { int a[n]; a[0] = x;\nasm goto(\"jmp %l0\" : : : : in); } in: return x; } }\n" },
+        { .name = "asm goto beside another function label's address", .source = "void f(int *p);\nint g(void) { void *p = &&far; { int x __attribute__((cleanup(f))) = 7;\nasm goto(\"jmp %l0\" : : : : in); in: return x; } far: return 0; }\n" },
         // An __auto_type variable's cleanup is checked against the deduced type, not its placeholder's int (#745's
         // review): a double's, by the specifiers too, a decayed array's and a structure's through void *, and
         // pointers to other types.

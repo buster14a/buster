@@ -36,11 +36,12 @@ typedef enum CheckInputMessage
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
     CHECK_INPUT_OPTIMIZE,
-    // A goto, a switch's case and a computed goto that enter a variable-length array's or a cleanup's scope, or for a
-    // computed goto leave a cleanup's, as clang's JumpScopeChecker reports them.
+    // A goto, a switch's case, a computed goto and an asm goto that enter a variable-length array's or a cleanup's scope,
+    // or for a computed goto and an asm goto leave a cleanup's, as clang's JumpScopeChecker reports them.
     CHECK_INPUT_JUMP_GOTO,
     CHECK_INPUT_JUMP_SWITCH,
     CHECK_INPUT_JUMP_INDIRECT,
+    CHECK_INPUT_JUMP_ASM,
     // GNU's cleanup attribute's argument and function (c_check_cleanup_input.c).
     CHECK_INPUT_CLEANUP_FUNCTION,
     CHECK_INPUT_CLEANUP_PARAMETERS,
@@ -150,6 +151,7 @@ static const char* const check_input_messages[] =
     "cannot jump from this goto statement to its label",
     "cannot jump from switch statement to this case label",
     "cannot jump from this indirect goto statement to one of its possible targets",
+    "cannot jump from this asm goto statement to one of its possible targets",
     "'cleanup' argument is not a function",
     "'cleanup' function must take 1 parameter",
     "'cleanup' function's parameter has a type incompatible with the variable's address",

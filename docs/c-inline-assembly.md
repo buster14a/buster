@@ -450,6 +450,15 @@ A label as anything but a jmp's or a jcc's target (data, a call's target, an
 addend) is refused by name. A template of no instructions never jumps, and has
 no helper.
 
+An asm goto's possible targets are its own labels, as clang's
+JumpScopeChecker takes them (`check_input_asm_goto_refused`). The checker
+refuses one that would enter the scope of a variable-length array or of a
+cleanup variable it isn't in, or that would leave the scope of a cleanup
+variable it is in, with clang's "cannot jump from this asm goto statement to
+one of its possible targets". It may leave a variable-length array's scope,
+as clang allows. Like clang's `callbr`, it then goes straight to the label,
+without the stack restore that the scope's normal end makes.
+
 ## File-scope assembly
 
 A file-scope `asm` statement (#619: `main.c`'s puts the checker's code in a
