@@ -68,6 +68,17 @@ static const char asm_test_predicate_fixture[] =
 // and a max-skip alignment pads less, the GCC 16 -O2 pattern that a round-based layout grew; a forward jmp across an
 // alignment that absorbs an earlier jmp's growth; and a forward jmp that 45 grown jmps before it would see behind it,
 // which waits for the next pass. Alignments fill with int3, as GNU as's code padding differs between binutils versions.
+// `.set` aliases' types and sizes, as GNU as copies them (copy_symbol_attributes): a weak alias of a function (GCC's
+// `__attribute__((weak, alias("original")))`), an alias of a label typed only after it (which isn't copied), of a
+// function defined after it, a chain declared before its target, an object's, one whose own .size replaces the copied
+// one, and an .lcomm object's and a local .comm one's.
+static const char asm_test_alias_fixture[] =
+    ".text\n.globl original\n.type original,@function\noriginal: mov $42,%eax\nret\n.size original,.-original\n.weak alias\n"
+    ".set alias,original\n.globl untyped\nuntyped: ret\n.set early,untyped\n.globl early\n.type untyped,@function\n"
+    ".size untyped,.-untyped\n.set forward,later\n.globl forward\n.type later,@function\nlater: ret\n.size later,.-later\n"
+    ".set second,first\n.set first,original\n.globl first\n.globl second\n"
+    ".data\nobj: .long 1\n.type obj,@object\n.size obj,4\n.set oalias,obj\n.globl oalias\n.set salias,obj\n.size salias,2\n"
+    ".globl salias\n.lcomm buf,16\n.set balias,buf\n.globl balias\n.local lbuf\n.comm lbuf,24,8\n.set lalias,lbuf\n.globl lalias\n";
 #define BUSTER_ASM_TEST_FAR5 "jmp .Lh_far\njmp .Lh_far\njmp .Lh_far\njmp .Lh_far\njmp .Lh_far\n"
 static const char asm_test_relax_fixture[] =
     ".section .text.backward,\"ax\",@progbits\nbackward: jmp .Lb_far\n.skip 13, 0x90\n.Lb_target: .skip 7, 0x90\n.p2align 4, 0xcc, 10\n"
@@ -151,6 +162,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_x87_fixture, X86_ARCH_BASELINE },
         { asm_test_predicate_fixture, X86_ARCH_V4 },
         { asm_test_relax_fixture, X86_ARCH_BASELINE },
+        { asm_test_alias_fixture, X86_ARCH_BASELINE },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -177,7 +189,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
     // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
     // characters; %st(8); fsubp of ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an
-    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); and malformed base64.
+    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); malformed base64; and a symbol
+    // whose size reaches past its section's end, by `.size` or as an alias of an object past its start, which GNU as
+    // writes and a Link symbol can't hold.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
@@ -211,6 +225,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".data\n.base64 \"A=AA\"\n",
         ".data\n.base64 \"AA==AAAA\"\n",
         ".data\n.base64 label\n",
+        ".data\nshort: .long 1\n.size short, 8\n",
+        ".data\nobj: .long 1\n.type obj, @object\n.size obj, 4\n.set oalias, obj+2\n.globl oalias\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
@@ -463,10 +479,20 @@ static void asm_test_program_sections(const ObjectView* ours, const ObjectView* 
         {
             first += 1;
         }
-        if (b != 0 && (a->sh_size != b->sh_size || a->sh_flags != b->sh_flags || a->sh_addralign != b->sh_addralign || (contents && first < a->sh_size)))
+        // What object_test_same_as compares: a compared section GNU as lacks, its type, flags, size, alignment, entry
+        // size and bytes.
+        if (b == 0 && object_test_compared_section(ours, i))
         {
-            printf("assembler program section %s: %s: size %llu against GNU as's %llu, first difference at %#llx:", name, object_view_section_name(ours, i),
-                   (unsigned long long)a->sh_size, (unsigned long long)b->sh_size, (unsigned long long)first);
+            printf("assembler program section %s: %s: GNU as has none\n", name, object_view_section_name(ours, i));
+        }
+        else if (b != 0 && (a->sh_type != b->sh_type || a->sh_size != b->sh_size || a->sh_flags != b->sh_flags || a->sh_addralign != b->sh_addralign || a->sh_entsize != b->sh_entsize ||
+                            (contents && first < a->sh_size)))
+        {
+            printf("assembler program section %s: %s: type %u, flags %#llx, size %llu, alignment %llu, entry size %llu against GNU as's %u, %#llx, %llu, %llu, %llu; first difference at "
+                   "%#llx:",
+                   name, object_view_section_name(ours, i), a->sh_type, (unsigned long long)a->sh_flags, (unsigned long long)a->sh_size, (unsigned long long)a->sh_addralign,
+                   (unsigned long long)a->sh_entsize, b->sh_type, (unsigned long long)b->sh_flags, (unsigned long long)b->sh_size, (unsigned long long)b->sh_addralign,
+                   (unsigned long long)b->sh_entsize, (unsigned long long)first);
             for (uint32_t side = 0; contents && side < 2; side += 1)
             {
                 const ObjectView* view = side == 0 ? ours : theirs;
@@ -478,6 +504,16 @@ static void asm_test_program_sections(const ObjectView* ours, const ObjectView* 
                 }
             }
             printf("\n");
+        }
+    }
+    for (uint64_t j = 1; j < theirs->section_count; j += 1)
+    {
+        const char* section = object_view_section_name(theirs, j);
+        // GNU as writes .text, .data and .bss even empty, which the comparator lets ours omit.
+        const bool always = theirs->sections[j].sh_size == 0 && (strcmp(section, ".text") == 0 || strcmp(section, ".data") == 0 || strcmp(section, ".bss") == 0);
+        if (object_test_compared_section(theirs, j) && !always && object_test_section_named(ours, section, false) == 0)
+        {
+            printf("assembler program section %s: %s: only GNU as has it\n", name, section);
         }
     }
 }

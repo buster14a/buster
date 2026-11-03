@@ -93,6 +93,9 @@ struct AsmSymbol
     bool alias;
     AsmExpr alias_target;
     int64_t offset;
+    // An alias whose target wasn't defined at its `.set`, which takes the target's type and size once it is (GNU as's
+    // copy_symbol_attributes; asm_alias_inherit).
+    bool inherits;
     // `.comm` and `.lcomm` (#1115): ASM_COMMON_GLOBAL for a common symbol (SHN_COMMON, of common_size bytes aligned to
     // common_alignment), ASM_COMMON_BSS for one .bss holds (.lcomm, or a local's .comm), placed after .bss's other
     // contents in directive order (common_next, from AsmParser.common_first), as GNU as places them.
@@ -2745,6 +2748,25 @@ static void asm_alias_expression(const AsmParser* parser, AsmExpr* expression)
     }
 }
 
+// GNU as's copy_symbol_attributes for `.set alias, target`: the alias takes the target's type and size, where it has
+// none of its own, when the target is defined (its type and size then: a later `.type` or `.size` of the target isn't
+// copied), or once a target defined later is (all of them). GCC writes `.weak alias` and `.set alias, original` for a
+// weak alias of a function, which GNU as makes FUNC with the function's size; an `.lcomm` object's alias is OBJECT. A
+// later `.type` or `.size` of the alias replaces them. A global common isn't a target: GNU as refuses one.
+static void asm_alias_inherit(AsmSymbol* symbol, const AsmSymbol* target)
+{
+    if ((symbol->flags & BUSTER_LINK_SYMBOL_TYPE) == 0)
+    {
+        symbol->flags = (uint8_t)(symbol->flags | (target->flags & BUSTER_LINK_SYMBOL_TYPE));
+    }
+    if (!symbol->has_size && target->has_size)
+    {
+        symbol->size = target->size;
+        symbol->has_size = true;
+    }
+    symbol->inherits = false;
+}
+
 // The aliases, once the source has defined every symbol (#1115), an alias of an alias by its target's target. The alias
 // of a label the source defines (`.set .LC4, .LC11+4`, GCC's constant pool entry within another) is a symbol at the
 // label's place plus the constant, as GNU as makes it. Each reference to an alias of another symbol (an undefined one)
@@ -2781,6 +2803,10 @@ static void asm_resolve_aliases(AsmParser* parser)
             symbol->offset = target->offset + (int64_t)symbol->alias_target.value;
             symbol->alias = false;
             parser->alias_count -= 1;
+            if (symbol->inherits)
+            {
+                asm_alias_inherit(symbol, target);
+            }
         }
         else if (symbol->alias && (symbol->explicit_binding || symbol->has_size))
         {
@@ -3061,11 +3087,18 @@ static void asm_directive(AsmParser* parser, uint32_t end)
                 {
                     // An alias of a symbol plus a constant, which may come later (asm_resolve_aliases): GCC's constant
                     // pools write one entry within another so (#1115: `.set .LC4, .LC11+4`).
+                    const AsmSymbol* target = &parser->symbols[value.plus];
+                    const bool placed = target->defined || target->common == ASM_COMMON_BSS;
                     symbol->alias = true;
                     symbol->alias_target = value;
                     symbol->defined = true;
                     symbol->section_start = false;
+                    symbol->inherits = !placed;
                     parser->alias_count += 1;
+                    if (placed)
+                    {
+                        asm_alias_inherit(symbol, target);
+                    }
                 }
             }
         }
@@ -4626,6 +4659,12 @@ static void asm_emit(AsmParser* parser)
         {
             asm_fail(parser, symbol->location, "symbol alias outside its target's section");
         }
+        else if (symbol->defined && (uint64_t)size.value > link->atoms.size[parser->sections[definition->section].atom] - (uint64_t)position)
+        {
+            // GNU as writes such a size (`.set alias, object+2` of a 4-byte object takes its size, #1115); a Link symbol
+            // lies within its atom, and link_add_symbol would refuse it.
+            asm_fail(parser, symbol->location, "symbol size reaches past its section's end");
+        }
         symbol->link = link_add_symbol(link, name, symbol->defined ? parser->sections[definition->section].atom : 0, (uint64_t)position, size.value, symbol->flags, symbol->defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE);
     }
     parser->result.directives = link->symbols.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint8_t, link->symbols.count) : 0;
@@ -4764,7 +4803,8 @@ static void asm_emit(AsmParser* parser)
     }
     asm_object_options(parser);
     parser->result.common_count = parser->common_count;
-    if (parser->result.error == 0 && link_check(link) != LINK_ERROR_NONE)
+    // A record link_add_* refused leaves the Link's error, not a record link_check would see.
+    if (parser->result.error == 0 && (link->error != LINK_ERROR_NONE || link_check(link) != LINK_ERROR_NONE))
     {
         asm_fail(parser, 0, "invalid link representation (symbol size, capacity or relocation)");
     }

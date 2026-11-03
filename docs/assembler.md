@@ -276,7 +276,15 @@ is a symbol at the label's place plus the constant, as GNU as makes it (its
 relocations in a merged section refer to it: `.LC4 - 4`); a reference to the
 alias of an undefined symbol is one to that symbol plus the constant, and that
 alias, which can't be exported, is in no table. An alias of an alias is its
-target's target.
+target's target. As GNU as's `copy_symbol_attributes` does, an alias takes its
+target's type and size where it has none of its own. It takes them at `.set`
+when the target is defined by then (a later `.type` or `.size` of the target
+isn't copied), or once a target defined later is. GCC writes `.weak alias` and
+`.set alias,original` for a weak function alias, which is then FUNC with the
+function's size. An `.lcomm` object's alias is OBJECT, and the alias's own
+`.type` and `.size` replace them. A symbol whose size reaches past its section's
+end, which GNU as writes (an alias of `object+2` takes the object's size), is
+refused: a `Link` symbol lies within its atom.
 
 `.comm name, size[, alignment]` and `.lcomm name, size` (#1115) are GNU as's
 for ELF. A global's `.comm` (C's tentative definitions under `-fcommon`) is a
