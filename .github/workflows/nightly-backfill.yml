@@ -113,6 +113,9 @@ jobs:
     outputs:
       window: ${{ steps.coordinate.outputs.window }}
       snapshot: ${{ steps.coordinate.outputs.snapshot }}
+      # The dispatches the runs may not show yet, which the window job must not repeat (tools/ci/nightly.sh,
+      # pending_handoff): a job output, which reaches the window job whenever it runs, unlike an artifact.
+      pending: ${{ steps.coordinate.outputs.pending }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -130,7 +133,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nightly-ledger-prepare-${{ github.run_attempt }}
-          # pending.tsv: the dispatches not yet visible as runs, which the window job reads so as not to repeat them.
+          # pending.tsv: the dispatches not yet visible as runs, for the record (the window job gets them as an output).
           path: |
             ${{ runner.temp }}/nightly/ledger.tsv
             ${{ runner.temp }}/nightly/report.md
@@ -160,6 +163,8 @@ jobs:
           NIGHTLY_PUBLICATION_TOKEN: ${{ secrets.BUSTER_PERFORMANCE_LEDGER_TOKEN }}
           # The snapshot the prepare job pinned, should its ledger not reach this job.
           NIGHTLY_SNAPSHOT: ${{ needs.prepare.outputs.snapshot }}
+          # Its dispatches the runs may not show yet: without them this job plans nothing.
+          NIGHTLY_PENDING: ${{ needs.prepare.outputs.pending }}
         run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase window --mode run
       - name: Keep the ledger and the report
         if: always()

@@ -292,7 +292,9 @@ record()
 
 # The ledger this run's prepare job kept, or the newest the previous coordinator runs on main kept (a window job's
 # before a prepare job's), or the one published to buster-performance, or a new one. Artifacts are read only from this
-# workflow's own runs; an invalid ledger is replaced by a new one, which harvest refills from the runs' records.
+# workflow's own runs; an invalid ledger is replaced by a new one, which harvest refills from the runs' records. Every
+# fallback is safe: the rows are the records', which harvest reads again, and the cycle's pin reaches the window job
+# as a job output (NIGHTLY_SNAPSHOT), as the prepare job's pending dispatches do (pending_handoff).
 ledger_artifact()
 {
     local run=$1 attempt
@@ -307,11 +309,8 @@ load_ledger()
     local ledger=$1 id='' run
     printf '# buster-nightly-ledger 1\n' > "$ledger"
     : > "$work/ledger.previous"
-    local own=false
     id=$(ledger_artifact "${GITHUB_RUN_ID:?}")
-    if [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
-        own=true
-    else
+    if ! [[ "$id" =~ ^[1-9][0-9]*$ ]]; then
         for run in $(api "repos/$repository/actions/workflows/nightly-backfill.yml/runs?branch=main&status=completed&per_page=10" \
             --jq '.workflow_runs[]? | select(.event == "schedule" or .event == "workflow_dispatch") | .id' | grep -E '^[1-9][0-9]*$' || true); do
             id=$(ledger_artifact "$run")
@@ -322,10 +321,6 @@ load_ledger()
     fi
     if [[ "$id" =~ ^[1-9][0-9]*$ ]] && "$gh" api "repos/$repository/actions/artifacts/$id/zip" > "$work/ledger.zip"; then
         unzip -p "$work/ledger.zip" ledger.tsv 2> /dev/null | head -c 67108864 > "$work/ledger.previous" || true
-        # This run's prepare job's dispatches not yet visible as runs, which the window job must not repeat.
-        if [ "$own" = true ]; then
-            unzip -p "$work/ledger.zip" pending.tsv 2> /dev/null | head -c 65536 | grep -E $'^pending\t' > "$work/pending.tsv" || true
-        fi
     elif git -c advice.detachedHead=false clone -q --depth 1 --branch nightly-ledger \
         "${NIGHTLY_PERFORMANCE_REMOTE:-https://github.com/buster14a/buster-performance.git}" "$work/published" 2> /dev/null &&
         [ -f "$work/published/nightly/main-coverage.tsv" ]; then
@@ -462,6 +457,37 @@ publish()
     fi
 }
 
+# The prepare job's dispatches that the runs may not show yet, which the window job must not repeat. They are no
+# record's and no ledger's, so only the prepare job can hand them over: as a job output, which the window job (that
+# needs the prepare job's success) always gets, never an artifact the API may fail to list or serve. The form is
+# "buster-nightly-pending-1 COUNT", then each dispatch as REQUEST,PURPOSE,HARDWARE,SHA,TIME. No dispatches is a valid
+# list; an absent or malformed one, or one whose count doesn't match, is no list at all.
+pending_handoff()
+{
+    awk -F '\t' '$1 == "pending" { count += 1; entries = entries sprintf(" %s,%s,%s,%s,%s", $2, $3, $4, $5, $6) }
+        END { printf "buster-nightly-pending-1 %d%s\n", count, entries }' "$1"
+}
+pending_received()
+{
+    local words entry valid=true
+    read -r -a words <<< "$1"
+    if [ "${words[0]:-}" != buster-nightly-pending-1 ] || ! [[ "${words[1]:-}" =~ ^(0|[1-9][0-9]{0,3})$ ]] ||
+        [ "${#words[@]}" -ne $((${words[1]:-0} + 2)) ]; then
+        valid=false
+    fi
+    : > "$2"
+    if [ "$valid" = true ]; then
+        for entry in "${words[@]:2}"; do
+            if [[ "$entry" =~ ^[^,]+,[^,]+,[^,]+,[^,]+,[^,]+$ ]]; then
+                printf 'pending\t%s\n' "${entry//,/$'\t'}" >> "$2"
+            else
+                valid=false
+            fi
+        done
+    fi
+    [ "$valid" = true ]
+}
+
 coordinate()
 {
     local phase='' mode=''
@@ -477,12 +503,18 @@ coordinate()
     local coordinator=${GITHUB_RUN_ID:?} states="$work/states.tsv" facts="$work/facts.tsv" ledger="$work/ledger.tsv"
     local refs="$work/refs.tsv" pending="$work/pending.tsv" main sequence=1 times cycle start deadline started
     started=$(now)
+    : > "$pending"
     if [ "$phase" = window ]; then
         sequence=10001
+        # Without the prepare job's pending dispatches, a dispatch the runs don't show yet could be dispatched again:
+        # nothing is planned. The next coordinator run plans when the runs show them.
+        if ! pending_received "${NIGHTLY_PENDING:-}" "$pending"; then
+            printf '::error title=Nightly coordinator::the prepare job'"'"'s pending dispatches did not reach this job, so nothing is planned (a dispatch the runs do not show yet could be repeated): %s\n' "${NIGHTLY_PENDING:-none}"
+            exit 1
+        fi
     fi
     load_states "$states"
     main=$main_head
-    : > "$pending"
     load_ledger "$ledger"
     times=$("$tool" window-times --now "$(now)")
     cycle=$(awk -F '\t' '$1 == "cycle" { print $2 }' <<< "$times")
@@ -592,6 +624,7 @@ coordinate()
     publish "$cycle"
     if [ "$phase" = prepare ]; then
         output snapshot "$(awk -F '\t' -v cycle="$cycle" '$1 == "cycle" && $2 == cycle { print $3 }' "$ledger" | tail -n 1)"
+        output pending "$(pending_handoff "$pending")"
         # The window job runs when the window is open, or opens before this job's 6 hours end (5 hours 55 minutes from
         # its start, to leave the job a margin).
         local current

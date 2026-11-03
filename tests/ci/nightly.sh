@@ -478,6 +478,9 @@ run_coordinator()
     : > "$GITHUB_OUTPUT"
     (cd "$root" && bash tools/ci/nightly.sh coordinate "$1" --phase "$2" --mode "$3") > "$work/coordinate.log" 2>&1 || { cat "$work/coordinate.log" >&2; fail 'the coordinator failed'; }
 }
+# The prepare job's pending dispatches as its output hands them to the window job (none: a valid empty list).
+none_pending='buster-nightly-pending-1 0'
+handed() { sed -n 's/^pending=//p' "$GITHUB_OUTPUT"; }
 : > "$fixtures/calls.log"
 rm -f "$fixtures/runs-head-"*.json
 GITHUB_RUN_ID=9100 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') run_coordinator "$work/dry" prepare dry-run
@@ -490,6 +493,7 @@ expect_line "$work/dry/plan.tsv" $'done\tdry run' 'and does nothing'
 expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' 'a dry run writes nothing'
 expect_line "$GITHUB_OUTPUT" 'window=closed' 'a dry run never waits for the window'
 expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'the cycle pins main'"'"'s head'
+expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'and hands over a valid empty list of pending dispatches'
 
 # Run mode before the window: branches and dispatches of the hosted preparations, and the wait for the window.
 : > "$fixtures/calls.log"
@@ -499,6 +503,9 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml --repo buster14a/bus
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$epoch -f purpose=backlog -f hardware=defer" 'and the oldest state'"'"'s'
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and waits for the window, under six hours away'
 test "$(grep -E -c '^workflow run' "$fixtures/calls.log")" -eq 3 || fail 'the snapshot and the two states without hosted rows are prepared'
+prepared=$(handed)
+[[ "$prepared" == "buster-nightly-pending-1 3 20261104.9200.1.defer,snapshot,defer,$head,$(madrid '2026-11-03 22:10') "* ]] ||
+    fail "the prepare job hands over its three dispatches: $prepared"
 
 # Inside the window, with the snapshot's hosted run qualified and its record harvested: the comprehensive run.
 cat > "$fixtures/runs-workflow_dispatch.json" <<JSON
@@ -518,7 +525,7 @@ echo '{"artifacts":[{"id":9001,"name":"coverage-record-1","expired":false}]}' > 
 (cd "$work/prepare" && zip -q "$fixtures/artifact-9201.zip" ledger.tsv)
 echo '{"artifacts":[{"id":9201,"name":"nightly-ledger-prepare-1","expired":false}]}' > "$fixtures/artifacts-9200.json"
 : > "$fixtures/calls.log"
-GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_SNAPSHOT=$head run_coordinator "$work/window" window run
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$prepared run_coordinator "$work/window" window run
 expect_match "$work/window/ledger.tsv" "^run	900	1	$head	workflow_dispatch	snapshot	20261104\.9200\.1\.defer	" 'the snapshot'"'"'s hosted run is harvested'
 expect_match "$work/window/ledger.tsv" "^run	900	.*	ok	skip	full	blocked-hosted	" 'its sanitizer row failed, but its plain rows qualified it'
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit .*-f request=20261104\.9200\.100[0-9][0-9]\.admit$" 'the comprehensive run is admitted first'
@@ -528,12 +535,13 @@ expect_line "$work/window/ledger.tsv" "cycle	2026-11-04	$head	9200	$(madrid '202
 : > "$fixtures/calls.log"
 GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_OVERRIDE='validating the coordinator' run_coordinator "$work/override-prepare" prepare run
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'an override makes the window job run at once'
+prepared=$(handed)
 : > "$fixtures/calls.log"
-GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_OVERRIDE='validating the coordinator' NIGHTLY_SNAPSHOT=$head run_coordinator "$work/override-window" window run
+GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_OVERRIDE='validating the coordinator' NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$prepared run_coordinator "$work/override-window" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit .* -f override=validating the coordinator$" 'the override admits the comprehensive run and passes its reason on'
 expect_match "$work/override-window/report.md" 'Override.*validating the coordinator' 'and the report says so'
 : > "$fixtures/calls.log"
-GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_SNAPSHOT=$head run_coordinator "$work/no-override" window run
+GITHUB_RUN_ID=9300 NIGHTLY_NOW=$(madrid '2026-11-04 13:00') NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$none_pending run_coordinator "$work/no-override" window run
 expect_no_match "$fixtures/calls.log" 'hardware=admit' 'without an override 13:00 admits nothing'
 expect_match "$work/override-window/report.md" 'out of scope' 'the report says what the epoch leaves out'
 # A later step whose run listing fails plans nothing: an admitted run in flight that the failed list would hide isn't
@@ -549,7 +557,7 @@ JSON
 cp "$fixtures/jobs-800.json" "$fixtures/jobs-951.json"
 : > "$fixtures/runs-workflow_dispatch.json.2.fail"
 : > "$fixtures/calls.log"
-GITHUB_RUN_ID=9500 NIGHTLY_NOW=$(madrid '2026-11-04 04:20') NIGHTLY_ITERATIONS=3 NIGHTLY_SLEEP=0 NIGHTLY_SNAPSHOT=$head run_coordinator "$work/failed-poll" window run
+GITHUB_RUN_ID=9500 NIGHTLY_NOW=$(madrid '2026-11-04 04:20') NIGHTLY_ITERATIONS=3 NIGHTLY_SLEEP=0 NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$none_pending run_coordinator "$work/failed-poll" window run
 expect_match "$work/coordinate.log" 'the runs could not be listed; nothing is planned' 'a failed listing is reported'
 expect_no_match "$fixtures/calls.log" 'hardware=admit' 'and no second hardware run is dispatched beside the one in flight'
 test "$(grep -c 'actions/workflows/9700x.yml/runs?event=workflow_dispatch' "$fixtures/calls.log")" -eq 3 || fail 'the coordinator tries again after a failed listing'
@@ -570,7 +578,8 @@ expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$mer
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and the job still waits for the window'
 rm -f "$fixtures/runs-workflow_dispatch.json.2" "$fixtures"/count-*
 # The handoff from the prepare job to the window job: a prepare step inside the window admits no hardware, and the
-# window job, reading the prepare job's pending dispatches with its ledger, repeats none that aren't visible yet.
+# window job, handed the prepare job's pending dispatches as its output, repeats none that aren't visible yet, whether
+# or not the ledger's artifact can be read.
 rm -f "$fixtures"/count-* "$fixtures/runs-push.json"
 echo '{"workflow_runs":[]}' > "$fixtures/runs-workflow_dispatch.json"
 : > "$fixtures/calls.log"
@@ -579,12 +588,43 @@ expect_no_match "$fixtures/calls.log" 'hardware=admit' 'a prepare step inside th
 expect_match "$fixtures/calls.log" "^workflow run .*-f purpose=snapshot -f hardware=defer .*request=20261104\\.9700\\.1\\.defer$" 'it prepares'
 expect_line "$GITHUB_OUTPUT" 'window=reachable' 'and hands over to the window job'
 test -s "$work/handoff-prepare/pending.tsv" || fail 'the prepare job keeps its pending dispatches'
+handoff=$(handed)
+[[ "$handoff" == "buster-nightly-pending-1 3 20261104.9700.1.defer,snapshot,defer,$head,"* ]] || fail "and hands them over: $handoff"
 (cd "$work/handoff-prepare" && rm -f "$fixtures/artifact-9701.zip" && zip -q "$fixtures/artifact-9701.zip" ledger.tsv report.md pending.tsv)
 echo '{"artifacts":[{"id":9701,"name":"nightly-ledger-prepare-1","expired":false}]}' > "$fixtures/artifacts-9700.json"
 : > "$fixtures/calls.log"
-GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$head run_coordinator "$work/handoff-window" window run
+GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$handoff run_coordinator "$work/handoff-window" window run
 expect_no_match "$fixtures/calls.log" '^workflow run' 'the window job repeats none of the prepare job'"'"'s dispatches the API doesn'"'"'t show yet'
 cmp "$work/handoff-prepare/pending.tsv" "$work/handoff-window/pending.tsv" || fail 'the window job starts from the prepare job'"'"'s pending dispatches'
+# The artifact that can't be served, or whose listing fails: the dispatch, still hidden, isn't repeated either.
+mv "$fixtures/artifact-9701.zip" "$fixtures/artifact-9701.zip.away"
+for unreadable in served listed; do
+    rm -f "$fixtures"/count-*
+    if [ "$unreadable" = listed ]; then : > "$fixtures/artifacts-9700.json.1.fail"; : > "$fixtures/artifacts-9700.json.2.fail"; fi
+    : > "$fixtures/calls.log"
+    GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$handoff run_coordinator "$work/handoff-$unreadable" window run
+    expect_no_match "$fixtures/calls.log" '^workflow run' "with the ledger's artifact not $unreadable, the hidden dispatch isn't repeated"
+    cmp "$work/handoff-prepare/pending.tsv" "$work/handoff-$unreadable/pending.tsv" || fail "and the pending dispatches are the prepare job's ($unreadable)"
+done
+# Without a valid handoff (none, another format, a count that doesn't match, a malformed dispatch), the window job plans
+# nothing and fails, though a valid empty list would have planned: an absent list is not an empty one.
+for broken in '' 'buster-nightly-pending-2 0' "buster-nightly-pending-1 2 ${handoff#buster-nightly-pending-1 3 }" \
+    "buster-nightly-pending-1 1 20261104.9700.1.defer,snapshot,defer,$head"; do
+    rm -f "$fixtures"/count-*
+    : > "$fixtures/calls.log"
+    : > "$GITHUB_OUTPUT"
+    if (cd "$root" && GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$broken \
+        bash tools/ci/nightly.sh coordinate "$work/handoff-broken" --phase window --mode run) > "$work/coordinate.log" 2>&1; then
+        fail "a window job without a valid handoff ($broken) succeeded"
+    fi
+    expect_match "$work/coordinate.log" 'pending dispatches did not reach this job, so nothing is planned' "and says why ($broken)"
+    expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' "and writes nothing ($broken)"
+done
+rm -f "$fixtures"/count-* "$fixtures/artifacts-9700.json.1.fail" "$fixtures/artifacts-9700.json.2.fail"
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9700 NIGHTLY_NOW=$(madrid '2026-11-04 04:06') NIGHTLY_SNAPSHOT=$head NIGHTLY_PENDING=$none_pending run_coordinator "$work/handoff-empty" window run
+expect_match "$fixtures/calls.log" "^workflow run .*-f purpose=snapshot -f hardware=defer " 'a valid empty list plans: the hidden dispatch, not handed over, is made again'
+mv "$fixtures/artifact-9701.zip.away" "$fixtures/artifact-9701.zip"
 rm -f "$fixtures/artifacts-9700.json"
 # Main moves on between the prepare job and the window job: the window job's dispatches still name the cycle's pinned
 # snapshot, which the worker checks ancestry against and records, not main's new head.
@@ -598,7 +638,7 @@ commit_at 1793700700 commit -q -m later
 later=$(git -C "$history" rev-parse HEAD)
 git -C "$history" -c push.negotiate=false push -q "$remote" main
 : > "$fixtures/calls.log"
-GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') run_coordinator "$work/moved" window run
+GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') NIGHTLY_PENDING=$none_pending run_coordinator "$work/moved" window run
 expect_match "$fixtures/calls.log" "^workflow run 9700x.yml .*--ref nightly/$head -f purpose=snapshot -f hardware=admit -f snapshot=$head -f request=" 'after main moves on, the worker gets the cycle'"'"'s pinned snapshot'
 expect_no_match "$fixtures/calls.log" "snapshot=$later" 'and never main'"'"'s new head'
 printf 'nightly glue: evidence, records, first-parent states, the ledger, the window step, dry and real coordination, overrides, failed polls, refilled preparations, the prepare-to-window handoff and a pin that main moved past checked\n'

@@ -358,7 +358,12 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    never admits hardware, even when a step lands at 04:00 or carries an
    override: admission is the window job's alone. The window job starts from
    the prepare job's ledger and its pending dispatches, so a dispatch the API
-   doesn't show yet isn't repeated.
+   doesn't show yet isn't repeated. The pending dispatches come as a job
+   output, with their count, not with the ledger's artifact. A valid empty list
+   is still a list. A window job without a valid one plans nothing and fails,
+   and the next coordinator run plans once the runs show the dispatches. The
+   ledger's own fallbacks are safe: harvest reads its rows from the records
+   again, and the pin comes as an output too.
 4. **Measure.** Inside the window it admits one 9700X run at a time: the
    snapshot's comprehensive run first, then the oldest ready state. While the
    snapshot's hosted rows are in flight, it keeps room for the snapshot. If
