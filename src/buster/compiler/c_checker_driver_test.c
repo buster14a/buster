@@ -4874,6 +4874,11 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
         { "a struct, a #pragma pack, then another type", "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nint x;\n" },
         { "a struct, a #pragma pack, then a typedef of a struct", "#pragma pack(push, 1)\nstruct P { char c; }\n#pragma pack(pop)\ntypedef struct node { int x; } node;\n" },
         { "a struct, a _Pragma pack, then a storage class and a type", "struct P { char c; }\n_Pragma(\"pack(pop)\") static int x;\n" },
+        // A constant before a syntax error in its declaration, which only the parse reached: clang's error comes first.
+        { "an octal constant's digit before a missing operand", "int x = 08 +;\n" },
+        { "a floating constant's suffix before a missing `;`", "void f(void) { return 1.5b }\n" },
+        { "a condition's constant before a missing `;`", "void f(int a) { if (a == 0129) a = 1 }\n" },
+        { "an exponent without digits before a missing operand", "void f(void) { int x = 1e + ; }\n" },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
