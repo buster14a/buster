@@ -27,7 +27,7 @@ requirements. [Command index](README.md).
 ## Parser tests
 
 `./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
-[--streams N] [--reports N] [--keep] [options] [file or directory...]`
+[--streams N] [--reports N] [--keep] [--files-only] [options] [file or directory...]`
 (about 7 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
 clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
 the vector path with its fallback and the scalar parser alone, which must read
@@ -99,7 +99,12 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
 - files: every `.c` file under each path, preprocessed with -E's options, must
   parse; with `--clang`, the parser must accept exactly what `clang
   -fsyntax-only` with the same options accepts (our side reads clang's
-  predefines for target options from `--predefines`);
+  predefines for target options from `--predefines`). A run with files also
+  runs the checks that take no input (the snippets, the oracle, the fixtures,
+  the workspace, K6's tables and the handoff's streams), but with
+  `--files-only`: they read only `--seed` and the language (`-std` and the
+  keywords' and digraphs' `-f` options), so the correctness list's runs of
+  files, beside its run without, leave them to that one;
 - mutations (`--mutations N`, with files): N copies of the files' -E text with
   a token deleted, duplicated or swapped with the next. With `--clang`, a copy
   clang accepts must parse, and one whose first error is a parse issue must fail

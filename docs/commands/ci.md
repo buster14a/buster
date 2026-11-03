@@ -9,6 +9,15 @@ requirements. [Command index](README.md).
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
+Each row's inventory runs as 4 shards, a runner each that builds the compiler
+itself (a native build must run on the CPU it was built for): `parallel --shard
+K/4 --costs tools/ci/correctness.costs` deals the commands by their hosted
+costs, the same deal on every shard's runner, so the shards run each command
+once. A plain row's test step took 14.6 minutes on one 4-CPU runner; its shards
+take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
+arena checks, the parser smoke test, the performance readers and the TSan/MSan
+`main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
+report when the shards' times drift apart ([the runner guide](parallel.md)).
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
@@ -107,10 +116,16 @@ there at a time, so everything takes one lock:
   step that hide its command in each must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
-  `zen5`'s digit, closures through includes, the build's description, pushes). Run it
+  `zen5`'s digit, closures through includes, the build's description, pushes).
+  It also fails when the hosted test job's shards disagree
+  (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
+  without a gap, and the same N must be in the job's name, the run step's
+  `--shard "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1
+  to N of each architecture), since a list and an N that disagree would leave a
+  shard's commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
-  benchmark's step or the tables.
+  benchmark's step, the tables or the shards.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 

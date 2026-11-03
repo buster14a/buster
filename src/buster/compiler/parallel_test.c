@@ -43,6 +43,11 @@
 //     once every command has ended, which must drop the rest of the report rather than wait for the reader; and 61
 //     commands with room for 32 descriptors, 60 of them ending before the first, whose output must be read and their
 //     captures closed as they end (#276's review);
+//   - shards: a list of six commands dealt to 2, 3 and 1 shards by costs, two of them without a line (each its CPUs
+//     times 10 s) and a line for a command the list doesn't have, each shard's commands in the list's order and every
+//     command in exactly one; 2 shards without costs; a shard without commands, which passes; the most shards
+//     (4294967295), the first with the costliest command and the last with none, dealt without room for each shard;
+//     and each error of the options (with the usage) and of the costs (at its line), and costs that can't be read;
 //   - the command: build/compiler parallel's report and exit status, for lists on standard input and in a file that
 //     pass and fail, a report with no reader (its failed write stops the run, and the runner ends at once), with SIGPIPE
 //     at its default and ignored, a reader that leaves after the first line, which fails a run whose command passes, a
@@ -1247,7 +1252,7 @@ static void parallel_test_command_line(ParallelTest* test)
     parallel_test_check(test, "the command, a list that can't be read", status == 1, parallel_test_read(&test->arena, errors), "parallel: can't read /nonexistent/list\n");
     test->arena.length = 0;
 
-    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [LIST]\n";
+    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]\n";
     char* const option_cases[][5] = {
         { "compiler", "parallel", "--jobs", "0", 0 },
         { "compiler", "parallel", "--jobs", "x", 0 },
@@ -1270,6 +1275,209 @@ static void parallel_test_command_line(ParallelTest* test)
     unlink(stuck);
     unlink(stuck_pid);
     unlink(stuck_temp);
+    unlink(output);
+    unlink(errors);
+}
+
+// --shard K/N and --costs: a list of six commands dealt to shards by costs, two of them without a line (each its CPUs
+// times 10 s) and a line for a command the list doesn't have; each shard's commands, in the list's order, and every
+// command in exactly one; the shards without costs; a shard without commands; the most shards; and each error of the
+// options and costs.
+static void parallel_test_shards(ParallelTest* test)
+{
+    char list[600];
+    char costs[600];
+    char output[600];
+    char errors[600];
+    parallel_test_path(test, list, sizeof(list), "shards.list");
+    parallel_test_path(test, costs, sizeof(costs), "shards.costs");
+    parallel_test_path(test, output, sizeof(output), "command.out");
+    parallel_test_path(test, errors, sizeof(errors), "command.err");
+    const bool ready = parallel_test_write(list, parallel_test_string("== a\necho a\n== b\necho b\n== c [2 CPUs]\necho c\n== d\necho d\n== e\necho e\n"
+                                                                      "== f [3 CPUs]\necho f\n")) &&
+                       parallel_test_write(costs, parallel_test_string("# Seconds of the CPUs each held.\n30 a\n10 b\n\n20.0 c [2 CPUs]\n  5   d  \n7.5 gone\n"));
+    typedef struct ParallelTestShard ParallelTestShard;
+    struct ParallelTestShard
+    {
+        const char* shard;
+        bool costs;
+        const char* expected;
+    };
+    // By cost: a and f 30 (f's by its 3 CPUs), c 20, b and e 10 (e's by its CPU), d 5. Two shards: a, f, c to 0, 1, 0;
+    // b and e to 1, the lighter; d to 0, which ties. Three: a, f, c to 0, 1, 2; b to 2; e to 0, all three tying; d to 1.
+    // Without costs: f 30, c 20, then a, b, d and e 10 each, in the list's order.
+    static const ParallelTestShard cases[] = {
+        {
+            "1/2",
+            true,
+            "parallel: shard 1 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU\na\n"
+            "== c [2 CPUs]: passed in * s, * s of CPU\nc\n"
+            "== d: passed in * s, * s of CPU\nd\n"
+            "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/2",
+            true,
+            "parallel: shard 2 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
+            "== b: passed in * s, * s of CPU\nb\n"
+            "== e: passed in * s, * s of CPU\ne\n"
+            "== f [3 CPUs]: passed in * s, * s of CPU\nf\n"
+            "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "1/3",
+            true,
+            "parallel: shard 1 of 3, 2 of 6 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU\na\n"
+            "== e: passed in * s, * s of CPU\ne\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/3",
+            true,
+            "parallel: shard 2 of 3, 2 of 6 commands, at most 4 CPUs at once\n"
+            "== d: passed in * s, * s of CPU\nd\n"
+            "== f [3 CPUs]: passed in * s, * s of CPU\nf\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "3/3",
+            true,
+            "parallel: shard 3 of 3, 2 of 6 commands, at most 4 CPUs at once\n"
+            "== b: passed in * s, * s of CPU\nb\n"
+            "== c [2 CPUs]: passed in * s, * s of CPU\nc\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "1/1",
+            true,
+            "parallel: shard 1 of 1, 6 of 6 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU\na\n"
+            "== b: passed in * s, * s of CPU\nb\n"
+            "== c [2 CPUs]: passed in * s, * s of CPU\nc\n"
+            "== d: passed in * s, * s of CPU\nd\n"
+            "== e: passed in * s, * s of CPU\ne\n"
+            "== f [3 CPUs]: passed in * s, * s of CPU\nf\n"
+            "parallel: 6 commands in * s, * s of CPU, at most 4 CPUs at once: 6 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "1/2",
+            false,
+            "parallel: shard 1 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
+            "== b: passed in * s, * s of CPU\nb\n"
+            "== e: passed in * s, * s of CPU\ne\n"
+            "== f [3 CPUs]: passed in * s, * s of CPU\nf\n"
+            "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/2",
+            false,
+            "parallel: shard 2 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU\na\n"
+            "== c [2 CPUs]: passed in * s, * s of CPU\nc\n"
+            "== d: passed in * s, * s of CPU\nd\n"
+            "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "7/7",
+            false,
+            "parallel: shard 7 of 7, 0 of 6 commands, at most 4 CPUs at once\n"
+            "parallel: 0 commands in * s, * s of CPU, at most 4 CPUs at once: 0 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        // The most shards: each command its own shard, the costliest the first, and the deal's room only the
+        // commands' (parallel_shards), not a word for each of the shards.
+        {
+            "1/4294967295",
+            true,
+            "parallel: shard 1 of 4294967295, 1 of 6 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU\na\n"
+            "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "4294967295/4294967295",
+            true,
+            "parallel: shard 4294967295 of 4294967295, 0 of 6 commands, at most 4 CPUs at once\n"
+            "parallel: 0 commands in * s, * s of CPU, at most 4 CPUs at once: 0 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+    };
+    for (uint64_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    {
+        char* with_costs[] = { "compiler", "parallel", "--jobs", "4", "--shard", (char*)cases[i].shard, "--costs", costs, list, 0 };
+        char* without_costs[] = { "compiler", "parallel", "--jobs", "4", "--shard", (char*)cases[i].shard, list, 0 };
+        const int status = ready ? parallel_test_command(test, cases[i].costs ? with_costs : without_costs, "/dev/null", -1) : -1;
+        char name[128];
+        snprintf(name, sizeof(name), "shards, %s %s costs", cases[i].shard, cases[i].costs ? "with" : "without");
+        parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), cases[i].expected);
+        test->arena.length = 0;
+    }
+
+    // The options' errors print the usage; the costs' print the file, the line and the problem.
+    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]\n";
+    char* const option_cases[][7] = {
+        { "compiler", "parallel", "--shard", "0/2", list, 0 },
+        { "compiler", "parallel", "--shard", "3/2", list, 0 },
+        { "compiler", "parallel", "--shard", "1/0", list, 0 },
+        { "compiler", "parallel", "--shard", "2", list, 0 },
+        { "compiler", "parallel", "--shard", "a/b", list, 0 },
+        { "compiler", "parallel", "--shard", "/2", list, 0 },
+        { "compiler", "parallel", "--shard", "1/2", "--shard", "2/2", 0 },
+        { "compiler", "parallel", "--costs", costs, list, 0 },
+        { "compiler", "parallel", "--shard", 0 },
+    };
+    for (uint64_t i = 0; i < sizeof(option_cases) / sizeof(option_cases[0]); i += 1)
+    {
+        const int status = ready ? parallel_test_command(test, option_cases[i], "/dev/null", -1) : -1;
+        char name[128];
+        snprintf(name, sizeof(name), "shards, invalid options %llu", (unsigned long long)i);
+        parallel_test_check(test, name, status == 1, parallel_test_read(&test->arena, errors), usage);
+        test->arena.length = 0;
+    }
+    typedef struct ParallelTestCosts ParallelTestCosts;
+    struct ParallelTestCosts
+    {
+        const char* text;
+        uint64_t length;
+        const char* error;
+    };
+    // A case's text, its length (sizeof's, past any NUL in it) and its error.
+#define BUSTER_PARALLEL_TEST_COST(literal, message) \
+    {                                            \
+        .text = literal,                         \
+        .length = sizeof(literal) - 1,           \
+        .error = message,                        \
+    }
+    static const ParallelTestCosts cost_cases[] = {
+        BUSTER_PARALLEL_TEST_COST("30 a\nx b\n", "2: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5a b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5 \n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5. b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("1.2345 b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("-1 b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("99999999999 b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("1 b\n\n2 b\n", "3: a title that an earlier cost has"),
+        BUSTER_PARALLEL_TEST_COST("1 b\n2 \0b\n", "2: a NUL byte"),
+    };
+#undef BUSTER_PARALLEL_TEST_COST
+    for (uint64_t i = 0; i < sizeof(cost_cases) / sizeof(cost_cases[0]); i += 1)
+    {
+        const bool written = ready && parallel_test_write(costs, (String8){ .pointer = (char*)cost_cases[i].text, .length = cost_cases[i].length });
+        char* arguments[] = { "compiler", "parallel", "--shard", "1/2", "--costs", costs, list, 0 };
+        const int status = written ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
+        char expected[1024];
+        snprintf(expected, sizeof(expected), "parallel: %s:%s\n", costs, cost_cases[i].error);
+        char name[128];
+        snprintf(name, sizeof(name), "shards, invalid costs %llu", (unsigned long long)i);
+        parallel_test_check(test, name, status == 1, parallel_test_read(&test->arena, errors), expected);
+        test->arena.length = 0;
+    }
+    char* unreadable[] = { "compiler", "parallel", "--shard", "1/2", "--costs", "/nonexistent/costs", list, 0 };
+    const int status = ready ? parallel_test_command(test, unreadable, "/dev/null", -1) : -1;
+    parallel_test_check(test, "shards, costs that can't be read", status == 1, parallel_test_read(&test->arena, errors), "parallel: can't read /nonexistent/costs\n");
+    test->arena.length = 0;
+    unlink(list);
+    unlink(costs);
     unlink(output);
     unlink(errors);
 }
@@ -1329,6 +1537,7 @@ static int run_parallel_tests(int argc, char** argv)
             parallel_test_slow_reader(&test);
             parallel_test_signals(&test);
             parallel_test_command_line(&test);
+            parallel_test_shards(&test);
             parallel_test_cores(&test);
             if (test.failures == 0)
             {
