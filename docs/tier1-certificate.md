@@ -591,7 +591,8 @@ The decoding:
 **Not decoded yet**, so not certified, each counted by its reason: by-value
 aggregates (#789's copies, parts and hidden pointers), dynamic frames with
 `alloca` or a stack restore (a stack save alone is certified, rbp its base)
-and realigned ones, a prologue's stack probes, a variadic
+and realigned ones, vectors wider than 8 bytes (#141's ymm and zmm moves) and
+long doubles (the x87 stack), a prologue's stack probes, a variadic
 definition's register save area,
 an indirect jump to several labels, a call's stack arguments or a stack
 parameter where the frame base register isn't rsp's (or the incoming area's),

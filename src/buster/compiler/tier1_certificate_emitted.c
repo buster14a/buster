@@ -67,6 +67,9 @@ typedef enum Tier1CertEmittedReason
     TIER1_CERT_EMITTED_INDIRECT,
     TIER1_CERT_EMITTED_ENTRY_LOOP,
     TIER1_CERT_EMITTED_PROBE,
+    // A vector wider than 8 bytes (#141: its ymm and zmm moves aren't decoded), or a long double (its x87 stack).
+    TIER1_CERT_EMITTED_VECTOR,
+    TIER1_CERT_EMITTED_X87,
     // The code doesn't decode to its own certificate: a refusal.
     TIER1_CERT_EMITTED_ORIGIN,
     TIER1_CERT_EMITTED_DECODE,
@@ -95,6 +98,8 @@ static __attribute__((unused)) const char* tier1_cert_emitted_reason_name(Tier1C
         "indirect",
         "entry-loop",
         "probe",
+        "vector",
+        "x87",
         "origin",
         "decode",
         "kernel",
@@ -872,6 +877,10 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     {
         reason = TIER1_CERT_EMITTED_VARIADIC;
     }
+    else if (emitted->prepared.x87_count != 0)
+    {
+        reason = TIER1_CERT_EMITTED_X87;
+    }
     else if (function->result_size != 0)
     {
         reason = TIER1_CERT_EMITTED_AGGREGATE;
@@ -879,6 +888,11 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     else if (input->predecessor_offsets[1] != input->predecessor_offsets[0])
     {
         reason = TIER1_CERT_EMITTED_ENTRY_LOOP;
+    }
+    // A vector's ymm or zmm moves aren't decoded.
+    for (uint32_t v = 0; reason == TIER1_CERT_EMITTED_OK && v < input->value_count; v += 1)
+    {
+        reason = input->classes[v] == BUSTER_TIER1_ALLOCATE_VECTOR && emitted->prepared.sizes[emitted->value_nodes[v]] > 8 ? TIER1_CERT_EMITTED_VECTOR : reason;
     }
     // A probe's loop in the prologue isn't decoded.
     for (uint32_t k = 0; reason == TIER1_CERT_EMITTED_OK && k < emitted->frame.prologue_count && k < BUSTER_TIER1_FRAME_STEP_CAPACITY; k += 1)
