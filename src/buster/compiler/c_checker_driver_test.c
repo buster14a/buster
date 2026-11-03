@@ -2942,8 +2942,9 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
 }
 
 // Reads --time-stages' report in `text` (check_clock_read): whether it has every row once, the stages adding up to the
-// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), the reader's expressions' walk
-// once within the reader's stage (#1038), and the process's lines. Each stage's milliseconds go to `stages` (by CheckStage).
+// total and the preprocessor's and the lowering's rows to their stages (each line is rounded to a microsecond), the
+// reader's expressions' walk once within the reader's stage (#1038), and the process's lines. Each stage's milliseconds
+// go to `stages` (by CheckStage).
 static bool check_test_driver_time_report(const char* text, double* stages)
 {
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
@@ -2961,14 +2962,14 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     double walk = -1;
     bool valid = check_clock_read(text, stages, phases, &total, &walk, NULL);
     double sum = 0;
-    double phase_sum = 0;
+    double phase_sums[CHECK_STAGE_COUNT] = { 0 };
     for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
     {
         sum += stages[s];
     }
     for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
     {
-        phase_sum += phases[p];
+        phase_sums[check_clock_phase_stages[p]] += phases[p];
     }
     for (uint32_t p = 0; valid && p < BUSTER_ARRAY_LENGTH(process); p += 1)
     {
@@ -2980,11 +2981,16 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     valid = valid && strstr(text, "\ntime-check\ttransition-hits\t") != NULL && strstr(text, "\ntime-check\ttransition-misses\t") != NULL &&
             strstr(text, "\ntime-check\ttransition-folds\t") != NULL && strstr(text, "\ntime-check\ttransition-entries\t") != NULL;
     const double stage_error = sum > total ? sum - total : total - sum;
-    const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
-    return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
+    // The preprocessor's rows add up to its stage, and the lowering's to its own.
+    const double preprocess = stages[CHECK_STAGE_PREPROCESS];
+    const double lower = stages[CHECK_STAGE_LOWER];
+    const double preprocess_error = phase_sums[CHECK_STAGE_PREPROCESS] > preprocess ? phase_sums[CHECK_STAGE_PREPROCESS] - preprocess : preprocess - phase_sums[CHECK_STAGE_PREPROCESS];
+    const double lower_error = phase_sums[CHECK_STAGE_LOWER] > lower ? phase_sums[CHECK_STAGE_LOWER] - lower : lower - phase_sums[CHECK_STAGE_LOWER];
+    return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && preprocess_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1) &&
+           lower_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
 }
 
-// Builds one whole report for check_clock_read: every stage and the preprocessor's phases once, then the total and the
+// Builds one whole report for check_clock_read: every stage and the preprocessor's and the lowering's rows once, then the total and the
 // system/peak statuses. `system_status` and `peak_status` are 0 for no status line, 1 for available and 2 for
 // unavailable. `system_available` and `peak_available` choose numeric columns or their -1 form; `alter_one_system`
 // makes one stage numeric in an otherwise unavailable report. Returns false if the text doesn't fit.
@@ -3083,6 +3089,19 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, object_report && stages[CHECK_STAGE_ENCODE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] > 0 && stages[CHECK_STAGE_EXECUTABLE] == 0 &&
                                 stages[CHECK_STAGE_LANES] == 0,
                       "--time-stages -c reports every stage once, adding up to its total, its functions on one lane");
+    // The lowering's rows (#1048), which add up to its stage: each measured, not left to the rest's row. Its preparation
+    // reads the whole unit, <stdio.h>'s too, and on one lane each of the two functions' statements, the rest of its walk
+    // and its validation take some time of their own.
+    double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
+    double read_stages[CHECK_STAGE_COUNT] = { 0 };
+    double read_total = 0;
+    double read_walk = 0;
+    check_test_expect(test, object_report && check_clock_read(text, read_stages, phases, &read_total, &read_walk, NULL) &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_PREPARE] > 0 &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_STATEMENTS] > 0 &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_BODIES] > 0 &&
+                                phases[BUSTER_CHECK_CLOCK_LOWER_FIRST + CHECK_CLOCK_LOWER_VALIDATE] > 0,
+                      "--time-stages -c reports the lowering's preparation, statements, bodies and validation inside its stage");
     check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
     uint64_t expression_nodes = 0;
     uint64_t batch_nodes = 0;
@@ -3241,8 +3260,11 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable") != NULL;
-    // The reader's expressions' walk (#1038), under its stage.
+    // The reader's expressions' walk (#1038), under its stage; and the lowering's coverage (#1048), the first report's
+    // `lowering-nodes` line, once.
     const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
+    const char* covered = text != NULL ? strstr(text, "\nlowering coverage: lowering-nodes\tevaluated=") : NULL;
+    const bool coverage_once = covered != NULL && strstr(covered + 1, "\nlowering coverage: ") == NULL;
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
@@ -3250,6 +3272,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
     check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk under its stage");
+    check_test_expect(test, coverage_once, "measure-compile reports the lowering's coverage once");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
@@ -3991,6 +4014,24 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "int caller(int x) { if (0) return h(x); return (0 && h(x)) + (1 ? x : h(x)); }\nint after(int x) { return x; return h(x); }\n",
           false, true },
+        // #1108: a function that only a constant if's dead arm reaches, called there, through a block-scope static's
+        // initializer there, or under a condition whose && leaves a call unevaluated (main.c's BUSTER_IN_UNIT branches),
+        // is never emitted, by clang and by -c's selection, and so never checked; the live arm's call is.
+        { "a function only constant ifs' dead arms reach", "-march=x86-64",
+          "#include <immintrin.h>\n"
+          "static int vec(const unsigned char* p)\n{\n    __m512i v = _mm512_maskz_cvtepu8_epi32(0xffff, _mm_loadu_si128((const __m128i*)p));\n"
+          "    return _mm512_reduce_add_epi32(v);\n}\nint strcmp(const char* a, const char* b);\n"
+          "int run(const unsigned char* p, int n)\n{\n    int r = p[0];\n    if (0)\n    {\n        r = vec(p);\n    }\n"
+          "    if (0 && n >= 2 && strcmp(\"a\", \"b\") == 0)\n    {\n        r += vec(p + 1);\n    }\n"
+          "    if (1)\n    {\n    }\n    else\n    {\n        static int (*pointer)(const unsigned char*) = vec;\n        r += pointer(p);\n    }\n"
+          "    return r;\n}\n",
+          false, true },
+        { "a function a constant if's live arm reaches", "-march=x86-64",
+          "#include <immintrin.h>\n"
+          "static int vec(const unsigned char* p)\n{\n    __m512i v = _mm512_maskz_cvtepu8_epi32(0xffff, _mm_loadu_si128((const __m128i*)p));\n"
+          "    return _mm512_reduce_add_epi32(v);\n}\n"
+          "int run(const unsigned char* p)\n{\n    int r = p[0];\n    if (1)\n    {\n        r = vec(p);\n    }\n    return r;\n}\n",
+          true, true },
         { "the first function to have an error", "-march=x86-64",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
           "int e1(int x) { return s(x) + h(x + 1); }\nint e2(int x) { return h(x + 2); }\n",

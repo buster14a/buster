@@ -6,10 +6,13 @@
 //
 //   build/compiler benchmark-check-lanes [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...
 //
-// Each file is checked as the driver checks it (the vector path, check_corpus_check_policy), its static data and checked
-// program prepared for the target its options give (-march and the -m flags, as -c compiles it) and its referenced
-// definitions selected, outside the time. Then each pass times, in an order that
-// rotates by pass, the emission on each lane count of --lanes (1,2,3,4,6,8 by default), every lane forced
+// Each file is prepared as -c prepares it (check_source_prepare, #1057: the options read and refused as the driver reads
+// and refuses them, the vector path's checking, the static data and checked program for the target and predefines its
+// options give, the referenced definitions selected and their target features checked), outside the time, and its
+// configuration's receipt printed (check_source_receipt) for every file preprocessed. A file -c would refuse (the
+// checker's rejection, a refusal by name, its target features' errors) is left out with the reason, and the command goes
+// on; a refused request, a file that doesn't preprocess or whose preparation fails otherwise, and a run that measures
+// no file fail it. Then each pass times, in an order that rotates by pass, the emission on each lane count of --lanes (1,2,3,4,6,8 by default), every lane forced
 // (CheckProgramLanes.every_lane), and on the lanes the default rule takes with room for the largest count: everything
 // -c's check_program_emit does (the lowering, Tier 0, branch sizing, encoding and the link's code), from arenas put back
 // after each run, the lanes' threads started for each run as a compile starts them, with lane i pinned to the i-th CPU of
@@ -36,14 +39,15 @@ struct CheckLanesBenchmarkRun
 // One emission of the selected program on `lanes` into the arenas, put back after: whether it emitted the code bytes,
 // atoms and fixups `expected` holds (all zero for the warm-up, which sets them), and with `object` its object's hash.
 static bool check_lanes_benchmark_emit(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser, const InternTable* identifiers,
-                                       const TypeTable* types, CheckProgramLanes* lanes, Arena* output, Arena* bytes, Arena* scratch, uint64_t expected[3],
-                                       uint64_t* object)
+                                       const TypeTable* types, bool scalar, CheckProgramLanes* lanes, Arena* output, Arena* bytes, Arena* scratch,
+                                       uint64_t expected[3], uint64_t* object)
 {
     const uint64_t output_mark = output->length;
     const uint64_t byte_mark = bytes->length;
     const uint64_t scratch_mark = scratch->length;
     CheckProgramCode code = { 0 };
-    bool valid = check_program_emit_lanes(&code, program, parser, identifiers, data->capacity, false, output, bytes, scratch, NULL, NULL, false, false, lanes);
+    bool valid = check_program_emit_lanes(&code, program, parser, identifiers, data->capacity, BUSTER_SCALAR_PATH(scalar), output, bytes, scratch, NULL, NULL,
+                                          false, false, lanes);
     const uint64_t made[3] = { code.code_bytes, code.link.atoms.count, code.link.fixups.count };
     for (uint32_t i = 0; valid && i < 3; i += 1)
     {
@@ -74,55 +78,43 @@ static bool check_lanes_benchmark_emit(const CheckProgram* program, const CheckD
     return valid;
 }
 
-// The file's measurement on each of `counts` (`count_number` of them, the last the default rule's), printed: whether the
-// file could be measured.
-static bool check_lanes_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, const uint32_t* counts, uint32_t count_number,
-                                       const uint32_t* cpus)
+// What became of a file (check_lanes_benchmark_file): measured; left out, as -c would refuse it (the checker's
+// rejection, a refusal by name or its target features' errors: check_source_left_out), as the other source benchmarks
+// leave it out; failed, which fails the command; or its options couldn't be read, the command's usage error.
+typedef enum CheckLanesBenchmarkOutcome
 {
-    static InternTable identifiers;
-    static Preprocessor pp;
-    static Parser parser;
-    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
-    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
-    bool valid = own != 0;
-    for (uint32_t i = 0; valid && i < option_count; i += 1)
+    CHECK_LANES_BENCHMARK_MEASURED,
+    CHECK_LANES_BENCHMARK_LEFT_OUT,
+    CHECK_LANES_BENCHMARK_FAILED,
+    CHECK_LANES_BENCHMARK_UNREAD,
+} CheckLanesBenchmarkOutcome;
+
+// The file's measurement on each of `counts` (`count_number` of them, the last the default rule's), printed, with its
+// configuration's receipt first: what became of it.
+static CheckLanesBenchmarkOutcome check_lanes_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, const uint32_t* counts,
+                                                             uint32_t count_number, const uint32_t* cpus)
+{
+    // The file prepared as -c prepares it (c_check_source_prepare.c, #1057), outside the time: its options read and
+    // refused as the driver reads and refuses them, its program checked for the options' target and predefines
+    // (#1045: -c's code for -march, a function's target attribute resolved against the options), its referenced
+    // definitions selected and their target features checked; by the scalar path with --scalar among the options.
+    CheckSource prepared;
+    const bool ready = check_source_prepare(&prepared, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true });
+    bool valid = ready;
+    const bool scalar = prepared.scalar;
+    const char* failure = NULL;
+    // The configuration, for every file preprocessed, measured or not: -c's for these options, but for the emission's
+    // tables and rows, which -c writes and the benchmark's emission doesn't, and its lanes, forced for each count and the
+    // rule's for the last. A file that stopped before its code says why at once, as the other source benchmarks do.
+    check_source_print_receipt(stdout, "check-lanes", file, &prepared, "selection:reachable,unwind:off,debug:off,lanes:forced+rule");
+    if (!ready)
     {
-        own[i] = options[i];
+        check_source_report(stdout, "check-lanes", file, &prepared);
     }
-    // Zeroed: pp_parse_options sets every field, but where the option arena can't push its arguments it doesn't run, and
-    // the program's options below read the target and the predefines whether or not the file could be read.
-    PPOptions pp_options = { 0 };
-    const char* input = 0;
-    const char* output_file = 0;
-    bool markers = false;
-    if (valid)
-    {
-        own[option_count] = (char*)file;
-    }
-    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
-    pp_options.semantic_pragmas = true;
-    CheckCorpusPath path = { 0 };
-    const char* failure = valid ? NULL : "its options couldn't be read";
-    valid = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input) &&
-            check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
-    failure = failure == NULL && !valid ? "it couldn't be preprocessed, or the checker rejected it" : failure;
-    CheckDataPrepared data = { 0 };
-    CheckProgram program = { 0 };
-    CheckProgramSelection selected = { 0 };
-    valid = valid && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
-    const CheckProgramOptions program_options = {
-        .initializers = &path.initializers,
-        .asms = &path.asms,
-        .identifiers = pp.table,
-        .initializer_references = data.references,
-        .initializer_reference_count = data.reference_count,
-        // The options' target and predefines, as the driver passes them: -c's code for -march, not the baseline's.
-        .target = pp_options.target,
-        .predefines = &pp_options.predefines,
-    };
-    valid = valid && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch) &&
-            check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
-    failure = failure == NULL && !valid ? "its static data or checked program couldn't be prepared, or its definitions selected" : failure;
+    const CheckProgramSelection selected = prepared.selected;
+    const Parser* parser = prepared.parser;
+    const InternTable* identifiers = prepared.pp != 0 ? prepared.pp->table : 0;
+    const TypeTable* types = &prepared.path.types;
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     Arena scratch = arena_reserve(UINT64_C(1) << 36);
@@ -138,7 +130,7 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
         const bool rule = c + 1 == count_number;
         *lanes = (CheckProgramLanes){ .lanes = counts[c], .every_lane = !rule, .cpus = cpus, .timing = true };
         uint64_t object = 0;
-        valid = check_lanes_benchmark_emit(&selected.program, &selected.data, &parser, pp.table, &path.types, lanes, &output, &bytes, &scratch, expected, &object);
+        valid = check_lanes_benchmark_emit(&selected.program, &selected.data, parser, identifiers, types, scalar, lanes, &output, &bytes, &scratch, expected, &object);
         failure = failure == NULL && !valid ? (c == 0 ? "it couldn't be emitted on one lane, or its object built" : "an emission on lanes failed") : failure;
         valid = valid && (c == 0 || object == first_object);
         failure = failure == NULL && !valid ? "an emission on lanes made another object than one lane's" : failure;
@@ -153,7 +145,7 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
             const bool rule = c + 1 == count_number;
             *lanes = (CheckProgramLanes){ .lanes = counts[c], .every_lane = !rule, .cpus = cpus, .timing = true };
             const uint64_t begin = check_source_time();
-            valid = check_lanes_benchmark_emit(&selected.program, &selected.data, &parser, pp.table, &path.types, lanes, &output, &bytes, &scratch, expected, NULL);
+            valid = check_lanes_benchmark_emit(&selected.program, &selected.data, parser, identifiers, types, scalar, lanes, &output, &bytes, &scratch, expected, NULL);
             failure = failure == NULL && !valid ? "a timed run failed, or made other code than its warm-up" : failure;
             runs[c].total[pass] = check_source_time() - begin;
             runs[c].prepare[pass] = lanes->prepare_ns;
@@ -171,7 +163,7 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
         for (uint32_t b = 0; b < selected.program.body_count; b += 1)
         {
             const uint32_t opening = selected.program.bodies[b].opening;
-            const uint64_t tokens = (uint64_t)parser.tree.parents[opening] - opening + 1;
+            const uint64_t tokens = (uint64_t)parser->tree.parents[opening] - opening + 1;
             total_tokens += tokens;
             largest = tokens > largest ? tokens : largest;
         }
@@ -195,22 +187,21 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
                    (double)check_source_median(runs[c].merge, (uint32_t)passes) / 1000.0);
         }
     }
-    else
+    else if (ready)
     {
         printf("check-lanes: file=%s failed=\"%s\"\n", file, failure != NULL ? failure : "its arenas couldn't be reserved");
     }
     fflush(stdout);
+    const CheckLanesBenchmarkOutcome outcome = valid ? CHECK_LANES_BENCHMARK_MEASURED : check_source_left_out(&prepared) ? CHECK_LANES_BENCHMARK_LEFT_OUT :
+                                               !ready && prepared.stage == CHECK_SOURCE_OPTIONS && prepared.refusal.error == CHECK_REQUEST_ACCEPTED ?
+                                               CHECK_LANES_BENCHMARK_UNREAD : CHECK_LANES_BENCHMARK_FAILED;
     free(lanes);
     free(runs);
     arena_release(&scratch);
     arena_release(&bytes);
     arena_release(&output);
-    check_corpus_close(&path);
-    parse_release(&parser);
-    pp_release(&pp);
-    intern_release(&identifiers);
-    arena_release(&option_arena);
-    return valid;
+    check_source_release(&prepared);
+    return outcome;
 }
 
 // A list of numbers, "1,2,3": into `values`, at most `capacity` of them, each from `least` to `most`; how many, 0 for
@@ -283,15 +274,27 @@ static int run_check_lanes_benchmark(int count, char** arguments)
     }
     counts[count_number] = largest;
     valid = valid && file_count != 0 && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES && (cpu_count == 0 || cpu_count >= largest);
-    for (uint32_t i = 0; valid && i < file_count; i += 1)
+    // Each file in turn, until one fails: a file left out, as -c would refuse it, isn't measured but doesn't fail the
+    // command, though one that measures no file does. A refused request is the command's error, as the driver's is,
+    // not a usage error: only options that can't be read are.
+    CheckLanesBenchmarkOutcome outcome = CHECK_LANES_BENCHMARK_MEASURED;
+    uint32_t measured = 0;
+    for (uint32_t i = 0; valid && (outcome == CHECK_LANES_BENCHMARK_MEASURED || outcome == CHECK_LANES_BENCHMARK_LEFT_OUT) && i < file_count; i += 1)
     {
-        valid = check_lanes_benchmark_file(files[i], options, option_count, passes, counts, count_number + 1, cpu_count != 0 ? cpus : NULL);
+        outcome = check_lanes_benchmark_file(files[i], options, option_count, passes, counts, count_number + 1, cpu_count != 0 ? cpus : NULL);
+        measured += outcome == CHECK_LANES_BENCHMARK_MEASURED;
     }
-    if (!valid)
+    const bool usage = !valid || outcome == CHECK_LANES_BENCHMARK_UNREAD;
+    const bool failed = outcome == CHECK_LANES_BENCHMARK_FAILED || (!usage && measured == 0);
+    if (!usage && outcome != CHECK_LANES_BENCHMARK_FAILED && measured == 0)
+    {
+        printf("check-lanes: no file was measured\n");
+    }
+    if (usage)
     {
         fprintf(stderr, "usage: compiler benchmark-check-lanes [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
-    return valid ? 0 : 1;
+    return usage || failed ? 1 : 0;
 }

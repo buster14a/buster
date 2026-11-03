@@ -6,7 +6,8 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
-- `build.sh` invokes Clang and produces **only** `build/compiler`, using
+- `build.sh` invokes Clang and produces **only** `build/compiler` (and, with
+  `BUSTER_PGO=1`, its profile `build/compiler.profdata`, below), using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
   It compiles the translation units in a clang process each, one per core of
@@ -49,3 +50,27 @@ requirements. [Command index](README.md).
   padding in `.text` before SOURCE's code, for `time-runs` to compare builds
   over their code's placements (#509, "Comparing two versions" in
   `docs/profiling.md`).
+- `BUSTER_PGO=1` builds `build/compiler`, and `shifts`' executables, with a
+  profile of the compiler's own compiles (#880). First the sources are
+  compiled with `-fprofile-instr-generate` into an executable in a temporary
+  directory. It is left unbaked, since its counters are writable memory
+  outside `buster_baked`, which `bake-tables` refuses. That executable
+  compiles each source three times in turn, as `-E -P`, `-fsyntax-only` and
+  `-c`, one source per core at a time. The `llvm-profdata` beside `clang` (or
+  on `PATH`) merges the counts into `build/compiler.profdata`, which stays
+  beside the executable, and every source is then compiled with
+  `-fprofile-instr-use`. `print-compile-flags` leaves that flag out, since
+  its profile exists only once a build has trained it: its flags reproduce a
+  build without `BUSTER_PGO`.
+  `BUSTER_PGO_TRAIN=SCRIPT` replaces that training with a bash script of
+  your own: it runs in a directory of its own, with `BUSTER_PGO_COMPILER`
+  naming the instrumented executable. On the 9700X, the compiler's own
+  sources gave a better profile than the frozen `sqlite3.c`, musl and
+  c-testsuite of buster-performance#182 ("The compiler's own code and a
+  profile", `docs/compile-time.md`).
+  The mode isn't the default, and no CI job builds with it. Sanitizer builds,
+  `BUSTER_HOST_RUNTIME` and `lexer-variant` refuse it; the lexer variants
+  change `main.c`'s code, so a profile of the build without them no longer
+  matches it. `.github/workflows/build-pgo.yml` runs those refusals, and
+  those of `BUSTER_PGO` and `BUSTER_PGO_TRAIN`'s values, on GitHub's runner
+  with a `clang` that fails at any compile: each must come before the build.
