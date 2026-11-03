@@ -3439,7 +3439,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -3857,7 +3857,7 @@ static void check_test_driver_reports(CheckTest* test)
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
                                     (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {
@@ -4871,6 +4871,14 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
         { "an integer constant's suffix", "int x = 1lul;\n" },
         { "a hexadecimal floating constant without an exponent", "double h = 0x1.5;\n" },
         { "an integer constant past 64 bits", "int big = 99999999999999999999999;\n" },
+        { "a struct, a #pragma pack, then another type", "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nint x;\n" },
+        { "a struct, a #pragma pack, then a typedef of a struct", "#pragma pack(push, 1)\nstruct P { char c; }\n#pragma pack(pop)\ntypedef struct node { int x; } node;\n" },
+        { "a struct, a _Pragma pack, then a storage class and a type", "struct P { char c; }\n_Pragma(\"pack(pop)\") static int x;\n" },
+        // A constant before a syntax error in its declaration, which only the parse reached: clang's error comes first.
+        { "an octal constant's digit before a missing operand", "int x = 08 +;\n" },
+        { "a floating constant's suffix before a missing `;`", "void f(void) { return 1.5b }\n" },
+        { "a condition's constant before a missing `;`", "void f(int a) { if (a == 0129) a = 1 }\n" },
+        { "an exponent without digits before a missing operand", "void f(void) { int x = 1e + ; }\n" },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -4898,12 +4906,60 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
         unlink(object);
         unlink(source);
     }
+    // What the checker refused where clang takes it (#1127): C2y's `0o` octal prefix, which clang takes in every mode
+    // and in #if, and GNU's array designator without its `=`, whose value has its own tree whatever begins it. The
+    // program's values are clang's, through both host paths.
+    static const char accepted[] =
+        "#if 0o17 != 15\n#error 0o\n#endif\n"
+        "int x = 5;\n"
+        "int a1[3] = { [1] -1, [2] ~1 };\n"
+        "int *a2[2] = { [1] &x };\n"
+        "int a3[] = { [0] 1, [3] 4 };\n"
+        "int a4[2][2] = { [1] { 1, 2 }, [0] { [1] -3 } };\n"
+        "char a5[2][4] = { [1] \"abc\" };\n"
+        "int a6[3] = { [0 ... 1] 7 };\n"
+        "int a7[2] = { [1] 1 + 2 * 3, [0] (int)2.5 };\n"
+        "static int g(int v) { return v * 3; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int i = 2;\n"
+        "    int b1[2] = { [1] g(i) + 1, [0] -i };\n"
+        "    int b2[2] = { [1] (int){ 3 }, [0] sizeof i };\n"
+        "    unsigned o = 0o17 + 0O7u;\n"
+        "    return a1[1] == -1 && a1[2] == -2 && *a2[1] == 5 && sizeof a3 == 16 && a3[3] == 4 && a4[0][1] == -3 && a4[1][1] == 2 &&\n"
+        "           a5[1][2] == 'c' && a6[1] == 7 && a6[2] == 0 && a7[1] == 7 && a7[0] == 2 && b1[1] == 7 && b1[0] == -2 && b2[1] == 3 &&\n"
+        "           b2[0] == 4 && o == 22 ? 42 : 1;\n"
+        "}\n";
+    char source[192];
+    snprintf(source, sizeof(source), "%s/declspec-accepted.c", directory);
+    const bool written = parse_test_write(source, accepted, sizeof(accepted) - 1);
+    for (uint32_t scalar = 0; executable != NULL && scalar < 2; scalar += 1)
+    {
+        char program[192];
+        snprintf(program, sizeof(program), "%s/declspec-accepted-%u", directory, scalar);
+        char* build[] = { (char*)executable, "-std=gnu17", scalar ? "--scalar" : "-w", "-w", "-o", program, source, NULL };
+        char* run[] = { program, NULL };
+        char* text = NULL;
+        const int built = written ? check_test_driver_spawn(build, &text) : -1;
+        free(text);
+        text = NULL;
+        const int status = built == 0 ? check_test_driver_spawn(run, &text) : -1;
+        free(text);
+        char description[192];
+        snprintf(description, sizeof(description), "0o and GNU's designators without '=' build and run with clang's values (%s path, status %d)",
+                 scalar ? "scalar" : "vector", status);
+        check_test_expect(test, status == 42, description);
+        unlink(program);
+    }
+    unlink(source);
 }
 
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
 #include "c_check_musttail_driver_test.c"
+#include "c_check_label_attribute_driver_test.c"
+#include "c_check_generic_builtin_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -5310,6 +5366,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // of section.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
+#include "c_check_common_driver_test.c"
+#include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_fence_driver_test.c"
 
@@ -6437,6 +6495,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
+            check_test_driver_label_attributes(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_generic_builtins(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_const(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -6536,6 +6602,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_retained(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_commons(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_conventions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -6652,6 +6726,18 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_records(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_wide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_shapes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_vectors(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

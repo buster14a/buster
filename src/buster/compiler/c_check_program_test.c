@@ -2442,7 +2442,13 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
                 snprintf(description, sizeof(description), "%s: the refusal names its feature", name);
-                check_test_expect(test, reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0), description);
+                const bool named = reason == NULL || (!lowered_ok && lowered.reason != NULL && strcmp(lowered.reason, reason) == 0);
+                check_test_expect(test, named, description);
+                if (!named || lowered_ok != machine)
+                {
+                    fprintf(stderr, "test-checker: %s: lowered=%d status=%u reason=\"%s\", expected \"%s\"\n", name, lowered_ok, lowered.status,
+                            lowered.reason != NULL ? lowered.reason : "", reason != NULL ? reason : "");
+                }
                 if (!lowered_ok)
                 {
                     check_test_expect(test, output.length == mark && lowered.functions == 0 && lowered.count == 0 && program.controls == controls && program.status == CHECK_PROGRAM_OK,
@@ -2581,6 +2587,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_copy_test.c"
 #include "c_check_program_folds_test.c"
 #include "c_check_program_fence_test.c"
+#include "c_check_program_atomic_access_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -3288,6 +3295,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_copies(test, clang);
         check_test_program_folds(test, clang);
         check_test_program_fences(test, clang);
+        check_test_program_atomic_accesses(test, clang);
         check_test_program_batch(test);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
@@ -5020,8 +5028,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                     "vla-bound-reference", true, true, 1, 0);
         check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
                                     "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
-        check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                           "typed-asm-goto-target", true, false, 0, 0, "asm goto");
+        check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                    "typed-asm-goto-target", true, true, 0, 0);
     }
     // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
     if (check_test_takes())

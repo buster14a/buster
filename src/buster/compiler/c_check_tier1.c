@@ -13,6 +13,7 @@
 // docs/tier1.md's "Debug information"). Include after tier1_emit.c and c_check_program_emit.c.
 
 #include "ir_optimize_verified.c"
+#include "ir_wide.c"
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
 
@@ -135,7 +136,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. The solver's arena (#866, step 6) is reserved only when `gvn` asks for it, so
+// for a target other than the last one's. The solver's arena (#866, step 7) is reserved only when `gvn` asks for it, so
 // that --tier1 alone maps no address space it never uses. Returns false if one can't be reserved.
 static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, bool gvn)
 {
@@ -256,7 +257,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         IrGvnOptions options = ir_gvn_options();
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[6], scratch, options, &gvn_result);
+        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
         outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
@@ -272,6 +273,16 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The 128-bit integers' halves (#141, ir_wide.c), which the optimizer then takes: a function without any is the
+    // promoted one itself, borrowed.
+    IrWideResult wide = { 0 };
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+    }
     IrOptimizeResult optimized = { 0 };
     IrVerifiedRevision revision = { 0 };
     IrVerifiedAnalysis analysis = { 0 };
@@ -279,10 +290,10 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_verified(&promoted, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
+        const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
-        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
     // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
@@ -297,9 +308,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered,
-        // GVN's rewritten function (steps[6], when enabled) and promoted IR may borrow from each other, but none is a
-        // dependency of the optimized function. Reuse lowered and promoted arenas for the plan and emitted records;
-        // retain optimized IR and analyses through emission.
+        // GVN's rewritten function (steps[7], when enabled), promoted IR and its 128-bit integers' halves (steps[6]) may
+        // borrow from each other, but none is a dependency of the optimized function. Reuse lowered and promoted arenas
+        // for the plan and emitted records; retain optimized IR and analyses through emission.
         arena_pop_to(&lane->steps[0], 0);
         arena_pop_to(&lane->steps[1], 0);
     }

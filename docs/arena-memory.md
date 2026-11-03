@@ -112,7 +112,47 @@ mapping that holds its capacity with the same base pages and page layout (huge
 pages past `small`, or none; `Arena.reserved` is what the mapping was laid out
 for), and gets the capacity it asked for, as from a fresh mapping. Reuse starts
 with zero length and peak and zero-filled pages. A failed reprotection or
-discard unmaps the arena instead. Tests that deliberately
+discard unmaps the arena instead.
+
+An arena of tables (`arena_reserve_tables`, #1128) holds several fixed-size
+tables that are reserved and released together in one mapping: a unit's
+preprocessor tables, each token buffer's four columns, and the parser's token,
+tree and postorder columns. Each table starts on a page and is laid out as an
+arena of its own of its size would be: base pages up to its `small` (with
+`arena_reserve_small`'s minimum and the thread's floor) and, past them, huge
+pages from a huge-page boundary. The next table starts at its end, or where its
+own base pages end on a boundary; the first table with huge pages sets where in
+a huge page the arena's base is, so that it needs no gap. So the mapping is no
+larger than the tables' own arenas' (their bytes and a huge page each) for two
+tables or more, which a finite `RLIMIT_AS` bounds: rounding each table's end to
+a boundary, as the first version did, outgrew a 512 MB limit on a small unit's
+replay for its expansion history (#1203's review). A mapping refused for its
+size past 64 MB switches the thread to compact reservations, as an arena's does,
+so that the preprocessor retries with smaller tables. The mapping is advised
+`MADV_NOHUGEPAGE` once, each table's huge pages `MADV_HUGEPAGE`, and one
+`mprotect` commits it whole.
+So a lane's first unit reserves the preprocessor's 27 tables with one `mmap`,
+one `mprotect` and an advice call for each table with huge pages, where they
+took up to four calls each, every one of which takes the address space's lock
+for writing; and each unit discards them with one `MADV_DONTNEED`, one TLB
+flush sent to the other lanes rather than 27. The pool matches it by
+`Arena.layout`, a hash of its tables' sizes and base pages: only a reservation
+of the same tables takes it, and no ordinary reservation does. The parser's
+columns follow their unit's token count, so where the address space is
+unbounded the parser rounds each to a power of two, which units of similar sizes
+then share; under a finite `RLIMIT_AS` or compact reservations each keeps its
+own size. A power of two of bytes, past 64 KB of base pages, ends 64 KB short of
+a huge-page boundary, so a column's last huge page is base pages: rounding to the
+base pages and a power of two past them instead took back 632 of `sqlite3.c`'s
+faults, but no time measurable on the 9700X, and was not kept (#1203's review).
+`test-lanes` checks the tables' zero, writable and separate bytes, their pages'
+advice against an arena of their own's, the pool's reuse for the same tables
+alone, not for another layout, the floor's or an ordinary reservation; for 4,096
+random sets of tables a layout in order, aligned and no larger than their own
+arenas; and, in a child under `RLIMIT_AS`, tables refused for their size, which
+past 64 MB switch the thread to compact reservations.
+
+Tests that deliberately
 poison unused logical capacity explicitly commit that test memory first; a raw
 `base` pointer no longer authorizes touching an owned reservation.
 

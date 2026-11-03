@@ -581,6 +581,8 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
+// #141: Tier 1's 128-bit integers as pairs of 64-bit halves, before the optimizer.
+#include "buster/compiler/ir_wide.c"
 #include "buster/compiler/ir_rebuild.c"
 #include "buster/compiler/ir_reduce.c"
 #include "buster/compiler/ir_reduce_oracle.c"
@@ -614,6 +616,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_pipeline_test.c"
 // #179: hand-written IR of AVX-512's masks through Tier 1, natively against the shared IR's interpreter.
 #include "buster/compiler/tier1_masks_test.c"
+// #141: the 128-bit integers' split into halves through Tier 1, natively against the shared IR's interpreter.
+#include "buster/compiler/tier1_wide_test.c"
 // #179: what a mask's spill costs, to memory against to a general register, and the programs' checks.
 #include "buster/compiler/mask_spill_measure.c"
 #include "buster/compiler/mask_spill_measure_test.c"
@@ -652,6 +656,10 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-compile (#518): whole compiles timed as processes against a reference compiler, with --time-stages' report of
 // where their time goes.
 #include "buster/compiler/compile_measure.c"
+
+// #1128's benchmark-check-units: a command of several units timed as processes by each lane count, with its system time
+// against one lane's (time-runs' runs, of test-check-units' program of synth's shape).
+#include "buster/compiler/c_check_units_benchmark.c"
 
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
 // order) and its tests, for the parallel and test-parallel commands.
@@ -1314,6 +1322,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_lanes_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-units") == 0)
+    {
+        result = run_check_units_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {
         result = run_checker_binding_benchmark(argc - 2, argv + 2);
@@ -1521,6 +1533,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-masks") == 0)
     {
         result = run_tier1_mask_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-wide") == 0)
+    {
+        result = run_tier1_wide_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-pipeline") == 0)
     {

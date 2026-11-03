@@ -2,14 +2,16 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #1059's concurrent controls through the C driver: a store-buffering litmus (each of two threads stores 1 to its own
-// variable, fences, and loads the other's) whose outcome of both loads reading 0 x86-64's store buffers allow without a
-// fence that orders a store before a later load, and a seq_cst thread fence forbids. The program runs it twice, with a
-// signal fence (a compiler barrier alone: the control, which may show the outcome) and with a thread fence of seq_cst
-// (the typed stream's FENCE, Tier 0's or Tier 1's mfence: which must never show it), and prints how many of its
-// iterations showed the outcome. Each build is checked: by both paths, by Tier 0 and by --tier1 (every function Tier
-// 1's), its four fences taken directly (--helper-report), its fenced threads' objects with one mfence each and the
-// control's with none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process
-// with one CPU prints that it skipped the runs. And --helper-report's counts of a unit with every kind of helper call
+// variable, orders, and loads the other's) whose outcome of both loads reading 0 x86-64's store buffers allow without a
+// fence that orders a store before a later load, and a seq_cst thread fence, or a seq_cst store before a seq_cst load,
+// forbids. The program runs it four times: with a signal fence (a compiler barrier alone: a control, which may show the
+// outcome), with a thread fence of seq_cst (the typed stream's FENCE, Tier 0's or Tier 1's mfence), with relaxed atomic
+// accesses (the other control) and with seq_cst ones (the typed stream's marked SET and LOAD, and the store's FENCE),
+// the second and the fourth of which must never show it, and prints how many of its iterations showed the outcome. Each
+// build is checked: by both paths, by Tier 0 and by --tier1 (every function Tier 1's), its fences and atomic accesses
+// taken directly (--helper-report), its fenced and seq_cst threads' objects with one mfence each and the others with
+// none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process with one CPU prints
+// that it skipped the runs. And --helper-report's counts of a unit with every kind of helper call
 // (check_test_driver_helper_report). Include after c_check_tier1_driver_test.c, whose decoder of a function's object
 // and Tier 1 report readers this test takes.
 
@@ -50,6 +52,28 @@ static const char check_test_fence_litmus_source[] =
     "    for (int i = 1; i <= ITERATIONS; i++) { wait_for(&go, i); y = 1; __atomic_signal_fence(__ATOMIC_SEQ_CST); r1 = x; __atomic_store_n(&done1, i, __ATOMIC_RELEASE); }\n"
     "    return unused;\n"
     "}\n"
+    // #1059's direct atomic accesses: a seq_cst store and a seq_cst load, whose store's fence forbids the outcome, and
+    // relaxed ones, which allow it.
+    "void* sequential0(void* unused)\n"
+    "{\n"
+    "    for (int i = 1; i <= ITERATIONS; i++) { wait_for(&go, i); __atomic_store_n(&x, 1, __ATOMIC_SEQ_CST); r0 = __atomic_load_n(&y, __ATOMIC_SEQ_CST); __atomic_store_n(&done0, i, __ATOMIC_RELEASE); }\n"
+    "    return unused;\n"
+    "}\n"
+    "void* sequential1(void* unused)\n"
+    "{\n"
+    "    for (int i = 1; i <= ITERATIONS; i++) { wait_for(&go, i); __atomic_store_n(&y, 1, __ATOMIC_SEQ_CST); r1 = __atomic_load_n(&x, __ATOMIC_SEQ_CST); __atomic_store_n(&done1, i, __ATOMIC_RELEASE); }\n"
+    "    return unused;\n"
+    "}\n"
+    "void* relaxed0(void* unused)\n"
+    "{\n"
+    "    for (int i = 1; i <= ITERATIONS; i++) { wait_for(&go, i); __atomic_store_n(&x, 1, __ATOMIC_RELAXED); r0 = __atomic_load_n(&y, __ATOMIC_RELAXED); __atomic_store_n(&done0, i, __ATOMIC_RELEASE); }\n"
+    "    return unused;\n"
+    "}\n"
+    "void* relaxed1(void* unused)\n"
+    "{\n"
+    "    for (int i = 1; i <= ITERATIONS; i++) { wait_for(&go, i); __atomic_store_n(&y, 1, __ATOMIC_RELAXED); r1 = __atomic_load_n(&x, __ATOMIC_RELAXED); __atomic_store_n(&done1, i, __ATOMIC_RELEASE); }\n"
+    "    return unused;\n"
+    "}\n"
     "static int run(void* (*first)(void*), void* (*second)(void*))\n"
     "{\n"
     "    go = 0;\n"
@@ -78,8 +102,10 @@ static const char check_test_fence_litmus_source[] =
     "    if (sched_getaffinity(0, sizeof(set), &set) != 0 || CPU_COUNT(&set) < 2) { printf(\"skipped\\n\"); return 0; }\n"
     "    const int control = run(plain0, plain1);\n"
     "    const int fenced = run(fenced0, fenced1);\n"
-    "    printf(\"fenced=%d control=%d iterations=%d\\n\", fenced, control, ITERATIONS);\n"
-    "    return fenced < 0 || control < 0;\n"
+    "    const int relaxed = run(relaxed0, relaxed1);\n"
+    "    const int sequential = run(sequential0, sequential1);\n"
+    "    printf(\"fenced=%d control=%d sequential=%d relaxed=%d iterations=%d\\n\", fenced, control, sequential, relaxed, ITERATIONS);\n"
+    "    return fenced < 0 || control < 0 || sequential < 0 || relaxed < 0;\n"
     "}\n";
 
 // The mfence records of function `name` in object `path`, or UINT32_MAX where it doesn't decode.
@@ -113,7 +139,7 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
     check_test_expect(test, written, "fences: the litmus's source is written");
     const bool ready = written && x86_disassembler_initialize();
     check_test_expect(test, ready, "fences: the disassembler that reads the builds' objects initializes");
-    static const char* const names[4] = { "fenced0", "fenced1", "plain0", "plain1" };
+    static const char* const names[8] = { "fenced0", "fenced1", "plain0", "plain1", "sequential0", "sequential1", "relaxed0", "relaxed1" };
     for (uint32_t build = 0; ready && build < 4; build += 1)
     {
         const bool tier1 = build >= 2;
@@ -147,9 +173,11 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
             arguments[count] = NULL;
             char* text = NULL;
             const int status = check_test_driver_spawn(arguments, &text);
-            // Its four fences are the typed stream's, none a helper's call; its atomic accesses keep theirs.
+            // Its four fences and its eighteen atomic accesses (the seq_cst and relaxed threads' stores and loads, the eight
+            // threads' done flags' stores, the go flag's store and the wait's load) are the typed stream's, none a helper's call.
             const bool reported = text != NULL && strstr(text, "helpers.fence\tdirect=4\thelper=0\tplanned=0\n") != NULL &&
-                                  strstr(text, "helpers\tunits=1\trefused=0\tdirect=4\t") != NULL;
+                                  strstr(text, "helpers.atomic-access\tdirect=18\thelper=0\tplanned=0\n") != NULL &&
+                                  strstr(text, "helpers\tunits=1\trefused=0\tdirect=22\thelper=0\tplanned=0\n") != NULL;
             const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
             if (status != 0 && text != NULL)
             {
@@ -159,32 +187,38 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
             built &= status == 0 && reported && taken;
         }
         char message[256];
-        snprintf(message, sizeof(message), "fences (%s): the litmus builds, its four fences taken directly%s", way, tier1 ? " and its threads Tier 1's" : "");
+        snprintf(message, sizeof(message), "fences (%s): the litmus builds, its fences and atomic accesses taken directly%s", way, tier1 ? " and its threads Tier 1's" : "");
         check_test_expect(test, built, message);
-        // One mfence in each fenced thread, between its store and its load; none in the control's.
-        const uint32_t fences[4] = {
-            built ? check_test_fence_records(object, "fenced0") : UINT32_MAX,
-            built ? check_test_fence_records(object, "fenced1") : UINT32_MAX,
-            built ? check_test_fence_records(object, "plain0") : UINT32_MAX,
-            built ? check_test_fence_records(object, "plain1") : UINT32_MAX,
-        };
-        snprintf(message, sizeof(message), "fences (%s): the fenced threads have one mfence each and the control's none (%u, %u, %u, %u)", way, fences[0], fences[1], fences[2],
-                 fences[3]);
-        check_test_expect(test, fences[0] == 1 && fences[1] == 1 && fences[2] == 0 && fences[3] == 0, message);
+        // One mfence in each fenced thread, between its store and its load, and in each seq_cst one, after its store; none in
+        // the control's or the relaxed ones.
+        uint32_t fences[8];
+        for (uint32_t t = 0; t < 8; t += 1)
+        {
+            fences[t] = built ? check_test_fence_records(object, names[t]) : UINT32_MAX;
+        }
+        snprintf(message, sizeof(message), "fences (%s): the fenced and seq_cst threads have one mfence each, the others none (%u %u %u %u %u %u %u %u)", way, fences[0],
+                 fences[1], fences[2], fences[3], fences[4], fences[5], fences[6], fences[7]);
+        check_test_expect(test, fences[0] == 1 && fences[1] == 1 && fences[2] == 0 && fences[3] == 0 && fences[4] == 1 && fences[5] == 1 && fences[6] == 0 && fences[7] == 0,
+                          message);
         char captured[256] = { 0 };
         const bool ran = built && check_test_driver_capture(output, captured, sizeof(captured));
         int fenced = -1;
         int control = -1;
+        int sequential = -1;
+        int relaxed = -1;
         int iterations = 0;
         const bool skipped = ran && strcmp(captured, "skipped\n") == 0;
-        const bool read = ran && sscanf(captured, "fenced=%d control=%d iterations=%d", &fenced, &control, &iterations) == 3;
-        snprintf(message, sizeof(message), "fences (%s): the fenced litmus never shows both loads reading 0 (%d of %d iterations)", way, fenced, iterations);
-        check_test_expect(test, skipped || (read && fenced == 0 && control >= 0 && iterations > 0), message);
+        const bool read = ran && sscanf(captured, "fenced=%d control=%d sequential=%d relaxed=%d iterations=%d", &fenced, &control, &sequential, &relaxed, &iterations) == 5;
+        snprintf(message, sizeof(message), "fences (%s): the fenced and seq_cst litmus never show both loads reading 0 (%d and %d of %d iterations)", way, fenced, sequential,
+                 iterations);
+        check_test_expect(test, skipped || (read && fenced == 0 && sequential == 0 && control >= 0 && relaxed >= 0 && iterations > 0), message);
         if (read)
         {
-            // The control's count is the evidence that the machine shows the reordering the fence forbids; it may be 0
-            // on a run where the threads never overlapped, which leaves the fenced run's 0 weaker, not wrong.
-            printf("fences (%s): without a thread fence, %d of %d iterations showed both loads reading 0; with one, %d\n", way, control, iterations, fenced);
+            // The controls' counts are the evidence that the machine shows the reordering the fence and the seq_cst store
+            // forbid; one may be 0 on a run where the threads never overlapped, which leaves the 0 beside it weaker, not wrong.
+            printf("fences (%s): of %d iterations, both loads read 0 in %d without a thread fence and %d with one; in %d with relaxed accesses and %d with "
+                   "seq_cst ones\n",
+                   way, iterations, control, fenced, relaxed, sequential);
         }
         else if (skipped)
         {
@@ -196,11 +230,12 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
     unlink(source);
 }
 
-// --helper-report's counts (#1059) of a unit with every kind of helper call: an implicit _Atomic store, load and compound
-// assignment (a load and a compare-exchange in its loop), an explicit store and load, a fence taken directly, and an asm
-// statement with instructions. Its `helper` columns are the lowered code's call sites of each family's helpers, every
-// call in the object; `planned` the signatures (the width's implicit leaves, the explicit ones among them, and the
-// statement's helper). By both paths.
+// --helper-report's counts (#1059) of a unit with every kind of direct form and helper call: an implicit _Atomic store,
+// load and compound assignment (a direct load and a compare-exchange's call in its loop), an explicit store and load, a
+// fence, and an asm statement with instructions. Its `direct` columns are the lowered code's direct forms (five
+// accesses, one fence: a seq_cst store's own isn't one), its `helper` columns its call sites of each family's helpers,
+// every call in the object, and `planned` the signatures (the compare-exchange's leaf alone, which the implicit update
+// takes, and the statement's helper). By both paths.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "_Atomic int a;\n"
@@ -215,9 +250,9 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE);\n"
                                   "}\n";
     static const char* const lines[] = {
-        "helpers\tunits=1\trefused=0\tdirect=1\thelper=7\tplanned=5\n",
-        "helpers.atomic-access\tdirect=0\thelper=5\tplanned=2\n",
-        "helpers.atomic-rmw\tdirect=0\thelper=1\tplanned=2\n",
+        "helpers\tunits=1\trefused=0\tdirect=6\thelper=2\tplanned=2\n",
+        "helpers.atomic-access\tdirect=5\thelper=0\tplanned=0\n",
+        "helpers.atomic-rmw\tdirect=0\thelper=1\tplanned=1\n",
         "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
         "helpers.asm\tdirect=0\thelper=1\tplanned=1\n",
         "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",

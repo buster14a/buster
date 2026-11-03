@@ -42,7 +42,11 @@ The outcome retains the stage, category, disposition, cause domain, original
 32-bit error, instruction and detail. IR boundaries preserve the complete
 `IrCheck`, including `dominance_checked`. The optional `--tier1-gvn` pass retains its
 check under the distinct `gvn` stage and follows the same failure policy; it
-remains off by default. A lowering instruction is a typed
+remains off by default. The 128-bit integers' split into halves (`ir_wide.c`,
+#141), after promotion and before the optimizer, has the `wide` stage: an
+operation of them it doesn't take (a division, a conversion to or from a
+floating value, a switch, one in a signature) is unsupported, and Tier 0
+compiles the body. A lowering instruction is a typed
 entry; later IR checks use their API's IR instruction. `UINT32_MAX` means the
 API supplied no instruction. These are not source tokens: diagnostics also
 retain the body's source declaration, rather than pretending to map an IR
