@@ -39,7 +39,7 @@ The metadata producer is responsible for marking a definition
 External-linkage definitions, unknown symbols, indirect calls, noinline
 definitions and variadic definitions remain calls, and so do calls with ABI
 records (#131's `IrCall.abi`: a call that passes or returns an aggregate by
-value). Unknown flag bits are errors. Every known direct call's variadic
+value, or passes one the convention ignores). Unknown flag bits are errors. Every known direct call's variadic
 status, and every other one's result type and fixed parameter types/count, must
 agree with its table entry, even when expansion is disabled. A call with ABI
 records has the convention's shape instead, which only its records give: its

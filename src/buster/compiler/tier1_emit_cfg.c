@@ -201,16 +201,18 @@ static bool tier1_emit_cfg_record_copied(const IrPassed* record)
 }
 
 // The bytes frame object `object` past the IR's slots takes (#789): a by-value aggregate parameter's copy, which the entry
-// stores its parts into whole, 8 bytes each, so its size rounded up to them, and the hidden pointer's 8 bytes. A
+// stores its parts into whole, 8 bytes each, so its size rounded up to them, and the hidden pointer's 8 bytes. An
+// ignored aggregate's copy (#141) takes its size too, which the entry leaves as it is, as the callee may copy it whole. A
 // parameter in registers of its own, or one on the stack whole (whose copy is its stack slots, tier1_emit_cfg_incoming),
-// takes a row of one byte, which nothing reads, as a function without the hidden pointer does for it.
+// takes a row of one byte, which nothing reads, as a function without the hidden pointer does for it, and so does an
+// ignored aggregate of no bytes.
 static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, uint32_t object)
 {
     // A long double's object and the x87 scratch object (#141): 16 bytes, aligned to 16.
     const bool x87 = object >= tier1_emit_cfg_record_count(function);
     const uint32_t parameter = object - function->slot_count;
     const IrPassed* record = parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
-    const bool copied = tier1_emit_cfg_record_copied(record);
+    const bool copied = tier1_emit_cfg_record_copied(record) || (record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_IGNORE);
     const bool hidden = parameter == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
     return x87 ? 16 : copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
 }
@@ -1734,8 +1736,8 @@ static Tier1EmitError tier1_emit_cfg_labels(const Tier1SelectPlan* plan, Tier1Em
 // A return of an aggregate result (#789) from the address in general register `source`, its ret operand's: in registers,
 // each part's bytes staged in the red zone (the frame stays out of it, tier1_emit_cfg_frame_flags) and then its register
 // loaded from there, 8 bytes, so that `source` may be one of them; through the hidden pointer, its bytes copied to the
-// address the entry stored (tier1_emit_cfg_entry), which rax returns. Before the epilogue, which moves rsp past the
-// staging slots.
+// address the entry stored (tier1_emit_cfg_entry), which rax returns; and an ignored one (#141, an empty struct's) not at
+// all. Before the epilogue, which moves rsp past the staging slots.
 static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function, const Tier1EmitResult* emitted, uint8_t source, Tier1EmitBuffer* buffer)
 {
     const AbiReturn result = function->result_abi;
@@ -1746,7 +1748,8 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
     int32_t hidden_offset = 0;
     const bool found = hidden && tier1_emit_cfg_object(function, emitted, function->slot_count + function->parameter_count, &hidden_offset);
-    Tier1EmitError error = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && (part_count != 0 || x87_parts != 0 || found) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    const bool ignored = result.kind == BUSTER_ABI_RESULT_IGNORE;
+    Tier1EmitError error = ignored || (source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && (part_count != 0 || x87_parts != 0 || found)) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
     for (uint32_t k = x87_parts; error == TIER1_EMIT_OK && k-- > 0;)
     {
         const X86Instruction load = { .form = X86_FORM_FLD_M80, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(16 * k) };

@@ -815,7 +815,9 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         {
             registered += parts[k].reg != BUSTER_ABI_REGISTER_NONE;
         }
-        error = record == 0 || whole || (count != 0 && part_count + registered <= BUSTER_ARRAY_LENGTH(part_registers)) ? error : TIER1_EMIT_ALLOCATION;
+        // An ignored aggregate (#141) passes nothing.
+        const bool ignored = record != 0 && record->location.kind == BUSTER_ABI_LOCATION_IGNORE;
+        error = record == 0 || whole || ignored || (count != 0 && part_count + registered <= BUSTER_ARRAY_LENGTH(part_registers)) ? error : TIER1_EMIT_ALLOCATION;
         for (uint32_t k = 0; error == TIER1_EMIT_OK && k < count; k += 1)
         {
             if (parts[k].reg != BUSTER_ABI_REGISTER_NONE)

@@ -264,9 +264,9 @@ from rsp around it (the selection guide's "The dynamic stack"). So do the
 below), and long double (#141), in frame objects of their own, computed on the
 x87 stack (the selection guide's "Long double"), with aggregates returned in
 the x87's registers, and the convention's rarer aggregate shapes (#141): a
-part in a stack slot, a high or low eightbyte alone, and an aggregate in a vector
-register whole. Still refused: vectors (and with them a result LLVM demotes to
-a hidden pointer), an ignored aggregate, and naked
+part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
+register whole, and an aggregate it ignores. Still refused: vectors (and with
+them a result LLVM demotes to a hidden pointer), and naked
 functions, whose bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
@@ -354,7 +354,7 @@ memory class's, to and from clang -O2's code and through a variadic
 definition, beside 128-bit integers within its bodies, every function Tier 1's
 by both paths, against clang -O0's build; and its rarer shapes' fixture passes
 aggregates with a high or a low eightbyte alone, in a register and in a stack
-slot, and `SPLIT` ones, so.
+slot, `SPLIT` ones and ignored ones, so.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

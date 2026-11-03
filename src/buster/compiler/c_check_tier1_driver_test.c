@@ -829,7 +829,10 @@ static const char check_test_tier1_wide_source[] =
 // alone in a register or a stack slot) or whose high one is (in a register alone, or LOW: on the stack in one slot), and
 // SPLIT ones, a part in a register and the other in a stack slot, where an _Atomic scalar takes a register clang doesn't
 // count: an integer pair split between r9 and the stack, and a double and a long split between rdi and the stack, each
-// way round. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results.
+// way round; and ones the convention ignores, passed and returned nowhere: an empty struct, and one of unnamed
+// bit-fields. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results:
+// the other unit's b_empty, by --tier1, once passed its empty struct's address in rdi, x's register (a call without
+// records, ir_typed_aggregate_call).
 static const char check_test_tier1_shapes_header[] =
     "#include <stdio.h>\n"
     "typedef struct { long x; long : 64; } Low;\n"
@@ -838,6 +841,8 @@ static const char check_test_tier1_shapes_header[] =
     "typedef struct { double d; long l; } DL;\n"
     "typedef struct { long l; double d; } LD;\n"
     "typedef struct { long a, b; } LL;\n"
+    "typedef struct {} Empty;\n"
+    "typedef struct { int : 32; } Bits;\n"
     "long b_low(Low s);\n"
     "long b_high(High s);\n"
     "long b_high_mixed(HighMixed s);\n"
@@ -860,7 +865,14 @@ static const char check_test_tier1_shapes_header[] =
     "long a_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t);\n"
     "Low a_make_low(long x);\n"
     "High a_make_high(long y);\n"
-    "HighMixed a_make_high_mixed(int k);\n";
+    "HighMixed a_make_high_mixed(int k);\n"
+    "long b_empty(Empty e, long x);\n"
+    "long b_bits(long a, Bits b, long c);\n"
+    "Empty b_make_empty(long x);\n"
+    "long a_empty(Empty e, long x);\n"
+    "long a_bits(long a, Bits b, long c);\n"
+    "Empty a_make_empty(long x);\n"
+    "long a_empty_chain(long x);\n";
 
 static const char check_test_tier1_shapes_other_source[] =
     "#include \"tier1-shapes.h\"\n"
@@ -875,7 +887,10 @@ static const char check_test_tier1_shapes_other_source[] =
     "Low b_make_low(long x) { Low r = { x * 11 }; return r; }\n"
     "High b_make_high(long y) { High r; r.y = y * 13; return r; }\n"
     "HighMixed b_make_high_mixed(int k) { HighMixed r; r.f = k * 1.25f; r.i = k * 3; return r; }\n"
-    "long b_back(int k) { return a_make_low(k).x * 3 + a_make_high(k + 1).y * 5 + a_make_high_mixed(k + 2).i + (long)(a_make_high_mixed(k).f * 8); }\n";
+    "long b_back(int k) { return a_make_low(k).x * 3 + a_make_high(k + 1).y * 5 + a_make_high_mixed(k + 2).i + (long)(a_make_high_mixed(k).f * 8); }\n"
+    "long b_empty(Empty e, long x) { return a_empty(e, x) * 2 + x; }\n"
+    "long b_bits(long a, Bits b, long c) { return a_bits(a, b, c) + 1; }\n"
+    "Empty b_make_empty(long x) { Empty e = { }; (void)x; return e; }\n";
 
 static const char check_test_tier1_shapes_source[] =
     "#include \"tier1-shapes.h\"\n"
@@ -890,6 +905,10 @@ static const char check_test_tier1_shapes_source[] =
     "Low a_make_low(long x) { Low r = { x * 3 }; return r; }\n"
     "High a_make_high(long y) { High r; r.y = y * 5; return r; }\n"
     "HighMixed a_make_high_mixed(int k) { HighMixed r; r.f = k * 0.5f; r.i = k * 9; return r; }\n"
+    "long a_empty(Empty e, long x) { (void)e; return x * 3 + 2; }\n"
+    "long a_bits(long a, Bits b, long c) { Bits copy = b; (void)copy; return a * 5 + c; }\n"
+    "Empty a_make_empty(long x) { Empty e; (void)x; return e; }\n"
+    "long a_empty_chain(long x) { Empty e = b_make_empty(x); Bits b = { }; return b_empty(e, x) + b_bits(x, b, x + 1) + a_empty(a_make_empty(x), x); }\n"
     "int main(void)\n"
     "{\n"
     "    for (int k = 1; k < 4; k += 1)\n"
@@ -904,6 +923,8 @@ static const char check_test_tier1_shapes_source[] =
     "        printf(\"%ld %ld %ld\\n\", b_low_stack(1, 2, 3, 4, 5, k, l, 6), b_high_stack(1, 2, 3, 4, 5, k, h, 7), b_split_int(1, 2, 3, 4, k, p, 8));\n"
     "        printf(\"%ld %ld\\n\", b_split_sse(1, 2, 3, 4, 5, 6, 7, k, q, 9), b_split_ld(1, 2, 3, 4, 5, 6, 7, k, r, 10));\n"
     "        printf(\"%ld %ld %ld\\n\", a_make_low(k).x, a_make_high(k).y, (long)a_make_high_mixed(k).i);\n"
+    "        Empty e = { };\n"
+    "        printf(\"%ld %ld\\n\", b_empty(e, k), a_empty_chain(k));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";

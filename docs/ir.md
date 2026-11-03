@@ -161,7 +161,10 @@ fixed parameters; additional variadic arguments must be nonvoid. `symbol_count`
 is an exclusive bound supplied by the translation unit; `UINT32_MAX` permits any
 nonzero, nonsentinel link ID. Zero is reserved by `link.c` and is rejected for
 both direct calls and symbol addresses. A call that passes or returns an
-aggregate by value has ABI records (`IrCall.abi`, below); the typed stream loses
+aggregate by value has ABI records (`IrCall.abi`, below), and so does one that
+passes an aggregate the convention ignores, as an empty struct of no bytes is,
+which a call without records would place in a register by its type (#141); the
+typed stream loses
 the named/variadic parameter boundary, as described below.
 
 ### Labels and `br_indirect`

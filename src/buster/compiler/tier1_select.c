@@ -1810,12 +1810,18 @@ static const IrPassed* tier1_select_argument_record(const IrFunction* function, 
     return call->abi != 0 ? &function->passed[function->abi_calls[call->abi - 1].passed + argument] : 0;
 }
 
-// Whether parameter `parameter` is a by-value aggregate (#789): its record's bytes aren't 0, and its IR value is a ptr
-// to them, the function's own copy (tier1_emit_cfg.c's frame object, or its stack slots in the incoming area).
+// Whether an ABI record is a by-value aggregate's (#789): its bytes aren't 0, or (#141) it is passed in no place at all
+// (IGNORE: an empty struct, or one of unnamed bit-fields), which only an aggregate is.
+static bool tier1_select_aggregate_record(const IrPassed* record)
+{
+    return record != 0 && (record->size != 0 || record->location.kind == BUSTER_ABI_LOCATION_IGNORE);
+}
+
+// Whether parameter `parameter` is a by-value aggregate (#789, tier1_select_aggregate_record), whose IR value is a ptr to
+// its bytes, the function's own copy (tier1_emit_cfg.c's frame object, or its stack slots in the incoming area).
 static bool tier1_select_aggregate_parameter(const IrFunction* function, uint32_t parameter)
 {
-    const IrPassed* record = tier1_select_parameter_record(function, parameter);
-    return record != 0 && record->size != 0;
+    return tier1_select_aggregate_record(tier1_select_parameter_record(function, parameter));
 }
 
 // Whether node `node` is a parameter where the entry puts it, in its incoming register or slot: IR_PARAM, but a by-value
@@ -1836,7 +1842,7 @@ static Tier1SelectPlace tier1_select_record_place(const IrPassed* record)
         index += 1;
     }
     const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
-    const uint8_t kind = record->size != 0                                       ? BUSTER_TIER1_PLACE_AGGREGATE
+    const uint8_t kind = tier1_select_aggregate_record(record)                   ? BUSTER_TIER1_PLACE_AGGREGATE
                          : record->location.kind == BUSTER_ABI_LOCATION_STACK ? BUSTER_TIER1_PLACE_STACK
                          : vector                                              ? BUSTER_TIER1_PLACE_VECTOR
                                                                                : BUSTER_TIER1_PLACE_GENERAL;
@@ -1993,7 +1999,8 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
 // register of its class (a general argument register for an integer or a pointer, xmm0 to xmm7 for a floating value) or
 // in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, on the stack whole or in its
 // parts (tier1_select_location_parts): in registers, and since #141 a part LLVM put in a stack slot (SPLIT) and a
-// value's high or low eightbyte alone (HIGH, LOW). Not an ignored one.
+// value's high or low eightbyte alone (HIGH, LOW); or one passed in no place (IGNORE, #141), which a call copies
+// nothing for and a function's copy of has no bytes it must keep.
 static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
 {
     const AbiLocation location = record->location;
@@ -2003,7 +2010,12 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
     const bool stacked = location.kind == BUSTER_ABI_LOCATION_STACK && location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && location.stack_offset < BUSTER_TIER1_SELECT_MAX_STACK_OFFSET;
     Tier1SelectPart parts[2];
     bool supported = false;
-    if (record->size == 0)
+    if (location.kind == BUSTER_ABI_LOCATION_IGNORE)
+    {
+        // Whatever its IR type: an empty struct's argument, of no bytes, is its class's value (ir_typed_call).
+        supported = location.flags == 0;
+    }
+    else if (record->size == 0)
     {
         const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
                                 (floating ? vector && (reg & 0x1fu) < BUSTER_ABI_VECTOR_ARGUMENTS : reg < 16 && ((BUSTER_TIER1_SELECT_ARGUMENT_GENERAL >> reg) & 1) != 0);
@@ -2041,14 +2053,15 @@ static uint32_t tier1_select_x87_parts(AbiReturn result, uint32_t size)
 // Whether Tier 1 takes a result as the convention returns it (#789): a scalar's (`size` 0) as the IR's result type says,
 // and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts, a high eightbyte's alone among them
 // (tier1_select_result_parts, #141), in st0 and st1 (tier1_select_x87_parts, #141), or through the hidden pointer
-// (MEMORY). Not one LLVM returns through a hidden pointer that clang doesn't count (DEMOTED), which only a vector makes.
+// (MEMORY), or nowhere (IGNORE, #141: an empty struct's, which neither the call nor the return copies). Not one LLVM
+// returns through a hidden pointer that clang doesn't count (DEMOTED), which only a vector makes.
 static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
 {
     Tier1SelectPart parts[2];
     const uint32_t high = size != 0 ? BUSTER_ABI_FLAG_HIGH : 0;
     const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO | high)) == 0;
     const bool registers = tier1_select_result_parts(result, size, parts) != 0;
-    return flags && (size == 0 || registers || tier1_select_x87_parts(result, size) != 0 || result.kind == BUSTER_ABI_RESULT_MEMORY);
+    return flags && (size == 0 || registers || tier1_select_x87_parts(result, size) != 0 || result.kind == BUSTER_ABI_RESULT_MEMORY || result.kind == BUSTER_ABI_RESULT_IGNORE);
 }
 
 static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot);

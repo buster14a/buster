@@ -261,11 +261,13 @@ patterns are:
   its copy's address, a frame object past the IR's slots that the entry fills
   from its registers and slots, or its stack slots in the incoming area when it
   is there whole, selected as a frame object's address
-  (`TIER1_RULE_STACK_ADDRESS`). Refused: an ignored aggregate, a result LLVM
-  demotes to a hidden pointer (`DEMOTED`), which only a vector type makes, and a
-  call whose parts in registers take more than the red zone's 14 staging slots
-  of 8 bytes, a whole vector register's its bytes' (`tier1_select_part_slots`).
-  Every function and
+  (`TIER1_RULE_STACK_ADDRESS`). An aggregate the convention ignores (#141:
+  `IGNORE`, an empty struct or one of unnamed bit-fields) is passed and returned
+  nowhere: a call copies nothing for it, and a parameter's copy keeps no bytes it
+  was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
+  which only a vector type makes, and a call whose parts in registers take more
+  than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
+  bytes' (`tier1_select_part_slots`). Every function and
   call with records goes to the CFG consumer. Before a call's moves, it copies
   the call's aggregates from their addresses into their stack slots, or into the
   red zone's staging slots, whose registers it loads after the moves. An address
