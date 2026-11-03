@@ -187,16 +187,39 @@ histogram, not a count of every construct inside a rejected function. Call it
 once after the final stage of a function; do not count decode and adaptation as
 two independent functions. Decode failure is itself a reported function outcome.
 
-`accepted` means accepted by the stage being tallied, never certified allocation.
-`certificate-unavailable` is a distinct reason for a campaign whose prerequisite
-checker is absent. #939's gate is `tier1_problem_certify`
-(`tier1_problem_intervals.c`). It checks an allocation of an adapted problem by
-the fragment certificate checker. A refusal is `certificate-rejected`, and its
-capacity is `capacity`. No success stub is supplied. A future quality publisher
-must invoke this gate, or the CFG checker once problems carry edges, against
-original and rewritten programs, and refuse publication on absence or failure.
-No publisher calls it yet. Import and occupancy checks cannot stand in for that
-gate.
+`accepted` means accepted by the stage being tallied. Import and occupancy checks
+alone are never a certified allocation. `certificate-unavailable` is a distinct
+reason for a campaign whose prerequisite checker is absent.
+
+#939's gate is `tier1_problem_certify` (`tier1_problem_intervals.c`). It checks
+an allocation of an adapted problem by the fragment certificate checker. A
+refusal is `certificate-rejected`, and its capacity is `capacity`. No success
+stub is supplied.
+
+The harness allocates through `tier1_problem_allocate`, and nothing it reports
+skips the gate. The function adapts a problem and allocates it by both of
+buster's allocator paths, `tier1_allocate` and its scalar twin. It certifies
+each allocation by the gate and returns the function's one terminal reason:
+* the adapter's refusal;
+* `allocation-refused`, where a path can't allocate the problem;
+* `capacity`, where the arena can't hold an allocation or its check;
+* `certificate-rejected`, where either path's allocation fails its certificate;
+* otherwise `ok`, with both allocations and their certificates' reports.
+
+On any reason but `ok`, the arena is as it was and nothing is published.
+
+Its callers:
+* `tests/tier1-problem/report.c` reads problem files. It prints each function's
+  reason and, for an accepted one, its allocations' fragments and spills, then
+  the tally. It exits with status 1 on a `certificate-rejected` allocation.
+* The integration build of `fuzz.c` allocates every problem it decodes and
+  aborts on a `certificate-rejected` one.
+* `test.c` runs the fixtures and 400 generated straight-line imports through
+  the wire format and the gate.
+
+A future quality publisher must report through this path, or through the CFG
+checker once problems carry edges, and must refuse publication on absence or
+failure.
 
 ## Tests and reproduction
 
@@ -218,9 +241,27 @@ prefixes, every input alignment modulo 64, guard pages on input, destination
 and arena tails, deterministic mutations, CSR/reference errors, GPR and vector
 class membership, phase/tie/alias/mask retention, refusals by reason,
 capacity rollback, unchanged publication and the current allocator bridge.
-The allocator smoke checks occupancy only; it is not #939 acceptance.
-`seed.c` emits explicitly synthetic straight/CFG/form seeds; `fuzz.c` verifies
+The allocator smoke checks occupancy only; #939's acceptance is the gate, which
+`harness_tests` drives:
+* the fixtures' allocations, both paths', certified, and each the allocator's
+  own;
+* every arena too small, refused as `capacity` with nothing published;
+* the adapter's refusals, which keep their reasons, and an import the allocator
+  refuses (`allocation-refused`);
+* 400 seeded straight-line imports of up to 48 instructions on 2 to 8
+  allocatable registers, generated, round-tripped through the wire and
+  certified by both paths. 251 of them spill.
+
+`seed.c` emits explicitly synthetic straight/CFG/form seeds. `fuzz.c` verifies
 that every successfully decoded mutation canonically re-encodes byte for byte.
+With `-DBUSTER_TP_INTEGRATION` it also allocates each one through the gate.
+
+The report runs on the seeds. The workflow checks that it accepts the
+straight-line one with both paths certified and refuses the others by reason:
+
+```sh
+clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o /tmp/tier1-problem-report && /tmp/tier1-problem-report FILE...
+```
 
 ## Remaining #938 acceptance
 
