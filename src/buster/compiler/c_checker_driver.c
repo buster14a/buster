@@ -116,6 +116,10 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
         case CHECK_INPUT_NO_BUILTIN_DEFINITION: result = "no_builtin attribute is permitted on definitions only"; break;
+        case CHECK_INPUT_SPECIFIER_COMBINE: result = "cannot combine with previous declaration specifier"; break;
+        case CHECK_INPUT_SPECIFIER_SIGN: result = "type cannot be signed or unsigned"; break;
+        case CHECK_INPUT_SPECIFIER_WIDTH: result = "invalid width for the type"; break;
+        case CHECK_INPUT_SPECIFIER_COMPLEX: result = "invalid _Complex type"; break;
     }
     return result;
 }
@@ -368,6 +372,61 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 }
 
 #include "c_check_warning_render.c"
+#include "c_check_literal_diagnostic.c"
+
+// A numeric constant the checker refused, worded and placed as clang does (c_check_literal_diagnostic.c, #1127): false if
+// clang has no error for it, which leaves the checker's own message.
+static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch)
+{
+    bool result = false;
+    PPTokens* output = &pp->output;
+    if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && source < output->count && output->kinds[source] != BUSTER_PP_KIND_EMBED &&
+        output->kinds[source] != BUSTER_PP_KIND_INTEGER)
+    {
+        const uint64_t mark = scratch->length;
+        const uint64_t capacity = (uint64_t)output->values[source] - output->locations[source] + 1;
+        uint8_t* buffer = arena_push(scratch, capacity, 1);
+        const uint8_t* bytes = 0;
+        const uint32_t length = buffer != 0 ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
+        CheckLiteralDiagnostic diagnostic;
+        result = length != 0 && check_literal_diagnose(bytes, length, parser->language.standard >= 2023, &diagnostic);
+        if (result)
+        {
+            const char* radix = diagnostic.radix == 2 ? "binary" : diagnostic.radix == 8 ? "octal" : "decimal";
+            const uint32_t offset = diagnostic.offset;
+            switch (diagnostic.kind)
+            {
+                case CHECK_LITERAL_DIAGNOSTIC_EXPONENT:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "exponent has no digits");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_DIGIT:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid digit '%c' in %s constant", diagnostic.character, radix);
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_SUFFIX:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "invalid suffix '%.*s' on %s constant", (int)(length - offset),
+                                                 (const char*)bytes + offset, diagnostic.floating ? "floating" : "integer");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_HEX_EXPONENT:
+                case CHECK_LITERAL_DIAGNOSTIC_HEX_SIGNIFICAND:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "hexadecimal floating constant requires %s",
+                                                 diagnostic.kind == CHECK_LITERAL_DIAGNOSTIC_HEX_EXPONENT ? "an exponent" : "a significand");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_SEPARATOR:
+                    pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, offset, publication, "digit separator cannot appear at %s of digit sequence",
+                                                 diagnostic.floating ? "end" : "start");
+                    break;
+                case CHECK_LITERAL_DIAGNOSTIC_TOO_LARGE:
+                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "integer literal is too large to be represented in any integer type");
+                    break;
+                default:
+                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'size_t' suffix for literals is a C++23 feature");
+                    break;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return result;
+}
 
 // Tier 1's selection state tables (tier1_select_burs.c), which main.c includes after this file: --tier1 builds them before
 // any lane compiles a unit.
@@ -1078,6 +1137,33 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' attribute %s", spelling,
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
+                        }
+                        else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
+                        {
+                            // Specifiers that don't combine, named as clang's DeclSpec names them (#1127).
+                            const CheckInputReport* report = input->reports + index;
+                            const char* first = check_declspec_names[report->specifier < CHECK_DECLSPEC_NAME_COUNT ? report->specifier : 0];
+                            const char* type = check_declspec_names[report->specifier_type < CHECK_DECLSPEC_NAME_COUNT ? report->specifier_type : 0];
+                            if (kind == CHECK_INPUT_SPECIFIER_COMBINE)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "cannot combine with previous '%s' declaration specifier", first);
+                            }
+                            else if (kind == CHECK_INPUT_SPECIFIER_SIGN)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' cannot be signed or unsigned", first);
+                            }
+                            else if (kind == CHECK_INPUT_SPECIFIER_WIDTH)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s %s' is invalid", first, type);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'_Complex %s' is invalid", first);
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_LITERAL && check_driver_literal(pp, parser, located, source, publication, scratch))
+                        {
+                            // A numeric constant's error, worded and placed as clang's.
                         }
                         else if (kind == CHECK_INPUT_UNDECLARED && named)
                         {
@@ -2748,7 +2834,7 @@ struct CheckDriverCommand
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
-static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock);
+static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
@@ -2902,7 +2988,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             if (stage_clock != NULL)
             {
+                _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
                 stage_clock->expression_ticks += input.expression_ticks;
+                for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+                {
+                    stage_clock->expression_part_ticks[p] += input.expression_part_ticks[p];
+                }
+                stage_clock->expression_faults += input.expression_faults;
+                stage_clock->expression_system_us += input.expression_system_us;
+                stage_clock->expression_usage_failed = stage_clock->expression_usage_failed || input.expression_usage_failed;
             }
             if (input.resource)
             {
@@ -3332,7 +3426,7 @@ static void check_driver_flow(void* argument)
         {
             run->lanes->units_flow = &run->units_flow;
             check_units_flow_begin(&run->units_flow);
-            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
+            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock, run->release);
             check_units_flow_end(&run->units_flow);
             run->lanes->units_flow = NULL;
         }

@@ -394,6 +394,80 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, added && runtime.memory_count == 0, "heap allocation removal");
 }
 
+// The memories' disjoint prefix (InterpreterRuntime.disjoint_count, #1229) never changes which memory an access finds,
+// the first that holds it: a memory that overlaps one in the prefix stays past it, and the prefix's one, found first,
+// decides; a last-match hint that a removal left pointing at another memory isn't taken; the prefix stops growing at
+// BUSTER_INTERPRETER_DISJOINT_PREFIX memories, past which the lookup still finds each; and a removal keeps from the
+// prefix exactly the memories it kept from it.
+static void interpreter_test_lookup(InterpreterTestTally* tally)
+{
+    static InterpreterMemory memories[BUSTER_INTERPRETER_DISJOINT_PREFIX + 8];
+    static uint8_t cells[BUSTER_INTERPRETER_DISJOINT_PREFIX + 8];
+    uint8_t first[16] = { 0 };
+    uint8_t second[16] = { 0 };
+    uint8_t third[16] = { 0 };
+    InterpreterRuntime runtime = {
+        .memories = memories,
+        .memory_capacity = BUSTER_ARRAY_LENGTH(memories),
+        .check_memory = true,
+    };
+    const uint64_t at_first = (uint64_t)(uintptr_t)first;
+    const uint64_t at_second = (uint64_t)(uintptr_t)second;
+    const uint64_t at_third = (uint64_t)(uintptr_t)third;
+    // 0: first, read-only, and 1: second, writable, are the prefix. 2: a writable view of first's bytes 4 to 8 overlaps
+    // it, and from it on nothing joins the prefix: 3: third, and 4: a writable view of first's bytes 8 to 12.
+    bool added = interpreter_memory_add(&runtime, first, sizeof(first), 0, false, 1);
+    added = added && interpreter_memory_add(&runtime, second, sizeof(second), 0, true, 2);
+    added = added && interpreter_memory_add(&runtime, first + 4, 4, 0, true, 3);
+    added = added && interpreter_memory_add(&runtime, third, sizeof(third), 0, true, 4);
+    added = added && interpreter_memory_add(&runtime, first + 8, 4, 0, true, 5);
+    interpreter_test_expect(tally, added && runtime.memory_count == 5 && runtime.disjoint_count == 2, "lookup: from an overlapping memory on, none joins the prefix");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_second, 4, true) == INTERPRETER_OK, "lookup: the prefix's newest memory");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 4, 4, true) == INTERPRETER_MEMORY,
+                            "lookup: the first memory that holds a range decides, not a later overlapping one");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_third, 8, true) == INTERPRETER_OK && runtime.last_match == 3,
+                            "lookup: a memory past the prefix, found in order, is the hint");
+    // With second removed, index 3, the hint, is the view of first's bytes 8 to 12, past the prefix: first, still
+    // before it, decides.
+    interpreter_memory_remove(&runtime, second);
+    interpreter_test_expect(tally, runtime.memory_count == 4 && runtime.disjoint_count == 1, "lookup: a removal keeps the prefix's memories it kept");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
+                            "lookup: a hint past the prefix isn't taken over an earlier memory that holds the range");
+    // With first removed, its views decide for its bytes 4 to 12, and nothing for its others.
+    interpreter_memory_remove(&runtime, first);
+    interpreter_test_expect(tally, runtime.memory_count == 3 && runtime.disjoint_count == 0, "lookup: no prefix once its memories are gone");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 4, 4, true) == INTERPRETER_OK &&
+                                   interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_OK,
+                            "lookup: the views a removal uncovered are found");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first, 4, false) == INTERPRETER_MEMORY &&
+                                   interpreter_memory_access(&runtime, at_second, 1, false) == INTERPRETER_MEMORY,
+                            "lookup: a removed memory's bytes");
+    for (uint32_t owner = 1; owner <= 5; owner += 1)
+    {
+        interpreter_memory_remove_owner(&runtime, owner);
+    }
+    interpreter_test_expect(tally, runtime.memory_count == 0 && runtime.disjoint_count == 0, "lookup: no memories, no prefix");
+    // A memory each cell, owner 1 to the prefix's end and 2 past it: the prefix stops at its limit, and every cell is
+    // found, before and past it, the last ones by the in-order search.
+    bool registered = true;
+    for (uint32_t i = 0; registered && i < BUSTER_ARRAY_LENGTH(cells); i += 1)
+    {
+        registered = interpreter_memory_add(&runtime, cells + i, 1, 0, i % 2 == 0, i < BUSTER_INTERPRETER_DISJOINT_PREFIX ? 1 : 2);
+    }
+    interpreter_test_expect(tally, registered && runtime.disjoint_count == BUSTER_INTERPRETER_DISJOINT_PREFIX, "lookup: the prefix stops at its limit");
+    bool found = registered;
+    for (uint32_t i = 0; found && i < BUSTER_ARRAY_LENGTH(cells); i += 1)
+    {
+        const InterpreterStatus expected = i % 2 == 0 ? INTERPRETER_OK : INTERPRETER_MEMORY;
+        found = interpreter_memory_access(&runtime, (uint64_t)(uintptr_t)(cells + i), 1, true) == expected;
+    }
+    interpreter_test_expect(tally, found, "lookup: each memory found, in the prefix and past it");
+    interpreter_memory_remove_owner(&runtime, 2);
+    interpreter_test_expect(tally, runtime.memory_count == BUSTER_INTERPRETER_DISJOINT_PREFIX && runtime.disjoint_count == runtime.memory_count,
+                            "lookup: removing the memories past the prefix leaves it whole");
+    interpreter_memory_remove_owner(&runtime, 1);
+}
+
 static void interpreter_test_limits(InterpreterTestTally* tally, Arena* scratch)
 {
     uint8_t kind = BUSTER_TYPED_JUMP;
@@ -1215,6 +1289,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_lookup(&tally);
         interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);
         interpreter_test_native(&tally, &scratch);

@@ -20,6 +20,9 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_DOMINANCE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_UNSUPPORTED, 0x12345678, 0x87654321 }, CHECK_TIER1_UNSUPPORTED },
+    { { 3, CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, IR_ERROR_UNSUPPORTED, 0x12345678, 0x87654321 }, CHECK_TIER1_UNSUPPORTED },
+    { { 3, CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, IR_ERROR_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
+    { { 3, CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, IR_ERROR_OPERAND, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 0x12345678, 0x87654321 }, CHECK_TIER1_UNSUPPORTED },
     { { 3, CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
@@ -31,6 +34,7 @@ static const CheckTier1FailureCase check_tier1_failure_cases[] = {
     { { 3, CHECK_TIER1_EMISSION, CHECK_TIER1_CAUSE_EMISSION, TIER1_EMIT_MEMORY, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, 0x12345678, 0x87654321 }, CHECK_TIER1_RESOURCE_FAILURE },
     { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_STRUCTURE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
+    { { 3, CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, IR_ERROR_OPCODE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, IR_ERROR_PHI, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, IR_ERROR_DOMINANCE, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
     { { 3, CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_INVALID, 0x12345678, 0x87654321 }, CHECK_TIER1_INTERNAL },
@@ -153,15 +157,16 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
 {
     Arena arena = arena_reserve(1u << 20);
     const uint32_t many = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
-    const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .call_count = 4, .call_type_count = 3 + many + 2, .abi_call_count = 1, .passed_count = 1 };
+    const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .call_count = 5, .call_type_count = 3 + many + 4, .abi_call_count = 2, .passed_count = 3 };
     IrFunction function;
     const bool created = arena.base != NULL && ir_create(&arena, &sizes, &function) == IR_OK;
     check_lanes_test_expect(tally, created, "create the call kinds' IR", NULL);
     if (created)
     {
-        // f(int, double, long double) -> double; (*p)(short, long..., long double) of one argument past the boundary's
-        // limit, the long double, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
-        // h(long) of two parameters -> long double; and a constant.
+        // f(int, double, long double) -> double; (*p)(short, long..., __int128) of one argument past the boundary's
+        // limit, the __int128, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
+        // h(long) of two parameters -> long double; k(a, b) of two 64-byte aggregates, each whole in a zmm register,
+        // whose parts take 16 staging slots; and a constant.
         function.call_types[0] = IR_I32;
         function.call_types[1] = IR_F64;
         function.call_types[2] = IR_F80;
@@ -170,37 +175,50 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
         {
             function.call_types[3 + k] = IR_I64;
         }
-        function.call_types[2 + many] = IR_F80;
+        function.call_types[2 + many] = IR_I128;
         function.call_types[3 + many] = IR_I64;
         function.call_types[4 + many] = IR_I64;
+        function.call_types[5 + many] = IR_PTR;
+        function.call_types[6 + many] = IR_PTR;
         function.calls[0] = (IrCall){ .type_first = 0, .argument_count = 3, .parameter_count = 3, .result_type = IR_F64 };
         function.calls[1] = (IrCall){ .type_first = 3, .argument_count = many, .parameter_count = many, .result_type = IR_I128, .variadic = true };
         function.calls[2] = (IrCall){ .type_first = 3 + many, .argument_count = 1, .parameter_count = 1, .result_type = IR_VOID, .abi = 1 };
         function.calls[3] = (IrCall){ .type_first = 4 + many, .argument_count = 1, .parameter_count = 2, .result_type = IR_F80 };
+        function.calls[4] = (IrCall){ .type_first = 5 + many, .argument_count = 2, .parameter_count = 2, .result_type = IR_VOID, .abi = 2 };
         function.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = UINT32_MAX }, .passed = 0, .result_size = 0 };
+        function.abi_calls[1] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 1, .result_size = 0 };
         function.passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
-        static const uint8_t ops[5] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CONST };
-        static const uint8_t results[5] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_I32 };
-        for (uint32_t node = 0; node < 5; node += 1)
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            function.passed[1 + k] = (IrPassed){ .size = 64, .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | k), BUSTER_ABI_REGISTER_NONE } } };
+        }
+        static const uint8_t ops[6] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CALL, IR_CONST };
+        static const uint8_t results[6] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_VOID, IR_I32 };
+        for (uint32_t node = 0; node < 6; node += 1)
         {
             function.op[node] = ops[node];
             function.type[node] = results[node];
-            function.b[node] = node < 4 ? node : 0;
+            function.b[node] = node < 5 ? node : 0;
             function.c[node] = BUSTER_IR_NONE;
         }
-        // A double, argument or result, is the boundary's since #141; the long double isn't, nor the short, the 17th
-        // argument, the __int128 result, the record's area or the missing argument. The 17th is still a long double.
-        const uint32_t expected[5] = {
-            1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT,
-            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT |
-                1u << CHECK_TIER1_CALL_NARROW_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
+        // A double and a long double, argument or result, are the boundary's since #141, and so is each of k's records;
+        // the short isn't, nor the 17th argument, the __int128 result, the record's area, the missing argument or k's 16
+        // slots past the 14. The 17th is still an __int128.
+        const uint32_t expected[6] = {
+            0,
+            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
+                1u << CHECK_TIER1_CALL_OTHER_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
             1u << CHECK_TIER1_CALL_ABI_RECORD,
-            1u << CHECK_TIER1_CALL_ARGUMENT_COUNT | 1u << CHECK_TIER1_CALL_LONG_DOUBLE_RESULT,
+            1u << CHECK_TIER1_CALL_ARGUMENT_COUNT,
+            1u << CHECK_TIER1_CALL_ABI_RECORD,
             0,
         };
-        for (uint32_t node = 0; node < 5; node += 1)
+        const uint32_t taken = 1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC;
+        for (uint32_t node = 0; node < 6; node += 1)
         {
             check_lanes_test_expect(tally, check_tier1_call_kinds(&function, node) == expected[node], "a refused call's kinds are its descriptor's shapes", ir_op_names[ops[node]]);
+            check_lanes_test_expect(tally, node == 5 || tier1_select_call_supported(&function, node) == ((check_tier1_call_kinds(&function, node) & ~taken) == 0),
+                                    "a call has a kind past indirect and variadic exactly where the selector refuses it", ir_op_names[ops[node]]);
         }
         CheckTier1Outcome outcome = check_tier1_failure(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 1, 0);
         outcome.operation = IR_CALL_INDIRECT;
@@ -214,11 +232,11 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             check_tier1_print_refusal(stream, (const uint8_t*)"g", 1, outcome);
             fclose(stream);
         }
-        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,long-double-argument,narrow-argument,other-result\n") != NULL &&
+        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,narrow-argument,other-argument,other-result\n") != NULL &&
                                 strstr(line, "tier1-refused\tg\t") != NULL && strstr(strstr(line, "tier1-refused\tg\t"), "call=") == NULL,
                                 "a refused call's line ends in its kinds, and another refusal's has none", line);
         static CheckTier1Report report;
-        report.calls[CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT] = 3;
+        report.calls[CHECK_TIER1_CALL_NARROW_ARGUMENT] = 3;
         report.calls[CHECK_TIER1_CALL_ABI_RECORD] = 1;
         char printed[8192] = { 0 };
         stream = fmemopen(printed, sizeof(printed) - 1, "w");
@@ -227,7 +245,7 @@ static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
             check_tier1_print_report(stream, &report);
             fclose(stream);
         }
-        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.long-double-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
+        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.narrow-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
                                 strstr(printed, "selection.call.indirect") == NULL,
                                 "the report counts refused calls by kind", NULL);
     }
@@ -256,6 +274,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
     uint8_t* defined_objects = NULL;
     ready = ready && check_program_access(&publication, program, &lowered_arena, &scratch, &defined_objects);
     check_lanes_test_expect(tally, ready, "Tier 1 rollback fixture lowers", NULL);
+    check_lanes_test_expect(tally, ready && lowered.asms.name_count != 0, "failure fixtures retain named assembly before emission", NULL);
     CheckTier1Lane lane = { 0 };
     uint8_t* prefix = ready ? arena_push(&output, 32, 1) : NULL;
     if (prefix != NULL)
@@ -361,7 +380,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
     arena_release(&lowered_arena);
 }
 
-static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp, const InternTable* identifiers, bool scalar, bool mixed)
+static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp, const InternTable* identifiers, bool scalar, bool mixed, bool lowering_refusal)
 {
     static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
     const uint32_t bodies = unit->selected.program.body_count;
@@ -416,6 +435,13 @@ static void check_tier1_test_lanes(CheckLanesTestTally* tally, CheckLanesTestUni
             CheckLanesTestEmission refused = check_lanes_test_emit(unit, parser, pp, identifiers, &lanes, scalar, false, true);
             check_lanes_test_expect(tally, refused.rolled_back && refused.tier1_failure.category == CHECK_TIER1_UNSUPPORTED && lanes.tier1_report.fallbacks == 0,
                                     "strict qualification rejects a real capability refusal", NULL);
+            if (lowering_refusal)
+            {
+                check_lanes_test_expect(tally, refused.tier1_failure.stage == CHECK_TIER1_LOWERING && refused.tier1_failure.cause == CHECK_TIER1_CAUSE_IR &&
+                                        refused.tier1_failure.error == IR_ERROR_UNSUPPORTED && refused.tier1_failure.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN &&
+                                        refused.token == unit->selected.program.bodies[bodies - 1].declaration,
+                                        "frame-address and musttail refusals preserve their lowering cause and source declaration", NULL);
+            }
             free(refused.object);
         }
     }
@@ -494,16 +520,27 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
-    for (uint32_t mixed = 0; ready && mixed < 2; mixed += 1)
+    static const char* const last_bodies[] = {
+        "long f7(long x){return x+8;}\n",
+        "__attribute__((naked)) long f7(long x){__asm__(\"leaq 8(%rdi), %rax\\n\\tret\");}\n",
+        "long f7(long x){return __builtin_frame_address(0)!=0?x+8:-1;}\n",
+        "long f7(long x){__attribute__((musttail)) return f6(x+1);}\n",
+    };
+    for (uint32_t variant = 0; ready && variant < BUSTER_ARRAY_LENGTH(last_bodies); variant += 1)
     {
+        const bool mixed = variant != 0;
         FILE* file = fopen(source, "w");
         bool written = file != NULL && fputs("long tier1_global=1;\nlong f0(long x){return x+tier1_global;}\n", file) >= 0;
-        for (uint32_t f = 1; written && f < 7; f += 1)
+        // Named inline assembly makes every injected failure cross the .size scan with an unallocated symbol map.
+        written = written && fputs("long f1(long x){__asm__(\".Lissue1155:\\n\\tnop\");return x+2;}\n", file) >= 0;
+        for (uint32_t f = 2; written && f < 7; f += 1)
         {
             written = fprintf(file, "long f%u(long x){return x+%u;}\n", f, f + 1) > 0;
         }
-        // The mixed fixture's last body is one Tier 1 refuses as unsupported: a long double, whose constant selection refuses.
-        written = written && fputs(mixed ? "long double f7(long double x){return x+1.5L;}\n" : "long f7(long x){return x+8;}\n", file) >= 0;
+        // Real refusals at admission (a naked function, whose body is its own assembly, which admission leaves to Tier 0:
+        // #141 took long double and its x87 aggregates, which anchored it before) and at lowering (frame-address and
+        // musttail), not injected errors.
+        written = written && fputs(last_bodies[variant], file) >= 0;
         const bool closed = file != NULL && fclose(file) == 0;
         check_lanes_test_expect(tally, written && closed, "write original Tier 1 coverage fixture", source);
         for (uint32_t scalar = 0; written && closed && scalar < 2; scalar += 1)
@@ -517,7 +554,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
                 {
                     check_tier1_test_rollback(tally, &unit, scalar != 0);
                 }
-                check_tier1_test_lanes(tally, &unit, &parser, &pp, &identifiers, scalar != 0, mixed != 0);
+                check_tier1_test_lanes(tally, &unit, &parser, &pp, &identifiers, scalar != 0, mixed, variant >= 2);
             }
             check_lanes_test_close(&unit);
             parse_release(&parser);
@@ -525,9 +562,8 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
             intern_release(&identifiers);
         }
         // Exercise the public command, including multi-unit option propagation, independently of the in-process
-        // fault control. The native oracle is ordinary original C, compiled externally by Clang.
-        const char* oracle = mixed ? "long f0(long);long double f7(long double);int main(void){return f0(41)!=42||f7(1.25L)!=2.75L;}\n" :
-                                    "long f0(long);long f7(long);int main(void){return f0(41)!=42||f7(34)!=42;}\n";
+        // fault control. The native oracle is ordinary original C, compiled externally by Clang; every variant's f7 adds 8.
+        const char* oracle = "long f0(long);long f7(long);int main(void){return f0(41)!=42||f7(34)!=42;}\n";
         const bool wrote_caller = parse_test_write(caller, oracle, strlen(oracle));
         for (uint32_t scalar = 0; wrote_caller && scalar < 2; scalar += 1)
         {

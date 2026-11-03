@@ -375,8 +375,8 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 
 // The call-save row that emitted record `r` stores to or loads from, as a bit of the rows' set, with *load saying which;
 // 0 for any other record. The rows are a general register's (bits 0 to 15: tier1_emit_call_save's mov), an xmm
-// register's (bits 16 to 31: a floating value's movsd, #141) and an opmask register's (bits 32 to 39: a mask's kmov of
-// its width, #179), the latter two the CFG consumer's. Each row is the frame's, apart from every spill slot, so its
+// register's (bits 16 to 31: a floating value's movsd, #141, or in a function with vectors the widest one's move, #141)
+// and an opmask register's (bits 32 to 39: a mask's kmov of its width, #179), the latter two the CFG consumer's. Each row is the frame's, apart from every spill slot, so its
 // displacement tells it from a spill of the same register.
 static uint64_t tier1_emit_test_save_row(const Tier1EmitResult* emitted, uint32_t r, bool* load)
 {
@@ -394,10 +394,13 @@ static uint64_t tier1_emit_test_save_row(const Tier1EmitResult* emitted, uint32_
         *load = form == X86_FORM_MOV_R64_RM64;
     }
     const uint32_t vector_row = emitted->general && reg < 16 && ((prepared->vector_save_mask >> reg) & 1) != 0 ? tier1_emit_cfg_vector_save_row(emitted, reg) : UINT32_MAX;
-    if (memory && vector_row < emitted->frame.count && (form == X86_FORM_MOVSD_XM64_X || form == X86_FORM_MOVSD_X_XM64) && record->displacement == emitted->frame.offset[vector_row])
+    const Tier1SelectFloatForms* wide = prepared->vector_bytes != 0 ? tier1_select_float_forms(prepared->vector_bytes) : NULL;
+    const uint16_t vector_store = wide != NULL ? wide->store : X86_FORM_MOVSD_XM64_X;
+    const uint16_t vector_load = wide != NULL ? wide->load : X86_FORM_MOVSD_X_XM64;
+    if (memory && vector_row < emitted->frame.count && (form == vector_store || form == vector_load) && record->displacement == emitted->frame.offset[vector_row])
     {
         row = 1ull << (16 + reg);
-        *load = form == X86_FORM_MOVSD_X_XM64;
+        *load = form == vector_load;
     }
     const uint32_t mask_row = emitted->general && reg < 8 && ((prepared->mask_save_mask >> reg) & 1) != 0 ? tier1_emit_cfg_mask_save_row(emitted, reg) : UINT32_MAX;
     for (uint32_t width = 1; memory && mask_row < emitted->frame.count && width <= 8; width *= 2)

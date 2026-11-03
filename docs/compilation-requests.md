@@ -191,9 +191,11 @@ The default `test-checker` run deals them to its parts too. The checks:
   data and a jump table, the baseline, AVX2 (`-march=x86-64-v3`) and AVX-512
   (`-march=x86-64-v4`, `znver5`) targets, a function's `target("avx2")`
   attribute, `-funsigned-char`, `-D` and `-std=c11`, and the scalar path, both
-  the request's and `--scalar` among the options (the driver's `--scalar`).
-  Where `-c` refuses, both must refuse the same way: wider vectors than the
-  target's registers at the emission, an `always_inline` callee whose target
+  the request's and `--scalar` among the options (the driver's `--scalar`),
+  and vectors wider than the target's registers, split across them (32 bytes
+  for the baseline, 64 for AVX2: #1193). Where `-c` refuses, both must refuse
+  the same way: a 32-byte variable shift for the baseline, which SSE2 has no
+  instruction to split into, at the emission, an `always_inline` callee whose target
   the caller lacks at the target-feature check, and `-fshort-enums` at the
   request. The first case runs again last, after the other targets, and must
   make the same object again: one preparation's configuration never reaches the
@@ -259,11 +261,58 @@ objects are byte for byte the base's. `benchmark-backend-source` and
 functions, entries, records and lowered counts, apart from the new receipt
 lines.
 
-Pending: these costs, for a tiny file and a representative corpus, measured
-on the locked 9700X. Their raw evidence belongs in
-[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements).
-The pull request's own 9700X job runs the benchmarks above as it runs them
-for any change to their sources.
+On the locked 9700X, [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/request-preparation-1057-2026-11-03)
+(with its raw logs) measured #1141's merge (`4670b2eb`) against its first
+parent (`754475d4`) as whole processes interleaved by `time-runs` on CPU 2,
+medians of 5 to 41 runs:
+
+| Command | runs | wall time, base → merge | instructions, base → merge |
+|---|---:|---|---|
+| `-c` of a tiny file (one function, no header) | 41 | 0.831 → 0.839 ms | 1,531,831 → 1,531,002 (−829) |
+| `-fsyntax-only` of it | 41 | 0.735 → 0.744 ms | 1,428,388 → 1,427,677 (−711) |
+| `-c` of `tools/ci/changes.c` | 21 | 7.917 → 7.883 ms | 63,570,059 → 63,568,455 (−1,604) |
+| `-c` of the frozen corpus's `sqlite3.c` | 11 | 112.309 → 112.223 ms | 1,215,785,766 → 1,215,786,163 (+397) |
+| `-fsyntax-only` of it | 11 | 89.167 → 89.370 ms | 903,854,433 → 903,855,020 (+587) |
+| `--lanes 1 -fsyntax-only` of Lua 5.4.8's 33 units | 11 | 59.950 → 60.159 ms | 741,327,601 → 741,307,598 (−20,003) |
+| `--lanes 1 -c` of them | 11 | 70.094 → 70.599 ms | 847,785,264 → 847,765,941 (−19,323) |
+| `benchmark-backend-source` of `sqlite3.c` | 5 | 656.661 → 660.375 ms | 9,630,170,403 → 9,629,561,143 (−609,260) |
+| `benchmark-lowering-source` of `sqlite3.c` | 5 | 1,024.968 → 1,023.769 ms | 14,479,142,381 → 14,483,648,230 (+4,505,849) |
+
+What these inputs show, and no more:
+
+- The driver's commands run between 1,604 fewer and 587 more instructions
+  for one file, and about 600 fewer per unit for Lua's 33. Each difference is
+  larger than its row's spread between runs (under 900 instructions for the
+  single files, up to 5,299 for Lua's), so it is the change's own work, and on
+  inputs from a tiny file to `sqlite3.c` the net difference doesn't grow with
+  their size, within this sample and method; net whole-process counts don't
+  isolate any per-token work from work offset elsewhere.
+- Time: the merge costs slightly more user cycles, while its retired
+  instructions fall for the tiny file, `changes.c` and Lua's units and rise
+  slightly for `sqlite3.c` (397 more by `-c`, 587 by `-fsyntax-only`). With
+  one executable per tree, every wall-time median is
+  within 1.22% of the base's, but the merge is slower in most paired runs on
+  several rows (Lua's user cycles in 11 of 11). Over six placements of the
+  checker's code, three copies each, in three rounds, as `docs/profiling.md`'s
+  "Builds over their code's placements and copies" compares builds (#509),
+  its user cycles are 0.09% to 0.26% above the base's for Lua's units and
+  `sqlite3.c`, where the base against itself moves −0.10% to +0.07%, and 2.8%
+  to 3.1% above for the tiny file's 1-ms `-c`, against its floor's 1.5% to
+  1.8%: beyond the floor in every round for Lua's `-c` and the tiny file, in
+  two of three for Lua's `-fsyntax-only` and `sqlite3.c`. The cost doesn't
+  grow with the input (`sqlite3.c`'s 526 million cycles show no more of it
+  than Lua's). Its cause is open: retired-instruction totals don't explain it
+  and can't rule out a change in instruction mix, dependencies or execution
+  cost, and the placements move only the checker's unit.
+- Every `-c` object is byte for byte the base's, Lua's 33 included.
+- Both source benchmarks report the same counts and timed regions, with the
+  receipt line the only addition. Their processes differ outside the timed
+  regions: `benchmark-backend-source` runs 0.006% fewer instructions, and
+  `benchmark-lowering-source` 0.031% more in no more wall time. A plausible
+  contributor is the selection and target-feature check that its preparation
+  now runs once per file, as `-c` does; nothing in the record isolates it, so
+  that attribution is a hypothesis.
+- The corpus is two programs, `sqlite3.c` and Lua; other inputs may differ.
 
 ## Still separate
 

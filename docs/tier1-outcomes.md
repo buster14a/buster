@@ -42,7 +42,11 @@ The outcome retains the stage, category, disposition, cause domain, original
 32-bit error, instruction and detail. IR boundaries preserve the complete
 `IrCheck`, including `dominance_checked`. The optional `--tier1-gvn` pass retains its
 check under the distinct `gvn` stage and follows the same failure policy; it
-remains off by default. A lowering instruction is a typed
+remains off by default. The 128-bit integers' split into halves (`ir_wide.c`,
+#141), after promotion and before the optimizer, has the `wide` stage: an
+operation of them it doesn't take (a division, a conversion to or from a
+floating value, a switch, one in a signature) is unsupported, and Tier 0
+compiles the body. A lowering instruction is a typed
 entry; later IR checks use their API's IR instruction. `UINT32_MAX` means the
 API supplied no instruction. These are not source tokens: diagnostics also
 retain the body's source declaration, rather than pretending to map an IR
@@ -87,18 +91,18 @@ call boundary doesn't take, by the selector's own predicates
 
 - `indirect` and `variadic`;
 - `abi-record`: an ABI record the boundary refuses, the call's (its result,
-  its outgoing area) or an argument's;
+  its outgoing area) or an argument's, or aggregates' parts in registers past
+  the red zone's 14 staging slots;
 - `stack-arguments`: arguments past the boundary's limit
   (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
   the stack, which Tier 1 takes below it;
-- `long-double-`, `narrow-` and `other-argument`: any argument's, one past
-  the limit too;
-- `long-double-` and `other-result`;
+- `narrow-` and `other-argument`: any argument's, one past the limit too;
+- `other-result`;
 - `argument-count`: arguments that don't match the parameters.
 
-Floating arguments and results are the boundary's (#141), with a record or
-without, so no kind names them: a float whose record the boundary refuses is
-an `abi-record`.
+Floating and `long double` arguments and results are the boundary's (#141),
+with a record or without, so no kind names them: one whose record the
+boundary refuses is an `abi-record`.
 
 `--tier1-report` counts the refused calls by kind as `selection.call.KIND`. A
 call counts under every kind it has, so the kinds' counts can sum past

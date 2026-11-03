@@ -22,6 +22,8 @@ typedef enum CheckTier1Stage
     CHECK_TIER1_RESOURCE,
     CHECK_TIER1_PUBLICATION,
     CHECK_TIER1_VALUE_NUMBERING,
+    // The 128-bit integers' split into halves (ir_wide.c, #141), between promotion and the optimizer.
+    CHECK_TIER1_WIDE,
     CHECK_TIER1_STAGE_COUNT,
 } CheckTier1Stage;
 
@@ -66,27 +68,24 @@ typedef enum CheckTier1Fallback
 // refusals say which shape to take first. Indirect and variadic are kinds the boundary takes, which the counts still tell
 // apart. A call has every kind it has, so the kinds' counts can sum past the calls'. Stack arguments are the arguments
 // past the boundary's limit (BUSTER_TIER1_SELECT_MAX_ARGUMENTS), not every argument the ABI passes on the stack, which
-// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's. The boundary
-// takes floating arguments and results (#141), with or without a record, so no kind names them: a float with a record it
-// refuses is an ABI record's.
+// Tier 1 takes below it (#141); an ABI record is one the boundary refuses, the call's or an argument's, or aggregates'
+// parts in registers past the staging slots. The boundary takes floating and long double arguments and results (#141),
+// with or without a record, so no kind names them: one with a record it refuses is an ABI record's.
 typedef enum CheckTier1CallKind
 {
     CHECK_TIER1_CALL_INDIRECT,
     CHECK_TIER1_CALL_VARIADIC,
     CHECK_TIER1_CALL_ABI_RECORD,
     CHECK_TIER1_CALL_STACK_ARGUMENTS,
-    CHECK_TIER1_CALL_LONG_DOUBLE_ARGUMENT,
     CHECK_TIER1_CALL_NARROW_ARGUMENT,
     CHECK_TIER1_CALL_OTHER_ARGUMENT,
-    CHECK_TIER1_CALL_LONG_DOUBLE_RESULT,
     CHECK_TIER1_CALL_OTHER_RESULT,
     CHECK_TIER1_CALL_ARGUMENT_COUNT,
     CHECK_TIER1_CALL_KIND_COUNT,
 } CheckTier1CallKind;
 
 static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT] = {
-    "indirect", "variadic", "abi-record", "stack-arguments", "long-double-argument", "narrow-argument", "other-argument", "long-double-result",
-    "other-result", "argument-count",
+    "indirect", "variadic", "abi-record", "stack-arguments", "narrow-argument", "other-argument", "other-result", "argument-count",
 };
 
 // These two domains have no upstream error enum: the adapter's exact refusal/capacity reason.
@@ -128,7 +127,7 @@ struct CheckTier1Fault
     uint32_t detail;
 };
 
-static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn" };
+static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource", "publication", "gvn", "wide" };
 static const char* const check_tier1_category_names[CHECK_TIER1_CATEGORY_COUNT] = { "unattempted", "compiled", "unsupported", "resource", "internal" };
 static const char* const check_tier1_cause_names[CHECK_TIER1_CAUSE_COUNT] = { "none", "admission", "ir", "dominators", "selection", "emission", "arena", "publication", "liveness", "allocation", "cfg-allocation", "frame", "certificate" };
 

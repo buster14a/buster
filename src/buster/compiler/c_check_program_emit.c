@@ -268,7 +268,7 @@ struct CheckEmitBoard
 // explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
-#define BUSTER_CHECK_TIER1_STEPS 7
+#define BUSTER_CHECK_TIER1_STEPS 8
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
 {
@@ -2259,7 +2259,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         scratch_end(mangle_scratch);
     }
     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
-    // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
+    // template, a mask stack beyond its bound, or an operand window beyond its registers: tier0_select_deep).
     uint32_t failed = count;
     for (uint32_t p = 0; valid && p < run.part_count; p += 1)
     {
@@ -2279,7 +2279,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const Tier0Code* code = run.codes + failed;
             result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                              code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
-            result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
+            result->reason = code->error == TIER0_ERROR_DEPTH ? "Tier 0 mask depth or operand register window exceeded" :
                              code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = code->error;
             result->backend_node = code->node;
@@ -3063,7 +3063,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // A template's `.size` on one of the unit's program symbols, which check_program_sections applies once the static
     // data's atoms exist: a variable's atom is published after this emission.
     bool sized = false;
-    for (uint32_t n = 0; sized == false && n < asms->name_count; n += 1)
+    // An earlier failure can leave asm_symbols unallocated. Keep that failure's diagnostic instead of reading it.
+    for (uint32_t n = 0; valid && sized == false && n < asms->name_count; n += 1)
     {
         const SymbolId symbol = asm_symbols[n];
         sized = symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0;
