@@ -326,8 +326,14 @@ load_states()
     local history="$work/history.git" states=$1 epoch
     fetch_main "$history" blob:none
     epoch=${NIGHTLY_EPOCH:-$(git -C "$history" log --first-parent --diff-filter=A --format=%H main -- tools/ci/nightly.c | tail -n 1)}
-    sha "$epoch"
-    git -C "$history" rev-list --first-parent main | has_line "$epoch"
+    # Before tools/ci/nightly.c reaches main (a pull request's dry run of it), NIGHTLY_EPOCH_SINCE bounds the states.
+    if [ -z "$epoch" ] && [ -n "${NIGHTLY_EPOCH_SINCE:-}" ]; then
+        epoch=$(git -C "$history" log --first-parent --since="$NIGHTLY_EPOCH_SINCE" --format=%H main | tail -n 1)
+    fi
+    if ! sha "$epoch" || ! git -C "$history" rev-list --first-parent main | has_line "$epoch"; then
+        printf '::error title=Nightly coordinator::no epoch: main has no first-parent commit that added tools/ci/nightly.c (%s)\n' "${epoch:-none}"
+        return 1
+    fi
     : > "$states"
     local commit parent committed started=false
     while read -r commit parent committed; do

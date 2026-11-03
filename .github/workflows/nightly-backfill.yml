@@ -82,6 +82,8 @@ jobs:
       - name: Harvest and plan without dispatching
         env:
           GH_TOKEN: ${{ github.token }}
+          # Until main has tools/ci/nightly.c, whose first-parent commit is the epoch, the last two days' states.
+          NIGHTLY_EPOCH_SINCE: 2 days ago
         run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode dry-run
       - name: Keep the planned ledger and report
         if: always()
