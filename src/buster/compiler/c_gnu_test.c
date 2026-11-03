@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-gnu: retained GNU syntax from original C fixtures, by both parser paths and both metadata collectors. The
 // expected names, argument spellings and group memberships are independent of the collector. Guards remove the
@@ -7,6 +8,7 @@
 // malformed-slice checks require empty results; arena-build failures must restore the caller's prior allocation.
 // main.c includes this file after c_parser_test.c, whose file writer and optional Clang oracle are reused.
 
+#include "buster/compiler/test_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -725,8 +727,8 @@ static int run_gnu_tests(int argument_count, char** arguments)
     GnuTest test = { .fixture = "test setup" };
     char directory[4096];
     char path[4200];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-test-gnu-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-test-gnu-XXXXXX", temporary);
     if (!valid)
     {
         printf("usage: test-gnu [--clang [PATH]]\n");

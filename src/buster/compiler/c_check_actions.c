@@ -284,6 +284,19 @@ struct CheckConversion
 typedef struct CheckAction CheckAction;
 typedef struct CheckVectorMember CheckVectorMember;
 struct CheckConstValues;
+
+// What an action read of its source position (#1050): each tag whose completion it asked about, with the answer (bit i of
+// `answers`, tag i complete there), for a memoized transition (c_check_transitions.c) to ask again at another node.
+// `unknown` marks a read the guards can't hold: more tags than they have room for, or a transparent union's activation.
+#define BUSTER_CHECK_ACTION_GUARDS 4u
+typedef struct CheckActionGuards CheckActionGuards;
+struct CheckActionGuards
+{
+    uint32_t tags[BUSTER_CHECK_ACTION_GUARDS];
+    uint32_t count;
+    uint32_t answers;
+    bool unknown;
+};
 struct CheckAction
 {
     CheckOp op;
@@ -302,6 +315,9 @@ struct CheckAction
     CheckConversion* argument_conversions;
     CheckContext context;
     const CheckVectorMember* vector_member;
+    // Optional: where the action records the answers it read of the source position, which only the checker's memoized
+    // transitions ask for (c_check_transitions.c). Null records nothing.
+    CheckActionGuards* guards;
 };
 
 typedef struct CheckActionResult CheckActionResult;
@@ -354,9 +370,56 @@ static bool check_action_runtime_size(const TypeTable* table, TypeId type)
     return runtime;
 }
 
+// Records that the action read tag `tag`'s completion at its source position, and the answer (CheckAction.guards).
+static void check_action_guard(const CheckAction* action, uint32_t tag, bool complete)
+{
+    CheckActionGuards* guards = action->guards;
+    if (guards != NULL)
+    {
+        bool found = false;
+        for (uint32_t i = 0; i < guards->count; i += 1)
+        {
+            found |= guards->tags[i] == tag;
+        }
+        const bool room = guards->count < BUSTER_CHECK_ACTION_GUARDS;
+        if (!found && room)
+        {
+            guards->tags[guards->count] = tag;
+            guards->answers |= (uint32_t)complete << guards->count;
+            guards->count += 1;
+        }
+        guards->unknown |= !found && !room;
+    }
+}
+
+// Records that the action read a transparent union's activation at its source position, which no guard holds.
+static void check_action_guard_unknown(const CheckAction* action)
+{
+    if (action->guards != NULL && action->context.transparent_unions != NULL)
+    {
+        action->guards->unknown = true;
+    }
+}
+
 static bool check_action_source_complete(const TypeTable* table, TypeId type, const CheckAction* action)
 {
     const bool complete = check_context_source_complete(table, type, &action->context);
+    // The memoized transitions' guard (CheckAction.guards): the nominal tag whose completion at the source position
+    // check_context_source_complete read, and its answer. A tag past the history is incomplete wherever the action is.
+    if (action->guards != NULL && action->context.tag_completions != NULL && type_is_complete(table, type))
+    {
+        TypeId base = type_strip_aligned(table, type);
+        while (type_kind_is_array(type_kind(table, base)))
+        {
+            base = type_strip_aligned(table, type_element(table, base));
+        }
+        const uint8_t kind = type_kind(table, base);
+        const uint32_t tag = table->types.index[type_index(base)];
+        if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM) && tag < action->context.tag_completion_count)
+        {
+            check_action_guard(action, tag, complete);
+        }
+    }
     return complete;
 }
 
@@ -949,7 +1012,8 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
     return value;
 }
 
-static void check_action_promote(const TypeTable* table, CheckValue* value, CheckConversion* conversion, uint32_t node)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_arithmetic.
+static inline __attribute__((always_inline)) void check_action_promote(const TypeTable* table, CheckValue* value, CheckConversion* conversion, uint32_t node)
 {
     const TypeId promoted = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0 ? type_promote_bit_field(table, value->type, value->bit_width) : type_promote(table, value->type);
     if (promoted != value->type)
@@ -970,6 +1034,7 @@ static bool check_action_compatible(const TypeTable* table, TypeId left, TypeId 
 
 static bool check_action_compatible_at(const TypeTable* table, TypeId left, TypeId right, const CheckAction* action, CheckActionResult* result)
 {
+    check_action_guard_unknown(action);
     const TypeAnswer answer = left == right ? TYPE_ANSWER_YES :
                               type_compatible_at(table, left, right, action->context.transparent_unions, action->context.tag_completion_count, action->context.source_position);
     if (answer == TYPE_ANSWER_FULL)
@@ -1032,7 +1097,8 @@ static bool check_action_nested_qualifiers(const TypeTable* table, TypeId left, 
 // pointers to pointers whose levels' qualifiers differ. void * converts to and from any object pointer, and to and
 // from a function pointer as a pedantic extension, without the qualifier warning. strict takes clang's Compatible
 // alone, as transparent-union selection does: no warning, and no function pointer through void *.
-static bool check_action_assignable_mode(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result, bool strict)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignable.
+static inline __attribute__((always_inline)) bool check_action_assignable_mode(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result, bool strict)
 {
     const TypeId target = type_unqualified(type_strip_aligned(table, destination));
     const TypeId input = type_unqualified(type_strip_aligned(table, source->type));
@@ -1101,7 +1167,8 @@ static bool check_action_assignable_mode(const TypeTable* table, TypeId destinat
     return accepted;
 }
 
-static bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do; hot callers: check_action_assignment and check_action_call.
+static inline __attribute__((always_inline)) bool check_action_assignable(const TypeTable* table, TypeId destination, const CheckValue* source, const CheckAction* action, CheckActionResult* result)
 {
     const bool accepted = check_action_assignable_mode(table, destination, source, action, result, false);
     return accepted;
@@ -1900,7 +1967,8 @@ static bool check_action_const_member(const TypeTable* table, const CheckAction*
     return allowed && !searching;
 }
 
-static void check_action_member(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
+static inline __attribute__((always_inline)) void check_action_member(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool arrow = action->op == CHECK_OP_ARROW;
     CheckValue base = arrow ? check_action_operand(table, action, result, 0) : action->operands[0];
@@ -2045,7 +2113,8 @@ static bool check_action_record_modifiable(const TypeTable* table, TypeId record
     return valid;
 }
 
-static bool check_action_modifiable(const TypeTable* table, const CheckValue* value, const CheckAction* action, CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignment.
+static inline __attribute__((always_inline)) bool check_action_modifiable(const TypeTable* table, const CheckValue* value, const CheckAction* action, CheckActionResult* result)
 {
     const uint8_t kind = check_action_kind(table, value->type);
     bool valid = value->category == CHECK_LVALUE;
@@ -2065,7 +2134,8 @@ static bool check_action_modifiable(const TypeTable* table, const CheckValue* va
     return valid;
 }
 
-static void check_action_bit_field_store(const TypeTable* table, const CheckValue* target, CheckValue* value)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_assignment.
+static inline __attribute__((always_inline)) void check_action_bit_field_store(const TypeTable* table, const CheckValue* target, CheckValue* value)
 {
     if ((target->flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
@@ -2086,7 +2156,8 @@ static void check_action_bit_field_store(const TypeTable* table, const CheckValu
     }
 }
 
-static void check_action_assignment(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
+static inline __attribute__((always_inline)) void check_action_assignment(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool store = action->op == CHECK_OP_ASSIGN;
     const uint32_t slot = store ? 1 : 0;
@@ -2213,7 +2284,8 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
     }
 }
 
-static void check_action_cast(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
+static inline __attribute__((always_inline)) void check_action_cast(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     CheckValue source = check_action_operand(table, action, result, 0);
     const TypeId target = type_unqualified(type_strip_aligned(table, action->type));
@@ -2328,6 +2400,7 @@ static TypeId check_action_transparent_parameter(const TypeTable* table, TypeId 
     {
         const uint32_t index = type_index(type_strip_aligned(table, destination));
         const uint32_t tag = table->types.index[index];
+        check_action_guard_unknown(action);
         const bool active = action->context.transparent_unions == NULL ||
                             (tag < action->context.tag_completion_count && action->context.transparent_unions[tag] != 0 &&
                              action->context.transparent_unions[tag] <= action->context.source_position);
@@ -2411,6 +2484,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
             argument.operands[0] = action->arguments[i];
             argument.node = action->node;
             argument.context = action->context;
+            argument.guards = action->guards;
             CheckActionResult converted = { 0 };
             if (!type_is_valid(table, argument.operands[0].type))
             {
@@ -2467,7 +2541,8 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
 #include "c_check_complex.c"
 #include "c_check_vector.c"
 
-static uint32_t check_action_operand_count(const CheckAction* action)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute, once per action.
+static inline __attribute__((always_inline)) uint32_t check_action_operand_count(const CheckAction* action)
 {
     uint32_t count = 2;
     switch (action->op)
@@ -2582,7 +2657,8 @@ static void check_action_fp_environment(const TypeTable* table, const CheckActio
     }
 }
 
-static void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_node_action, once per action.
+static inline __attribute__((always_inline)) void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
 {
     memset(result, 0, sizeof(*result));
     if (pending != NULL)

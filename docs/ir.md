@@ -360,7 +360,7 @@ as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
-refused, as #147's `TAIL_CALL` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
+refused, as #147's `TAIL_CALL` is (`IR_ERROR_UNSUPPORTED`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -387,7 +387,7 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_OPCODE`, and the
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
 for the output target (any, through the old entry points) with
 `IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything

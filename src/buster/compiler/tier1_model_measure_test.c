@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // Original manifest parser and operand-grouping regressions for #181. Included by tier1_model_measure.c so the
 // tests exercise its private reader without a second implementation. Each fixture uses one private disk file;
 // no generated program, timing loop or hardware counter runs here. Producer completion is not corpus coverage.
 
+#include "buster/compiler/test_paths.h"
 typedef struct Tier1ModelTest Tier1ModelTest;
 struct Tier1ModelTest
 {
@@ -219,7 +221,7 @@ int run_tier1_model_measure_tests(int argc, char** argv)
     {
         test.allowed = malloc(X86_FORM_COUNT);
         test.manifest = malloc(sizeof(*test.manifest));
-        const char* directory = getenv("TMPDIR");
+        const char* directory = oracle_temporary_directory();
         directory = directory != 0 && directory[0] != 0 ? directory : "/var/tmp";
         const int length = snprintf(path, sizeof(path), "%s/buster-tier1-model-XXXXXX", directory);
         valid = test.allowed != 0 && test.manifest != 0 && length > 0 && (uint64_t)length < sizeof(path);

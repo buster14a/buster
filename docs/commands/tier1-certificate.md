@@ -26,8 +26,14 @@ requirements. [Command index](README.md).
   the checker's capacity (`TIER1_EMIT_MEMORY`) a resource failure. Either fails
   `--tier1 --verify`'s compile ([the outcomes
   guide](../../docs/tier1-outcomes.md)).
-- `tier1_problem_certify` is the gate #938's quality publisher must call; no
-  publisher exists yet.
+- #938's harness allocates every problem it adapts through
+  `tier1_problem_allocate`, by both allocator paths, and reports an allocation
+  only past `tier1_problem_certify`:
+  - `tests/tier1-problem/report.c` reports problem files;
+  - the integration fuzzer certifies every problem it decodes;
+  - `tests/tier1-problem/test.c` certifies its fixtures and generated imports.
+
+  The `Tier 1 machine-problem interchange` workflow runs all three.
 - [The certificate guide](../../docs/tier1-certificate.md) records the trust
   boundary, supported forms, the CFG producer, why the checker is scalar and the
   native-emitter bridge still pending for #939.

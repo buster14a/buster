@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-check-lanes [--executable PATH] [--seed N] [--programs N] [--id-order N] [--keep]: the functions' lanes (#151, and
 // #153's item for them), check_program_emit_lanes. Every output must be one lane's, whatever the lanes, whichever finishes
@@ -65,6 +66,7 @@
 //   a process of its own; then the same on a lazy session, whose lane 1 creates the others while lane 0 runs the first
 //   command.
 
+#include "buster/compiler/test_paths.h"
 #include "worker_budget_test.c"
 
 typedef struct CheckLanesTestTally CheckLanesTestTally;
@@ -2151,8 +2153,8 @@ static int run_check_lanes_tests(int argc, char** argv)
         executable = resolved;
     }
     char directory[PATH_MAX];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-lanes-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-lanes-XXXXXX", temporary);
     const bool made = options && mkdtemp(directory) != 0;
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
     if (made)

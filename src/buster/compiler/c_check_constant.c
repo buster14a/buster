@@ -1373,7 +1373,7 @@ static void check_constant_source_regions(CheckConstantInput* input)
                 input->syntax[index] = true;
             }
             if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == token &&
-                reader->output->declaration_bodies[token] == reader->function_body)
+                check_sparse_get(reader->output->declaration_bodies, token) == reader->function_body)
             {
                 input->statement_syntax[index] |= 2;
             }

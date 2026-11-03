@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The runtime snapshot's tests (snapshot.c), for the test-snapshot command:
 //
@@ -44,6 +45,7 @@
 // Layout, in this order: the tally, the comparison, the round trip, the links, opening, staleness, invalid files,
 // damaged pieces, the kinds, concurrency, the cache directory, and run_snapshot_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1919,7 +1921,7 @@ static int run_snapshot_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
-    const char* parent = getenv("TMPDIR") != 0 ? getenv("TMPDIR") : "/tmp";
+    const char* parent = oracle_temporary_directory();
     bool keep = false;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)

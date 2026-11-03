@@ -15,6 +15,41 @@ A reservation and a successful push are therefore distinct operations that can
 both fail. The driver reports the failed operation and requested byte count.
 The early C-driver checks from #852 remain in place.
 
+## Page sizes
+
+An arena's first `small` bytes (`BUSTER_ARENA_SMALL_BYTES`, 64 KB, or
+`arena_reserve_small`'s, or a thread's `arena_small_floor`) are base pages and
+the rest huge pages. In an arena with huge pages, `base + small` falls on a 2 MB
+boundary, and `base` a page or more past the mapping's start. Since the kernel
+takes a transparent huge page only where one writable mapping covers its whole
+2 MB from such a boundary, the layout itself keeps the base pages base pages
+(#652): below `base + small` the writable bytes start past inaccessible ones and
+end at the boundary, where the huge pages' differently advised mapping starts,
+so fewer than 2 MB of them hold no huge page, nor join a writable neighbour's
+mapping, with any setting of transparent huge pages. An arena of 64 KB or less,
+base pages alone, has an inaccessible page on each side for the same reason. So
+the advice is only where the layout doesn't decide:
+
+- `MADV_NOHUGEPAGE` at the reservation for base pages of 2 MB or more (a units
+  lane's 16 MB floor, the tables reserved in base pages throughout, the
+  deferred checker's slices);
+- `MADV_HUGEPAGE` from `base + small` to the mapping's end at the first commit
+  that reaches past `base + small` (`Arena.huge`, which the pool keeps), which a
+  host whose transparent huge pages are `madvise` needs, and which makes the
+  kernel compact for them where they are `always`.
+
+An arena that stays in its base pages, as most of a small unit's do, takes one
+`mmap` and one `mprotect` and no advice. An empty file's `-fsyntax-only` made
+146 `madvise` calls before, 48 since.
+
+The compile commands (the C driver and `-E`, `check`, `parse`) also advise the
+executable's `.bss` `MADV_NOHUGEPAGE` first (`arena_static_base_pages`). It is
+220 MB of statics, mostly the tests' and benchmarks', of which any compile, an
+empty file's or sqlite3.c's, writes 11 pages in three 2 MB stretches; with
+transparent huge pages `always`, as on the 9700X, two of them took a huge page
+each, 4 MB cleared for 44 KB of statics. Tests and benchmarks keep their
+`.bss` as the kernel gives it.
+
 ## Finite address spaces
 
 `PROT_NONE` still counts toward `RLIMIT_AS`. With a finite limit, each ordinary
@@ -63,14 +98,29 @@ capacity; `committed` is an offset from its original mapping address. A zero
 `mapping_bytes` denotes borrowed writable memory, including the measuring
 arena. Such views do not change protections or unmap their owner's storage.
 
-A pooled arena is reprotected inaccessible and discarded with `MADV_DONTNEED`;
-reuse starts with zero length/peak and a zero-filled prefix on its first push.
-A failed reprotection/discard unmaps the arena instead. Tests that deliberately
+A pooled arena (`arena_pool`, which only the C driver's units lanes set) is
+discarded with `MADV_DONTNEED`, and its committed prefix stays writable for the
+next reservation that takes it (#1128): every `mprotect` takes the address
+space's lock for writing, which the other lanes' reservations, commits and
+page faults then wait for, while the discard takes it only for reading. Where
+commit charge is bounded, under strict overcommit (`vm.overcommit_memory` 2)
+or a finite `RLIMIT_DATA`, release reprotects the prefix inaccessible first,
+returning its charge. The pool reads both once, with the `RLIMIT_AS` share its
+thread's reservations admit (`arena_pool_limits`), and again after
+`arena_pool_release`. A reservation takes the pooled arena with the smallest
+mapping that holds its capacity with the same base pages and page layout (huge
+pages past `small`, or none; `Arena.reserved` is what the mapping was laid out
+for), and gets the capacity it asked for, as from a fresh mapping. Reuse starts
+with zero length and peak and zero-filled pages. A failed reprotection or
+discard unmaps the arena instead. Tests that deliberately
 poison unused logical capacity explicitly commit that test memory first; a raw
 `base` pointer no longer authorizes touching an owned reservation.
 
 `tests/arena/resources.c` checks inaccessible tails, growth and stable pointers,
-zero-filled pool reuse, borrowed/measuring arenas, overflow rollback, a real
+zero-filled pool reuse (its prefix writable, and inaccessible again in a child
+under a finite `RLIMIT_DATA`), the pool's choice of mapping by base pages,
+layout and room, the smallest first and the latest released of equal ones,
+borrowed/measuring arenas, overflow rollback, a real
 `mprotect` refusal injected with a child-only seccomp filter, and 32 simultaneous
 large logical requests under a 2 GiB address-space limit. Another isolated child
 refuses large inaccessible mappings with `EINVAL`, exercising the compact retry

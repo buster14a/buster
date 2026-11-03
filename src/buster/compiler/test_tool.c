@@ -431,7 +431,9 @@ static uint32_t test_tool_test(void)
     test_tool_check(test_tool_compare(newer, 3, sixteen, 1) > 0, "16.2.1 is newer than 16", &failures, &checks);
     test_tool_check(test_tool_compare(older, 3, sixteen, 1) < 0, "13.3.0 is older than 16", &failures, &checks);
     test_tool_check(test_tool_compare(as_old, 2, as_minimum, 2) < 0, "2.42 is older than 2.47", &failures, &checks);
-    char path[] = "/tmp/buster-test-tool-XXXXXX";
+    const char* temporary = oracle_temporary_directory();
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/buster-test-tool-XXXXXX", temporary);
     const int descriptor = mkstemp(path);
     const char script[] = "#!/bin/sh\nprintf 'fake gcc 16.2.1\\n'\n";
     bool written = descriptor >= 0 && write(descriptor, script, sizeof(script) - 1) == (ssize_t)(sizeof(script) - 1) && fchmod(descriptor, 0755) == 0;
@@ -440,7 +442,8 @@ static uint32_t test_tool_test(void)
         written = close(descriptor) == 0 && written;
     }
     test_tool_check(written, "the fake tool is written", &failures, &checks);
-    char unreadable_path[] = "/tmp/buster-test-tool-XXXXXX";
+    char unreadable_path[4200];
+    snprintf(unreadable_path, sizeof(unreadable_path), "%s/buster-test-tool-XXXXXX", temporary);
     const int unreadable_descriptor = mkstemp(unreadable_path);
     const char quiet_script[] = "#!/bin/sh\nexit 0\n";
     bool quiet_written = unreadable_descriptor >= 0 && write(unreadable_descriptor, quiet_script, sizeof(quiet_script) - 1) == (ssize_t)(sizeof(quiet_script) - 1) &&
@@ -450,7 +453,8 @@ static uint32_t test_tool_test(void)
         quiet_written = close(unreadable_descriptor) == 0 && quiet_written;
     }
     test_tool_check(quiet_written, "the quiet tool is written", &failures, &checks);
-    char hanging_path[] = "/tmp/buster-test-tool-XXXXXX";
+    char hanging_path[4200];
+    snprintf(hanging_path, sizeof(hanging_path), "%s/buster-test-tool-XXXXXX", temporary);
     const int hanging_descriptor = mkstemp(hanging_path);
     const char hanging_script[] = "#!/bin/sh\nexec /bin/sleep 5\n";
     bool hanging_written = hanging_descriptor >= 0 && write(hanging_descriptor, hanging_script, sizeof(hanging_script) - 1) == (ssize_t)(sizeof(hanging_script) - 1) &&
