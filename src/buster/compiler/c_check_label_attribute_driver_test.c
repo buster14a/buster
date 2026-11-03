@@ -350,8 +350,8 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
     unlink(reference_path);
 }
 
-// The lines of a compiler's -Wunknown-attributes diagnostics in `text`, in order, into `lines` (#147); false where they
-// don't fit.
+// The lines of a compiler's -Wunknown-attributes diagnostics in `text`, in order, into `lines` (#147), with its warnings
+// at `__clang__` where an attribute's scope goes; false where they don't fit.
 static bool check_test_unknown_attribute_lines(const char* text, char* lines, size_t capacity)
 {
     size_t length = 0;
@@ -362,7 +362,8 @@ static bool check_test_unknown_attribute_lines(const char* text, char* lines, si
         const char* end = strchr(line, '\n');
         const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
         const char* found = strstr(line, "unknown attribute");
-        const bool kept = found != NULL && found < line + size;
+        const char* macro = strstr(line, "is a predefined macro name, not an attribute scope specifier");
+        const bool kept = (found != NULL && found < line + size) || (macro != NULL && macro < line + size);
         fits = !kept || length + size + 1 < capacity;
         if (kept && fits)
         {
@@ -404,6 +405,144 @@ static bool check_test_diagnostic_lines(const char* text, char* lines, size_t ca
     return fits;
 }
 
+// The misspelled attributes of check_test_driver_unknown_attributes, from c_check_attribute_clang.inc's spellings.
+static void check_test_driver_attribute_typos(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const scopes[] = { "gnu", "clang", "gnux", "clangg", "x", "msvc", "omp", "ompp", "__gnu__", "_Clang", "gs", "vk", "acc", "hlsll" };
+    static const char letters[] = "abcdefghijklmnopqrstuvwxyz_";
+    enum { CAPACITY = 1u << 20, LINES = 1u << 20 };
+    char* text = malloc(CAPACITY);
+    char* kept = malloc(CAPACITY);
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    size_t length = 0;
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t round = 0; text != NULL && round < 3; round += 1)
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_input_clang_spellings); i += 1)
+        {
+            char name[96];
+            uint32_t size = check_input_clang_spellings[i].length;
+            memcpy(name, check_input_clang_spellings[i].name, size);
+            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t edits = 1 + (uint32_t)((state >> 60) & 1);
+            for (uint32_t e = 0; e < edits; e += 1)
+            {
+                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                const uint32_t kind = (uint32_t)(state >> 61) % 3;
+                const uint32_t at = (uint32_t)((state >> 32) % (size + 1u));
+                const char letter = letters[(state >> 16) % (sizeof(letters) - 1)];
+                if (kind == 0 && size > 1)
+                {
+                    const uint32_t place = at < size ? at : size - 1;
+                    memmove(name + place, name + place + 1, size - place - 1);
+                    size -= 1;
+                }
+                else if (kind == 1 && size + 1 < sizeof(name))
+                {
+                    memmove(name + at + 1, name + at, size - at);
+                    name[at] = letter;
+                    size += 1;
+                }
+                else if (size > 1)
+                {
+                    name[at < size ? at : size - 1] = letter;
+                }
+            }
+            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t form = (uint32_t)(state >> 62);
+            const char* scope = scopes[(state >> 20) % BUSTER_ARRAY_LENGTH(scopes)];
+            // Only identifiers: OpenMP's `declare simd` and the like are spellings with spaces.
+            bool identifier = (name[0] < '0' || name[0] > '9') && length + 256 < CAPACITY;
+            for (uint32_t b = 0; b < size; b += 1)
+            {
+                const char c = name[b];
+                identifier &= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+            }
+            if (identifier && form == 0)
+            {
+                length += (size_t)snprintf(text + length, CAPACITY - length, "[[%.*s]] int v%u_%u;\n", (int)size, name, round, i);
+            }
+            else if (identifier && form == 1)
+            {
+                length += (size_t)snprintf(text + length, CAPACITY - length, "[[%s::%.*s]] int v%u_%u;\n", scope, (int)size, name, round, i);
+            }
+            else if (identifier)
+            {
+                length += (size_t)snprintf(text + length, CAPACITY - length, "int v%u_%u __attribute__((%.*s));\n", round, i, (int)size, name);
+            }
+        }
+    }
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/attribute-typos.c", directory);
+    bool made = text != NULL && kept != NULL && expected_lines != NULL && actual_lines != NULL && parse_test_write(source, text, length);
+    char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", "-ferror-limit=0", source, NULL, NULL };
+    char* first = NULL;
+    made = made && check_test_driver_spawn(arguments, &first) >= 0 && first != NULL;
+    // The source's lines clang warns about as unknown, in order: those its warnings' line numbers name.
+    size_t kept_length = 0;
+    uint32_t line = 1;
+    uint32_t total = 0;
+    const char* cursor = text;
+    const char* warning = first;
+    for (; made && cursor != NULL && cursor < text + length; line += 1)
+    {
+        const char* end = memchr(cursor, '\n', (size_t)(text + length - cursor));
+        const size_t size = end != NULL ? (size_t)(end - cursor) + 1 : (size_t)(text + length - cursor);
+        char marker[64];
+        snprintf(marker, sizeof(marker), "attribute-typos.c:%u:", line);
+        bool unknown = false;
+        for (const char* at = warning != NULL ? strstr(warning, marker) : NULL; !unknown && at != NULL; at = strstr(at + 1, marker))
+        {
+            const char* eol = strchr(at, '\n');
+            const char* found = strstr(at, "unknown attribute");
+            unknown = found != NULL && (eol == NULL || found < eol);
+        }
+        if (unknown)
+        {
+            memcpy(kept + kept_length, cursor, size);
+            kept_length += size;
+            total += 1;
+        }
+        cursor = end != NULL ? end + 1 : NULL;
+    }
+    made = made && total > 1000 && parse_test_write(source, kept, kept_length);
+    char* expected = NULL;
+    arguments[0] = (char*)clang;
+    made = made && check_test_driver_spawn(arguments, &expected) >= 0 && expected != NULL && check_test_unknown_attribute_lines(expected, expected_lines, LINES);
+    uint32_t suggestions = 0;
+    for (const char* at = made ? strstr(expected_lines, "did you mean") : NULL; at != NULL; at = strstr(at + 1, "did you mean"))
+    {
+        suggestions += 1;
+    }
+    for (uint32_t scalar = 0; made && scalar < 2; scalar += 1)
+    {
+        arguments[0] = (char*)executable;
+        arguments[6] = scalar != 0 ? "--scalar" : NULL;
+        char* actual = NULL;
+        const int status = check_test_driver_spawn(arguments, &actual);
+        const bool same = actual != NULL && check_test_unknown_attribute_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+        size_t at = 0;
+        while (!same && expected_lines[at] != 0 && expected_lines[at] == actual_lines[at])
+        {
+            at += 1;
+        }
+        char description[512];
+        snprintf(description, sizeof(description), "attribute typos, %s: %u lines (%u suggestions), status %d, the same as clang's%s%.160s", scalar != 0 ? "scalar" : "vector",
+                 total, suggestions, status, same ? "" : " but from: ", same ? "" : expected_lines + at);
+        check_test_expect(test, same && status == 0, description);
+        free(actual);
+    }
+    check_test_expect(test, made && suggestions > 300, "attribute typos: clang's lines read, hundreds of them with suggestions");
+    free(first);
+    free(expected);
+    free(text);
+    free(kept);
+    free(expected_lines);
+    free(actual_lines);
+    unlink(source);
+}
+
 // Attributes clang doesn't know (#147, c_check_attribute_clang.inc), which it ignores with -Wunknown-attributes' warning
 // at the name (a C23 one's at its scope), spelled as written in GNU's syntax and normalized in C23's: invented names,
 // GCC's own (externally_visible, optimize, access), an unknown scope's and gnu::'s and clang::'s unknown names, C23's
@@ -427,6 +566,16 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void n(int *p) __attribute__((access(read_only, 1)));\n"
         "[[unsequenced]] int o(void);\n"
         "struct S { int x __attribute__((invented)); [[gnu::invented2]] int y; } s;\n"
+        "int t1 __attribute__((alignd(8)));\n"
+        "int t2 __attribute__((no_sanitize_undefined, unsed, __visiblity__(\"default\")));\n"
+        "[[gnux::__alignd__(8)]] int t3;\n"
+        "[[deprecatd, maybe_unusd]] int t4;\n"
+        "[[clang::nodref, clangg::noderef]] int *t5;\n"
+        "[[ompp::x, omp::x, x::__y__, msvc::__y__]] int t6;\n"
+        "int t7 __attribute__((____devicew___));\n"
+        "[[__clang__::x]] int t8;\n"
+        "[[__clang__::__aligned__(4), deprecated]] int t10;\n"
+        "[[__clang__]] int t9;\n"
         "int q(int x) {\n"
         "    switch (x) { case 1: __attribute__((invented)); case 2: break; }\n"
         "l: __attribute__((invented, unused));\n"
@@ -477,8 +626,9 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
             snprintf(description, sizeof(description), "unknown attributes %s, %s: status %d (clang %d), lines\n%s(clang\n%s)",
                      configurations[c].option != NULL ? configurations[c].option : "(no option)", scalar != 0 ? "scalar" : "vector", status, oracle,
                      actual_lines, expected_lines);
+            // -Wno-unknown-attributes leaves clang's -Wignored-attributes warning at `__clang__`; -w leaves nothing.
             check_test_expect(test, same && (status != 0) == configurations[c].failed && (oracle != 0) == configurations[c].failed &&
-                                        (expected_lines[0] != 0) == (c != 1 && c != 3),
+                                        (expected_lines[0] != 0) == (c != 3) && (c != 1 || strstr(expected_lines, "unknown attribute") == NULL),
                               description);
             free(actual);
         }
@@ -527,6 +677,12 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
     }
     free(expected_lines);
     free(actual_lines);
+    // clang's "did you mean" suggestions (check_warning_attribute_suggestion): misspellings of clang's spellings, made by a
+    // fixed generator (a deletion, an insertion or a replacement, once or twice), as GNU attributes, C23 ones and C23 ones of
+    // a scope, itself misspelled at times. A first run of clang keeps the lines it warns about as unknown, as the misspelling
+    // can make another attribute clang knows; then both compilers' unknown-attribute lines of those, by both paths, must be
+    // clang's.
+    check_test_driver_attribute_typos(test, clang, executable, directory);
     // The vocabulary itself (c_check_attribute_clang.inc), against this clang: each GNU name's __has_attribute and each C23
     // spelling's __has_c_attribute (under -std=gnu23) is nonzero, one answer per line.
     for (uint32_t standard = 0; written && standard < 2; standard += 1)

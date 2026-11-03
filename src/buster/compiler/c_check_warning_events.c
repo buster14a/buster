@@ -62,6 +62,9 @@ typedef enum CheckWarningEventKind
     // An attribute clang doesn't know, which it ignores (#147): payload.name its name's identifier, payload.data its scope's
     // (0 for none) with BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE where it is a C23 attribute ([[...]]) rather than GNU's.
     CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE,
+    // `__clang__`'s expansion where a C23 attribute's scope or name goes, which clang reads as `_Clang` (#147, c_parser.c's
+    // parse_clang_scope_numbers): -Wignored-attributes' warning at it.
+    CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

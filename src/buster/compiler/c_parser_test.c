@@ -454,6 +454,18 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int x) { __attribute__((aligned(4))) [[y]] int z; }\n", "1:45: an attribute list cannot appear here", 0 },
     { "void f(int x) { if (x) __attribute__((aligned(4))) [[y]] x++; }\n", "1:52: expected expression", 0 },
     { "void f(int x) { switch (x) { case 1: __attribute__((nomerge)) [[y]] x++; } }\n", "1:63: expected expression", 0 },
+    // With GNU attributes, every attribute of the prefix, C23's too, must be a statement's for a statement (clang's
+    // isStmtAttr), whatever the token after them; and specifiers of attributes alone have no type: an implicit int, but
+    // a member's error after C23 ones, which clang's specifiers don't hold.
+    { "void f(int x) { [[y]] __attribute__((nomerge)) zz++; }\n", "1:48: unknown type name 'zz'", 0, true },
+    { "void f(int x) { [[clang::noinline, y]] __attribute__((noinline)) zz++; }\n", "1:66: unknown type name 'zz'", 0, true },
+    { "void f(int x) { [[clang::nomerge]] __attribute__(()) x++; [[clang::likely]] __attribute__((nomerge)) x++; [[msvc::noinline, gnu::noinline]] __attribute__((noinline)) x++; }\n", "", 0 },
+    { "void f(int x) { [[__gnu__::__noinline__, _Clang::nomerge]] __attribute__((nomerge)) x++; }\n", "", 0 },
+    { "struct S { __attribute__((aligned(4))) *p; };\n", "1:41: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "struct S { int a; [[deprecated]] *p; };\n", "1:34: type name requires a specifier or qualifier", 0 },
+    { "[[deprecated]] *p;\n", "1:17: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(void) { __attribute__(()) __attribute__(()) *p; }\n", "1:53: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "void f(__attribute__((aligned(8))) *p);\n", "1:37: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
     // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
     { "typedef int U; typedef enum E : unsigned short { A } T; typedef enum : const U { B } V, W; int n = sizeof(T) + sizeof(V) + sizeof(W);\n", "", 0 },

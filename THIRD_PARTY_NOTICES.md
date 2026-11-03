@@ -648,10 +648,28 @@ the checker ignores the others with clang's `-Wunknown-attributes` warning
   scoped by `gnu::`, `clang::` or `msvc::`, whose `__has_c_attribute` clang
   answers nonzero under `-std=gnu23` (283 C23 spellings), each list in byte
   order. [The checker guide](docs/c-checker.md)'s "Attributes clang doesn't
-  know (#147)" records the procedure; the file's sha256 is
-  `39f2c159c86a110a0d2395ace205f3315d116301559610676559a1d6b87d73d3`.
+  know (#147)" records the procedure.
+- **Spelling list:** the 539 names and 9 scopes of every spelling in
+  `clang/include/clang/Basic/Attr.td` at `llvmorg-23.1.5` (sha256
+  `6014bff340878cf3c656bf3d1ccae64cfd33615d8245c4c5472d10ffd4dc6a1d`, with
+  `AttrDocs.td`, `ASTNode.td`, `DeclNodes.td` and `StmtNodes.td` it includes),
+  as `clang-tblgen --gen-attribute-spelling-list` of apt.llvm.org's
+  `clang-tools-23` of the same version writes them (clang's
+  `AttributeSpellingList.inc`), in its order, for clang's "did you mean"
+  suggestion. Only the names were taken. The file's sha256 is
+  `3eb1138c3a5692e91dc3a1b6a03afbbc0d6b94f76b4b732896eac951967bd218`.
+- **Statement attributes:** the parser's C23 statement-attribute spellings
+  (`parse_scalar_standard_statement_attribute`) are those of `Attr.td`'s
+  statement attributes, read from `clang-tblgen --gen-clang-attr-parsed-attr-impl`'s
+  output (names only).
 - **Cross-check:** the lists were compared with `clang/include/clang/Basic/Attr.td`
   at `llvmorg-23.1.1`, read for its spellings and their targets, none of it
-  copied. `test-checker-driver` asks the clang it runs every row again
+  copied: the GNU list is the spelling list's names whose `__has_attribute` is
+  nonzero, and asking `__has_c_attribute` of them under every scope adds no C23
+  spelling. clang's `SimpleTypoCorrection.cpp`, `Attributes.cpp` and
+  `SemaDeclAttr.cpp`'s `DiagnoseUnknownAttribute`, and its parser's
+  `TryParseCXX11AttributeIdentifier` and `ParseStatementOrDeclaration`, at
+  `llvmorg-23.1.1`, were read for their rules, which `c_check_warning_render.c`
+  and `c_parser.c` write again in C. `test-checker-driver` asks the clang it runs every row again
   (`check_test_driver_unknown_attributes` in
   `c_check_label_attribute_driver_test.c`), which copies none of its code.

@@ -947,23 +947,65 @@ struct CheckInputClangAttribute
     uint32_t length;
 };
 
+#define BUSTER_CHECK_CLANG_ENTRY(text) { text, sizeof(text) - 1 },
+#define BUSTER_CHECK_CLANG_NONE(text)
+
 static const CheckInputClangAttribute check_input_clang_gnu_attributes[] =
 {
-#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE(name) { name, sizeof(name) - 1 },
-#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE(spelling)
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_ENTRY
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_NONE
 #include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
 #undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
 #undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
 };
 
 static const CheckInputClangAttribute check_input_clang_c23_attributes[] =
 {
-#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE(name)
-#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE(spelling) { spelling, sizeof(spelling) - 1 },
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_ENTRY
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_NONE
 #include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
 #undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
 #undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
 };
+
+// clang's attribute spellings and scopes (AttributeSpellingList.inc), every syntax's, which its suggestion for an unknown
+// attribute's name or scope searches in this order.
+static const CheckInputClangAttribute check_input_clang_spellings[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_ENTRY
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_NONE
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+static const CheckInputClangAttribute check_input_clang_scopes[] =
+{
+#define BUSTER_CHECK_CLANG_GNU_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_C23_ATTRIBUTE BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SPELLING BUSTER_CHECK_CLANG_NONE
+#define BUSTER_CHECK_CLANG_SCOPE BUSTER_CHECK_CLANG_ENTRY
+#include "c_check_attribute_clang.inc"
+#undef BUSTER_CHECK_CLANG_SCOPE
+#undef BUSTER_CHECK_CLANG_SPELLING
+#undef BUSTER_CHECK_CLANG_C23_ATTRIBUTE
+#undef BUSTER_CHECK_CLANG_GNU_ATTRIBUTE
+};
+
+#undef BUSTER_CHECK_CLANG_NONE
+#undef BUSTER_CHECK_CLANG_ENTRY
 
 // Whether `text` is one of the `count` names of `list`, in byte order: a binary search.
 static bool check_input_attribute_listed(const CheckInputClangAttribute* list, uint32_t count, String8 text)
@@ -1021,6 +1063,30 @@ static bool check_input_attribute_clang_knows(String8 scope, String8 name, bool 
     return result;
 }
 
+// clang's warning at `__clang__`'s expansion where a C23 attribute's scope or name goes (#147), which the parser made the
+// identifier `_Clang` (parse_clang_scope_numbers): a token of that name whose source is a number.
+static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const PPTokens* output = &reader->pp->output;
+    const uint32_t source = parser->tokens.sources[token];
+    const bool rewritten = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && source < output->count && output->kinds[source] == C_TOKEN_NUMERIC_CONSTANT;
+    if (rewritten)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;
@@ -1033,11 +1099,15 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
     bool unknown = false;
     String8 scope = { 0 };
     uint32_t scope_name = 0;
+    if (valid && standard)
+    {
+        check_input_attribute_clang_macro(reader, i);
+    }
     if (valid && standard && i + 2 < end && parser->tokens.kinds[i + 1] == PARSE_KIND_COLON && parser->tokens.kinds[i + 2] == PARSE_KIND_COLON)
     {
         scope_name = parser->tokens.names[i];
         scope = check_input_attribute_name(reader, scope_name);
-        // clang's scope is spelled `clang` or `_Clang` (a keyword's underscores are already gone from `__clang__`).
+        // clang's scope is spelled `clang` or `_Clang` (`__clang__`'s expansion's too, parse_clang_scope_numbers).
         clang_scope = check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
         namespace_known = check_input_attribute_equal(scope, "gnu") || clang_scope;
         scoped = true;
@@ -1084,8 +1154,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         attribute.end = i;
         valid &= i == end || parser->tokens.kinds[i] == PARSE_KIND_COMMA;
         // An attribute clang doesn't know it ignores with a warning, whatever this checker's rules say of the name (GNU's
-        // externally_visible and access, C23's unsequenced).
-        const bool known = valid && check_input_attribute_clang_knows(scope, name, scoped, standard);
+        // externally_visible and access, C23's unsequenced). Its vocabulary is of spellings, a keyword's underscores
+        // stripped from `__x__` alone: a calling convention's keyword in a list (`__vectorcall`) is none, though
+        // check_input_attribute_name reads it as its convention's name for the keyword's own use.
+        const String8 written = check_input_attribute_name(reader, attribute.name);
+        const bool keyword = attribute.name >= C_NAME_CDECL && attribute.name <= C_NAME_VECTORCALL && written.length + 2 == reader->pp->table->spans[attribute.name].length;
+        const String8 spelled = keyword ? (String8){ written.pointer - 2, written.length + 2 } : written;
+        const bool known = valid && check_input_attribute_clang_knows(scope, spelled, scoped, standard);
         if (valid && rule != 0 && known)
         {
             attribute.kind = rule->kind;

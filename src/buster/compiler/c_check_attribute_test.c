@@ -413,10 +413,14 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
 // between them found, a name between two of them not, and a scoped C23 spelling found under each of its scopes' spellings.
 static void check_test_attribute_vocabulary(CheckTest* test)
 {
-    for (uint32_t standard = 0; standard < 2; standard += 1)
+    const CheckInputClangAttribute* const lists[4] = { check_input_clang_gnu_attributes, check_input_clang_c23_attributes, check_input_clang_spellings,
+                                                       check_input_clang_scopes };
+    const uint32_t counts[4] = { BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes), BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes),
+                                 BUSTER_ARRAY_LENGTH(check_input_clang_spellings), BUSTER_ARRAY_LENGTH(check_input_clang_scopes) };
+    for (uint32_t standard = 0; standard < 4; standard += 1)
     {
-        const CheckInputClangAttribute* list = standard != 0 ? check_input_clang_c23_attributes : check_input_clang_gnu_attributes;
-        const uint32_t count = standard != 0 ? BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) : BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes);
+        const CheckInputClangAttribute* list = lists[standard];
+        const uint32_t count = counts[standard];
         uint32_t unordered = 0;
         uint32_t found = 0;
         for (uint32_t i = 0; i < count; i += 1)
@@ -426,10 +430,12 @@ static void check_test_attribute_vocabulary(CheckTest* test)
             unordered += order > 0 || (order == 0 && list[i - 1].length >= list[i].length) || list[i].length >= 64 ? 1u : 0u;
             found += check_input_attribute_listed(list, count, (String8){ (char*)list[i].name, list[i].length }) ? 1u : 0u;
         }
-        check_test_expect(test, count > 256 && unordered == 0 && found == count, "attribute vocabulary: ordered, bounded and each name found");
+        check_test_expect(test, (count > 256 || (standard == 3 && count == 9)) && unordered == 0 && found == count,
+                          "attribute vocabulary: ordered, bounded and each name found");
     }
-    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes) == 366 && BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) == 283,
-                      "attribute vocabulary: clang 23.1.5's 366 GNU names and 283 C23 spellings");
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes) == 366 && BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) == 283 &&
+                          BUSTER_ARRAY_LENGTH(check_input_clang_spellings) == 539 && BUSTER_ARRAY_LENGTH(check_input_clang_scopes) == 9,
+                      "attribute vocabulary: clang 23.1.5's 366 GNU names, 283 C23 spellings, and its list's 539 spellings and 9 scopes");
     static const struct
     {
         const char* scope;
