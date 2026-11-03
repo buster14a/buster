@@ -37,7 +37,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
-      fail-fast: true
+      # On a pull request, the first failing architecture cancels the other; pushes to main and dispatched runs
+      # report both.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
         arch: [x86-64, native]
     steps:
