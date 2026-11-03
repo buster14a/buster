@@ -4,7 +4,8 @@
 // Source spelling for shared conversion facts. Context and publication belong to the caller; this constructor
 // allocates nothing and can be used while initializer parts must remain contiguous in their output arena.
 
-static bool check_warning_null_event(const Parser* parser, const TypeTable* types, TypeId destination, const CheckValue* value,
+// Always inlined (#880), as profile-guided builds do; hot caller: check_init_value.
+static inline __attribute__((always_inline)) bool check_warning_null_event(const Parser* parser, const TypeTable* types, TypeId destination, const CheckValue* value,
                                       uint32_t first, uint32_t end, uint32_t completion, CheckWarningEvent* event)
 {
     bool result = check_warning_null_integer(types, destination, value) && (value->flags & BUSTER_CHECK_LITERAL_ZERO) == 0 &&

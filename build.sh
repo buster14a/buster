@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# ./build.sh builds build/compiler, the only thing it writes under build/ besides compile_commands.json. It compiles the
-# translation units in a clang process each, one per core at a time, the longest first (main.c's units, which include
-# most of the compiler, take most of the time), then links their objects in the sources' order: the same executable as
-# one clang command for all of them. It reports how long the compiles took, and which took longest.
+# ./build.sh builds build/compiler, the only thing it writes under build/ besides compile_commands.json and BUSTER_PGO's
+# profile (below). It compiles the translation units in a clang process each, one per core at a time, the longest first
+# (main.c's units, which include most of the compiler, take most of the time), then links their objects in the sources'
+# order: the same executable as one clang command for all of them. It reports how long the compiles took, and which
+# took longest.
 # ./build.sh check-call-graph checks the no-recursion rule on the built compiler's call graph: it writes the LLVM IR of
 # the same translation units into a temporary directory, one per allowed core, and runs build/compiler check-call-graph on it.
 # The IR is clang's before any LLVM pass, so a call in it is a call in the source, at the build's own optimization
@@ -20,6 +21,11 @@
 # (#509), so time-runs compares builds over several placements.
 # print-compile-flags and print-sources print expanded compile arguments and source paths as NUL-delimited argv,
 # without building. Consumers read arrays rather than reevaluating shell text from this script.
+# BUSTER_PGO=1 builds build/compiler, and the shifts' executables, with a profile of its own compiles (#880): first an
+# instrumented executable compiles the training inputs, then build/compiler.profdata, what they counted, goes to every
+# compile with -fprofile-instr-use. It isn't the default, and no CI job builds so (train_profile, below); build-pgo.yml
+# checks its refusals, which come before any compile.
+# print-compile-flags leaves -fprofile-instr-use out, since only a build trains its profile.
 set -e
 # Fuzzing is opt-in. Its entry source defines buster_fuzz_test_input and is
 # included where the compiler's normal entry point has access to its modules.
@@ -91,6 +97,15 @@ if [ "${BUSTER_SANITIZER:-none}" != none ]; then
     debug=(-gline-tables-only)
     link_mode=(-pie)
 fi
+case "${BUSTER_PGO:-0}" in
+    0) [ -z "${BUSTER_PGO_TRAIN:-}" ] || { echo 'build.sh: BUSTER_PGO_TRAIN requires BUSTER_PGO=1' >&2; exit 1; } ;;
+    1)
+        [ "${BUSTER_SANITIZER:-none}" = none ] || { echo 'build.sh: BUSTER_PGO builds the production executable, not a sanitizer build' >&2; exit 1; }
+        [ -z "${BUSTER_HOST_RUNTIME:-}" ] || { echo "build.sh: BUSTER_PGO links the profile's runtime, which BUSTER_HOST_RUNTIME's link leaves out" >&2; exit 1; }
+        [ -z "${BUSTER_PGO_TRAIN:-}" ] || [ -f "$BUSTER_PGO_TRAIN" ] || { echo 'build.sh: BUSTER_PGO_TRAIN must name a file' >&2; exit 1; }
+        ;;
+    *) echo 'build.sh: BUSTER_PGO must be 0 or 1' >&2; exit 1 ;;
+esac
 fuzz_libraries=()
 if [ "${BUSTER_FUZZ_AVAILABLE:-0}" = 1 ]; then
     [ "${BUSTER_SANITIZER:-none}" != thread ] || { echo 'build.sh: libFuzzer cannot be combined with ThreadSanitizer' >&2; exit 1; }
@@ -358,6 +373,60 @@ select_linker()
     fi
     echo "build.sh: stage 1 linker: ${linker:-system default}" >&2
 }
+# The source of index $1 compiled by the instrumented executable in `pgo_directory` as build.sh compiles it, as -E,
+# -fsyntax-only and -c: train_profile's inputs without BUSTER_PGO_TRAIN.
+train_source()
+{
+    local source=("${sources[$1]}" "${flags[@]}" "${defines[@]}")
+    "$pgo_directory/compiler" -E -P "${source[@]}" -o /dev/null
+    "$pgo_directory/compiler" -fsyntax-only "${source[@]}"
+    "$pgo_directory/compiler" -c "${source[@]}" -o "$pgo_directory/train/$1.o"
+}
+# With BUSTER_PGO=1, adds to `flags` the profile of the compiler's own compiles, build/compiler.profdata (#880). An
+# executable of the sources compiled with -fprofile-instr-generate, in a temporary directory and unbaked (its counters
+# are writable memory outside buster_baked, which bake-tables refuses), compiles the training inputs, a profile per
+# process, and llvm-profdata merges them. The inputs are the compiler's own translation units (train_source) or, with
+# BUSTER_PGO_TRAIN, that bash script, run in a directory of its own with BUSTER_PGO_COMPILER naming the executable: on
+# the 9700X, a profile of its frozen sqlite3.c, musl's units and c-testsuite took 2.4 to 3.6% off -c's time and 6 to 7%
+# of its instructions, for the same objects (buster-performance#182).
+train_profile()
+{
+    [ "${BUSTER_PGO:-0}" = 1 ] || return 0
+    local profdata start end jobs
+    profdata="$(dirname "$(realpath "$(command -v clang)")")/llvm-profdata"
+    [ -x "$profdata" ] || profdata="$(command -v llvm-profdata)" || { echo 'build.sh: BUSTER_PGO needs llvm-profdata' >&2; return 1; }
+    pgo_directory="$(mktemp -d)"
+    temporary+=("$pgo_directory")
+    mkdir "$pgo_directory/objects" "$pgo_directory/train" "$pgo_directory/logs"
+    jobs="$(cores)"
+    jobs="$((jobs != 0 ? jobs : ${#sources[@]}))"
+    now start
+    (
+        object_directory="$pgo_directory/objects"
+        debug=()
+        flags+=(-fprofile-instr-generate)
+        linker_flags+=(-fprofile-instr-generate)
+        each_source "$object_directory" compile_source "$jobs"
+        linked=()
+        for i in "${!sources[@]}"; do
+            linked+=("$object_directory/$i.o")
+        done
+        BUSTER_BAKE=0 link_program "$pgo_directory/compiler" "${linked[@]}"
+    )
+    export LLVM_PROFILE_FILE="$pgo_directory/profiles/%p.profraw"
+    if [ -n "${BUSTER_PGO_TRAIN:-}" ]; then
+        local script
+        script="$(realpath "$BUSTER_PGO_TRAIN")"
+        (cd "$pgo_directory/train" && BUSTER_PGO_COMPILER="$pgo_directory/compiler" bash "$script")
+    else
+        each_source "$pgo_directory/logs" train_source "$jobs"
+    fi
+    unset LLVM_PROFILE_FILE
+    "$profdata" merge -o build/compiler.profdata "$pgo_directory"/profiles/*.profraw
+    now end
+    echo "build.sh: trained build/compiler.profdata in $(((end - start) / 1000000)) s" >&2
+    flags+=("-fprofile-instr-use=$(realpath build/compiler.profdata)")
+}
 defines=()
 # BUSTER_BUILD_DEFINES adds preprocessor definitions to every translation unit for measurement-variant builds, split on
 # whitespace (e.g. to A/B a compile-time policy constant under perf).
@@ -401,6 +470,8 @@ elif [ "$1" = lexer-variant-assembly ]; then
 elif [ "$1" = lexer-variant ]; then
     shift
     [ $# -ne 0 ] || { echo "usage: ./build.sh lexer-variant NAME=SOURCE..." >&2; exit 1; }
+    # The variants change main.c's code, which the profile of the compiler without them would no longer match.
+    [ "${BUSTER_PGO:-0}" = 0 ] || { echo "build.sh lexer-variant: BUSTER_PGO builds build/compiler and the shifts' executables alone" >&2; exit 1; }
     select_linker
     rm -rf build || true
     mkdir -p build
@@ -452,6 +523,7 @@ elif [ "$1" = shifts ]; then
     select_linker
     rm -rf build || true
     mkdir -p build
+    train_profile
     build_compiler
     for bytes in "$@"; do
         link_shifted "$directory/compiler-$bytes" "$unit" "$bytes"
@@ -460,5 +532,6 @@ else
     select_linker
     rm -rf build || true
     mkdir -p build
+    train_profile
     build_compiler
 fi

@@ -103,6 +103,20 @@ fuzzing and the hardware job, including native correctness, so a skipped hardwar
 hosted failure cannot accidentally satisfy the merge gate. Documentation-only
 changes retain their explicit no-code path.
 
+A pull request's run stops at its first failure. Its two test rows' shards fail
+fast, and its tests wait for the agent-guide size and DCO hook checks, which finish
+within the `changes` job's time, and don't start when either fails, so the
+9700X job never runs for a pull request whose qualification can't pass. Pushes
+to main, the daily run and dispatched runs keep `fail-fast: false` and test
+whatever those checks report: their sanitizer rows and fuzz campaigns are main's
+coverage, and one detector's failure must not hide what the others find. The
+Tier 1 machine-problem workflow's two architectures follow the same rule.
+GitHub has no fail-fast across jobs. A job that cancels the run through the API
+was considered (#1195) and dropped: it needs a token with `actions: write`,
+which fork pull requests don't get; on a pull request, once the policy checks
+gate the tests, nothing would remain for it to stop; and on the other runs it
+would cut the coverage above.
+
 To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
 `BUSTER_HOST_ARCH=x86-64` for `build.sh`; keep Zen 5 performance measurements on
