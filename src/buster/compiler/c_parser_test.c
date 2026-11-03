@@ -17,6 +17,10 @@
 //     in the -E text, with spaces kept around the change). With --clang, each is checked against clang: a file clang
 //     accepts must be accepted, and one whose first error is a "Parse Issue" must be rejected with its first error on
 //     the same line. Without, each goes through both paths, which must agree as on any file.
+// The checks that take no input (the snippets, the trees, the workspace, the kernels' tables and the handoff's streams)
+// run with files too, but with --files-only, for a run of files beside one without (the correctness list's): those
+// checks read neither the files nor their options but --seed and the language, which -std and the -f options of its
+// keywords and digraphs give, so a second run with the same would repeat them.
 //
 // main.c includes this file after c_parser.c. Layout: running the parser on a file (ParseTestOutcome,
 // parse_test_parse_file), running clang (parse_test_clang), the snippets, the trees, the kernels, the paths on one
@@ -3764,6 +3768,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     uint64_t streams = 2000;
     uint32_t first_line = 0;
     uint32_t last_line = UINT32_MAX;
+    bool files_only = false;
     char** rest = malloc(sizeof(char*) * ((size_t)argument_count + 2));
     int rest_count = 0;
     const char** clang_arguments = malloc(sizeof(char*) * ((size_t)argument_count + 2));
@@ -3793,6 +3798,10 @@ static int run_parser_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argument, "--files-only") == 0)
+        {
+            files_only = true;
         }
         else if (strcmp(argument, "--print-tree") == 0 && i + 1 < argument_count)
         {
@@ -3869,10 +3878,12 @@ static int run_parser_tests(int argument_count, char** arguments)
     char directory[4096];
     const char* temporary = oracle_temporary_directory();
     snprintf(directory, sizeof(directory), "%s/buster-test-parser-XXXXXX", temporary);
+    // --files-only leaves out the checks without input, which only a run with files may do without.
+    valid = valid && (!files_only || input_count != 0);
     valid = valid && mkdtemp(directory) != 0;
     if (!valid)
     {
-        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
+        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [--files-only] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
         failures += 1;
     }
     else if (print_tree != 0)
@@ -3884,13 +3895,16 @@ static int run_parser_tests(int argument_count, char** arguments)
     {
         // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
         OracleCache* oracle = oracle_cache();
-        failures += parse_test_check_postorder_self(&arena);
-        failures += parse_test_workspace_budget();
-        failures += parse_test_check_k6_tables();
-        failures += parse_test_check_handoff(options.language, seed);
-        failures += parse_test_check_snippets(directory, clang);
-        failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
-        failures += parse_test_check_fixtures(directory);
+        if (!files_only)
+        {
+            failures += parse_test_check_postorder_self(&arena);
+            failures += parse_test_workspace_budget();
+            failures += parse_test_check_k6_tables();
+            failures += parse_test_check_handoff(options.language, seed);
+            failures += parse_test_check_snippets(directory, clang);
+            failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
+            failures += parse_test_check_fixtures(directory);
+        }
         if (input_count == 0)
         {
             // The generated inputs, with -E's options but no includes.
