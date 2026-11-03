@@ -141,11 +141,16 @@ of the same tables takes it, and no ordinary reservation does. The parser's
 columns follow their unit's token count, so where the address space is
 unbounded the parser rounds each to a power of two, which units of similar sizes
 then share; under a finite `RLIMIT_AS` or compact reservations each keeps its
-own size. `test-lanes` checks the tables' zero, writable and separate bytes,
-their pages' advice against an arena of their own's, the pool's reuse for the
-same tables alone, not for another layout, the floor's or an ordinary
-reservation, and for 4,096 random sets of tables a layout in order, aligned and
-no larger than their own arenas.
+own size. A power of two of bytes, past 64 KB of base pages, ends 64 KB short of
+a huge-page boundary, so a column's last huge page is base pages: rounding to the
+base pages and a power of two past them instead took back 632 of `sqlite3.c`'s
+faults, but no time measurable on the 9700X, and was not kept (#1203's review).
+`test-lanes` checks the tables' zero, writable and separate bytes, their pages'
+advice against an arena of their own's, the pool's reuse for the same tables
+alone, not for another layout, the floor's or an ordinary reservation; for 4,096
+random sets of tables a layout in order, aligned and no larger than their own
+arenas; and, in a child under `RLIMIT_AS`, tables refused for their size, which
+past 64 MB switch the thread to compact reservations.
 
 Tests that deliberately
 poison unused logical capacity explicitly commit that test memory first; a raw

@@ -374,6 +374,16 @@ So a units lane does four things:
   `benchmark-check-units`, which the 9700X job runs, reports each lane count's
   system time against one lane's: on 8 lanes, synth's shape still takes 3.6
   times one lane's system time for 3.1 times its speed.
+  #1203's review found that this first layout, which rounded each table's
+  huge pages out to a whole huge page, mapped more address space than the
+  tables' own arenas: under a 512 MiB `RLIMIT_AS` a one-line unit's replay
+  for its expansion history no longer fitted. A table now ends at its own
+  end, and a group maps no more than its tables' own arenas did. Against main
+  `a4a2182a` ([the record's review
+  section](https://github.com/buster14a/buster-performance/tree/af6767ef8bfc3f1927f4d75d689eabf1f1525324/docs/measurements/arena-tables-1128-2026-11-03/review)),
+  Lua's link took 75.0 ms against 76.6 on one lane and 30.2 against 33.3 on 8,
+  synth's 428.0 against 449.4 on 8 lanes, and `sqlite3.c`'s `-c` 110.1
+  against 109.7 on the same instructions.
 - **A small unit's other arenas start with base pages** (`arena_small_floor`,
   which only the units' lanes set): the first 16 MB of each arena that a unit
   of less than 1 MB of source reserves (`BUSTER_CHECK_UNITS_SMALL_BYTES` and
