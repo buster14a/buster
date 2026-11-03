@@ -88,7 +88,8 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         // A mask, and a mask's store, need the opmask class's allocation (#179), and a floating value, its operations and
         // its comparison the vector class's (#141).
         const bool mask = tier1_select_mask_width(type) != 0 || tier1_select_mask_rule(rule);
-        const bool floating = tier1_select_float_width(type) != 0 || tier1_select_float_rule(rule);
+        // A long double's (#141) needs the CFG consumer's frame objects of values.
+        const bool floating = tier1_select_float_width(type) != 0 || tier1_select_float_rule(rule) || tier1_select_x87_node(function, node);
         // Arguments past their classes' registers, and parameters past them, which the CFG consumer's entry loads, are its
         // own (#141).
         const bool stacked = (op == IR_CALL && tier1_select_call_stack_bytes(function, &function->calls[function->b[node]]) != 0) ||
@@ -172,10 +173,23 @@ static bool tier1_emit_cfg_overflow_area(const IrFunction* function, uint32_t sl
 
 // The frame objects: the IR's slots, then, for a function with its own ABI records (#789), one per parameter (a by-value
 // aggregate's copy, tier1_select_aggregate_parameter's) and one for the hidden pointer an aggregate result returns
-// through, which the entry stores (tier1_emit_cfg_entry). Their rows follow in that order.
-static uint32_t tier1_emit_cfg_object_count(const IrFunction* function)
+// through, which the entry stores (tier1_emit_cfg_entry); then, for a function with long doubles (#141), one per F80
+// node, its value's 16 bytes (tier1_emit_cfg_x87_object), and the x87's scratch object past them, which a conversion's
+// control words and its integer or floating value pass through. Their rows follow in that order.
+static uint32_t tier1_emit_cfg_record_count(const IrFunction* function)
 {
     return function->slot_count + (function->parameter_passed != 0 ? function->parameter_count + 1 : 0);
+}
+
+static uint32_t tier1_emit_cfg_object_count(const IrFunction* function, const Tier1EmitPrepared* prepared)
+{
+    return tier1_emit_cfg_record_count(function) + prepared->x87_count + (prepared->x87_count != 0 ? 1 : 0);
+}
+
+// A long double node's frame object (#141), or the x87 scratch object for UINT32_MAX.
+static uint32_t tier1_emit_cfg_x87_object(const IrFunction* function, const Tier1EmitPrepared* prepared, uint32_t node)
+{
+    return tier1_emit_cfg_record_count(function) + (node == UINT32_MAX ? prepared->x87_count : prepared->x87_ranks[node]);
 }
 
 // The bytes frame object `object` past the IR's slots takes (#789): a by-value aggregate parameter's copy, which the entry
@@ -184,11 +198,13 @@ static uint32_t tier1_emit_cfg_object_count(const IrFunction* function)
 // takes a row of one byte, which nothing reads, as a function without the hidden pointer does for it.
 static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, uint32_t object)
 {
+    // A long double's object and the x87 scratch object (#141): 16 bytes, aligned to 16.
+    const bool x87 = object >= tier1_emit_cfg_record_count(function);
     const uint32_t parameter = object - function->slot_count;
     const IrPassed* record = parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
     const bool copied = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS;
     const bool hidden = parameter == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
-    return copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
+    return x87 ? 16 : copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
 }
 
 // Whether frame object `object` has its address in the caller's frame, past the return address, `*past` bytes into the
@@ -373,11 +389,17 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t floats = 0;
     Tier1EmitPrepared* prepared = &emitted->prepared;
     // Each node's class: the opmask class's for a mask (#179), the vector class's for a floating value (#141), the
-    // general class's for anything else.
+    // general class's for anything else. A long double (#141) is no value of the allocation's: its frame object holds it.
     uint8_t* node_classes = ok ? ir_allocate(output, (uint64_t)count + 1, 1, &ok) : 0;
+    prepared->x87_ranks = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
+    prepared->x87_count = 0;
+    prepared->function = function;
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
-        const bool value = plan->covered[node] == 0 && function->type[node] != IR_VOID;
+        const bool x87 = function->type[node] == IR_F80;
+        prepared->x87_ranks[node] = x87 ? prepared->x87_count : UINT32_MAX;
+        prepared->x87_count += x87;
+        const bool value = plan->covered[node] == 0 && function->type[node] != IR_VOID && !x87;
         const bool mask = tier1_select_mask_width(function->type[node]) != 0;
         const bool floating = tier1_select_float_width(function->type[node]) != 0;
         node_classes[node] = mask ? BUSTER_TIER1_ALLOCATE_MASK : floating ? BUSTER_TIER1_ALLOCATE_VECTOR : BUSTER_TIER1_ALLOCATE_GPR;
@@ -386,8 +408,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         node_values[node] = value ? value_count : BUSTER_TIER1_CFG_NONE;
         value_nodes[value_count] = node;
         value_count += value;
-        phi_count += function->op[node] == IR_PHI;
-        operand_count += function->op[node] == IR_PHI ? function->b[node] : 0;
+        phi_count += function->op[node] == IR_PHI && !x87;
+        operand_count += function->op[node] == IR_PHI && !x87 ? function->b[node] : 0;
         returns += function->op[node] == IR_RET;
         symbols += function->op[node] == IR_SYMBOL_ADDR;
         // A division's rax and rdx, and a shift's rcx, may need call-save rows for the values it doesn't take.
@@ -429,7 +451,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     // temporary slots', then each frame object's, live throughout until its lifetime markers say otherwise
     // (tier1_emit_cfg_lifetimes): the IR's slots, and past them the records' objects (tier1_emit_cfg_object_count), which
     // no marker names.
-    const uint32_t objects = tier1_emit_cfg_object_count(function);
+    const uint32_t objects = error == TIER1_EMIT_OK ? tier1_emit_cfg_object_count(function, prepared) : 0;
     prepared->classes = node_classes;
     prepared->mask_columns = masks != 0 ? 8 : 0;
     prepared->vector_columns = floats != 0 ? 16 : 0;
@@ -469,7 +491,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             const bool anchor = slot != 0 && (slot->flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) != 0;
             const uint32_t record_bytes = slot == 0 ? tier1_emit_cfg_record_object_bytes(function, o) : 0;
             prepared->sizes[count + fixed_columns + o] = slot == 0 ? record_bytes : !anchor && slot->size != 0 ? (uint32_t)slot->size : 1;
-            prepared->alignments[count + fixed_columns + o] = slot == 0 ? (record_bytes > 1 ? 8 : 1) : !anchor && slot->alignment != 0 ? slot->alignment : 1;
+            prepared->alignments[count + fixed_columns + o] = slot == 0 ? (record_bytes == 16 && o >= tier1_emit_cfg_record_count(function) ? 16 : record_bytes > 1 ? 8 : 1) :
+                                                                          !anchor && slot->alignment != 0 ? slot->alignment : 1;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
@@ -624,11 +647,13 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         }
         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
         // definition's own use. A parameter's, at position 0, precedes every other use of it.
+        // A long double argument (#141) is no value's use: its call copies it from its object.
         for (uint32_t node = 0; node < count; node += 1)
         {
             for (uint32_t use = plan->effective_use_offsets[node]; use < plan->effective_use_offsets[node + 1]; use += 1)
             {
-                use_offsets[node_values[plan->effective_use_values[use]] + 1] += 1;
+                const uint32_t v = node_values[plan->effective_use_values[use]];
+                use_offsets[v + 1] += v != BUSTER_TIER1_CFG_NONE;
             }
         }
         for (uint32_t v = 0; v < value_count; v += 1)
@@ -660,9 +685,12 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                 // wherever it is (tier1_emit_cfg_aggregate_copy).
                 const uint8_t kind = argument < arguments ? tier1_select_argument_place(function, called, argument, &places).kind : BUSTER_TIER1_PLACE_GENERAL;
                 const bool stacked = kind == BUSTER_TIER1_PLACE_STACK || kind == BUSTER_TIER1_PLACE_AGGREGATE;
-                use_positions[use_cursors[v]] = base + 2 * node;
-                use_required[use_cursors[v]] = !stacked;
-                use_cursors[v] += 1;
+                if (v != BUSTER_TIER1_CFG_NONE)
+                {
+                    use_positions[use_cursors[v]] = base + 2 * node;
+                    use_required[use_cursors[v]] = !stacked;
+                    use_cursors[v] += 1;
+                }
             }
             if (defined != BUSTER_TIER1_CFG_NONE && !tier1_select_entry_parameter(function, node) && function->op[node] != IR_PHI)
             {
@@ -687,7 +715,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                 const bool is_phi = function->op[node] == IR_PHI;
                 error = !is_phi || (leading && b != added) ? error : added != 0 ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
                 leading = leading && is_phi;
-                if (error == TIER1_EMIT_OK && is_phi)
+                // A long double's phi (#141) is no value's: its edges copy its operand's object into its own
+                // (tier1_emit_cfg_x87_phis).
+                if (error == TIER1_EMIT_OK && is_phi && function->type[node] != IR_F80)
                 {
                     phi_values[phi] = node_values[node];
                     phi_operand_offsets[phi] = operand;
@@ -714,7 +744,27 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         }
         phi_offsets[blocks] = phi;
         phi_operand_offsets[phi] = operand;
+        // The edges along which a long double phi (#141) takes a value, which tier1_emit_cfg_x87_phis copies: placed as
+        // edges with moves.
+        uint8_t* edge_copies = prepared->x87_count != 0 ? ir_allocate(output, (uint64_t)edges + 1, 1, &ok) : 0;
+        error = ok ? error : TIER1_EMIT_MEMORY;
+        for (uint32_t b = added; error == TIER1_EMIT_OK && edge_copies != 0 && b < blocks; b += 1)
+        {
+            for (uint32_t e = successor_offsets[b]; e < successor_offsets[b + 1]; e += 1)
+            {
+                const uint32_t target = successors[e] - added;
+                for (uint32_t node = function->block_offsets[target]; node < function->block_offsets[target + 1] && function->op[node] == IR_PHI; node += 1)
+                {
+                    for (uint32_t pair = 0; function->type[node] == IR_F80 && pair < function->b[node]; pair += 1)
+                    {
+                        const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
+                        edge_copies[e] |= entry[0] == b - added && entry[1] < count && function->op[entry[1]] != IR_UNDEF;
+                    }
+                }
+            }
+        }
         emitted->cfg_input = (Tier1CfgInput){
+            .edge_copies = edge_copies,
             .block_starts = block_starts,
             .successor_offsets = successor_offsets,
             .successors = successors,
@@ -817,7 +867,7 @@ static bool tier1_emit_cfg_object(const IrFunction* function, const Tier1EmitRes
     uint64_t past = 0;
     // The records' objects past the IR's slots (#789): a by-value aggregate parameter's copy and the hidden pointer's, but
     // an aggregate on the stack whole, whose copy is in the incoming area.
-    const bool record = object >= function->slot_count && object < tier1_emit_cfg_object_count(function) && !tier1_emit_cfg_incoming_object(function, object, &past);
+    const bool record = object >= function->slot_count && object < tier1_emit_cfg_object_count(function, &emitted->prepared) && !tier1_emit_cfg_incoming_object(function, object, &past);
     const bool found = (object < function->slot_count || record) && (flags & BUSTER_IR_SLOT_OVERFLOW_AREA) == 0 && (save_area ? emitted->frame.variadic : row < emitted->frame.count);
     *offset = !found ? 0 : save_area ? emitted->frame.variadic_offset : emitted->frame.offset[row];
     return found;
@@ -986,7 +1036,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     const uint32_t temporary_columns = call_slots + prepared->mask_columns + prepared->vector_columns;
     const uint32_t fixed_columns = temporary_columns + BUSTER_TIER1_ALLOCATE_CLASSES;
     bool ok = true;
-    const uint32_t objects = tier1_emit_cfg_object_count(plan->function);
+    const uint32_t objects = tier1_emit_cfg_object_count(plan->function, prepared);
     uint32_t* indices = ir_allocate(scratch, (uint64_t)spills + call_slots + mask_slots + vector_slots + temporary + objects + 1, 4, &ok);
     uint8_t* phis = ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok);
     Tier1EmitError error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
@@ -1112,18 +1162,29 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
 // through the scratch register, or recomputed into the scratch register. A general register's mov stores the slot's 8
 // bytes, an I32's bits past its 32 the callee's to ignore, and a floating value's movss or movsd its 4 or 8, the rest
 // of the slot unwritten and the callee's to ignore too, as the ABI says.
+static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t node, int32_t* offset);
+static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int32_t displacement);
+
 static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint32_t slot, Tier1EmitBuffer* buffer)
 {
     const uint8_t base = (uint8_t)emitted->frame.base_register;
+    const IrFunction* function = emitted->prepared.function;
+    // A long double (#141): its object's 10 bytes into its 16, through the x87 stack.
+    const bool x87 = value < function->instruction_count && function->type[value] == IR_F80;
     const uint32_t v = emitted->node_values[value];
     uint32_t location = BUSTER_TIER1_CFG_NONE;
     uint8_t kind = 0;
     int32_t offset = 0;
-    const bool found = v != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, v, position, &location, &kind);
-    Tier1EmitError error = found ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    const bool found = x87 ? tier1_emit_cfg_x87_offset(function, emitted, value, &offset) : v != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, v, position, &location, &kind);
+    Tier1EmitError error = found ? TIER1_EMIT_OK : x87 ? TIER1_EMIT_FRAME : TIER1_EMIT_ALLOCATION;
     uint8_t source = BUSTER_TIER1_SELECT_SCRATCH;
     uint16_t form = X86_FORM_MOV_RM64_R64;
-    if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER && tier1_emit_cfg_vector_location(location))
+    if (error == TIER1_EMIT_OK && x87)
+    {
+        error = tier1_emit_append(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, offset)) ? error : TIER1_EMIT_MEMORY;
+        form = X86_FORM_FSTP_M80;
+    }
+    else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER && tier1_emit_cfg_vector_location(location))
     {
         source = (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
         form = tier1_select_float_forms(emitted->prepared.sizes[value])->store;
@@ -1146,9 +1207,10 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
     }
     else
     {
-        error = TIER1_EMIT_ALLOCATION;
+        error = error == TIER1_EMIT_OK ? TIER1_EMIT_ALLOCATION : error;
     }
-    const X86Instruction store = { .displacement = (int32_t)slot, .reg = source, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = form };
+    // fstp's record has no register (its x87 stack's top).
+    const X86Instruction store = { .displacement = (int32_t)slot, .reg = x87 ? 0 : source, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = form };
     return error == TIER1_EMIT_OK ? (tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY) : error;
 }
 
@@ -1347,9 +1409,14 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
 
 // Moves [first, end) of tier1_cfg's columns: registers and slots by tier1_cfg's location ids, and recomputations
 // (tier1_emit_copy, a symbol's with its reference), into a slot through the scratch register.
-static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t first, uint32_t end, Tier1EmitBuffer* buffer)
+static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t edge, Tier1EmitBuffer* buffer);
+
+// Edge `edge`'s moves, and its long double phis' copies (#141, tier1_emit_cfg_x87_phis) after them.
+static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t edge, Tier1EmitBuffer* buffer)
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
+    const uint32_t first = cfg->edge_move_offsets[edge];
+    const uint32_t end = cfg->edge_move_offsets[edge + 1];
     const uint8_t base = (uint8_t)emitted->frame.base_register;
     Tier1EmitError error = TIER1_EMIT_OK;
     for (uint32_t m = first; error == TIER1_EMIT_OK && m < end; m += 1)
@@ -1447,6 +1514,10 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
         }
         emitted->edge_moves += error == TIER1_EMIT_OK ? record_count : 0;
     }
+    if (error == TIER1_EMIT_OK && emitted->prepared.x87_count != 0)
+    {
+        error = tier1_emit_cfg_x87_phis(emitted->prepared.function, emitted, edge, buffer);
+    }
     return error;
 }
 
@@ -1525,7 +1596,7 @@ static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b
         error = tier1_emit_cfg_jump(buffer, inverse, f, pending_branches, pending_goals, pending, emitted);
         stub_first[e_true] = buffer->count;
         emitted->edge_stubs += 1;
-        error = error == TIER1_EMIT_OK ? tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e_true], cfg->edge_move_offsets[e_true + 1], buffer) : error;
+        error = error == TIER1_EMIT_OK ? tier1_emit_cfg_moves(emitted, e_true, buffer) : error;
         if (error == TIER1_EMIT_OK && t != b + 1)
         {
             error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, t, pending_branches, pending_goals, pending, emitted);
@@ -1539,7 +1610,7 @@ static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b
         {
             stub_first[e_false] = buffer->count;
             emitted->edge_stubs += 1;
-            error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e_false], cfg->edge_move_offsets[e_false + 1], buffer);
+            error = tier1_emit_cfg_moves(emitted, e_false, buffer);
         }
         if (error == TIER1_EMIT_OK && (f != b + 1 || split_true))
         {
@@ -1549,7 +1620,7 @@ static Tier1EmitError tier1_emit_cfg_branch(Tier1EmitResult* emitted, uint32_t b
         {
             stub_first[e_true] = buffer->count;
             emitted->edge_stubs += 1;
-            error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e_true], cfg->edge_move_offsets[e_true + 1], buffer);
+            error = tier1_emit_cfg_moves(emitted, e_true, buffer);
             if (error == TIER1_EMIT_OK && t != b + 1)
             {
                 error = tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, t, pending_branches, pending_goals, pending, emitted);
@@ -1573,7 +1644,7 @@ static Tier1EmitError tier1_emit_cfg_indirect(Tier1EmitResult* emitted, uint32_t
         {
             stub_first[e] = buffer->count;
             emitted->edge_stubs += 1;
-            error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e], cfg->edge_move_offsets[e + 1], buffer);
+            error = tier1_emit_cfg_moves(emitted, e, buffer);
             error = error == TIER1_EMIT_OK ? tier1_emit_cfg_jump(buffer, X86_FORM_JMP_REL8, input->successors[e], pending_branches, pending_goals, pending, emitted) : error;
         }
     }
@@ -1682,6 +1753,265 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
         const X86Instruction load = { .displacement = hidden_offset, .reg = holder, .rm = (uint8_t)emitted->frame.base_register, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
         error = tier1_emit_append(buffer, load) && tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, holder, 0, source, 0, function->result_size) ? error : TIER1_EMIT_MEMORY;
         error = error != TIER1_EMIT_OK || holder == X86_REGISTER_RAX || tier1_emit_append(buffer, tier1_emit_move(holder, X86_REGISTER_RAX, 8)) ? error : TIER1_EMIT_MEMORY;
+    }
+    return error;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Long double (#141)
+
+// A record of `form` on the memory at `displacement` from `base`.
+static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int32_t displacement)
+{
+    return (X86Instruction){ .form = (uint16_t)form, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = displacement };
+}
+
+// An x87 register's record of `form` (st(i)).
+static X86Instruction tier1_emit_cfg_x87_register(uint32_t form, uint32_t i)
+{
+    return (X86Instruction){ .form = (uint16_t)form, .rm = (uint8_t)i, .mode = BUSTER_X86_REGISTER_DIRECT };
+}
+
+// A long double node's object's offset from the frame's base, or the x87 scratch object's for UINT32_MAX.
+static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t node, int32_t* offset)
+{
+    const bool known = node == UINT32_MAX ? emitted->prepared.x87_count != 0 : node < function->instruction_count && emitted->prepared.x87_ranks[node] != UINT32_MAX;
+    return known && tier1_emit_cfg_object(function, emitted, tier1_emit_cfg_x87_object(function, &emitted->prepared, node), offset);
+}
+
+// A long double node's records (TIER1_RULE_X87, #141), as Tier 0's (tier0_emit_x87): its long double operands loaded onto
+// the x87 stack from their objects, the operation, and a long double result stored into its object, leaving the x87
+// stack empty. The scratch object (16 bytes) holds a conversion's control words (bytes 0 to 3: the caller's, then rounding
+// toward zero, which C's conversions to integers take and fisttp, SSE3's, is past the baseline), 2^63 as a float (4) and
+// an integer or a floating operand or result (8). The scratch register widens an integer operand, and moves the control
+// word and an unsigned 64-bit result's top bit; the holes' registers are the node's values' (`left` an address or a
+// conversion's operand, `destination` a comparison's or a conversion's result).
+static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t node, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+{
+    const uint8_t base = (uint8_t)emitted->frame.base_register;
+    const uint8_t scratch = BUSTER_TIER1_SELECT_SCRATCH;
+    const uint32_t kind = holes->scale;
+    const uint32_t a = function->a[node];
+    const uint32_t b = function->b[node];
+    int32_t own = 0;
+    int32_t left = 0;
+    int32_t right = 0;
+    int32_t temporary = 0;
+    const bool produces = function->type[node] == IR_F80;
+    const bool reads_a = kind == BUSTER_TIER1_X87_COPY || kind == BUSTER_TIER1_X87_BINARY || kind == BUSTER_TIER1_X87_NEGATE || kind == BUSTER_TIER1_X87_COMPARE || kind == BUSTER_TIER1_X87_TO_FLOAT ||
+                         kind == BUSTER_TIER1_X87_TO_INT;
+    const bool reads_b = kind == BUSTER_TIER1_X87_BINARY || kind == BUSTER_TIER1_X87_COMPARE || kind == BUSTER_TIER1_X87_STORE;
+    const bool converts = kind == BUSTER_TIER1_X87_FROM_FLOAT || kind == BUSTER_TIER1_X87_TO_FLOAT || kind == BUSTER_TIER1_X87_FROM_INT || kind == BUSTER_TIER1_X87_TO_INT;
+    bool valid = (!produces || tier1_emit_cfg_x87_offset(function, emitted, node, &own)) && (!reads_a || tier1_emit_cfg_x87_offset(function, emitted, a, &left)) &&
+                 (!reads_b || tier1_emit_cfg_x87_offset(function, emitted, b, &right)) && (!converts || tier1_emit_cfg_x87_offset(function, emitted, UINT32_MAX, &temporary));
+    X86Instruction records[32];
+    uint32_t count = 0;
+    const X86Instruction store = tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, base, own);
+    if (valid && kind == BUSTER_TIER1_X87_CONSTANT)
+    {
+        // Its 10 bytes as immediates: the significand's halves, then the sign and the exponent.
+        const IrConstant constant = function->constants[holes->immediate];
+        X86Instruction low = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own);
+        X86Instruction high = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own + 4);
+        X86Instruction exponent = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM16_IMM16, base, own + 8);
+        low.immediate = (int32_t)(uint32_t)constant.low;
+        high.immediate = (int32_t)(uint32_t)(constant.low >> 32);
+        exponent.immediate = (int32_t)(uint16_t)constant.high;
+        records[count++] = low;
+        records[count++] = high;
+        records[count++] = exponent;
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_LOAD)
+    {
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, holes->left, 0);
+        records[count++] = store;
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_STORE)
+    {
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, right);
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, holes->left, 0);
+    }
+    else if (valid && (kind == BUSTER_TIER1_X87_COPY || kind == BUSTER_TIER1_X87_NEGATE))
+    {
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        if (kind == BUSTER_TIER1_X87_NEGATE)
+        {
+            records[count++] = (X86Instruction){ .form = X86_FORM_FCHS };
+        }
+        records[count++] = store;
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_BINARY)
+    {
+        // a into st1 and b into st0, then faddp (fsubp, fmulp, fdivp) st(1), st(0), whose st(1) − st(0) is a − b.
+        static const uint16_t operations[4] = { X86_FORM_FADDP_ST_ST0, X86_FORM_FSUBP_ST_ST0, X86_FORM_FMULP_ST_ST0, X86_FORM_FDIVP_ST_ST0 };
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, right);
+        records[count++] = tier1_emit_cfg_x87_register(operations[holes->operation & 3], 1);
+        records[count++] = store;
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_COMPARE)
+    {
+        // fucomip of the operands in the order that makes each condition one unordered operands fail, as ucomisd's: st0
+        // a for ==, !=, > and >=, b for < and <= (b > a and b >= a); == and != with the parity flag, through the scratch
+        // register.
+        const uint32_t condition = holes->condition;
+        const bool swapped = condition == IR_LT || condition == IR_LE;
+        const uint8_t d = holes->destination;
+        valid = d < 16 && condition <= IR_GE;
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, swapped ? left : right);
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, swapped ? right : left);
+        records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FUCOMIP_ST0_ST, 1);
+        records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FSTP_ST, 0);
+        if (condition == IR_EQ || condition == IR_NE)
+        {
+            const bool equal = condition == IR_EQ;
+            records[count++] = (X86Instruction){ .form = equal ? X86_FORM_SETE_RM8 : X86_FORM_SETNE_RM8, .rm = d, .mode = BUSTER_X86_REGISTER_DIRECT };
+            records[count++] = (X86Instruction){ .form = equal ? X86_FORM_SETNP_RM8 : X86_FORM_SETP_RM8, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT };
+            records[count++] = (X86Instruction){ .form = equal ? X86_FORM_AND_RM8_R8 : X86_FORM_OR_RM8_R8, .reg = scratch, .rm = d, .mode = BUSTER_X86_REGISTER_DIRECT };
+        }
+        else
+        {
+            const bool strict = condition == IR_GT || condition == IR_LT;
+            records[count++] = (X86Instruction){ .form = strict ? X86_FORM_SETA_RM8 : X86_FORM_SETAE_RM8, .rm = d, .mode = BUSTER_X86_REGISTER_DIRECT };
+        }
+        records[count++] = (X86Instruction){ .form = X86_FORM_MOVZX_R32_RM8, .reg = d, .rm = d, .mode = BUSTER_X86_REGISTER_DIRECT };
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_FROM_FLOAT)
+    {
+        const bool single = holes->source_width == 4;
+        const uint8_t x = (uint8_t)(holes->left & 15);
+        records[count++] = (X86Instruction){ .form = single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, .reg = x, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
+        records[count++] = tier1_emit_cfg_x87_memory(single ? X86_FORM_FLD_M32 : X86_FORM_FLD_M64, base, temporary + 8);
+        records[count++] = store;
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_TO_FLOAT)
+    {
+        const bool single = holes->width == 4;
+        const uint8_t x = (uint8_t)(holes->destination & 15);
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        records[count++] = tier1_emit_cfg_x87_memory(single ? X86_FORM_FSTP_M32 : X86_FORM_FSTP_M64, base, temporary + 8);
+        records[count++] = (X86Instruction){ .form = single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, .reg = x, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_FROM_INT)
+    {
+        // The integer widened in the scratch register: a narrow signed one sign-extended to 32 bits (its canonical storage
+        // is zero-extended), an unsigned 32-bit one to 64; then fild of 32 or 64 bits, and for an unsigned 64-bit one, read
+        // as signed, 2^64 added where its top bit is set (a float constant that bit makes, through the scratch object).
+        const uint32_t bytes = holes->source_width;
+        const bool is_signed = holes->operation != 0;
+        const bool wide = bytes == 8 || (bytes == 4 && !is_signed);
+        const uint8_t source = holes->left;
+        valid = source < 16;
+        records[count++] = bytes < 4 && is_signed ? (X86Instruction){ .form = bytes == 1 ? X86_FORM_MOVSX_R32_RM8 : X86_FORM_MOVSX_R32_RM16, .reg = scratch, .rm = source, .mode = BUSTER_X86_REGISTER_DIRECT }
+                                                  : (X86Instruction){ .form = bytes == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, .reg = scratch, .rm = source, .mode = BUSTER_X86_REGISTER_DIRECT };
+        records[count++] = (X86Instruction){ .form = wide ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32, .reg = scratch, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
+        records[count++] = tier1_emit_cfg_x87_memory(wide ? X86_FORM_FILD_M64 : X86_FORM_FILD_M32, base, temporary + 8);
+        if (bytes == 8 && !is_signed)
+        {
+            records[count++] = (X86Instruction){ .form = X86_FORM_SAR_RM64_IMM8, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 63 };
+            records[count++] = (X86Instruction){ .form = X86_FORM_AND_RM32_IMM32, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 0x5f800000 };
+            records[count++] = (X86Instruction){ .form = X86_FORM_MOV_RM32_R32, .reg = scratch, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
+            records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FADD_M32, base, temporary + 8);
+        }
+        records[count++] = store;
+    }
+    else if (valid && kind == BUSTER_TIER1_X87_TO_INT)
+    {
+        // Truncating: the control word saved and loaded with rounding toward zero (RC 11), fistp of 64 bits, the control
+        // word back. An unsigned 64-bit result of 2^63 or more: 2^63 taken away first and its top bit set after (fcmovbe
+        // chooses what to take away, setbe the bit, both from one fucomi with 2^63), as Tier 0's. A narrower result in its
+        // canonical zero-extended storage.
+        const uint32_t bytes = holes->width;
+        const bool is_signed = holes->operation != 0;
+        const uint8_t d = holes->destination;
+        valid = d < 16;
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FNSTCW_M16, base, temporary);
+        records[count++] = (X86Instruction){ .form = X86_FORM_MOVZX_R32_RM16, .reg = scratch, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary };
+        records[count++] = (X86Instruction){ .form = X86_FORM_OR_RM32_IMM32, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 0x0c00 };
+        records[count++] = (X86Instruction){ .form = X86_FORM_MOV_RM16_R16, .reg = scratch, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 2 };
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLDCW_M16, base, temporary + 2);
+        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        if (bytes == 8 && !is_signed)
+        {
+            X86Instruction limit = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, temporary + 4);
+            limit.immediate = 0x5f000000;
+            records[count++] = limit;
+            records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M32, base, temporary + 4);
+            records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FUCOMI_ST0_ST, 1);
+            records[count++] = (X86Instruction){ .form = X86_FORM_SETBE_RM8, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT };
+            records[count++] = (X86Instruction){ .form = X86_FORM_FLDZ };
+            records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FCMOVBE_ST0_ST, 1);
+            records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FSTP_ST, 1);
+            records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FSUBP_ST_ST0, 1);
+            records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FISTP_M64, base, temporary + 8);
+            records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLDCW_M16, base, temporary);
+            records[count++] = (X86Instruction){ .form = X86_FORM_MOVZX_R32_RM8, .reg = scratch, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT };
+            records[count++] = (X86Instruction){ .form = X86_FORM_SHL_RM64_IMM8, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 63 };
+            records[count++] = (X86Instruction){ .form = X86_FORM_XOR_R64_RM64, .reg = scratch, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
+            records[count++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = d, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT };
+        }
+        else
+        {
+            records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FISTP_M64, base, temporary + 8);
+            records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLDCW_M16, base, temporary);
+            const uint16_t form = bytes == 8 ? X86_FORM_MOV_R64_RM64 : bytes == 4 ? X86_FORM_MOV_R32_RM32 : bytes == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+            records[count++] = (X86Instruction){ .form = form, .reg = d, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
+        }
+    }
+    Tier1EmitError error = valid ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
+    for (uint32_t r = 0; error == TIER1_EMIT_OK && r < count; r += 1)
+    {
+        error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
+    }
+    return error;
+}
+
+// An edge's long double phis' copies (#141): each phi of the successor whose operand from the predecessor is a value, its
+// operand's object into its own, as one parallel copy through the x87 stack: every operand loaded, then every phi's
+// object stored in reverse, so that a phi's object read as another's operand is read before it is written. The x87 stack
+// holds 8: an edge of more such phis refuses the function (TIER1_EMIT_UNSUPPORTED).
+static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t edge, Tier1EmitBuffer* buffer)
+{
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const uint32_t added = input->block_count - function->block_count;
+    // The edge's predecessor: the block whose successors' range holds it.
+    uint32_t low = 0;
+    uint32_t high = input->block_count;
+    while (high - low > 1)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = input->successor_offsets[middle] <= edge ? middle : low;
+        high = input->successor_offsets[middle] <= edge ? high : middle;
+    }
+    const uint32_t successor = input->successors[edge];
+    const bool ir_edge = low >= added && successor >= added;
+    const uint32_t source = low - added;
+    const uint32_t target = successor - added;
+    const uint8_t base = (uint8_t)emitted->frame.base_register;
+    int32_t destinations[8];
+    uint32_t copies = 0;
+    Tier1EmitError error = TIER1_EMIT_OK;
+    for (uint32_t node = ir_edge ? function->block_offsets[target] : 0; error == TIER1_EMIT_OK && ir_edge && node < function->block_offsets[target + 1] && function->op[node] == IR_PHI; node += 1)
+    {
+        uint32_t incoming = BUSTER_IR_NONE;
+        for (uint32_t pair = 0; function->type[node] == IR_F80 && pair < function->b[node]; pair += 1)
+        {
+            const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
+            incoming = entry[0] == source ? entry[1] : incoming;
+        }
+        const bool copied = incoming < function->instruction_count && function->op[incoming] != IR_UNDEF;
+        int32_t from = 0;
+        error = !copied || copies < 8 ? error : TIER1_EMIT_UNSUPPORTED;
+        error = error != TIER1_EMIT_OK || !copied || (tier1_emit_cfg_x87_offset(function, emitted, incoming, &from) && tier1_emit_cfg_x87_offset(function, emitted, node, &destinations[copies])) ? error : TIER1_EMIT_FRAME;
+        if (error == TIER1_EMIT_OK && copied)
+        {
+            error = tier1_emit_append(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, from)) ? error : TIER1_EMIT_MEMORY;
+            copies += 1;
+        }
+    }
+    for (uint32_t k = copies; error == TIER1_EMIT_OK && k-- > 0;)
+    {
+        error = tier1_emit_append(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, base, destinations[k])) ? error : TIER1_EMIT_MEMORY;
     }
     return error;
 }
@@ -1901,7 +2231,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             }
             if (cfg->edge_placements[e] == TIER1_CFG_EDGE_SUCCESSOR)
             {
-                error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e], cfg->edge_move_offsets[e + 1], &buffer);
+                error = tier1_emit_cfg_moves(emitted, e, &buffer);
             }
         }
         // The entry state: every interval that covers the block's start, where control brings it.
@@ -1952,7 +2282,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             if (error == TIER1_EMIT_OK && selected)
             {
                 const Tier1SelectPattern* pattern = &plan->patterns[node];
-                bool registered = function->type[node] == IR_VOID || tier1_emit_cfg_holds(emitted, node, transitions.registers[node]);
+                // A long double (#141) is in its frame object, no register.
+                bool registered = function->type[node] == IR_VOID || function->type[node] == IR_F80 || tier1_emit_cfg_holds(emitted, node, transitions.registers[node]);
                 for (uint32_t p = 0; p < 3; p += 1)
                 {
                     const uint32_t value = pattern->values[p];
@@ -2093,6 +2424,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         const uint32_t into_node = function->c[node];
                         Tier1EmitInto into = { .base = (uint8_t)emitted->frame.base_register };
                         into.valid = into_node < count && function->op[into_node] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[into_node], &into.displacement);
+                        // A long double result (#141) goes from st0 into the call's own object.
+                        into.valid = function->type[node] == IR_F80 ? tier1_emit_cfg_x87_offset(function, emitted, node, &into.displacement) : into.valid;
+                        error = function->type[node] != IR_F80 || into.valid ? error : TIER1_EMIT_FRAME;
                         error = tier1_emit_call(plan, node, argument_registers, saved, transitions.registers[node], &into, &buffer, scratch, emitted);
                     }
                 }
@@ -2108,7 +2442,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     const uint32_t s = input->successors[e_first];
                     if (cfg->edge_placements[e_first] == TIER1_CFG_EDGE_PREDECESSOR)
                     {
-                        error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[e_first], cfg->edge_move_offsets[e_first + 1], &buffer);
+                        error = tier1_emit_cfg_moves(emitted, e_first, &buffer);
                     }
                     if (error == TIER1_EMIT_OK && s != b + 1)
                     {
@@ -2133,6 +2467,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         error = tier1_emit_cfg_branch(emitted, b, e_first, selected_records.records[compares].form, &buffer, stub_first, pending_branches, pending_goals, &pending);
                     }
                 }
+            }
+            else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_X87)
+            {
+                error = tier1_emit_cfg_x87(function, emitted, node, &holes, &buffer);
             }
             else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
             {
@@ -2207,6 +2545,13 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         const uint32_t address = plan->patterns[node].values[0];
                         error = tier1_emit_cfg_aggregate_result(function, emitted, address < count ? transitions.registers[address] : UINT8_MAX, &buffer);
                     }
+                    // A long double result (#141): its object's value into st0, from the frame's base before the epilogue.
+                    if (error == TIER1_EMIT_OK && returns_here && r + 1 == selected_records.count && function->result_type == IR_F80)
+                    {
+                        int32_t result_offset = 0;
+                        error = tier1_emit_cfg_x87_offset(function, emitted, function->a[node], &result_offset) ? error : TIER1_EMIT_FRAME;
+                        error = error != TIER1_EMIT_OK || tier1_emit_append(&buffer, tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, (uint8_t)emitted->frame.base_register, result_offset)) ? error : TIER1_EMIT_MEMORY;
+                    }
                     if (error == TIER1_EMIT_OK && returns_here && r + 1 == selected_records.count && tier1_frame_emit(&emitted->frame, true, &buffer) != TIER1_FRAME_EMIT_OK)
                     {
                         error = TIER1_EMIT_FRAME;
@@ -2248,7 +2593,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         // The added entry's single edge: its moves, then it falls through into the IR's entry.
         if (error == TIER1_EMIT_OK && b < added && cfg->edge_placements[0] == TIER1_CFG_EDGE_PREDECESSOR)
         {
-            error = tier1_emit_cfg_moves(emitted, cfg->edge_move_offsets[0], cfg->edge_move_offsets[1], &buffer);
+            error = tier1_emit_cfg_moves(emitted, 0, &buffer);
         }
     }
     // The pending jumps' targets, now that every block and stub has its first record, and the labels'.

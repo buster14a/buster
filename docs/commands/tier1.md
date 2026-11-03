@@ -27,8 +27,10 @@ requirements. [Command index](README.md).
   [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
   random 128-bit programs, through the split by both paths, the optimizer and
   both of Tier 1's paths natively, against the IR's interpreter on the unsplit
-  function and the programs' stack machine. Long double and the convention's
-  rarer aggregate shapes still refuse explicitly ([the Tier 1
+  function and the programs' stack machine; and Tier 0's random long double
+  programs, whose values the CFG consumer keeps in frame objects and computes on
+  the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine.
+  The convention's rarer aggregate shapes still refuse explicitly ([the Tier 1
   guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
   stores, constants and bitcasts to and from integers of every width) and

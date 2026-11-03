@@ -417,8 +417,9 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
         {
             written = fprintf(file, "long f%u(long x){return x+%u;}\n", f, f + 1) > 0;
         }
-        // The mixed fixture's last body is one Tier 1 refuses as unsupported: a long double, whose constant selection refuses.
-        written = written && fputs(mixed ? "long double f7(long double x){return x+1.5L;}\n" : "long f7(long x){return x+8;}\n", file) >= 0;
+        // The mixed fixture's last body is one Tier 1 refuses as unsupported: a struct of a long double returned in st0, an
+        // x87 register's aggregate result, which selection refuses (a long double alone is Tier 1's since #141).
+        written = written && fputs(mixed ? "struct L{long double x;};struct L f7(long double x){struct L r={x+1.5L};return r;}\n" : "long f7(long x){return x+8;}\n", file) >= 0;
         const bool closed = file != NULL && fclose(file) == 0;
         check_lanes_test_expect(tally, written && closed, "write original Tier 1 coverage fixture", source);
         for (uint32_t scalar = 0; written && closed && scalar < 2; scalar += 1)
@@ -441,7 +442,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
         }
         // Exercise the public command, including multi-unit option propagation, independently of the in-process
         // fault control. The native oracle is ordinary original C, compiled externally by Clang.
-        const char* oracle = mixed ? "long f0(long);long double f7(long double);int main(void){return f0(41)!=42||f7(1.25L)!=2.75L;}\n" :
+        const char* oracle = mixed ? "long f0(long);struct L{long double x;};struct L f7(long double);int main(void){return f0(41)!=42||f7(1.25L).x!=2.75L;}\n" :
                                     "long f0(long);long f7(long);int main(void){return f0(41)!=42||f7(34)!=42;}\n";
         const bool wrote_caller = parse_test_write(caller, oracle, strlen(oracle));
         for (uint32_t scalar = 0; wrote_caller && scalar < 2; scalar += 1)

@@ -150,6 +150,12 @@ struct Tier1EmitPrepared
     uint32_t vector_columns;
     uint32_t slot_columns;
     AbiCall call_abi;
+    // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other
+    // node), whose frame object holds its value, and how many there are.
+    uint32_t* x87_ranks;
+    uint32_t x87_count;
+    // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
+    const IrFunction* function;
 };
 
 typedef struct Tier1EmitResult Tier1EmitResult;
@@ -753,7 +759,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     const IrCall* call = &function->calls[function->b[node]];
     const uint64_t scratch_mark = scratch->length;
     const uint32_t result_type = function->type[node];
-    const bool general_result = result_type != IR_VOID && tier1_select_float_width(result_type) == 0;
+    // A long double's (#141) comes in st0, which the CFG consumer's `into` object takes.
+    const bool general_result = result_type != IR_VOID && tier1_select_float_width(result_type) == 0 && result_type != IR_F80;
     Tier1EmitError error = TIER1_EMIT_OK;
     if ((saved & ~result->prepared.call_save_mask) != 0 || (general_result && (destination >= BUSTER_TIER1_EMIT_GENERAL_REGISTERS || ((saved >> destination) & 1))))
     {
@@ -960,6 +967,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
             appended = tier1_emit_store_part(buffer, part.reg, part.bytes, into->base, displacement);
         }
         error = appended ? error : TIER1_EMIT_MEMORY;
+    }
+    // A long double result (#141): st0 into the call's object, which `into` addresses.
+    if (error == TIER1_EMIT_OK && result_type == IR_F80)
+    {
+        error = into != 0 && into->valid ? error : TIER1_EMIT_INVALID;
+        const X86Instruction record = { .form = X86_FORM_FSTP_M80, .rm = error == TIER1_EMIT_OK ? into->base : 0, .mode = BUSTER_X86_MEMORY_BASE, .displacement = error == TIER1_EMIT_OK ? into->displacement : 0 };
+        error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
     }
     // The result into its register, a narrow one zero-extended into its canonical 32-bit storage: the callee leaves the
     // bits past its width unspecified, as clang's code does. A floating one from xmm0 (#141).

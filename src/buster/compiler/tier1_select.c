@@ -170,8 +170,34 @@ typedef enum Tier1SelectRule
     // The high 64 bits of values[0] times values[1], unsigned (IR_MULHU, #141's 128-bit integers): one operand in rax,
     // mul of the other, the result in rdx, which the consumers save around it as TIER1_RULE_DIVIDE_RECIPROCAL's.
     TIER1_RULE_MULTIPLY_HIGH,
+    // Long double (F80, #141), whose values the CFG consumer keeps in frame objects of their own, one per value, 16 bytes
+    // each, and computes on the x87 stack between them, leaving it empty after each node (tier1_emit_cfg_x87): its kind
+    // in `scale` (BUSTER_TIER1_X87_*), and in `values` the node's operands that aren't long doubles alone (a load's or a
+    // store's address, a conversion's integer or floating operand), its long double operands read from the IR's
+    // operands, which no register holds. Only the CFG consumer takes it.
+    TIER1_RULE_X87,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
+
+// TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
+// - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
+// - LOAD and STORE of the 10 bytes through the address in values[0], the stored value the IR's b;
+// - COPY; BINARY, `operation` its index among IR_FADD to IR_FDIV; NEGATE;
+// - COMPARE, `condition` its IR predicate, the truth value into the destination as a floating compare's;
+// - FROM_FLOAT and TO_FLOAT, a float's or a double's (`source_width` or `width` 4 or 8) in an xmm register;
+// - FROM_INT and TO_INT, an integer's (`source_width` or `width` its memory width), signed where `operation` is 1.
+#define BUSTER_TIER1_X87_CONSTANT 0
+#define BUSTER_TIER1_X87_UNDEF 1
+#define BUSTER_TIER1_X87_LOAD 2
+#define BUSTER_TIER1_X87_STORE 3
+#define BUSTER_TIER1_X87_COPY 4
+#define BUSTER_TIER1_X87_BINARY 5
+#define BUSTER_TIER1_X87_NEGATE 6
+#define BUSTER_TIER1_X87_COMPARE 7
+#define BUSTER_TIER1_X87_FROM_FLOAT 8
+#define BUSTER_TIER1_X87_TO_FLOAT 9
+#define BUSTER_TIER1_X87_FROM_INT 10
+#define BUSTER_TIER1_X87_TO_INT 11
 
 // TIER1_RULE_FLOAT_CONVERT's kinds, its pattern's `scale` (#141):
 // - FROM_SIGNED, an integer's sitofp: cvtsi2ss or cvtsi2sd of its 32 or 64 bits, an I8's or an I16's sign-extended into
@@ -1602,6 +1628,17 @@ static uint32_t tier1_select_float_width(uint32_t type)
     return type == IR_F32 ? 4 : type == IR_F64 ? 8 : 0;
 }
 
+// Whether a node computes on long doubles (#141, TIER1_RULE_X87's): one of type F80, a store of one, or a comparison of
+// them or a conversion from one; a phi of them and a call returning one too, which their own rules take.
+static bool tier1_select_x87_node(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    const uint32_t a = function->a[node];
+    const uint32_t b = function->b[node];
+    const bool from = (op == IR_FCMP || op == IR_FTRUNC || op == IR_FPTOSI || op == IR_FPTOUI || op == IR_RET) && a < function->instruction_count && function->type[a] == IR_F80;
+    return function->type[node] == IR_F80 || (op == IR_STORE && b < function->instruction_count && function->type[b] == IR_F80) || from;
+}
+
 // Whether a function has vectors, which the selector doesn't take (#141): ir_function_has_vectors_path's answer. Masks
 // (#179) it takes, as ir_function_has_simd doesn't.
 static bool tier1_select_has_vectors(const IrFunction* function, bool vector)
@@ -1744,8 +1781,11 @@ struct Tier1SelectPlaces
 
 static Tier1SelectPlace tier1_select_next_place(Tier1SelectPlaces* places, uint32_t type)
 {
+    // A long double (#141) is MEMORY's: on the stack always, its 16 bytes in two slots aligned to 16.
+    const bool x87 = type == IR_F80;
     const bool floating = type == IR_F32 || type == IR_F64;
-    const bool registered = floating ? places->vector < BUSTER_ABI_VECTOR_ARGUMENTS : places->general < BUSTER_ABI_INTEGER_ARGUMENTS;
+    const bool registered = !x87 && (floating ? places->vector < BUSTER_ABI_VECTOR_ARGUMENTS : places->general < BUSTER_ABI_INTEGER_ARGUMENTS);
+    places->stack = x87 ? (places->stack + 1) & ~1u : places->stack;
     const uint32_t index = !registered ? places->stack : floating ? places->vector : places->general;
     const Tier1SelectPlace place = {
         .kind = (uint8_t)(!registered ? BUSTER_TIER1_PLACE_STACK : floating ? BUSTER_TIER1_PLACE_VECTOR : BUSTER_TIER1_PLACE_GENERAL),
@@ -1753,7 +1793,7 @@ static Tier1SelectPlace tier1_select_next_place(Tier1SelectPlaces* places, uint3
     };
     places->general += registered && !floating;
     places->vector += registered && floating;
-    places->stack += !registered;
+    places->stack += !registered ? (x87 ? 2u : 1u) : 0u;
     return place;
 }
 
@@ -1940,7 +1980,8 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         // A variadic call's unnamed arguments are promoted ones, an F32 among them never: its al counts the vector
         // registers its arguments take (tier1_emit_call). A narrow result is zero-extended after the call, and a floating
         // one (#141) comes in xmm0.
-        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0;
+        // A long double's (#141) comes in st0, which the CFG consumer stores into the call's object.
+        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0 || type == IR_F80;
         supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
         // A call with ABI records (#789) passes each argument where its record says: its aggregates' bytes in registers
         // or in its stack slots, and its aggregate result's into the frame object its into operand (c) is the address of,
@@ -1954,8 +1995,9 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         {
             const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
             const IrPassed* record = tier1_select_argument_record(function, &call, argument);
+            // A long double (#141) in its stack slots, from its object.
             supported = record != 0 ? tier1_select_record_supported(record, argument_type)
-                                    : argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0;
+                                    : argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0 || argument_type == IR_F80;
         }
     }
     return supported;
@@ -2405,6 +2447,34 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_PHI;
         base.width = (uint8_t)mask_width;
         tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    // Long double (#141): each value a frame object of its own, which the CFG consumer's x87 records read and write
+    // (TIER1_RULE_X87); a phi of them its edges' copies, and a call's result and a return's operand st0.
+    else if (op != IR_PHI && op != IR_CALL && op != IR_CALL_INDIRECT && op != IR_RET && tier1_select_x87_node(function, node))
+    {
+        const uint32_t operand = a < function->instruction_count ? function->type[a] : IR_VOID;
+        base.rule = TIER1_RULE_X87;
+        base.width = (uint8_t)width;
+        base.intrinsic_cost = 3;
+        base.scale = op == IR_CONST ? BUSTER_TIER1_X87_CONSTANT : op == IR_UNDEF ? BUSTER_TIER1_X87_UNDEF : op == IR_LOAD ? BUSTER_TIER1_X87_LOAD : op == IR_STORE ? BUSTER_TIER1_X87_STORE :
+                     op == IR_COPY ? BUSTER_TIER1_X87_COPY : op == IR_FNEG ? BUSTER_TIER1_X87_NEGATE : op == IR_FCMP ? BUSTER_TIER1_X87_COMPARE :
+                     op == IR_FEXT ? BUSTER_TIER1_X87_FROM_FLOAT : op == IR_FTRUNC ? BUSTER_TIER1_X87_TO_FLOAT : op == IR_SITOFP || op == IR_UITOFP ? BUSTER_TIER1_X87_FROM_INT :
+                     op == IR_FPTOSI || op == IR_FPTOUI ? BUSTER_TIER1_X87_TO_INT : BUSTER_TIER1_X87_BINARY;
+        base.operation = op >= IR_FADD && op <= IR_FDIV ? (uint8_t)(op - IR_FADD) : op == IR_SITOFP || op == IR_FPTOSI ? 1 : 0;
+        base.immediate = op == IR_CONST ? a : 0;
+        base.condition = op == IR_FCMP ? (uint8_t)c : 0;
+        // The operands no register holds aren't values: the address of a load and a store, the floating or integer
+        // operand of a conversion to a long double, are.
+        base.values[0] = op == IR_LOAD || op == IR_STORE || op == IR_FEXT || op == IR_SITOFP || op == IR_UITOFP ? a : BUSTER_IR_NONE;
+        base.source_width = (uint8_t)(op == IR_FEXT ? tier1_select_float_width(operand) : op == IR_SITOFP || op == IR_UITOFP ? tier1_select_memory_width(operand) : 0);
+        base.width = (uint8_t)(op == IR_FTRUNC ? tier1_select_float_width(type) : op == IR_FPTOSI || op == IR_FPTOUI ? tier1_select_memory_width(type) : width);
+        const bool supported = op == IR_CONST || op == IR_UNDEF || op == IR_LOAD || op == IR_STORE || op == IR_COPY || (op >= IR_FADD && op <= IR_FDIV) || op == IR_FNEG || op == IR_FCMP ||
+                               (op == IR_FEXT && base.source_width != 0) || (op == IR_FTRUNC && base.width != 0) || ((op == IR_SITOFP || op == IR_UITOFP) && base.source_width != 0) ||
+                               ((op == IR_FPTOSI || op == IR_FPTOUI) && base.width != 0);
+        if (supported)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
     }
     // Floating values (#141): an undefined one is any value, zero's xorps.
     else if (float_width != 0 && (op == IR_CONST || op == IR_UNDEF))
@@ -3022,10 +3092,12 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // Tier 0's do, the psABI leaving the bits past its width unspecified. An aggregate result's address (#789) moves
     // nothing here: the CFG consumer loads its parts, or copies its bytes through the hidden pointer, before the epilogue.
     else if (op == IR_RET && (a == BUSTER_IR_NONE || function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32 ||
-                              function->type[a] == IR_I64 || function->type[a] == IR_PTR))
+                              function->type[a] == IR_I64 || function->type[a] == IR_PTR || function->type[a] == IR_F80))
     {
+        // A long double's (#141): its object's value into st0, which the CFG consumer loads before the epilogue; no value
+        // of its own.
         base.rule = TIER1_RULE_RETURN;
-        base.values[0] = a;
+        base.values[0] = a != BUSTER_IR_NONE && function->type[a] == IR_F80 ? BUSTER_IR_NONE : a;
         base.width = a == BUSTER_IR_NONE || function->result_size != 0 ? 0 : (uint8_t)tier1_select_width(function->type[a]);
         base.intrinsic_cost = a == BUSTER_IR_NONE ? 1 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -3036,7 +3108,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_PHI && width != 0)
+    else if (op == IR_PHI && (width != 0 || type == IR_F80))
     {
         base.rule = TIER1_RULE_PHI;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -3240,6 +3312,18 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
     {
         const uint32_t value = pattern->values[operand];
         if (value != BUSTER_IR_NONE)
+        {
+            pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
+        }
+    }
+    // A long double operand (#141), which the CFG consumer's records read from its object, no pattern's value: the IR's a
+    // and b of a long double node, and a return's.
+    const uint32_t operands[2] = { function->a[node], function->b[node] };
+    for (uint32_t operand = 0; (pattern->rule == TIER1_RULE_X87 || pattern->rule == TIER1_RULE_RETURN) && operand < 2; operand += 1)
+    {
+        const uint32_t value = operands[operand];
+        const bool used = (ir_value_mask(function, node) >> operand & 1) != 0 && value < function->instruction_count && function->type[value] == IR_F80;
+        if (used)
         {
             pending_count = tier1_select_need(needed, value, walked || value > node, pending, pending_count);
         }

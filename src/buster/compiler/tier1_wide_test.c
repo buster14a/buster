@@ -1122,6 +1122,181 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
     return passed;
 }
 
+typedef void (*Tier1WideTestX87)(const void*, const void*, const void*, void*);
+
+static __attribute__((no_sanitize("function"))) void tier1_wide_test_x87_call(const uint8_t* code, const void* in, const void* ints, const void* floats, void* out)
+{
+    Tier1WideTestX87 entry;
+    memcpy(&entry, &code, sizeof(entry));
+    entry(in, ints, floats, out);
+}
+
+// Tier 0's random programs of long double (tier0_x87_test.c's generator, #141: constants, arithmetic, comparisons,
+// conversions both ways between floats, doubles and integers of every class, frame objects, ?:'s blocks, and calls of C
+// functions through their addresses, whose arguments and results are long doubles) through the C driver's --tier1 steps:
+// lowered for the baseline, promoted, split (which takes them as they are), optimized, then planned and emitted by both of
+// Tier 1's paths, their allocations certified, and run natively, every output the generator's stack machine's
+// (tier0_test_x87_interpret), NaNs alike. The IR's interpreter runs the optimized function too. Returns how many programs
+// went through every stage.
+static uint32_t tier1_wide_test_x87(Tier1WideTest* test, uint32_t count)
+{
+    Tier0Tables tables = { 0 };
+    Tier0TestX87Abi abi;
+    Tier0TestX87Program* program = calloc(1, sizeof(Tier0TestX87Program));
+    const bool ready = program != 0 && tier0_tables_open(&tables) && tier0_test_x87_abi(&tables, &abi);
+    tier1_wide_test_expect(test, ready, "the long double programs' generator");
+    uint32_t passed = 0;
+    for (uint32_t p = 0; ready && p < count; p += 1)
+    {
+        const uint64_t output_mark = test->output.length;
+        uint64_t state = test->random ^ (UINT64_C(0x87) << 32) ^ p;
+        tier0_test_x87_program(program, &abi, &state);
+        const Tier0Function source = tier0_test_x87_function(program, &abi);
+        IrFunction lowered = { 0 };
+        const IrCheck lowering = program->overflow ? ir_check(IR_ERROR_LIMIT, 0, 0) : ir_lower_typed_target(&source, IR_VOID, 1, 0, &test->output, &test->scratch, &lowered);
+        bool ok = !program->overflow && tier1_wide_test_expect(test, lowering.error == IR_OK, "the long double program lowers");
+        IrFunction promoted = { 0 };
+        if (ok)
+        {
+            const IrCheck promotion = ssa_ir_promote(&lowered, &test->promoted, &test->scratch, &promoted);
+            ok = tier1_wide_test_expect(test, promotion.error == IR_OK, "the long double program promotes");
+        }
+        IrWideResult split = { 0 };
+        if (ok)
+        {
+            const IrCheck check = ir_wide_split(&promoted, &test->output, &test->scratch, &split);
+            ok = tier1_wide_test_expect(test, check.error == IR_OK && !split.split, "the split takes a long double program as it is");
+        }
+        IrOptimizeResult optimized = { 0 };
+        if (ok)
+        {
+            const IrCheck check = ir_optimize(&split.function, &test->optimized, &test->scratch, ir_optimize_options(), &optimized);
+            ok = tier1_wide_test_expect(test, check.error == IR_OK, "the optimizer takes the long double program");
+        }
+        static long double in[BUSTER_TIER0_TEST_X87_IN];
+        static uint64_t ints[BUSTER_TIER0_TEST_X87_INTS];
+        static uint64_t floats[BUSTER_TIER0_TEST_X87_FLOATS];
+        static uint8_t expected[BUSTER_TIER0_TEST_X87_OUTPUTS * 16];
+        static uint8_t actual[sizeof(expected)];
+        memset(in, 0, sizeof(in));
+        for (uint32_t k = 0; ok && k < BUSTER_TIER0_TEST_X87_IN; k += 1)
+        {
+            in[k] = tier0_test_x87_random(&state, true);
+        }
+        for (uint32_t k = 0; ok && k < BUSTER_TIER0_TEST_X87_INTS; k += 1)
+        {
+            const uint64_t random = tier0_generate_random(&state);
+            ints[k] = k < 4 ? random % 9 : random;
+        }
+        for (uint32_t k = 0; ok && k < BUSTER_TIER0_TEST_X87_FLOATS; k += 1)
+        {
+            const double d = (double)(int64_t)tier0_generate_random(&state) / 4096.0;
+            const float f = (float)d;
+            uint32_t f_bits = 0;
+            memcpy(&f_bits, &f, sizeof(f_bits));
+            floats[k] = 0;
+            memcpy(&floats[k], k >= 8 ? (const void*)&f_bits : (const void*)&d, k >= 8 ? 4 : 8);
+        }
+        if (ok)
+        {
+            memset(expected, 0xa5, sizeof(expected));
+            const uint64_t parameters[4] = { (uintptr_t)in, (uintptr_t)ints, (uintptr_t)floats, (uintptr_t)expected };
+            static uint8_t visited[BUSTER_TIER0_TEST_X87_ENTRIES];
+            ok = tier1_wide_test_expect(test, tier0_test_x87_interpret(program, parameters, visited), "the stack machine runs the long double program");
+        }
+        if (ok)
+        {
+            memset(actual, 0xa5, sizeof(actual));
+            uint8_t* buffers[4] = { (uint8_t*)in, (uint8_t*)ints, (uint8_t*)floats, actual };
+            const uint64_t sizes[4] = { sizeof(in), sizeof(ints), sizeof(floats), sizeof(actual) };
+            const bool ran = ir_lower_test_wide_run(&optimized.function, buffers, sizes, 4, &test->execution);
+            arena_pop_to(&test->execution, 0);
+            test->interpreted += 1;
+            bool same = ran;
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_X87_OUTPUTS; o += 1)
+            {
+                same = tier0_test_x87_same_output(program->outputs[o], actual + 16 * o, expected + 16 * o);
+            }
+            ok = tier1_wide_test_expect(test, same, "the IR's interpreter gives the stack machine's outputs after the optimizer");
+        }
+        IrDominance dominance = { 0 };
+        ok = ok && tier1_wide_test_dominance(test, &optimized.function, &dominance);
+        for (uint32_t path = 0; ok && path < 2; path += 1)
+        {
+            const uint64_t mark = test->output.length;
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, path == 0, &plan, &node);
+            ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the long double program");
+            Tier1EmitDiagnostic diagnostic = { 0 };
+            const Tier1EmitOptions options = {
+                .diagnostic = &diagnostic,
+                .certify = true,
+                .register_mask = tier1_liveness_register_mask(),
+                .vector = path == 0,
+                .rematerialize = true,
+            };
+            Tier1EmitResult emitted = { 0 };
+            const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->baseline, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_OK;
+            ok = ok && tier1_wide_test_expect(test, error == TIER1_EMIT_OK, "Tier 1 emits the long double program");
+            if (!ok)
+            {
+                printf("test-tier1-wide: long double program %u, %s path: selection %u, emission %u (cause %u, error %u) at node %u (%s)\n", p, path == 0 ? "vector" : "scalar", (unsigned)selected, (unsigned)error,
+                       (unsigned)diagnostic.cause, diagnostic.error, node, node < optimized.function.instruction_count ? ir_op_names[optimized.function.op[node]] : "-");
+            }
+            uint64_t mapped = 0;
+            uint8_t* machine = ok ? tier1_wide_test_load(test, &emitted, &mapped) : MAP_FAILED;
+            ok = machine != MAP_FAILED;
+            uint8_t* shared = ok ? mmap(0, sizeof(actual), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+            ok = ok && tier1_wide_test_expect(test, shared != MAP_FAILED, "the long double program's shared outputs");
+            if (ok)
+            {
+                memset(shared, 0xa5, sizeof(actual));
+                fflush(0);
+                const pid_t child = fork();
+                if (child == 0)
+                {
+                    alarm(10);
+                    tier1_wide_test_x87_call(machine, in, ints, floats, shared);
+                    _exit(0);
+                }
+                ok = tier1_wide_test_expect(test, child > 0 && tier1_pipeline_wait(child), "the long double program's native code exits normally");
+                bool same = ok;
+                for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_X87_OUTPUTS; o += 1)
+                {
+                    same = tier0_test_x87_same_output(program->outputs[o], shared + 16 * o, expected + 16 * o);
+                    if (!same)
+                    {
+                        printf("test-tier1-wide: long double program %u, %s path: output %u (class %u) differs\n", p, path == 0 ? "vector" : "scalar", o, program->outputs[o]);
+                    }
+                }
+                ok = tier1_wide_test_expect(test, same, "the long double program's native outputs are the stack machine's");
+                test->native_runs += 1;
+            }
+            if (shared != MAP_FAILED)
+            {
+                munmap(shared, sizeof(actual));
+            }
+            if (machine != MAP_FAILED)
+            {
+                munmap(machine, mapped);
+            }
+            arena_pop_to(&test->output, mark);
+        }
+        passed += ok;
+        tier1_wide_test_expect(test, test->scratch.length == 0, "the long double pipeline returns the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        arena_pop_to(&test->promoted, 0);
+        arena_pop_to(&test->optimized, 0);
+    }
+    if (ready)
+    {
+        tier0_tables_close(&tables);
+    }
+    free(program);
+    return passed;
+}
+
 // The refusals, a function without an I128 instruction, and the scan's twins.
 static void tier1_wide_test_boundaries(Tier1WideTest* test)
 {
@@ -1272,6 +1447,9 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
                 tier1_wide_test_boundaries(&test);
                 typed = tier1_wide_test_typed(&test, BUSTER_TIER1_WIDE_TEST_TYPED);
                 printf("test-tier1-wide: Tier 0's 128-bit programs: %u of %u through the split, the optimizer and Tier 1 natively\n", typed, BUSTER_TIER1_WIDE_TEST_TYPED);
+                const uint32_t x87 = tier1_wide_test_x87(&test, BUSTER_TIER1_WIDE_TEST_TYPED);
+                printf("test-tier1-wide: Tier 0's long double programs: %u of %u through the optimizer and Tier 1 natively\n", x87, BUSTER_TIER1_WIDE_TEST_TYPED);
+                typed += x87;
             }
             const uint64_t expected_runs = 4u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + 2u * typed;
             tier1_wide_test_expect(&test, file != 0 || test.native_runs == expected_runs, "every program runs natively on every input by both paths, with rematerialization and without");

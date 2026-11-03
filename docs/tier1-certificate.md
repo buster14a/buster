@@ -179,7 +179,9 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
     each value its intervals carry into the block, at
     `tier1_cfg_entry_location`. A value recomputed there gets a recipe fact.
   - **Shape.** Every column is in range, intervals and fragments are in order,
-    and each edge's placement agrees with its moves and degrees. Each offset is
+    and each edge's placement agrees with its moves and degrees (an edge its
+    consumer copies along, `Tier1CfgInput.edge_copies`, is placed without
+    moves). Each offset is
     bounded before it bounds a read. A fragment carries a register only if it
     is a register's (`UINT8_MAX` otherwise), and a slot only where the
     allocation has slots. Publication validates only this shape; whether the

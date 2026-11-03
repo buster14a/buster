@@ -117,10 +117,11 @@ static bool run(char* const* arguments)
 
 // Each loop's 17 iterations contribute 35*i + (0+...+16); the straight-line additions contribute
 // ADDITIONS*i + (0+...+ADDITIONS-1). Summing i=0..FUNCTIONS-1 is independent of the emitted loop/CFG execution.
-// One construct keeps the fixture mixed: widen's long double, which Tier 1's selection refuses (the x87's values; #141
-// took the SSE floating values that anchored it before, and #789 the variadic definition beside it, which still reads
-// its unnamed argument through its incoming frame). The matrix fails, naming this file, if a later Tier 1 covers it
-// too: a skip (77) let both earlier anchors go stale unnoticed, so the change that lifts the refusal re-anchors it.
+// One construct keeps the fixture mixed: widen's struct of a long double, returned in st0, an x87 register's aggregate
+// result, which Tier 1's selection refuses (#141 took the SSE floating values and then long double itself that anchored
+// it before, and #789 the variadic definition beside it, which still reads its unnamed argument through its incoming
+// frame). The matrix fails, naming this file, if a later Tier 1 covers it too: a skip (77) let both earlier anchors go
+// stale unnoticed, so the change that lifts the refusal re-anchors it.
 static bool write_sources(void)
 {
     const unsigned n = BUSTER_MULTICORE_FUNCTIONS;
@@ -134,15 +135,16 @@ static bool write_sources(void)
     for (unsigned file = 0; written && file < 2; file += 1)
     {
         FILE* output = outputs[file];
-        fputs("static long double widen(unsigned x) { return (long double)x; }\n"
+        fputs("struct wide { long double x; };\n"
+              "static struct wide widen(unsigned x) { struct wide r = { (long double)x }; return r; }\n"
               "unsigned fallback(unsigned x, ...)\n"
               "{\n"
               "    __builtin_va_list arguments;\n"
               "    __builtin_va_start(arguments, x);\n"
               "    const unsigned extra = __builtin_va_arg(arguments, unsigned);\n"
               "    __builtin_va_end(arguments);\n"
-              "    long double (*volatile operation)(unsigned) = widen;\n"
-              "    return ((unsigned)operation(x) ^ extra);\n"
+              "    struct wide (*volatile operation)(unsigned) = widen;\n"
+              "    return ((unsigned)operation(x).x ^ extra);\n"
               "}\n", output);
         for (unsigned i = 0; i < n; i += 1)
         {

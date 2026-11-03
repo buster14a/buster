@@ -261,9 +261,10 @@ saved and restored around their scopes, in a frame with a frame pointer whose
 places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
 from rsp around it (the selection guide's "The dynamic stack"). So do the
 128-bit integers (#141), as pairs of 64-bit halves ("The 128-bit integers",
-below). Still refused: long double, vectors, and the convention's rarer
-aggregate shapes (a part in a stack slot, a high or low eightbyte alone, a
-vector's or the x87's register). The IR's switches and selects of floating
+below), and long double (#141), in frame objects of their own, computed on the
+x87 stack (the selection guide's "Long double"). Still refused: vectors, and the
+convention's rarer aggregate shapes (a part in a stack slot, a high or low
+eightbyte alone, a vector's or the x87's register). The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
 
@@ -339,8 +340,11 @@ programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
 `?:`'s blocks, conversions both ways) through the split by both paths, which
 must make the same function, both verifiers, the optimizer and both of Tier 1's
 paths with their certificates, natively, against the IR's interpreter on the
-unsplit function and the programs' stack machine; and the split's refusals and
-its scan's twins.
+unsplit function and the programs' stack machine; the split's refusals and its
+scan's twins; and 300 of Tier 0's random long double programs (calls of C
+functions of long doubles, every conversion, NaNs, frame objects, `?:`'s blocks)
+through the optimizer and both of Tier 1's paths natively against their stack
+machine (#141).
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.

@@ -169,7 +169,36 @@ patterns are:
   signed conversion's, or, where that is 2^63 (the value is 2^63 or more), 2^63
   ORed with the truncation of the value less 2^63: the negation of the
   truncation of 2^63 less the value. A return moves its value into xmm0. Still
-  refused: `F80` (the x87's) and a select of floating values.
+  refused: a select of floating values.
+- Long double (#141): `F80`, the x87's, whose values the CFG consumer keeps in
+  frame objects of their own, 16 bytes each, one per value, and computes on the
+  x87 stack between them, leaving it empty after each node, as Tier 0 does
+  between its slots (`TIER1_RULE_X87`, its kind in the pattern's `scale`). Its
+  long double operands are no pattern's values, so no allocation sees them: the
+  consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
+  the plan marks them needed as it marks a pattern's values. The values are the
+  other operands alone: a load's and a store's address, a conversion's integer
+  or floating operand. A constant stores its 10 bytes as immediates; a load and a
+  store are `fld` and `fstp` of them through the address; arithmetic loads both
+  operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
+  `fchs`. A comparison is `fucomip` of the operands in the order that makes
+  each condition one unordered operands fail, as `ucomis` has them, `setcc` and
+  `movzx`, `==` and `!=` with the parity flag. A float or a double goes through
+  the x87 scratch object (`fld` or `fstp` of 32 or 64 bits); an integer through
+  it too by `fild` of 32 or 64 bits, a narrow signed one sign-extended and an
+  unsigned 32-bit one zero-extended to 64 first, and an unsigned 64-bit one read
+  as signed with 2^64 added where its top bit is set. To an integer, the control
+  word is saved and loaded with rounding toward zero around `fistp` of 64 bits
+  (`fisttp` is SSE3's, past the baseline), and an unsigned 64-bit result of 2^63
+  or more takes 2^63 away first and sets its top bit after (`fucomi`, `fcmovbe`
+  and `setbe`), as Tier 0's. A phi of long doubles is the edges' copies, every
+  operand loaded onto the x87 stack and then every phi's object stored in
+  reverse (a parallel copy; more than 8 on an edge refuse the function). A call
+  passes a long double in its 16-byte stack slots aligned to 16, its object's
+  bytes copied there by `fld` and `fstp` (`tier1_select_next_place`), and its
+  long double result comes in st0, which the call stores into its own object; a
+  return loads its operand's object into st0 before the epilogue. A function's
+  long double parameters are by-value aggregates, as before.
 - Call arguments and parameters take their places by the System V classes
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,

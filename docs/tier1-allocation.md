@@ -321,7 +321,15 @@ edge. Without it, the one `undef` per local that promotion puts in the entry
 block was live from there to every join that read it: around a loop, everywhere.
 Promotion makes such operands where a block's lifetime start kills a local
 ([the SSA guide](ssa.md)'s adapter), and Lua's `luaV_execute` had hundreds of
-them. Each value then gets an interval per block it is
+them.
+
+An edge can carry copies the allocation doesn't see: a long double phi's
+(#141), whose values live in frame objects, which the CFG consumer copies on the
+x87 stack (`tier1_emit_cfg_x87_phis`). Its optional per-edge column
+(`Tier1CfgInput.edge_copies`) places such an edge as one with moves, at its
+predecessor's end, its successor's start or a split's, though it has none of the
+allocation's; `tier1_cfg_verify` and the certificate's shape check take that
+placement. Each value then gets an interval per block it is
 defined in or live into, from its definition or the block's start to its last
 use there, or to the block's end where it stays live. A value's blocks come
 block by block from the live-in rows, counted and then filled, so building the
