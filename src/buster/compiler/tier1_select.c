@@ -2169,6 +2169,23 @@ static uint32_t tier1_select_part_slots(uint32_t bytes)
     return bytes <= 8 ? 1 : bytes / 8;
 }
 
+// A call argument's whole 64-byte vector register part (#141) waits in zmm16 and on rather than in the red zone, whose 14
+// staging slots two such parts would overflow: Tier 1 allocates nothing to registers past xmm15, a call clobbers them all,
+// and only a target with AVX-512F, which has them, passes a vector in a zmm register. The first of them, by the call's
+// parts in order.
+#define BUSTER_TIER1_SELECT_PART_ZMM 16u
+
+static bool tier1_select_part_in_zmm(uint32_t bytes)
+{
+    return bytes == 64;
+}
+
+// The red zone's staging slots a call argument's part takes (tier1_select_part_slots), none for one in zmm16 and on.
+static uint32_t tier1_select_argument_part_slots(uint32_t bytes)
+{
+    return tier1_select_part_in_zmm(bytes) ? 0 : tier1_select_part_slots(bytes);
+}
+
 // The form that loads (`load`) or stores a vector register's part of `bytes` (#789, #141) whole: an eightbyte's or less
 // movsd (its bytes past the part's padding), and a whole register's movups, vmovdqu (AVX's) or vmovdqu64 (AVX512F's), as
 // the convention passes it at the target's width, whose forms the target then has.
@@ -2284,7 +2301,8 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
         supported &= abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (type == IR_VOID && object)) &&
                                   abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
         // The aggregates' parts in registers wait in the red zone's staging slots, 14 of them (#789), a whole vector
-        // register's taking its bytes' (#141, tier1_select_part_slots).
+        // register's taking its bytes' (#141, tier1_select_part_slots), but a 64-byte one's, which waits in zmm16 and on
+        // (tier1_select_argument_part_slots).
         uint32_t staged = 0;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
@@ -2297,7 +2315,7 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
             const uint32_t count = supported && record != 0 && record->size != 0 && !tier1_select_location_whole(record->location) ? tier1_select_location_parts(record->location, record->size, parts) : 0;
             for (uint32_t k = 0; k < count; k += 1)
             {
-                staged += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_part_slots(parts[k].bytes) : 0;
+                staged += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_argument_part_slots(parts[k].bytes) : 0;
             }
         }
         supported &= staged <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS;
@@ -3335,6 +3353,23 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_fold(forest, node, b, &base);
             }
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (constant_index && operand.offset == (int64_t)(int32_t)operand.offset)
+        {
+            // A constant index whose scaled value doesn't fit the displacement (#141: `p[1ull << 30]`, a struct array's
+            // element past 2 GB): the constant in a register, its own node's mov, as an index the lea scales, and the
+            // offset the displacement. No walk: nothing folds into it, nor it into a user, whose walk stops at it (the
+            // displacement doesn't fit there either), and the bottom-up path's class for it is the REG leaf's
+            // (tier1_burs_displacement), whose pattern is maximal munch's, this one.
+            base.rule = TIER1_RULE_ADDRESS;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.stack_object = BUSTER_IR_NONE;
+            base.displacement = (int32_t)operand.offset;
+            base.scale = (uint8_t)tier1_select_log2(operand.scale);
+            base.fold_count = 0;
+            base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
     }

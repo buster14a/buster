@@ -2629,9 +2629,53 @@ static void check_test_driver_tier1_stack_vectors(CheckTest* test, const char* c
     unlink(other_object);
 }
 
+// The 64-byte vector arguments' fixture (#141), for x86-64-v4: calls of two, eight and nine 64-byte vectors (the ninth on
+// the stack) and of vectors of each width among integers and a double, more of them in zmm registers than the red zone's
+// 14 staging slots hold, which wait in zmm16 and on between their copies and the moves (tier1_select_part_in_zmm), from
+// this unit (Tier 1's) to the other's (clang -O2's), which hashes them.
+static const char check_test_tier1_zmm_header[] =
+    "#include <stdio.h>\n"
+    "typedef int V16 __attribute__((vector_size(64)));\n"
+    "typedef int V8 __attribute__((vector_size(32)));\n"
+    "typedef int V4 __attribute__((vector_size(16)));\n"
+    "unsigned long b_two(V16 a, V16 b);\n"
+    "unsigned long b_eight(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h);\n"
+    "unsigned long b_mixed(long x, V16 a, V8 b, double d, V4 c, V16 e, V8 f, long y);\n"
+    "unsigned long b_nine(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h, V16 i);\n"
+    "unsigned long a_two(V16* p, int k);\n"
+    "unsigned long a_eight(V16* p, int k);\n"
+    "unsigned long a_mixed(V16* p, V8* q, V4* r, int k);\n"
+    "unsigned long a_nine(V16* p, int k);\n";
+
+static const char check_test_tier1_zmm_source[] =
+    "#include \"tier1-zmm.h\"\n"
+    "unsigned long a_two(V16* p, int k) { V16 s = p[0] + p[2]; return b_two(s, p[1] * p[k]); }\n"
+    "unsigned long a_eight(V16* p, int k) { V16 t = p[7] ^ p[k]; return b_eight(p[0], p[1] + p[k], p[2], p[3] - p[k], p[4], p[5], p[6], t); }\n"
+    "unsigned long a_mixed(V16* p, V8* q, V4* r, int k) { V4 c = r[0] + r[0]; return b_mixed(k, p[0], q[0], k * 0.5, c, p[1] + p[k], q[1], -k); }\n"
+    "unsigned long a_nine(V16* p, int k) { return b_nine(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8] + p[k]); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    V16 p[9];\n"
+    "    V8 q[2];\n"
+    "    V4 r[1];\n"
+    "    for (int i = 0; i < 9; i += 1) for (int j = 0; j < 16; j += 1) p[i][j] = i * 100 + j * 7 - 50;\n"
+    "    for (int i = 0; i < 2; i += 1) for (int j = 0; j < 8; j += 1) q[i][j] = i * 30 + j * 3 + 1;\n"
+    "    for (int j = 0; j < 4; j += 1) r[0][j] = j * 11 - 5;\n"
+    "    for (int k = 0; k < 3; k += 1) printf(\"%lu %lu %lu %lu\\n\", a_two(p, k), a_eight(p, k), a_mixed(p, q, r, k), a_nine(p, k));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_zmm_other_source[] =
+    "#include \"tier1-zmm.h\"\n"
+    "static unsigned long fold(unsigned long h, const int* v, int n) { for (int i = 0; i < n; i += 1) h = h * 31 + (unsigned)v[i]; return h; }\n"
+    "unsigned long b_two(V16 a, V16 b) { unsigned long h = fold(1, (int*)&a, 16); return fold(h, (int*)&b, 16); }\n"
+    "unsigned long b_eight(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h) { V16 v[8] = { a, b, c, d, e, f, g, h }; return fold(3, (int*)v, 128); }\n"
+    "unsigned long b_mixed(long x, V16 a, V8 b, double d, V4 c, V16 e, V8 f, long y) { unsigned long h = fold((unsigned long)x * 7 + (unsigned long)y, (int*)&a, 16); h = fold(h, (int*)&b, 8); h = fold(h, (int*)&c, 4); h = fold(h, (int*)&e, 16); h = fold(h, (int*)&f, 8); return h + (unsigned long)(d * 4); }\n"
+    "unsigned long b_nine(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h, V16 i) { V16 v[9] = { a, b, c, d, e, f, g, h, i }; return fold(5, (int*)v, 144); }\n";
+
 // The vectors' fixture (#141), for x86-64-v4, run where the host has every feature of it: both compilers' code is
 // x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review). Then
-// the stack-passed vectors' check, on the same hosts.
+// the stack-passed vectors' check and the 64-byte vector arguments' fixture, on the same hosts.
 static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     X86Target v4 = { 0 };
@@ -2640,6 +2684,8 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
                                   check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
     check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-zmm", "64-byte vector arguments'", check_test_tier1_zmm_header, check_test_tier1_zmm_source,
+                                  check_test_tier1_zmm_other_source, "-march=x86-64-v4", host);
 }
 
 // The convention's rarer shapes' fixture (#141).
@@ -2647,6 +2693,67 @@ static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, c
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
                                   check_test_tier1_shapes_other_source, NULL, true);
+}
+
+// The thread-locals' fixture (#141): this unit's own thread-locals (a long, a static array and a struct), whose addresses
+// Tier 1 takes from the thread pointer at their TPOFF32 offsets (local-exec), and the other unit's (clang -O2's), from
+// its GOT slot's GOTTPOFF offset (initial-exec), read, written and returned as addresses by Tier 1's functions on four
+// threads the other unit starts and on the main thread, each thread's results its own copies'.
+static const char check_test_tier1_tls_header[] =
+    "#include <stdio.h>\n"
+    "extern _Thread_local long b_counter;\n"
+    "long a_bump(long k);\n"
+    "long a_peek(void);\n"
+    "long* a_own_address(void);\n"
+    "long* a_other_address(void);\n"
+    "long a_sum(int n);\n"
+    "unsigned long b_run(unsigned long* results, int n);\n";
+
+static const char check_test_tier1_tls_source[] =
+    "#include \"tier1-tls.h\"\n"
+    "_Thread_local long a_own = 7;\n"
+    "static _Thread_local long a_array[16];\n"
+    "_Thread_local struct { int x; long y; } a_pair = { 3, 4 };\n"
+    "long a_bump(long k) { a_own += k; b_counter += 2 * k; for (int i = 0; i < 16; i += 1) a_array[i] += k * i; a_pair.y += k; return a_own * 3 + b_counter; }\n"
+    "long a_peek(void) { return a_own; }\n"
+    "long* a_own_address(void) { return &a_own; }\n"
+    "long* a_other_address(void) { return &b_counter; }\n"
+    "long a_sum(int n) { long s = a_pair.x; for (int i = 0; i < n && i < 16; i += 1) s += a_array[i]; return s + a_pair.y; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long results[4];\n"
+    "    const unsigned long main_result = b_run(results, 4);\n"
+    "    printf(\"%lu %lu %lu %lu %lu\\n\", results[0], results[1], results[2], results[3], main_result);\n"
+    "    printf(\"%ld %ld %ld\\n\", a_own, b_counter, a_sum(16));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_tls_other_source[] =
+    "#include <pthread.h>\n"
+    "#include \"tier1-tls.h\"\n"
+    "_Thread_local long b_counter = 100;\n"
+    "static void* b_worker(void* p)\n"
+    "{\n"
+    "    const long k = (long)p;\n"
+    "    unsigned long r = 0;\n"
+    "    for (int i = 0; i < 5; i += 1) r = r * 7 + (unsigned long)a_bump(k + i);\n"
+    "    r = r * 11 + (unsigned long)a_sum(16);\n"
+    "    r = r * 13 + (a_other_address() == &b_counter) + 2 * (*a_own_address() == a_peek());\n"
+    "    return (void*)r;\n"
+    "}\n"
+    "unsigned long b_run(unsigned long* results, int n)\n"
+    "{\n"
+    "    pthread_t threads[4];\n"
+    "    for (int t = 0; t < n; t += 1) pthread_create(&threads[t], 0, b_worker, (void*)(long)(t + 1));\n"
+    "    for (int t = 0; t < n; t += 1) { void* r; pthread_join(threads[t], &r); results[t] = (unsigned long)r; }\n"
+    "    return (unsigned long)b_worker((void*)9L);\n"
+    "}\n";
+
+// The thread-locals' fixture (#141).
+static void check_test_driver_tier1_tls(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-tls", "thread-locals'", check_test_tier1_tls_header, check_test_tier1_tls_source, check_test_tier1_tls_other_source, NULL,
+                                  true);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

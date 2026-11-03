@@ -208,7 +208,11 @@ the option, each unit's report added to the command's.
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
 frame's layout), symbols' addresses (`lea` from `rip`, or a load of the GOT slot
-where the emission's access column says so; thread-locals are Tier 0's),
+where the emission's access column says so; a thread-local's, as Tier 0's,
+the thread pointer `fs:[0]` plus its offset: a TPOFF32 immediate for the
+image's own, or the offset from its GOT slot for one that may be outside it,
+which `test-checker-driver`'s thread-locals' fixture runs on five threads
+against clang -O0's build),
 parameters anywhere in the entry block and narrow ones (zero-extended into
 their canonical storage at the entry), variadic calls of integer arguments (`al`
 zero), calls through a pointer (the callee moved into `r10` with the
@@ -273,10 +277,20 @@ part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
 register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
 which the lowering makes aggregates in a vector register whole. Still refused: a
-vector result LLVM demotes to a hidden pointer, and naked functions, whose
-bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
+vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
+are assembly Tier 0 copies as written, an address whose offset alone is past 32
+bits, and a call whose aggregates' parts in registers other than 64-byte
+vectors take more than the red zone's 14 staging slots (four 32-byte vectors,
+for one). The IR's switches and selects of floating
 values are refused too, but the C driver's lowering makes neither: a `switch`
 comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
+Functions with what the IR doesn't represent stop before Tier 1, at the
+lowering to the IR: vectors of elements other than 32-bit integers (floats,
+doubles, 8-, 16- and 64-bit integers, which `__m512i`'s intrinsics are), any
+vector at a target without AVX-512 (#775), and x86 builtins' rows, scalar ones
+among them (BMI2's `pdep`, `pext` and `bzhi`), which #732's subset left to the
+typed stream's adapter. Adding them is the IR's: its type column has 18 of the
+32 types its masks allow.
 
 ### The 128-bit integers
 
