@@ -318,4 +318,451 @@ static const char* check_vector_lower_baseline_row(const TypeTable* types, const
     return reason;
 }
 
+// A shuffle's output element where it has no AVX-512 permute (#775): from a (0), from b (1) or undefined (2), and its
+// index in that vector at the plan's element size.
+#define BUSTER_CHECK_BASE_FROM_A 0
+#define BUSTER_CHECK_BASE_FROM_B 1
+#define BUSTER_CHECK_BASE_UNDEFINED 2
+// The most elements a shuffle has (64 bytes of 1-byte elements: BUSTER_CHECK_VECTOR_SHUFFLE_LANES).
+#define BUSTER_CHECK_BASE_LANES 64u
+
+typedef struct CheckVectorBaselineShuffle CheckVectorBaselineShuffle;
+struct CheckVectorBaselineShuffle
+{
+    uint8_t from[BUSTER_CHECK_BASE_LANES];
+    uint8_t index[BUSTER_CHECK_BASE_LANES];
+    // The plan's element bytes (1, 2, 4 or 8) and elements, the output's.
+    uint32_t element;
+    uint32_t lanes;
+};
+
+// A shuffle at twice its element size where every aligned pair of elements is one wider element, or undefined (an
+// undefined half takes the other's): the intrinsics' shuffles of bytes and words that move whole words and dwords.
+static bool check_vector_baseline_widen(CheckVectorBaselineShuffle* plan)
+{
+    bool widened = plan->element < 8 && plan->lanes % 2 == 0;
+    for (uint32_t j = 0; widened && j < plan->lanes / 2; j += 1)
+    {
+        const uint8_t f0 = plan->from[2 * j];
+        const uint8_t f1 = plan->from[2 * j + 1];
+        const uint8_t i0 = plan->index[2 * j];
+        const uint8_t i1 = plan->index[2 * j + 1];
+        widened = f0 == BUSTER_CHECK_BASE_UNDEFINED ? (f1 == BUSTER_CHECK_BASE_UNDEFINED || i1 % 2 == 1) :
+                  f1 == BUSTER_CHECK_BASE_UNDEFINED ? i0 % 2 == 0 : f0 == f1 && i0 % 2 == 0 && i1 == i0 + 1;
+    }
+    if (widened)
+    {
+        for (uint32_t j = 0; j < plan->lanes / 2; j += 1)
+        {
+            const bool first = plan->from[2 * j] != BUSTER_CHECK_BASE_UNDEFINED;
+            plan->from[j] = first ? plan->from[2 * j] : plan->from[2 * j + 1];
+            plan->index[j] = (uint8_t)((first ? plan->index[2 * j] : plan->index[2 * j + 1]) / 2);
+        }
+        plan->element *= 2;
+        plan->lanes /= 2;
+    }
+    return widened;
+}
+
+// Whether every defined output element is `vector`'s.
+static bool check_vector_baseline_from_one(const CheckVectorBaselineShuffle* plan, uint8_t vector, uint32_t first, uint32_t count)
+{
+    bool one = true;
+    for (uint32_t i = first; i < first + count && i < plan->lanes; i += 1)
+    {
+        one &= plan->from[i] == vector || plan->from[i] == BUSTER_CHECK_BASE_UNDEFINED;
+    }
+    return one;
+}
+
+// Whether the shuffle interleaves the low (`high` false) or high halves of x and y, elementwise: an unpack's pattern.
+static bool check_vector_baseline_interleaves(const CheckVectorBaselineShuffle* plan, uint32_t lanes, bool high, uint8_t x, uint8_t y)
+{
+    bool interleaves = true;
+    for (uint32_t i = 0; i < plan->lanes && i < lanes; i += 1)
+    {
+        const uint8_t from = i % 2 == 0 ? x : y;
+        const uint32_t index = i / 2 + (high ? lanes / 2 : 0);
+        interleaves &= plan->from[i] == BUSTER_CHECK_BASE_UNDEFINED || (plan->from[i] == from && plan->index[i] == index);
+    }
+    return interleaves;
+}
+
+// The record of a two-source form with an immediate into `to`, of `first` and `second`: a legacy form's destination
+// tied to `first` by a copy, through `scratch` where `to` is `second`.
+static void check_vector_baseline_pair(CheckVectorBaseline* context, uint32_t form, uint8_t to, uint8_t first, uint8_t second, uint8_t scratch,
+                                       uint8_t immediate)
+{
+    const bool vex = x86_form_description(form)->family == BUSTER_X86_FAMILY_VEX;
+    const uint8_t into = !vex && to != first && to == second ? scratch : to;
+    check_vector_baseline_binary(context, form, into, first, second);
+    if (context->valid && context->row->record_count != 0)
+    {
+        context->row->records[context->row->record_count - 1].immediate = immediate;
+    }
+    check_vector_baseline_copy(context, to, into);
+}
+
+// A shuffle of dwords from one or two vectors into VECTOR(0): PSHUFD's of one, SHUFPS's of two whose halves each take
+// one vector's (MOVHLPS's and MOVLHPS's shuffles), an unpack's, or two shuffles: SHUFPS's of the two elements each
+// vector gives, then PSHUFD's of those, or, where one vector gives three, SHUFPS's of the other's and the one beside it,
+// then SHUFPS's of that and the three's vector, as clang's code computes v4i32 and v4f32 shuffles.
+static void check_vector_baseline_dwords(CheckVectorBaseline* context, const CheckVectorBaselineShuffle* plan, const uint8_t* roles, uint8_t scratch)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint32_t shufps = context->avx ? X86_FORM_VSHUFPS_X_X_XM128_IMM8 : X86_FORM_SHUFPS_X_XM128_IMM8;
+    uint8_t picked[2][4] = { { 0 } };
+    uint32_t counts[2] = { 0, 0 };
+    for (uint32_t i = 0; i < plan->lanes; i += 1)
+    {
+        const uint8_t from = plan->from[i];
+        bool seen = from == BUSTER_CHECK_BASE_UNDEFINED;
+        for (uint32_t k = 0; !seen && k < counts[from]; k += 1)
+        {
+            seen = picked[from][k] == plan->index[i];
+        }
+        if (!seen)
+        {
+            picked[from][counts[from]] = plan->index[i];
+            counts[from] += 1;
+        }
+    }
+    const uint8_t low = check_vector_baseline_from_one(plan, BUSTER_CHECK_BASE_FROM_A, 0, 2) ? BUSTER_CHECK_BASE_FROM_A : BUSTER_CHECK_BASE_FROM_B;
+    const uint8_t high = check_vector_baseline_from_one(plan, BUSTER_CHECK_BASE_FROM_A, 2, 2) ? BUSTER_CHECK_BASE_FROM_A : BUSTER_CHECK_BASE_FROM_B;
+    if (counts[BUSTER_CHECK_BASE_FROM_B] == 0 || counts[BUSTER_CHECK_BASE_FROM_A] == 0)
+    {
+        const uint8_t from = counts[BUSTER_CHECK_BASE_FROM_B] == 0 ? BUSTER_CHECK_BASE_FROM_A : BUSTER_CHECK_BASE_FROM_B;
+        uint8_t immediate = 0;
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            immediate |= (uint8_t)((i < plan->lanes && plan->from[i] != BUSTER_CHECK_BASE_UNDEFINED ? plan->index[i] & 3 : i) << (2 * i));
+        }
+        check_vector_baseline_shuffle(context, v0, roles[from], immediate);
+    }
+    else if (check_vector_baseline_from_one(plan, low, 0, 2) && check_vector_baseline_from_one(plan, high, 2, 2))
+    {
+        uint8_t immediate = 0;
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            immediate |= (uint8_t)((i < plan->lanes && plan->from[i] != BUSTER_CHECK_BASE_UNDEFINED ? plan->index[i] & 3 : 0) << (2 * i));
+        }
+        check_vector_baseline_pair(context, shufps, v0, roles[low], roles[high], scratch, immediate);
+    }
+    else if (counts[0] <= 2 && counts[1] <= 2)
+    {
+        // SHUFPS's of a's elements into the low half, b's into the high one, then PSHUFD's of those into their places.
+        uint8_t gather = 0;
+        for (uint32_t k = 0; k < 4; k += 1)
+        {
+            const uint32_t from = k / 2;
+            gather |= (uint8_t)((k % 2 < counts[from] ? picked[from][k % 2] : picked[from][0]) << (2 * k));
+        }
+        check_vector_baseline_pair(context, shufps, v0, roles[0], roles[1], scratch, gather);
+        uint8_t place = 0;
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            uint32_t slot = i;
+            if (i < plan->lanes && plan->from[i] != BUSTER_CHECK_BASE_UNDEFINED)
+            {
+                const uint32_t from = plan->from[i];
+                slot = 2 * from + (counts[from] == 2 && picked[from][1] == plan->index[i] ? 1u : 0u);
+            }
+            place |= (uint8_t)(slot << (2 * i));
+        }
+        check_vector_baseline_shuffle(context, v0, v0, place);
+    }
+    else
+    {
+        // Three elements of x and one of y, at `at`: SHUFPS's of y's beside the element of x in its half, into scratch
+        // ([x, x, y, y]), then SHUFPS's of x's half and that one's in their order.
+        const uint8_t x = counts[0] == 3 ? 0 : 1;
+        const uint8_t y = (uint8_t)(1 - x);
+        uint32_t at = 0;
+        while (plan->from[at] != y)
+        {
+            at += 1;
+        }
+        const uint32_t beside = at ^ 1;
+        const uint8_t other = plan->from[beside] == x ? plan->index[beside] : 0;
+        const uint8_t pair = (uint8_t)(other | other << 2 | plan->index[at] << 4 | plan->index[at] << 6);
+        check_vector_baseline_pair(context, shufps, scratch, roles[x], roles[y], scratch, pair);
+        // In the half of y's element, scratch's slot 2 gives y's, 0 the element of x beside it.
+        const uint8_t own = (uint8_t)((at % 2 == 0 ? 2 : 0) | (at % 2 == 0 ? 0 : 2) << 2);
+        uint8_t kept = 0;
+        const uint32_t kept_half = at < 2 ? 2 : 0;
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const uint32_t i = kept_half + k;
+            kept |= (uint8_t)((plan->from[i] == x ? plan->index[i] : 0) << (2 * k));
+        }
+        const uint8_t immediate = at < 2 ? (uint8_t)(own | kept << 4) : (uint8_t)(kept | own << 4);
+        check_vector_baseline_pair(context, shufps, v0, at < 2 ? scratch : roles[x], at < 2 ? roles[x] : scratch, scratch, immediate);
+    }
+}
+
+// The row of __builtin_shufflevector(a, b, indices...) where the target hasn't AVX-512F and AVX-512VL (#775), or the
+// reason it has none: its records only (the caller gives the row its operands, a in VECTOR(0) and b in VECTOR(1), and
+// `constant_role` the next one, which a row with a constant takes: `constant` its bytes and `constant_bytes` their
+// count, 0 without one). The shuffle is planned at the widest element size its pairs of elements allow, then:
+//   - in 16 bytes, of 8-byte elements by PSHUFD's or SHUFPD's, of 4-byte ones by check_vector_baseline_dwords, of
+//     2- and 1-byte ones by an unpack's, PSHUFLW's and PSHUFHW's of one vector's halves, or with SSSE3 by PSHUFB's of
+//     each vector with the constant's indices (the other's elements zeroed by their top bits), ORed;
+//   - with AVX, a 32-byte vector of two 16-byte ones by VINSERTF128, one's high half by VEXTRACTF128, and with AVX2 a
+//     shuffle of 32-byte vectors' dwords by VPERMD's of each and VPBLENDD's of the two.
+// Others are refused by name, as clang -O0 computes them in sequences no row takes.
+static const char* check_vector_baseline_shuffle_row(const X86Target* target, uint32_t element, uint32_t in_lanes, uint32_t in_bytes, uint32_t out_lanes,
+                                                     uint32_t out_bytes, const uint32_t* indices, uint8_t constant_role, Tier0Operation* row,
+                                                     uint8_t* constant, uint32_t* constant_bytes)
+{
+    const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const bool avx2 = (target->features & BUSTER_X86_FEATURE(AVX2)) != 0;
+    const bool ssse3 = (target->features & BUSTER_X86_FEATURE(SSSE3)) != 0;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t roles[2] = { v0, v1 };
+    // A spare register past the operands, beside the constant where a row takes one (PSHUFB's) and in its place elsewhere.
+    const uint8_t scratch = constant_role;
+    const char* reason = NULL;
+    CheckVectorBaseline context = { row, 16, avx, true };
+    CheckVectorBaselineShuffle plan = { .element = element, .lanes = out_lanes };
+    *constant_bytes = 0;
+    for (uint32_t i = 0; i < out_lanes && i < BUSTER_CHECK_BASE_LANES; i += 1)
+    {
+        const uint32_t k = indices[i];
+        plan.from[i] = k == UINT32_MAX ? BUSTER_CHECK_BASE_UNDEFINED : k < in_lanes ? BUSTER_CHECK_BASE_FROM_A : BUSTER_CHECK_BASE_FROM_B;
+        plan.index[i] = (uint8_t)(k == UINT32_MAX ? 0 : k < in_lanes ? k : k - in_lanes);
+    }
+    bool widened = true;
+    while (widened)
+    {
+        widened = check_vector_baseline_widen(&plan);
+    }
+    const uint32_t wide = in_bytes > out_bytes ? in_bytes : out_bytes;
+    const uint32_t half = 16 / plan.element;
+    // A 32-byte vector of a's 16 bytes, then a's or b's (`upper`); a 16-byte one of a's high half; a splat of an element 0.
+    uint8_t upper = BUSTER_CHECK_BASE_UNDEFINED;
+    bool concatenates = in_bytes == 16 && out_bytes == 32;
+    bool extracts_high = in_bytes == 32 && out_bytes == 16;
+    bool splats = true;
+    uint8_t splat = BUSTER_CHECK_BASE_UNDEFINED;
+    for (uint32_t i = 0; i < plan.lanes; i += 1)
+    {
+        const uint8_t from = plan.from[i];
+        const bool defined = from != BUSTER_CHECK_BASE_UNDEFINED;
+        upper = i >= half && defined ? from : upper;
+        concatenates &= !defined || ((i < half ? from == BUSTER_CHECK_BASE_FROM_A : from == upper) && plan.index[i] == i % half);
+        extracts_high &= !defined || (from == BUSTER_CHECK_BASE_FROM_A && plan.index[i] == i + half);
+        splats &= !defined || ((splat == BUSTER_CHECK_BASE_UNDEFINED || from == splat) && plan.index[i] == 0);
+        splat = defined ? from : splat;
+    }
+    // AVX2's unpacks interleave each 16-byte lane's own halves.
+    uint32_t lane_unpack = 0;
+    uint8_t lane_x = 0;
+    uint8_t lane_y = 0;
+    for (uint32_t k = 0; wide > 16 && avx2 && in_bytes == 32 && out_bytes == 32 && plan.element <= 2 && lane_unpack == 0 && k < 8; k += 1)
+    {
+        const bool high = (k & 4) != 0;
+        bool interleaves = true;
+        for (uint32_t i = 0; i < plan.lanes; i += 1)
+        {
+            const uint32_t lane = i / half;
+            const uint8_t from = (uint8_t)(i % 2 == 0 ? (k & 1) : (k >> 1 & 1));
+            const uint32_t index = lane * half + (i % half) / 2 + (high ? half / 2 : 0);
+            interleaves &= plan.from[i] == BUSTER_CHECK_BASE_UNDEFINED || (plan.from[i] == from && plan.index[i] == index);
+        }
+        if (interleaves)
+        {
+            lane_x = (uint8_t)(k & 1);
+            lane_y = (uint8_t)(k >> 1 & 1);
+            lane_unpack = plan.element == 1 ? (high ? X86_FORM_VPUNPCKHBW_Y_Y_YM256 : X86_FORM_VPUNPCKLBW_Y_Y_YM256) :
+                                              (high ? X86_FORM_VPUNPCKHWD_Y_Y_YM256 : X86_FORM_VPUNPCKLWD_Y_Y_YM256);
+        }
+    }
+    if (splats && splat != BUSTER_CHECK_BASE_UNDEFINED && avx2 && plan.element <= 2)
+    {
+        // VPBROADCASTB's or VPBROADCASTW's of the vector's first element.
+        const uint32_t form = plan.element == 1 ? (out_bytes > 16 ? X86_FORM_VPBROADCASTB_Y_XM8 : X86_FORM_VPBROADCASTB_X_XM8) :
+                                                  (out_bytes > 16 ? X86_FORM_VPBROADCASTW_Y_XM16 : X86_FORM_VPBROADCASTW_X_XM16);
+        check_vector_baseline_put(&context, check_vector_lower_record(form, v0, 0, roles[splat]));
+    }
+    else if (lane_unpack != 0)
+    {
+        check_vector_baseline_put(&context, check_vector_lower_record(lane_unpack, v0, roles[lane_x], roles[lane_y]));
+    }
+    else if (wide > 16 && avx && concatenates)
+    {
+        X86Instruction record = check_vector_lower_record(X86_FORM_VINSERTF128_Y_Y_XM128_IMM8, v0, v0, roles[upper == BUSTER_CHECK_BASE_FROM_B ? 1 : 0]);
+        record.immediate = 1;
+        check_vector_baseline_put(&context, record);
+    }
+    else if (wide > 16 && avx && extracts_high)
+    {
+        X86Instruction record = check_vector_lower_record(X86_FORM_VEXTRACTF128_XM128_Y_IMM8, v0, 0, v0);
+        record.immediate = 1;
+        check_vector_baseline_put(&context, record);
+    }
+    else if (wide > 16 && avx2 && plan.element >= 4)
+    {
+        // VPERMD's of each vector by the constant's dword indices, then VPBLENDD's of b's where they are its.
+        const uint32_t split = plan.element / 4;
+        uint8_t blend = 0;
+        bool reads_b = false;
+        memset(constant, 0, 32);
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            const uint32_t lane = i / split;
+            const uint8_t from = plan.from[lane];
+            constant[4 * i] = (uint8_t)((plan.index[lane] * split + i % split) & 7);
+            blend |= (uint8_t)(from == BUSTER_CHECK_BASE_FROM_B ? 1u << i : 0u);
+            reads_b |= from == BUSTER_CHECK_BASE_FROM_B;
+        }
+        const bool only_b = check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_B, 0, plan.lanes);
+        check_vector_baseline_put(&context, check_vector_lower_record(X86_FORM_VPERMD_Y_Y_YM256, v0, constant_role, only_b ? v1 : v0));
+        if (reads_b && !only_b)
+        {
+            check_vector_baseline_put(&context, check_vector_lower_record(X86_FORM_VPERMD_Y_Y_YM256, v1, constant_role, v1));
+            X86Instruction record = check_vector_lower_record(X86_FORM_VPBLENDD_Y_Y_YM256_IMM8, v0, v0, v1);
+            record.immediate = blend;
+            check_vector_baseline_put(&context, record);
+        }
+        *constant_bytes = 32;
+    }
+    else if (wide > 16)
+    {
+        reason = !avx2 ? "vector shuffles of 32-byte vectors without AVX2" : "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512";
+    }
+    else if (plan.element == 8)
+    {
+        const bool one = check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_A, 0, 2) || check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_B, 0, 2);
+        if (one)
+        {
+            // PSHUFD's of the qwords' dwords.
+            const uint8_t from = check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_A, 0, 2) ? BUSTER_CHECK_BASE_FROM_A : BUSTER_CHECK_BASE_FROM_B;
+            uint8_t immediate = 0;
+            for (uint32_t i = 0; i < 2; i += 1)
+            {
+                const uint32_t q = i < plan.lanes && plan.from[i] != BUSTER_CHECK_BASE_UNDEFINED ? plan.index[i] & 1 : i;
+                immediate |= (uint8_t)((2 * q | (2 * q + 1) << 2) << (4 * i));
+            }
+            check_vector_baseline_shuffle(&context, v0, roles[from], immediate);
+        }
+        else
+        {
+            const uint32_t shufpd = avx ? X86_FORM_VSHUFPD_X_X_XM128_IMM8 : X86_FORM_SHUFPD_X_XM128_IMM8;
+            const uint8_t immediate = (uint8_t)((plan.index[0] & 1) | (plan.index[1] & 1) << 1);
+            check_vector_baseline_pair(&context, shufpd, v0, roles[plan.from[0]], roles[plan.from[1]], scratch, immediate);
+        }
+    }
+    else if (plan.element == 4)
+    {
+        check_vector_baseline_dwords(&context, &plan, roles, scratch);
+    }
+    else
+    {
+        // An unpack of x's and y's low or high halves, or PSHUFLW's and PSHUFHW's of one vector's own halves.
+        const uint32_t lanes = 16 / plan.element;
+        uint32_t unpack = 0;
+        uint8_t x = 0;
+        uint8_t y = 0;
+        for (uint32_t k = 0; unpack == 0 && k < 8; k += 1)
+        {
+            const bool high = (k & 4) != 0;
+            x = (uint8_t)(k & 1);
+            y = (uint8_t)(k >> 1 & 1);
+            if (check_vector_baseline_interleaves(&plan, lanes, high, x, y))
+            {
+                unpack = plan.element == 1 ? (high ? (avx ? X86_FORM_VPUNPCKHBW_X_X_XM128 : X86_FORM_PUNPCKHBW_X_XM128) :
+                                                     (avx ? X86_FORM_VPUNPCKLBW_X_X_XM128 : X86_FORM_PUNPCKLBW_X_XM128)) :
+                                             (high ? (avx ? X86_FORM_VPUNPCKHWD_X_X_XM128 : X86_FORM_PUNPCKHWD_X_XM128) :
+                                                     (avx ? X86_FORM_VPUNPCKLWD_X_X_XM128 : X86_FORM_PUNPCKLWD_X_XM128));
+            }
+        }
+        bool halves = plan.element == 2 && (check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_A, 0, 8) ||
+                                            check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_B, 0, 8));
+        for (uint32_t i = 0; halves && i < plan.lanes; i += 1)
+        {
+            halves = plan.from[i] == BUSTER_CHECK_BASE_UNDEFINED || plan.index[i] / 4 == i / 4;
+        }
+        if (unpack != 0)
+        {
+            check_vector_baseline_pair(&context, unpack, v0, roles[x], roles[y], scratch, 0);
+        }
+        else if (halves)
+        {
+            const uint8_t from = check_vector_baseline_from_one(&plan, BUSTER_CHECK_BASE_FROM_A, 0, 8) ? BUSTER_CHECK_BASE_FROM_A : BUSTER_CHECK_BASE_FROM_B;
+            uint8_t immediates[2] = { 0, 0 };
+            for (uint32_t i = 0; i < 8; i += 1)
+            {
+                const uint32_t word = i < plan.lanes && plan.from[i] != BUSTER_CHECK_BASE_UNDEFINED ? plan.index[i] % 4 : i % 4;
+                immediates[i / 4] |= (uint8_t)(word << (2 * (i % 4)));
+            }
+            X86Instruction low = check_vector_lower_record(avx ? X86_FORM_VPSHUFLW_X_XM128_IMM8 : X86_FORM_PSHUFLW_X_XM128_IMM8, v0, 0, roles[from]);
+            low.immediate = immediates[0];
+            check_vector_baseline_put(&context, low);
+            X86Instruction high = check_vector_lower_record(avx ? X86_FORM_VPSHUFHW_X_XM128_IMM8 : X86_FORM_PSHUFHW_X_XM128_IMM8, v0, 0, v0);
+            high.immediate = immediates[1];
+            check_vector_baseline_put(&context, high);
+        }
+        else if (ssse3)
+        {
+            // The constant's byte i: a's byte's index, or b's with the top bit set (PSHUFB zeroes a byte whose index has
+            // it); b's PSHUFB takes the constant with each top bit flipped, by 0x80 in each byte (check_vector_baseline_compare's).
+            const uint32_t pshufb = avx ? X86_FORM_VPSHUFB_X_X_XM128 : X86_FORM_PSHUFB_X_XM128;
+            bool reads_a = false;
+            bool reads_b = false;
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                const uint32_t lane = i / plan.element;
+                const uint8_t from = lane < plan.lanes ? plan.from[lane] : BUSTER_CHECK_BASE_UNDEFINED;
+                const uint8_t byte = (uint8_t)(plan.index[lane] * plan.element + i % plan.element);
+                constant[i] = from == BUSTER_CHECK_BASE_FROM_A ? byte : (uint8_t)(0x80 | byte);
+                reads_a |= from == BUSTER_CHECK_BASE_FROM_A;
+                reads_b |= from == BUSTER_CHECK_BASE_FROM_B;
+            }
+            *constant_bytes = 16;
+            if (reads_b)
+            {
+                const uint8_t flip = (uint8_t)(constant_role + 1);
+                check_vector_baseline_ones(&context, flip);
+                check_vector_baseline_shift(&context, flip, 2, 7);
+                check_vector_baseline_binary(&context, avx ? X86_FORM_VPACKSSWB_X_X_XM128 : X86_FORM_PACKSSWB_X_XM128, flip, flip, flip);
+                check_vector_baseline_binary(&context, avx ? X86_FORM_VXORPS_X_X_XM128 : X86_FORM_XORPS_X_XM128, flip, flip, constant_role);
+                check_vector_baseline_binary(&context, pshufb, v1, v1, flip);
+            }
+            if (reads_a)
+            {
+                check_vector_baseline_binary(&context, pshufb, v0, v0, constant_role);
+            }
+            if (reads_a && reads_b)
+            {
+                check_vector_baseline_binary(&context, avx ? X86_FORM_VORPS_X_X_XM128 : X86_FORM_ORPS_X_XM128, v0, v0, v1);
+            }
+            else if (reads_b)
+            {
+                check_vector_baseline_copy(&context, v0, v1);
+            }
+        }
+        else
+        {
+            reason = plan.element == 1 ? "vector shuffles of 8-bit elements without SSSE3" : "vector shuffles of 16-bit elements without SSSE3";
+        }
+    }
+    const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
+    for (uint32_t r = 0; context.valid && r < row->record_count; r += 1)
+    {
+        const uint64_t needed = x86_target_requirement(row->records[r].form);
+        context.valid = needed != 0 && (needed & ~available) == 0;
+    }
+    if (reason == NULL && !context.valid)
+    {
+        reason = "vector shuffles unavailable at this target";
+    }
+    return reason;
+}
+
+#undef BUSTER_CHECK_BASE_FROM_A
+#undef BUSTER_CHECK_BASE_FROM_B
+#undef BUSTER_CHECK_BASE_UNDEFINED
+#undef BUSTER_CHECK_BASE_LANES
+
 #undef BUSTER_CHECK_BASE_PACKED

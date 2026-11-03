@@ -5,8 +5,10 @@
 // builtin's call, its arguments converted to its prototype's types already (c_check_builtin_x86.c) and its immediates
 // constants, as clang -O0's code computes it. A builtin's row is its family's with the rule's form, from a table by
 // name; the families are those this compiler's own main.c reaches first. Each form is a VEX or EVEX one that names its
-// operands in its fields alone, of AVX-512F and AVX-512VL, which the lowering requires of a function with vectors, and
-// of the features and extensions (AVX512-FP16's and XOP's: X86Extension) the rule names past them. A builtin the table
+// operands in its fields alone, of AVX-512F and AVX-512VL, and of the features and extensions (AVX512-FP16's and XOP's:
+// X86Extension) the rule names past them; at a target without AVX-512F and AVX-512VL, the reviewed SSE or VEX forms of
+// the same operation (check_vector_baseline_row, #775), or SSE's sequences of an element's extraction and of SSE4.1's
+// blends. A builtin the table
 // doesn't name is refused by name. One whose instruction names fixed registers (rdtsc, xgetbv, monitorx and mwaitx) or has a
 // legacy encoding (pause, tzcnt), which no row takes, is a call of a per-unit leaf instead (c_builtin_x86_helpers.c).
 // Included by c_check_program_lower.c after c_check_program_vectors.c.
@@ -1119,6 +1121,40 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             row->operand_classes[3] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[3] = rule->bytes;
         }
+        else if (rule->family == CHECK_X86_LOWER_BLENDV && rule->bytes == 16 && (target->features & BUSTER_X86_FEATURE(AVX)) == 0)
+        {
+            // Without AVX (#775), SSE4.1's blends read their mask in xmm0, which no row names: the mask's elements' signs
+            // instead (PCMPGTB's of zeros and it, or PSRAD's by 31, then for qwords PSHUFD's of each one's high dword),
+            // b's elements under them and a's elsewhere (ANDPS, ANDNPS, ORPS), into VECTOR(0).
+            const uint8_t mask = rule->element == 1 ? v3 : v2;
+            uint32_t r = 0;
+            if (rule->element == 1)
+            {
+                row->records[r++] = check_x86_lower_record(X86_FORM_XORPS_X_XM128, v3, 0, v3);
+                row->records[r++] = check_x86_lower_record(X86_FORM_PCMPGTB_X_XM128, v3, 0, v2);
+            }
+            else
+            {
+                row->records[r] = check_x86_lower_record(X86_FORM_PSRAD_X_IMM8, 0, 0, v2);
+                row->records[r++].immediate = 31;
+                if (rule->element == 8)
+                {
+                    row->records[r] = check_x86_lower_record(X86_FORM_PSHUFD_X_XM128_IMM8, v2, 0, v2);
+                    row->records[r++].immediate = 0xf5;
+                }
+            }
+            row->records[r++] = check_x86_lower_record(X86_FORM_ANDPS_X_XM128, v1, 0, mask);
+            row->records[r++] = check_x86_lower_record(X86_FORM_ANDNPS_X_XM128, mask, 0, v0);
+            row->records[r++] = check_x86_lower_record(X86_FORM_ORPS_X_XM128, mask, 0, v1);
+            row->records[r++] = check_x86_lower_record(X86_FORM_MOVUPS_X_XM, v0, 0, mask);
+            row->record_count = (uint8_t)r;
+            row->operand_count = 3;
+            for (uint32_t j = 0; j < 3; j += 1)
+            {
+                row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+                row->operand_bytes[j] = rule->bytes;
+            }
+        }
         else if (rule->family == CHECK_X86_LOWER_BLENDV)
         {
             // The mask's vector, VECTOR(2), in the immediate's bits 7 to 4.
@@ -1497,15 +1533,25 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
                            rule->family == CHECK_X86_LOWER_EXTRACT || rule->family == CHECK_X86_LOWER_INSERT ||
                            rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE || rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE ||
                            rule->family == CHECK_X86_LOWER_UNARY;
-        if (older && check_vector_baseline_row(target, row, &baseline))
+        if (older && rule->family == CHECK_X86_LOWER_EXTRACT && rule->bytes == 16 && rule->element >= 4 && rule->form != X86_FORM_VPERMILPS_X_XM128_IMM8_EVEX &&
+            (target->features & BUSTER_X86_FEATURE(SSE41)) == 0)
+        {
+            // SSE2's (#775): PSHUFD's of the element (a qword's dwords) to the first, into VECTOR(1), then MOVD's or MOVQ's of it.
+            const uint32_t index = (uint32_t)(immediate & (16u / rule->element - 1));
+            const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+            const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+            row->records[0] = check_x86_lower_record(X86_FORM_PSHUFD_X_XM128_IMM8, v1, 0, v0);
+            row->records[0].immediate = (int32_t)(rule->element == 8 ? (index == 0 ? 0x44 : 0xee) : index * 0x55);
+            row->records[1] = check_x86_lower_record(rule->element == 8 ? X86_FORM_MOVQ_RM64_X : X86_FORM_MOVD_RM32_X, v1, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+            row->record_count = 2;
+            needed &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ));
+        }
+        else if (older && check_vector_baseline_row(target, row, &baseline))
         {
             *row = baseline;
-            // These two were requirements of the EVEX implementation, not of the reviewed SSE/VEX operation.
-            needed &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ));
-            if (rule->form == X86_FORM_VSHUFPD_X_X_XM128_IMM8)
-            {
-                needed &= ~BUSTER_X86_FEATURE(AVX);
-            }
+            // These were requirements of the EVEX implementation or of the rule's VEX form, not of the reviewed SSE/VEX
+            // operation, whose forms' own requirements check_vector_baseline_row has checked.
+            needed &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX));
         }
         else if (older)
         {

@@ -473,8 +473,9 @@ an entry's is refused, not miscompiled.
   an object the prologue stores its register in.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
   the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
-  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
-  end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
+  entries (`tier0_memory_function`), as `x87` and `int128` do. On the EVEX path (`vector_bytes` 0) Tier 0's own
+  records for them are EVEX ones, for a unit whose target has AVX-512 (F, VL, BW and DQ); elsewhere they are SSE's or
+  AVX's ("Targets without AVX-512", below).
 
 **Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
 up to 8 records each with their operands' classes (integers, floating values and VECTORs, each VECTOR one's bytes) and
@@ -524,6 +525,29 @@ the operations, of another class than its row's result or of an operand of anoth
 `?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a
 vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
 conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
+
+**Targets without AVX-512 (#775).** At `x86-64`, `x86-64-v2` and `x86-64-v3` a function's vector transport is 16 bytes
+of SSE2 or 32 of AVX (`vector_bytes`, #955), through the first free floating register, and its rows are the front end's
+at the target's forms, by both of the checker's paths:
+
+- The rows the operators, the generic builtins and the x86 builtins build in EVEX forms take their reviewed SSE or VEX
+  equivalents (`check_vector_baseline_form`, `c_check_program_vector_forms.c`): the same operation unmasked, a legacy
+  form's destination tied to its first source by a copy, each form allowed by the target's features
+  (`x86_target_requirement`), and legacy compares only of predicates 0 to 7. What SSE has no one instruction for is a
+  sequence: an SSE2 element's extraction (`pshufd` and `movd`), SSE4.1's blends without AVX (their legacy forms read
+  xmm0: the mask's signs, `andps`, `andnps` and `orps`), and the shuffles (`check_vector_baseline_shuffle_row`,
+  `c_check_program_vectors_baseline.c`), planned at the widest element their pairs allow: `pshufd` and `shufpd` of
+  qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
+  words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
+  a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+- What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
+  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
+  integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The conversions to
+  and from integers in a general register (`cvt(t)ss2si`, `movmskps` and the others) and vector results in several
+  registers are #1193's.
+- `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
+  intrinsics, shuffles of every element size, SSE4.1's and AVX2's) at the three levels natively against clang -O0's build
+  at the same `-march`, and checks each refusal by name.
 
 ## Masks (#179)
 
