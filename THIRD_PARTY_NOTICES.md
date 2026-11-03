@@ -581,3 +581,40 @@ Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
 and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
 `CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
 as behavior references. No LLVM implementation or test fixtures were copied.
+
+### The CPU model's names and values (#148)
+
+`src/buster/compiler/c_builtin_cpu.inc` is derived LLVM data, not first-party
+material: the names `__builtin_cpu_supports` and `__builtin_cpu_is` take, and
+the CPU model's bits and values clang's code tests them against. It keeps the
+LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Input:** `llvm/include/llvm/TargetParser/X86TargetParser.def`, as
+  installed by apt.llvm.org's `llvm-23-dev`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92` (LLVM
+  23.1.5, built from llvm-project commit `a738f2737189`), at
+  `/usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def`, sha256
+  `cc59e275156d08b658cf23bc950237ee288a54477b16c08b4cbb00242fa60f50`.
+- **Rows taken:** the strings and ABI values of its `X86_FEATURE_COMPAT` and
+  `X86_MICROARCH_LEVEL` rows (a feature's word is the value divided by 32, its
+  bit the remainder), and of its `X86_VENDOR`, `X86_CPU_TYPE` and
+  `X86_CPU_SUBTYPE` rows, aliases included. The rows keep the input's order,
+  the features' first, and nothing else of it is copied.
+- **Generator:** `tools/generate_x86_cpu_model.c`, which is original project
+  code under the default terms. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_model.c -o build/generate_x86_cpu_model
+  build/generate_x86_cpu_model /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def "llvm-23-dev 1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92 (apt.llvm.org)" "$(sha256sum /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def | cut -d' ' -f1)" > c_builtin_cpu.inc.new
+  ```
+
+  The output's sha256 is
+  `fe9cf559b3168f24d27e2a228c980af2c0a4b0bab8d552b37422f9ffb47588d7`. Its 183
+  rows are byte-identical to the table that first came in with #148. That
+  table was read from an earlier clang 23.1's code for a call of each name,
+  with no record of its exact inputs.
+- **Oracle:** clang runs externally in `test-checker-driver`
+  (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
+  every row's test against clang's code over every bit and value of the
+  model. Its use as an oracle copies none of its code.

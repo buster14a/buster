@@ -1342,9 +1342,11 @@ names in its word (`__cpu_model.features[0]` at 12, or `__cpu_features2`'s),
 and is false for a feature clang doesn't know, where clang also warns
 (pending here); `cpu_is(s)` compares the model's vendor, type or subtype with
 the value of the name s, which clang must know (an error otherwise). The names
-and their words, bits, fields and values are `c_builtin_cpu.inc`, generated
-data: the candidates are the strings of LLVM 23's `X86TargetParser.def`, and
-every value is read from clang's -O0 code of a call of it. The lowering reads
+and their words, bits, fields and values are `c_builtin_cpu.inc`, derived
+LLVM data that `tools/generate_x86_cpu_model.c` generates: the strings and ABI
+values of LLVM 23.1.5's `X86TargetParser.def` rows that clang's
+`validateCpuSupports` and `validateCpuIs` take. `THIRD_PARTY_NOTICES.md`
+records the input, its digest and the command. The lowering reads
 the model through the runtime's symbols `__cpu_model` and `__cpu_features2`
 (`check_lower_runtime`, data symbols: `check_lower_runtime_object`), which
 libgcc.a's `cpuinfo.o` defines, and calls `__cpu_indicator_init` as a runtime

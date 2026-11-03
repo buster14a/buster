@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Original generator of src/buster/compiler/c_builtin_cpu.inc (#148): the names __builtin_cpu_supports and
+// __builtin_cpu_is take and the CPU model's bits and values clang's code tests them against, projected from one input,
+// LLVM's llvm/include/llvm/TargetParser/X86TargetParser.def. Its X86_FEATURE_COMPAT and X86_MICROARCH_LEVEL rows are the
+// names clang's X86TargetInfo::validateCpuSupports takes, each with its ABI value (word ABI_VALUE / 32 of the model's
+// features, bit ABI_VALUE % 32); its X86_VENDOR, X86_CPU_TYPE and X86_CPU_SUBTYPE rows, aliases among them, are the
+// names validateCpuIs takes, each with the value clang compares the model's vendor, type or subtype with. Rows keep the
+// input's order, the features' first. The output is derived LLVM data and keeps the input's terms (its header says so);
+// the input's identity, which the header records, is the caller's: see THIRD_PARTY_NOTICES.md for the recorded run.
+//
+//   cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_model.c -o build/generate_x86_cpu_model
+//   build/generate_x86_cpu_model DEF_PATH "SOURCE" "SHA256" > OUTPUT
+//
+// Write to a temporary file and replace the checked-in table only after the generator succeeds.
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// A row kind the table takes: its macro, its argument count, and what it is (a feature, or a CPU name's field: 0 the
+// vendor, 1 the type, 2 the subtype).
+typedef struct CpuModelKind CpuModelKind;
+struct CpuModelKind
+{
+    const char* macro;
+    uint32_t arguments;
+    int32_t field;
+};
+
+static const CpuModelKind cpu_model_kinds[] =
+{
+    { "X86_FEATURE_COMPAT", 4, -1 },
+    { "X86_MICROARCH_LEVEL", 4, -1 },
+    { "X86_VENDOR", 3, 0 },
+    { "X86_CPU_TYPE", 3, 1 },
+    { "X86_CPU_SUBTYPE", 3, 2 },
+};
+
+// A row's string and ABI value, from `line` (a row of `kind`, at its macro's end): whether it parsed.
+static bool cpu_model_parse(const char* cursor, const CpuModelKind* kind, char* name, size_t capacity, uint64_t* value)
+{
+    bool valid = *cursor == '(';
+    uint32_t commas = 0;
+    const char* string = NULL;
+    const char* last = NULL;
+    for (const char* at = cursor; valid && *at != 0 && *at != ')'; at += 1)
+    {
+        commas += *at == ',';
+        string = string == NULL && *at == '"' ? at + 1 : string;
+        last = *at == ',' ? at + 1 : last;
+    }
+    const char* closing = string != NULL ? strchr(string, '"') : NULL;
+    valid = valid && commas + 1 == kind->arguments && closing != NULL && (size_t)(closing - string) < capacity && last != NULL;
+    if (valid)
+    {
+        memcpy(name, string, (size_t)(closing - string));
+        name[closing - string] = 0;
+        char* end = NULL;
+        *value = strtoull(last, &end, 10);
+        while (end != NULL && (*end == ' ' || *end == '\t'))
+        {
+            end += 1;
+        }
+        valid = end != NULL && end != last && *end == ')';
+    }
+    return valid;
+}
+
+// Prints the rows of `def` whose kinds are features (`features`) or CPU names (!`features`), in the input's order.
+static bool cpu_model_rows(FILE* def, bool features, uint32_t* count)
+{
+    char line[512];
+    bool valid = fseek(def, 0, SEEK_SET) == 0;
+    while (valid && fgets(line, sizeof(line), def) != NULL)
+    {
+        for (uint32_t k = 0; valid && k < sizeof(cpu_model_kinds) / sizeof(cpu_model_kinds[0]); k += 1)
+        {
+            const CpuModelKind* kind = cpu_model_kinds + k;
+            const size_t length = strlen(kind->macro);
+            if ((kind->field < 0) == features && strncmp(line, kind->macro, length) == 0 && line[length] == '(')
+            {
+                char name[128];
+                uint64_t value = 0;
+                valid = cpu_model_parse(line + length, kind, name, sizeof(name), &value) && (features ? value < 128 : value <= UINT32_MAX);
+                if (valid && features)
+                {
+                    printf("BUSTER_CBUILTIN_CPU_FEATURE(\"%s\", %u, %u)\n", name, (uint32_t)(value / 32), (uint32_t)(value % 32));
+                }
+                else if (valid)
+                {
+                    printf("BUSTER_CBUILTIN_CPU_NAME(\"%s\", %d, %u)\n", name, kind->field, (uint32_t)value);
+                }
+                else
+                {
+                    fprintf(stderr, "generate_x86_cpu_model: can't read the row: %s", line);
+                }
+                *count += valid;
+            }
+        }
+    }
+    return valid;
+}
+
+int main(int argc, char** argv)
+{
+    FILE* def = argc == 4 ? fopen(argv[1], "rb") : NULL;
+    int status = 1;
+    if (def == NULL)
+    {
+        fprintf(stderr, "usage: generate_x86_cpu_model DEF_PATH SOURCE SHA256\n");
+    }
+    else
+    {
+        printf("// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception\n");
+        printf("// Generated by tools/generate_x86_cpu_model.c; do not edit. Derived LLVM data, part of the LLVM Project, under the\n");
+        printf("// Apache License v2.0 with LLVM Exceptions (LICENSES/LLVM.txt): the names and ABI values of\n");
+        printf("// llvm/include/llvm/TargetParser/X86TargetParser.def, from\n");
+        printf("// %s,\n", argv[2]);
+        printf("// sha256 %s; see THIRD_PARTY_NOTICES.md.\n", argv[3]);
+        printf("// The names __builtin_cpu_supports and __builtin_cpu_is take (#148, c_check_builtin_misc.c), and how clang's code tests\n");
+        printf("// each against libgcc's (and compiler-rt's) CPU model: BUSTER_CBUILTIN_CPU_FEATURE(name, word, bit) for a feature, the\n");
+        printf("// bit of word 0 (__cpu_model.features[0], at __cpu_model + 12) or of words 1 to 3 (__cpu_features2[0] to [2]), and\n");
+        printf("// BUSTER_CBUILTIN_CPU_NAME(name, field, value) for a vendor (field 0, __cpu_model.vendor), a CPU type (1, its type) or\n");
+        printf("// a subtype (2, its subtype) and the value clang compares it with. test-checker-driver compares each with clang's\n");
+        printf("// code (c_check_library_driver_test.c's check_test_cpu_model_runs, which runs both builds' tests of every name over\n");
+        printf("// every bit and value of the model).\n");
+        uint32_t features = 0;
+        uint32_t names = 0;
+        const bool valid = cpu_model_rows(def, true, &features) && cpu_model_rows(def, false, &names) && features != 0 && names != 0;
+        fclose(def);
+        status = valid ? 0 : 1;
+    }
+    return status;
+}
