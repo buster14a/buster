@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The preprocessor tests (c_preprocessor.c), for the test-preprocessor command:
 //
@@ -37,6 +38,7 @@
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
 // keywords, features, -f option sets and timestamps checks, and run_preprocessor_tests.
 
+#include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -6977,9 +6979,42 @@ static bool pp_test_case_retention(const char* directory)
     return result;
 }
 
+// The tree an executable's path names (pp_buster_tree): the published build/compiler's, a configuration's
+// build/cmake/VARIANT/CONFIG/compiler's, the last build/ of a tree inside another's build/, and two levels up where no
+// build/ directory is in the path; none for an executable in /build itself.
+static bool pp_test_buster_tree(void)
+{
+    static const struct
+    {
+        const char* executable;
+        const char* tree;
+    } cases[] = {
+        { "/home/user/buster/build/compiler", "/home/user/buster" },
+        { "/home/user/buster/build/cmake/native/Release/compiler", "/home/user/buster" },
+        { "/w/build/trees/buster/build/cmake/x86-64-g0/Debug/compiler", "/w/build/trees/buster" },
+        { "/tmp/shifts/main/compiler-688", "/tmp/shifts" },
+        { "/build/compiler", 0 },
+    };
+    bool result = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s", cases[i].executable);
+        const bool found = pp_buster_tree(path);
+        const bool right = cases[i].tree != 0 ? found && strcmp(path, cases[i].tree) == 0 : !found;
+        if (!right)
+        {
+            printf("headers: %s's tree is %s, not %s\n", cases[i].executable, found ? path : "none", cases[i].tree != 0 ? cases[i].tree : "none");
+        }
+        result = result && right;
+    }
+    return result;
+}
+
 static bool pp_test_headers(const char* directory)
 {
     char ours[PATH_MAX];
+    const bool trees = pp_test_buster_tree();
     bool result = pp_buster_headers_directory(ours, sizeof(ours), 0);
     if (!result)
     {
@@ -7022,7 +7057,7 @@ static bool pp_test_headers(const char* directory)
            failures, sets, our_failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), order_failures,
            (unsigned long)(4 * BUSTER_ARRAY_LENGTH(pp_test_header_modes)), option_failures,
            beside ? "where they should be" : "elsewhere");
-    return result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
+    return trees && result && failures == 0 && our_failures == 0 && order_failures == 0 && option_failures == 0 && beside && file_failures == 0 && command;
 }
 
 static bool pp_fuzz(const PPFuzzOptions* options);
@@ -8080,8 +8115,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--print-case N] [options] [file...]\n");
     }
     char directory[4096];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary);
     const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
     // The oracle cache, set up before the parts fork, so that their counts reach its report.
     OracleCache* oracle = oracle_cache();

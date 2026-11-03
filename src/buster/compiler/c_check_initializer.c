@@ -73,7 +73,7 @@ struct CheckInitializer
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
-                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                   TypeId type, uint32_t begin, uint32_t end, bool static_storage,
                                   Arena* output, Arena* scratch, CheckInitializer* result);
 
@@ -210,7 +210,7 @@ struct CheckInitWalker
     bool semantic_suppressed;
     const CheckInitString* strings;
     uint32_t string_count;
-    const uint32_t* string_ids;
+    CheckSparseColumn string_ids;
     const uint64_t* indices;
     const uint8_t* index_valid;
     const TypeId* expression_types;
@@ -526,7 +526,8 @@ static uint32_t check_init_union_slot(const CheckInitUnion* entries, uint32_t ca
     return slot;
 }
 
-static void check_init_used(CheckInitWalker* walker, const CheckInitFrame* frame, uint32_t token, bool clear_union)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_init_walk.
+static inline __attribute__((always_inline)) void check_init_used(CheckInitWalker* walker, const CheckInitFrame* frame, uint32_t token, bool clear_union)
 {
     const TypeId type = type_strip_aligned(walker->types, frame->type);
     if (!frame->wrapper && type == walker->incomplete && frame->offset == 0 && frame->next >= walker->extent)
@@ -1104,7 +1105,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
 
 // Both identities are already indexed by the reader. In particular, an ordinary nonstring initializer never
 // searches the unit's literal pool, and an array-valued parenthesized string resolves through its original object.
-static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint32_t node)
+// Always inlined (#880), as profile-guided builds do; hot caller: check_init_walk.
+static inline __attribute__((always_inline)) const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint32_t node)
 {
     const CheckInitString* result = 0;
     uint32_t object = 0;
@@ -1117,17 +1119,17 @@ static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_
             object = value->object;
         }
     }
-    if (object != 0 && object <= walker->parser->tokens.count && walker->string_ids != 0)
+    if (object != 0 && object <= walker->parser->tokens.count && check_sparse_present(walker->string_ids))
     {
-        const uint32_t index = walker->string_ids[object - 1];
+        const uint32_t index = check_sparse_get(walker->string_ids, object - 1);
         if (index < walker->string_count && !walker->strings[index].predefined && walker->strings[index].object == object)
         {
             result = walker->strings + index;
         }
     }
-    if (result == 0 && begin < end && walker->string_ids != 0)
+    if (result == 0 && begin < end && check_sparse_present(walker->string_ids))
     {
-        const uint32_t index = walker->string_ids[begin];
+        const uint32_t index = check_sparse_get(walker->string_ids, begin);
         bool literal_only = index < walker->string_count && !walker->strings[index].predefined &&
                             walker->strings[index].token >= begin && walker->strings[index].token < end;
         for (uint32_t token = begin; literal_only && token < end; token += 1)
@@ -2520,7 +2522,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
 // The diagnostic caller has proved this complete root's dependency closure despite unrelated stream reports.
 // Only that caller permits reports; it discards all parts unconditionally and cannot supply emission plans.
 static bool check_initializer_plan_warnings(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
-                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph,
                                    CheckInitWarningCollector* warnings, const CheckInitObjects* objects)
@@ -2534,7 +2536,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
     const uint64_t scratch_start = scratch != 0 ? scratch->length : 0;
     bool valid = types != 0 && parser != 0 && token_nodes != 0 && stream != 0 && output != 0 && scratch != 0 &&
                  output != scratch && type_is_valid(types, type) && begin < end && end <= parser->tokens.count &&
-                 (string_count == 0 || (strings != 0 && string_ids != 0)) && (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != 0));
+                 (string_count == 0 || (strings != 0 && check_sparse_present(string_ids))) && (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != 0));
     valid = valid && (graph == NULL || (graph->count == stream->count && (graph->count == 0 ||
             (graph->ops != NULL && graph->tokens != NULL && graph->operand0 != NULL && graph->operand1 != NULL && graph->operand2 != NULL))));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
@@ -2628,7 +2630,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
 }
 
 static bool check_initializer_plan(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
-                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph)
 {
@@ -2637,7 +2639,7 @@ static bool check_initializer_plan(TypeTable* types, const Parser* parser, const
 }
 
 static bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
-                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                   TypeId type, uint32_t begin, uint32_t end, bool static_storage,
                                   Arena* output, Arena* scratch, CheckInitializer* result)
 {
@@ -2648,7 +2650,7 @@ static bool check_initializer_run(TypeTable* types, const Parser* parser, const 
 // Clang's ordinary C language modes diagnose excess elements as warnings. Their expressions remain in the
 // checked graph, but source-compatible plans omit them. Direct consumers can request the strict API above.
 static __attribute__((unused)) bool check_initializer_source(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
-                                     const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                     const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                      TypeId type, uint32_t begin, uint32_t end, bool static_storage,
                                      Arena* output, Arena* scratch, CheckInitializer* result)
 {

@@ -155,7 +155,12 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
   - Each position's first record clobbers the general class's scratch
     register: the selector's expansions use it (`BUSTER_TIER1_SELECT_SCRATCH`),
     so no value may stay there between moves.
-  - The phis are the edges' simultaneous renames.
+  - The phis are the edges' simultaneous renames. An undefined operand
+    (`BUSTER_TIER1_CFG_NONE`, the IR's undef that #141's blocks' lifetimes
+    give promotion) is a rename from `BUSTER_CERT_NONE`: any bits are the
+    phi's value along that edge, so its fact needs no proof there, which is
+    what `tier1_cfg_verify` checks of it too. The oracle makes every unit hold
+    such a destination after the edge.
   - A rematerializable value is an integer recipe of its class, with its own
     id as the payload.
 - **The allocation is untrusted.** Its stream is what the consumers run. Each
@@ -336,13 +341,17 @@ evidence is still required before selecting a production fast-path policy.
     guide](tier1-outcomes.md)). A refusal is an internal failure and capacity a
     resource failure, so either fails the compile rather than leaving the body
     to Tier 0, which would hide it.
-- **#938's quality publisher** gets its gate: `tier1_problem_certify`
-  (`tier1_problem_intervals.c`). That runs the fragment checker on an
-  allocation of the adapter's one-block problems and names a refusal
-  `certificate-rejected` in the tally. No publisher calls it yet: #938's
-  campaign, the publisher that would refuse a result without a proof, doesn't
-  exist in this repository. The fuzz and seed harnesses check the codec alone.
-  `tests/tier1-problem/test.c` tests the gate on its fixtures.
+- **#938's harness** allocates every problem it adapts by both of buster's
+  allocator paths, and reports an allocation only past its certificate. This
+  goes through `tier1_problem_allocate`, whose gate is `tier1_problem_certify`
+  (`tier1_problem_intervals.c`, the fragment checker on the adapter's one-block
+  problems). A refusal is `certificate-rejected` in the tally.
+  - `tests/tier1-problem/report.c` reports problem files so.
+  - Its integration build's fuzzer certifies every problem it decodes.
+  - Its tests certify the fixtures and 400 generated imports, 251 of which
+    spill.
+
+  [The machine-problem guide](tier1-machine-problems.md) has the outcomes.
 
 ## Tests and current integration
 

@@ -16,7 +16,9 @@ requirements. [Command index](README.md).
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, `--lower-all`
+  checking every function's records with `x86_validate`, `--check-transitions`
+  checking the expressions by #1050's memoized transitions (opt-in, each hit's
+  action run too with `--verify`), `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
@@ -92,8 +94,9 @@ requirements. [Command index](README.md).
   reaches compiles there; a unit without `main.c` (a benchmark's) gets
   `static`. A command then runs in two units' copies of the code, so a home
   must share no static variable with its callers' units: `main.c`'s units share
-  one lane context (`lane.c`) and the x86 encoder's templates
-  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`), and `./build.sh check-call-graph`
+  one lane context (`lane.c`), the x86 encoder's templates
+  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`) and Tier 1's selection tables
+  (`tier1_select_burs.c`'s `BUSTER_TIER1_SHARED`), and `./build.sh check-call-graph`
   reports any variable a command reaches in two units ([Call graph check](call-graph.md#call-graph-check)). A
   function to home is a module's entry point that several units compile, coarse enough
   that a call from another unit costs nothing, which keeps its state in its

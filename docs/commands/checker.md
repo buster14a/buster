@@ -16,7 +16,9 @@ requirements. [Command index](README.md).
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, with the walk (`--scalar`) its twin (`docs/c-checker.md`'s
-  "The coded walk"); `c_check_binding.c` publishes each use's retained answer from those events
+  "The coded walk"); `c_check_sparse.c` holds the output columns few tokens have
+  an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
+  "The sparse output columns", #628); `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
@@ -35,10 +37,15 @@ requirements. [Command index](README.md).
   semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
   `benchmark-checker-source` measures checking of real
-  source bodies by the scalar schedule, the vector path's postorder batches and its level order
-  (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
-  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
+  source bodies by the scalar schedule, the vector path's postorder batches (`vector`), its level order
+  (`levels`, `CheckOptions.level_order`), its memoized transitions in node order (`transitions`,
+  `CheckOptions.transitions`, #1050, `c_check_transitions.c`) and its transitions keyed in 16-lane windows
+  (`windows`, `CheckOptions.transition_windows`): #133's question of which order wins, which the postorder
+  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder"), and #1050's ("Memoized
+  transitions"), opt-in (the driver's `--check-transitions`) since they saved 4% of `sqlite3.c`'s graph run
+  there. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
+  transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
+  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -54,9 +61,11 @@ requirements. [Command index](README.md).
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--program-library` selects the library builtins' tables, constant folds and programs alone
   (`c_check_program_library_test.c`).
+  `--transitions` selects the memoized transitions' fixtures, keys and table limits alone (`c_check_transitions_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
+  `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
@@ -64,6 +73,21 @@ requirements. [Command index](README.md).
   records the actual contract and the remaining declaration/initializer,
   control-flow, corpus and downstream integration still needed
   for #133; this module does not establish whole-compiler semantic coverage.
+- `src/buster/compiler/c_check_request.c` is one request's configuration
+  (#1057): the code generation, instrumentation and layout options the
+  driver refuses (`check_request_scan`, `check_request_refusal`, among them
+  the hardening families below, and #1124's object and linkage options and
+  #1112's sanitizers, coverage and OpenMP when code is emitted), a client's
+  reading of its options
+  (`check_request_read`, `check_request_parse`), a checked program's target,
+  predefines and identifiers from its preprocessor
+  (`check_request_program_options`) and a measurement's receipt
+  (`check_request_receipt`). `c_check_source_prepare.c` prepares a real file as
+  `-c` does for `benchmark-backend-source`, `benchmark-check-lanes`,
+  `benchmark-lowering-source` and `ir_source_prepare`. Build a new real-source
+  client's options with them, never by copying fields.
+  [The request guide](../../docs/compilation-requests.md) has the contract,
+  lifetimes, overrides and the series' discontinuities.
 
 ## Object and linkage options (#1124)
 
@@ -114,13 +138,20 @@ and object emission and linking refuse what is left by name, as sanitizers
 below (#1138). Non-emitting commands keep its predefines. `-fsanitize-coverage=`
 and `-fsanitize-coverage=0` ask for nothing, a value clang doesn't know is
 clang's error, and the bare `-fsanitize-coverage`, which clang doesn't take, is
-refused by name. Negative flags retain their
+refused by name. The auxiliary `-fsanitize-coverage-*` options (such as
+`-fsanitize-coverage-allowlist=` and the cc1-only `-fsanitize-coverage-type=`)
+are not covered by the "auxiliary hardening options" above: they reach the
+generic `-f` handling, which accepts them, and are left to the wider `-f`/`-m`
+audit. An active coverage request they refine is still refused where code is
+emitted. Negative flags retain their
 existing handling. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
 Clang's last-option-wins policy. Unlike `-fstack-protector*` and
 `-fcf-protection=*`, which are resolved separately and do honor a later
 disabling spelling, a later inactive spelling cannot cancel an earlier request.
-The diagnostic retains the first unsupported spelling from this refusal table.
+The diagnostic retains the first unsupported spelling from this refusal table
+(`check_request_codegen_option` in `c_check_request.c`, which every client
+that reads the driver's options shares).
 
 Refusal happens before reading a translation unit or opening an output, for
 both tiers, the scalar and vector paths, `-c`, direct linking and the explicit

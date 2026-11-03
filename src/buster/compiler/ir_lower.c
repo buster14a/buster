@@ -130,9 +130,12 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// (before X86, the last) must be lowered (or refused, as FRAME_ADDRESS and TAIL_CALL are, and the X86 rows past the
-// SIMD subset) here before tier0_validate accepts it.
-_Static_assert(BUSTER_TYPED_KINDS == 49 && BUSTER_TYPED_KINDS == BUSTER_TYPED_X86 + 1, "ir_lower.c lowers or refuses every typed kind");
+// must be lowered (or refused, as FRAME_ADDRESS and TAIL_CALL are, and the X86 rows past the SIMD subset) here before
+// tier0_validate accepts it. A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is.
+_Static_assert(BUSTER_TYPED_KINDS == 50 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_KINDS == BUSTER_TYPED_FENCE + 1,
+               "ir_lower.c lowers or refuses every typed kind");
+_Static_assert(BUSTER_TYPED_FENCE_ORDER == BUSTER_IR_FENCE_ORDER && BUSTER_TYPED_FENCE_SIGNAL == BUSTER_IR_FENCE_SIGNAL &&
+               BUSTER_TYPED_FENCE_SEQ_CST == BUSTER_IR_FENCE_SEQ_CST, "a typed fence's value is its IR_FENCE's operand");
 
 static bool ir_typed_control(uint8_t kind)
 {
@@ -253,6 +256,9 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_STORE_LOCAL:
                 case BUSTER_TYPED_STORE_GLOBAL:
                     // Consume and reproduce the value at the same depth.
+                    break;
+                case BUSTER_TYPED_FENCE:
+                    // Neither takes nor leaves a value.
                     break;
                 case BUSTER_TYPED_SET_LOCAL:
                 case BUSTER_TYPED_SET_GLOBAL:
@@ -1078,9 +1084,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         }
         else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
         {
-            // A frame's address (#148) and a tail call (#147's musttail), which this adapter doesn't lower and the plan
-            // and the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
-            check.error = IR_ERROR_OPCODE;
+            // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
+            // neither reaches the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
+            check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
         else if (kind == BUSTER_TYPED_X86)

@@ -117,9 +117,10 @@ static bool run(char* const* arguments)
 
 // Each loop's 17 iterations contribute 35*i + (0+...+16); the straight-line additions contribute
 // ADDITIONS*i + (0+...+ADDITIONS-1). Summing i=0..FUNCTIONS-1 is independent of the emitted loop/CFG execution.
-// Two constructs keep the fixture mixed: the variadic definition's incoming frame and the indirect floating call
-// (with widen's conversion). Tier 1 refuses at least one of them today; the matrix skips with status 77, naming this
-// file, if a later Tier 1 covers them all.
+// One construct keeps the fixture mixed: widen's long double, which Tier 1's selection refuses (the x87's values; #141
+// took the SSE floating values that anchored it before, and #789 the variadic definition beside it, which still reads
+// its unnamed argument through its incoming frame). The matrix fails, naming this file, if a later Tier 1 covers it
+// too: a skip (77) let both earlier anchors go stale unnoticed, so the change that lifts the refusal re-anchors it.
 static bool write_sources(void)
 {
     const unsigned n = BUSTER_MULTICORE_FUNCTIONS;
@@ -133,14 +134,14 @@ static bool write_sources(void)
     for (unsigned file = 0; written && file < 2; file += 1)
     {
         FILE* output = outputs[file];
-        fputs("static double widen(unsigned x) { return (double)x; }\n"
+        fputs("static long double widen(unsigned x) { return (long double)x; }\n"
               "unsigned fallback(unsigned x, ...)\n"
               "{\n"
               "    __builtin_va_list arguments;\n"
               "    __builtin_va_start(arguments, x);\n"
               "    const unsigned extra = __builtin_va_arg(arguments, unsigned);\n"
               "    __builtin_va_end(arguments);\n"
-              "    double (*volatile operation)(unsigned) = widen;\n"
+              "    long double (*volatile operation)(unsigned) = widen;\n"
               "    return ((unsigned)operation(x) ^ extra);\n"
               "}\n", output);
         for (unsigned i = 0; i < n; i += 1)
@@ -368,11 +369,11 @@ static int matrix(const char* compiler, unsigned maximum)
     }
     if (!mixed)
     {
-        printf("multicore: %u cohorts; requested and observed teams 1..%u; SKIP (Tier 1 covered every function)\n",
+        printf("multicore: %u cohorts; requested and observed teams 1..%u; FAIL (Tier 1 covered every function)\n",
                cohorts, maximum);
         fprintf(stderr, "multicore: the mixed-tier fixture is stale: Tier 1 compiled every function; re-anchor it in "
-                        "tests/driver/multicore.c and docs/multicore-acceptance.md\n");
-        return 77;
+                        "tests/driver/multicore.c and docs/multicore-acceptance.md on a construct Tier 1 still refuses\n");
+        return 1;
     }
     printf("multicore: %u cohorts; requested and observed teams 1..%u; PASS\n", cohorts, maximum);
     return 0;

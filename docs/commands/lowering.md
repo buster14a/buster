@@ -14,7 +14,12 @@ lock and pin timings to CPU 2.
 
 On the source path, `check_program_select` (`c_check_program_select.c`) gives
 the planner the checked program's definitions, roots and evaluated references,
-and `-c` and the direct path lower what it selects. `c_lowering_symbols.c`
+and `-c` and the direct path lower what it selects. A constant `if`'s dead arm
+is never written, as clang -O0 doesn't emit it (#1108, the lowering guide's
+"Constant `if`s"): what only it reaches, a block-scope static it declares
+among them, is neither selected nor checked for target features, so
+`main.c`'s units emit no other unit's commands and a baseline build no
+`BUSTER_VECTOR_PATH` kernel. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
 on fixtures of each kind of definition (functions, objects and string literals),
 `test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
@@ -60,8 +65,9 @@ own is classified, by the fast twin of the common shapes
 slot, and is marked closed or not, whose slots the task loop splices when it
 pops their roots in those contexts (`check_lower_template_splice`). The task
 loop stays the exact rules. No compile takes it (`CheckLowerShared.templates`):
-these scalar steps cost about what they save, so they wait for data-parallel
-ones. `./build/compiler test-lowering-templates [--passes N] [preprocessor
+on the 9700X, a compile that took it spent about three times in these scalar
+steps what the splices saved, so they wait for data-parallel ones.
+`./build/compiler test-lowering-templates [--passes N] [preprocessor
 options] file...` (`c_check_program_templates_test.c`) lowers each file by the
 tasks and with the templates forced (`check_program_lower_templates`), on any
 host, requires every function's entries, locals, calls and arguments to be the

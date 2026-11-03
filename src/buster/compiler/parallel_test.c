@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // The runner's tests, for the test-parallel command:
 //
@@ -26,7 +27,8 @@
 //   - CPUs: with 4 jobs, commands of 2, 2, 3, 1, 1, 8, 1 and 1 CPUs start in the list's order and never hold more than
 //     4 CPUs at once, each waiting for the room it needs, and the one of 8 runs alone, holding the 4; a command that
 //     doesn't fit holds back the next, which would; each command's BUSTER_PARALLEL_CPUS, once in its environment, is
-//     its own CPUs (all 4 jobs for the one of 8), though the runner's environment has another value; and the CPU time
+//     its own CPUs (all 4 jobs for the one of 8), though the runner's environment has another value, and its
+//     BUSTER_COMPILER, once, the runner's executable, though the environment names another; and the CPU time
 //     of a shell's loop and of a process it waits for counts, a sleep's comes to next to none, and the summary's is
 //     their sum;
 //   - output: 1 MB from one command, past a pipe's 64 KB, all of it;
@@ -52,6 +54,7 @@
 // Its files go in a new directory under $TMPDIR (or /tmp), removed unless a check fails. The exit status is 1 if a
 // check fails.
 
+#include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -669,6 +672,31 @@ static void parallel_test_cpus(ParallelTest* test)
                         "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
 
+    // Each command's BUSTER_COMPILER, once in its environment, is the runner's executable, its parent's, though the
+    // runner's environment names another.
+    const char* compiler = getenv("BUSTER_COMPILER");
+    char compiler_kept[4096];
+    snprintf(compiler_kept, sizeof(compiler_kept), "%s", compiler != 0 ? compiler : "");
+    setenv("BUSTER_COMPILER", "/nonexistent/compiler", 1);
+    report = parallel_test_run(test,
+                               parallel_test_string("== compiler\n"
+                                                    "test \"$BUSTER_COMPILER\" -ef \"/proc/$PPID/exe\" && echo \"runner's $(env | grep -c '^BUSTER_COMPILER=')\"\n"),
+                               four, &summary, &results);
+    if (compiler != 0)
+    {
+        setenv("BUSTER_COMPILER", compiler_kept, 1);
+    }
+    else
+    {
+        unsetenv("BUSTER_COMPILER");
+    }
+    parallel_test_check(test, "CPUs: each command's BUSTER_COMPILER", summary.succeeded, report,
+                        "parallel: 1 commands, at most 4 CPUs at once\n"
+                        "== compiler: passed in * s, * s of CPU\n"
+                        "runner's 1\n"
+                        "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n");
+    test->arena.length = 0;
+
     // CPU time: a shell's own and a process's it waits for come to their work, a sleep's to next to none, and the
     // summary's to their sum. The child's command isn't its script's last, which bash would run in place of itself.
     report = parallel_test_run(test,
@@ -1281,8 +1309,8 @@ static int run_parallel_tests(int argc, char** argv)
     else
     {
         ParallelTest test = { .arena = arena_reserve(BUSTER_PARALLEL_ARENA_CAPACITY) };
-        const char* temporary = getenv("TMPDIR");
-        snprintf(test.directory, sizeof(test.directory), "%s/buster-test-parallel-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+        const char* temporary = oracle_temporary_directory();
+        snprintf(test.directory, sizeof(test.directory), "%s/buster-test-parallel-XXXXXX", temporary);
         printf("test-parallel:\n");
         if (mkdtemp(test.directory) == 0)
         {

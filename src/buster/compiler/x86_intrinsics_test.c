@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-x86-intrinsics (#136): the compiler's code of the headers' x86 intrinsics against clang -O0's, for the builtins
 // whose instructions neither the tests' hosts nor Zen 5 runs (XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's,
@@ -21,6 +22,7 @@
 // (x86_intrinsic_step); the walk over calls and jumps (x86_intrinsic_trace); and the command
 // (run_x86_intrinsic_tests).
 
+#include "buster/compiler/test_paths.h"
 #include <elf.h>
 
 // An intrinsic's result: a vector of its bytes in XMM0's, or an integer of its bytes in RAX's, or none.
@@ -3271,9 +3273,9 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
     {
         fclose(list);
     }
-    const char* temporary = getenv("TMPDIR");
+    const char* temporary = oracle_temporary_directory();
     char directory[512];
-    snprintf(directory, sizeof(directory), "%s/buster-intrinsics-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    snprintf(directory, sizeof(directory), "%s/buster-intrinsics-XXXXXX", temporary);
     valid = valid && mkdtemp(directory) != 0 && x86_disassembler_initialize() && x86_semantics_initialize();
     if (valid)
     {

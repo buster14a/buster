@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+
 //
 // test-check-debug [--seed N] [--programs N] [--cross-check] [--keep]: the C driver's source rows and DWARF (#395,
 // c_check_debug.c).
@@ -42,6 +43,7 @@
 //   line, into programs that run, whose DWARF llvm-dwarfdump and gdb read as they read the -g executable's.
 // - Unwind tables, with --cross-check: c_check_unwind_test.c's.
 
+#include "buster/compiler/test_paths.h"
 typedef struct CheckDebugTestTally CheckDebugTestTally;
 struct CheckDebugTestTally
 {
@@ -1399,8 +1401,8 @@ static int run_check_debug_tests(int argc, char** argv)
     check_debug_test_expect(&tally, options, "options: [--seed N] [--programs N] [--cross-check] [--keep]", 0);
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     char directory[PATH_MAX];
-    const char* temporary = getenv("TMPDIR");
-    snprintf(directory, sizeof(directory), "%s/buster-check-debug-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const char* temporary = oracle_temporary_directory();
+    snprintf(directory, sizeof(directory), "%s/buster-check-debug-XXXXXX", temporary);
     const bool made = options && arena.base != 0 && mkdtemp(directory) != 0;
     check_debug_test_expect(&tally, made, "make the test's directory", directory);
     if (made)

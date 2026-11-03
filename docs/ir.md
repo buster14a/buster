@@ -360,7 +360,7 @@ as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
-refused, as #147's `TAIL_CALL` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
+refused, as #147's `TAIL_CALL` is (`IR_ERROR_UNSUPPORTED`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -387,14 +387,15 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_OPCODE`, and the
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
 for the output target (any, through the old entry points) with
 `IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything
 is allocated: no function of the scalar corpora has one. A static
-assertion pins the typed kinds' count, `X86` the last, so that a new kind fails to
-build until this adapter lowers or refuses it, since the plan and the emitter
-would take an unnamed kind for a binary operation.
+assertion pins the typed kinds' count, `FENCE` (#1059) the last, so that a new kind
+fails to build until this adapter lowers or refuses it, since the plan and the
+emitter would take an unnamed kind for a binary operation. A `FENCE` lowers to the
+IR's `fence` of its value (below).
 
 The ordered replay is written once in `ir_lower_emit.c` and instantiated for
 counting and filling. Counting fixes its output to null; filling receives the
@@ -418,6 +419,30 @@ markers as roots and moves no load or store past them; SSA promotion drops a
 promoted slot's markers with its address and renumbers the others' slots. Tier
 1's selection gives them a rule with no records, and the CFG consumer colors
 the frame's objects by them (`tier1_emit_cfg_lifetimes`).
+
+### Fences (#1059)
+
+`fence` (void, `a` its order, C's `memory_order` 0 to 5 in bits 0 to 2, and bit 3
+for a signal fence; printed `fence.void ORDER` or `fence.void ORDER signal`, the
+orders `relaxed`, `consume`, `acquire`, `release`, `acq_rel` and `seq_cst`) is a
+memory fence: the typed stream's `FENCE`, which the C producer gives a fence of a
+constant order rather than a helper's call ([the builtin integration
+guide](c-builtins-integration.md)'s "Helper contracts and direct forms"). It
+reads and writes no value, but no pass moves a load, a store or a call across it,
+eliminates one past it or drops it: it is an optimizer root
+(`ir_optimize_roots`), neither value numbering's nor loop-invariant motion's
+whitelists take it, and private-field replacement and promotion leave it where
+it is, since a private slot no other thread or signal handler can reach. Both
+verifiers check its operand by its own rule (`IR_RULE_FENCE`, the vector path's
+deferred rows'); both interpreters run it as nothing, one thread's accesses
+already in program order (they model no other thread). Tier 1's selection gives
+it `TIER1_RULE_FENCE`: `mfence` for a thread fence of `seq_cst`, the one x86-64
+needs an instruction for, and no records for the others. `tests/ir/fences.ir`
+reads every order of both scopes back, `test-ir-optimize`'s `fence-dce` and
+`fence-licm` pairs keep every fence in its place among the stores and loads (the
+executor traces a fence among the stores, volatile loads and calls), and
+`tests/ir-source/fences.c` runs through both lowerings, promotion, the text's
+round trip and the IR's three forms against clang.
 
 ### Dynamic stack contract
 

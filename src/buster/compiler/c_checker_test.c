@@ -1656,18 +1656,26 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
         }
     }
     arena_pop_to(scratch, scratch_mark);
-    // Each batch size by both of the vector path's orders, in postorder and by level (CheckOptions.level_order).
-    for (uint32_t run = partitions ? 2 : 2 * BUSTER_CHECK_BATCH; scalar_valid && run < 2 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
+    // (CheckOptions.level_order), and its memoized transitions (#1050) in node order and in windows, every hit verified
+    // against its action.
+    for (uint32_t run = partitions ? 4 : 4 * BUSTER_CHECK_BATCH; scalar_valid && run < 4 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
-        const uint32_t batch = run / 2;
+        const uint32_t batch = run / 4;
+        const uint32_t order = run % 4;
         const CheckOptions vector_options = {
             .batch_size = batch,
-            .level_order = (run & 1) != 0,
+            .level_order = order == 1,
+            .transitions = order >= 2,
+            .transition_windows = order == 3,
+            .verify_transitions = true,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count),
-                          (run & 1) != 0 ? "graph paths or level-order batch partitions differ" : "graph paths or batch partitions differ");
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
+                          order == 1 ? "graph paths or level-order batch partitions differ" :
+                          order == 2 ? "graph paths or the transitions differ" :
+                          order == 3 ? "graph paths or the transitions' windows differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {
@@ -2174,8 +2182,6 @@ struct CheckSourceFixture
     bool undecided;
     // The type table's room, for a fixture larger than check_test_types_open's; null for that.
     const TypeCapacity* capacity;
-    // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
-    double* check_seconds;
     // Whether the reader must make the unit overload tables (CHECK_TEST_OVERLOAD_TABLES) or none (CHECK_TEST_OVERLOAD_NONE),
     // on both paths: a name of the overloadable attribute's counts only inside an attribute list (#1038). 0 checks neither.
     uint8_t overload_tables;
@@ -2374,18 +2380,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         lines[p] = outcome.line;
         if (!rejected[p])
         {
-            struct timespec reader_start;
-            struct timespec reader_stop;
-            if (fixture->check_seconds != NULL)
-            {
-                clock_gettime(CLOCK_MONOTONIC, &reader_start);
-            }
             const bool adapted = check_input(&input[p], &parsers[p], &pp, &types[p].table, &input_storage[p], &scratch[p]);
-            if (fixture->check_seconds != NULL)
-            {
-                clock_gettime(CLOCK_MONOTONIC, &reader_stop);
-                *fixture->check_seconds += (double)(reader_stop.tv_sec - reader_start.tv_sec) + (double)(reader_stop.tv_nsec - reader_start.tv_nsec) * 1e-9;
-            }
             if (adapted || input[p].diagnostic_graph)
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
@@ -2437,20 +2432,9 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             {
                 const CheckOptions options = {
                     .scalar = p == 0,
-                    .verify = true
+                    .verify = true,
                 };
-                struct timespec start;
-                struct timespec stop;
-                if (fixture->check_seconds != NULL)
-                {
-                    clock_gettime(CLOCK_MONOTONIC, &start);
-                }
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
-                if (fixture->check_seconds != NULL)
-                {
-                    clock_gettime(CLOCK_MONOTONIC, &stop);
-                    *fixture->check_seconds += (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9;
-                }
                 check_test_expect(test, checked[p], "source adapter emitted an invalid graph");
                 rejected[p] = !checked[p] || streams[p].report_count != 0;
                 if (checked[p] && streams[p].report_count != 0)
@@ -2522,6 +2506,14 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         {
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
                                    check_test_stream_equal(&streams[0], &streams[1], input[0].graph.argument_count), "source paths produce different typed streams");
+            // The vector path by its memoized transitions too (#1050, CheckOptions.transitions), every hit verified.
+            const uint64_t mark = output_storage[1].length;
+            const CheckOptions memoized = { .verify = true, .transitions = true, .verify_transitions = true };
+            CheckStream stream;
+            const bool rechecked = check_graph_run(&types[1].table, &input[1].graph, &output_storage[1], &scratch[1], &memoized, &stream);
+            check_test_expect(test, rechecked && stream.statistics.transition_mismatches == 0 &&
+                                   check_test_stream_equal(&streams[0], &stream, input[0].graph.argument_count), "source paths' transitions produce another typed stream");
+            arena_pop_to(&output_storage[1], mark);
         }
     }
     for (uint32_t p = 0; p < 2; p += 1)
@@ -5353,6 +5345,175 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // GNU's function multiversioning (#839): target("default") makes a function multiversioned even alone, and
+        // clang refuses these declaration attributes beside it, at the function's name.
+        {
+            "multiversioning: always_inline beside target default",
+            "int g(int x) { return x; }\n__attribute__((always_inline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: noinline beside target default",
+            "int g(int x) { return x; }\n__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: flatten beside target default",
+            "int g(int x) { return x; }\n__attribute__((flatten, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cold beside target default",
+            "int g(int x) { return x; }\n__attribute__((cold, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: hot beside target default",
+            "int g(int x) { return x; }\n__attribute__((hot, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: weak beside target default",
+            "int g(int x) { return x; }\n__attribute__((weak, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: const beside target default",
+            "int g(int x) { return x; }\n__attribute__((const, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: pure beside target default",
+            "int g(int x) { return x; }\n__attribute__((pure, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: naked beside target default",
+            "int g(int x) { return x; }\n__attribute__((naked, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: alias beside target default",
+            "int g(int x) { return x; }\n__attribute__((alias(\"g\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: target_clones beside target",
+            "int g(int x) { return x; }\n__attribute__((target_clones(\"avx2\", \"default\"), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_specific beside target",
+            "int g(int x) { return x; }\n__attribute__((cpu_specific(generic), target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: used beside target default",
+            "int g(int x) { return x; }\n__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: nothrow beside target default",
+            "int g(int x) { return x; }\n__attribute__((nothrow, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a second target version checks the first declaration",
+            "__attribute__((always_inline, target(\"avx2\"))) int h(int x);\n"
+            "__attribute__((noinline, target(\"default\"))) int h(int x) { return x + 1; }\n"
+            "int caller(int x) { return h(x); }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: cpu_dispatch beside target",
+            "__attribute__((cpu_dispatch(generic), target(\"default\"))) int h(int x) { return x + 1; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: aligned beside target default",
+            "int h(void) __attribute__((aligned(16), target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: may_alias beside target default",
+            "int h(void) __attribute__((may_alias, target(\"default\")));\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: inline nonnull beside target default",
+            "inline int h(int *p) __attribute__((nonnull, nothrow, target(\"default\"))) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: a block-scope declaration beside target default",
+            "int f(void) { int h(void) __attribute__((target(\"default\"), always_inline)); return 0; }\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: several declarators beside target default",
+            "__attribute__((target(\"default\"), always_inline)) int h(void), g(void);\n",
+            true,
+            false
+        },
+        {
+            "multiversioning: a cpu_specific declaration alone is unsupported",
+            "__attribute__((cpu_specific(generic))) int h(void);\n",
+            true,
+            true
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu17",
+            "int h(void) __attribute__((nodiscard, target(\"default\")));\n",
+            false,
+            false
+        },
+        {
+            "multiversioning: C23-only attributes are ignored in gnu23",
+            "int h(void) __attribute__((nodiscard, maybe_unused, no_sanitize_undefined, target(\"default\")));\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "multiversioning: no_builtin on a declaration still reports the conflict",
+            "__attribute__((no_builtin(\"printf\"), always_inline, target(\"default\"))) int h(void);\n",
+            true,
+            false
+        },
     };
     enum
     {
@@ -5442,11 +5603,48 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
     }
 }
 
+// #1130: a scaling fixture's check time for its growth guard: the least thread CPU time of `runs` checks, with that run's
+// wall time. Thread CPU time leaves out the time the process is descheduled, which was the flake, and the least of a few
+// runs leaves out a page fault or another one-off in the test process; each run does the same work.
+#define BUSTER_CHECK_SCALING_RUNS 3u
+#define BUSTER_CHECK_SCALING_RATIO 20.0
+#define BUSTER_CHECK_SCALING_SLACK 0.2
+
+static double check_test_scaling_seconds(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* outcome,
+                                         uint32_t runs, double* wall)
+{
+    double best = 0;
+    double best_wall = 0;
+    for (uint32_t run = 0; run < runs; run += 1)
+    {
+        struct timespec cpu_start;
+        struct timespec wall_start;
+        struct timespec cpu_stop;
+        struct timespec wall_stop;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start);
+        clock_gettime(CLOCK_MONOTONIC, &wall_start);
+        check_test_source(test, fixture, path, outcome);
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_stop);
+        clock_gettime(CLOCK_MONOTONIC, &wall_stop);
+        const double cpu = (double)(cpu_stop.tv_sec - cpu_start.tv_sec) + (double)(cpu_stop.tv_nsec - cpu_start.tv_nsec) * 1e-9;
+        const double elapsed = (double)(wall_stop.tv_sec - wall_start.tv_sec) + (double)(wall_stop.tv_nsec - wall_start.tv_nsec) * 1e-9;
+        if (run == 0 || cpu < best)
+        {
+            best = cpu;
+            best_wall = elapsed;
+        }
+    }
+    *wall = best_wall;
+    return best;
+}
+
 // #480's fifth review: an inferred array's struct element in d parentheses, or after d ?:'s, has its type read from the
 // tree's links in one pass, not from a scan of what's left at each level. Against clang at depths it parses (its
-// brackets stop at 256), then alone, timed: 60,000 parentheses and 40,000 ?:'s must check within 20 times what a tenth
-// of them takes, plus 0.2 s, as linear work does. The scans took 0.62 s for 30,000 parentheses on the laptop and 1.16 s
-// for 30,000 ?:'s, 9 times as long as for 10,000, which a tenth's 20 times doesn't allow.
+// brackets stop at 256), then alone: 60,000 parentheses and 40,000 ?:'s must check within 20 times the thread CPU time a
+// tenth takes, plus 0.2 s, as linear work does (#1130). Thread CPU time excludes descheduling, which was the flake, and
+// the least of three checks drops a page fault or another one-off; the times are printed. The scans took 0.62 s for
+// 30,000 parentheses on the laptop and 1.16 s for 30,000 ?:'s, 9 times as long as for 10,000, which a tenth's 20 times
+// didn't allow.
 static bool check_test_nesting_source(Arena* text, uint32_t form, uint32_t depth, const char* path)
 {
     const char literal[] = "(struct S){ .x = 1 }";
@@ -5492,6 +5690,8 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
         const char* levels = form == 0 ? "parentheses" : "?:'s";
         // Depths clang parses, against its answer, and then a tenth of the timed depth and the timed depth itself.
         double seconds[2] = { 0 };
+        double wall[2] = { 0 };
+        char description[256];
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compared) + 2; c += 1)
         {
             const bool timing = c >= BUSTER_ARRAY_LENGTH(compared);
@@ -5508,7 +5708,6 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
             ParseTestClang outcome = { 0 };
             bool ready = check_test_nesting_source(&text, form, depth, path);
             ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
-            char description[200];
             snprintf(description, sizeof(description), "%u %s around an inferred array's struct element: %s", depth, levels,
                      timing ? "the fixture is written" : "clang accepts it");
             check_test_expect(test, ready && !outcome.rejected, description);
@@ -5518,20 +5717,25 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
                     .name = name,
                     .source = (const char*)text.base,
                 };
-                struct timespec start;
-                struct timespec stop;
-                clock_gettime(CLOCK_MONOTONIC, &start);
-                check_test_source(test, &fixture, path, &outcome);
-                clock_gettime(CLOCK_MONOTONIC, &stop);
-                seconds[timing ? c - BUSTER_ARRAY_LENGTH(compared) : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : 0;
+                if (timing)
+                {
+                    const uint32_t index = c - BUSTER_ARRAY_LENGTH(compared);
+                    seconds[index] = check_test_scaling_seconds(test, &fixture, path, &outcome, BUSTER_CHECK_SCALING_RUNS, &wall[index]);
+                }
+                else
+                {
+                    check_test_source(test, &fixture, path, &outcome);
+                }
             }
             unlink(path);
             arena_release(&text);
         }
-        char description[200];
-        snprintf(description, sizeof(description), "%u %s checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", timed[form], levels, seconds[1],
-                 timed[form] / 10, seconds[0]);
-        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+        snprintf(description, sizeof(description),
+                 "%u %s around an inferred array's struct element: %.3f s of thread CPU (%.3f s wall) in the best of %u checks, within "
+                 "20 times %u's %.3f s (%.3f s wall) plus %.1f s",
+                 timed[form], levels, seconds[1], wall[1], BUSTER_CHECK_SCALING_RUNS, timed[form] / 10, seconds[0], wall[0], BUSTER_CHECK_SCALING_SLACK);
+        check_test_expect(test, seconds[1] <= BUSTER_CHECK_SCALING_RATIO * seconds[0] + BUSTER_CHECK_SCALING_SLACK, description);
+        printf("test-checker: %s\n", description);
     }
     if (created)
     {
@@ -5541,9 +5745,10 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
 
 // #591: member accesses checked in time linear in the unit, whatever the type table's size and the records'. The lookup
 // cleared a byte per type at every access, and compared the record's names one at a time. Two units, each against clang
-// at a small size, then timed at a tenth of a size and at the size, both paths (check_test_source, whose typed streams,
-// the members' offsets among them, must agree): the larger must check within 20 times what the tenth takes, plus 0.2 s,
-// as linear work does.
+// at a small size, then measured at a tenth of a size and at the size, both paths (check_test_source, whose typed
+// streams, the members' offsets among them, must agree): the larger must check within 20 times the thread CPU time a
+// tenth takes, plus 0.2 s, as linear work does (#1130). Thread CPU time excludes descheduling, which was the flake, and
+// the least of three checks drops a page fault or another one-off; the times are printed.
 //   - `size` structs of 3 to 26 members, every 7th with an anonymous union too, each with a pointer to it of 50 levels,
 //     whose types fill the table, and a function that reads 16 of its members;
 //   - one struct of `size` members, an anonymous struct of two every 50th, and a function that reads every name.
@@ -5626,6 +5831,7 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
         const char* name = form == 0 ? "many records' members after a large type table" : "a record of many members";
         // 100 against clang, then a tenth of the timed size and the timed size itself.
         double seconds[2] = { 0 };
+        double wall[2] = { 0 };
         for (uint32_t c = 0; c < 3; c += 1)
         {
             const bool timing = c != 0;
@@ -5642,7 +5848,7 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
             ParseTestClang outcome = { 0 };
             bool ready = check_test_member_source(&text, form, size, path);
             ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
-            char description[200];
+            char description[240];
             snprintf(description, sizeof(description), "%s, %u of them: %s", name, size, timing ? "the fixture is written" : "clang accepts it");
             check_test_expect(test, ready && !outcome.rejected, description);
             if (ready)
@@ -5658,17 +5864,26 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
                     .name = name,
                     .source = (const char*)text.base,
                     .capacity = &capacity,
-                    .check_seconds = timing ? &seconds[c - 1] : NULL,
                 };
-                check_test_source(test, &fixture, path, &outcome);
+                if (timing)
+                {
+                    const uint32_t index = c - 1;
+                    seconds[index] = check_test_scaling_seconds(test, &fixture, path, &outcome, BUSTER_CHECK_SCALING_RUNS, &wall[index]);
+                }
+                else
+                {
+                    check_test_source(test, &fixture, path, &outcome);
+                }
             }
             unlink(path);
             arena_release(&text);
         }
-        char description[200];
-        snprintf(description, sizeof(description), "%s: %u read and checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
-                 timed[form] / 10, seconds[0]);
-        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+        char description[320];
+        snprintf(description, sizeof(description),
+                 "%s: %u read and checked in %.3f s of thread CPU (%.3f s wall) in the best of %u checks, within 20 times %u's %.3f s (%.3f s "
+                 "wall) plus %.1f s",
+                 name, timed[form], seconds[1], wall[1], BUSTER_CHECK_SCALING_RUNS, timed[form] / 10, seconds[0], wall[0], BUSTER_CHECK_SCALING_SLACK);
+        check_test_expect(test, seconds[1] <= BUSTER_CHECK_SCALING_RATIO * seconds[0] + BUSTER_CHECK_SCALING_SLACK, description);
         printf("test-checker: %s\n", description);
     }
     if (created)
@@ -5813,6 +6028,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
 #include "c_check_sizeof_test.c"
+#include "c_check_transitions_test.c"
 #include "c_check_integer_policy_test.c"
 #include "c_check_fp_actions_test.c"
 #include "c_check_query_runtime_test.c"
@@ -5917,6 +6133,7 @@ static void check_test_lowering_inventory(CheckTest* test);
 static void check_test_lowering_templates(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
+static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
@@ -5943,7 +6160,9 @@ static int run_checker_tests(int argc, char** argv)
     bool program_overloads = false;
     bool program_library = false;
     bool embed_initializers = false;
+    bool requests = false;
     bool sizeof_only = false;
+    bool transitions_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6003,6 +6222,14 @@ static int run_checker_tests(int argc, char** argv)
         {
             sizeof_only = true;
         }
+        else if (strcmp(argv[i], "--requests") == 0)
+        {
+            requests = true;
+        }
+        else if (strcmp(argv[i], "--transitions") == 0)
+        {
+            transitions_only = true;
+        }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
             clang = argv[++i];
@@ -6028,16 +6255,20 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || sizeof_only));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && sizeof_only)
+        if (initialized && transitions_only)
+        {
+            check_test_transitions(&test);
+        }
+        else if (initialized && sizeof_only)
         {
             check_test_sizeof_scaling(&test);
             check_test_integer_extensions(&test, clang);
@@ -6055,6 +6286,15 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && embed_initializers)
         {
             check_test_embed_initializers(&test, clang);
+        }
+        else if (initialized && requests)
+        {
+            // #1057: one request's configuration and the shared source preparation against the driver, then the source
+            // benchmarks' preparations, which share them.
+            check_test_requests(&test);
+            check_test_lowering_source_benchmark(&test);
+            check_test_backend_source_benchmark(&test);
+            check_test_check_lanes_benchmark(&test);
         }
         else if (initialized && program_initializers)
         {
@@ -6411,6 +6651,10 @@ static int run_checker_tests(int argc, char** argv)
             {
                 check_test_sizeof_scaling(&test);
             }
+            if (check_test_takes())
+            {
+                check_test_transitions(&test);
+            }
             if (check_test_shared())
             {
                 check_test_integer_policy(&test, &types.table, clang);
@@ -6548,6 +6792,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_check_lanes_benchmark(&test);
+            }
+            if (check_test_takes())
+            {
+                check_test_requests(&test);
             }
             if (check_test_takes())
             {
