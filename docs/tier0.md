@@ -470,7 +470,12 @@ an entry's is refused, not miscompiled.
   object's address (`result_size`), each in one vector register whole as the convention places it (an XMM, YMM or ZMM
   register: `tier0_parts_of`'s parts of 16, 32 and 64 bytes, which a struct of one vector takes too; one of 4 or 8 bytes
   an SSE eightbyte's part in an XMM register's first bytes, as a struct of floats is), or on the stack. A parameter is
-  an object the prologue stores its register in.
+  an object the prologue stores its register in. A vector wider than the target's registers (a baseline target's,
+  `vector_bytes` 16 or 32) is returned split across them, as LLVM returns it (#1193): 32 bytes in xmm0 and xmm1 and 64
+  in xmm0 to xmm3 without AVX, 64 in ymm0 and ymm1 with AVX but not AVX-512F; part k at byte 16k or 32k of the object,
+  each register loaded and stored whole (`tier0_vector_result_parts`, which `tier0_aggregate_result_valid` takes only
+  in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
+  memory, on the stack whole.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
   the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
   entries (`tier0_memory_function`), as `x87` and `int128` do. On the EVEX path (`vector_bytes` 0) Tier 0's own
@@ -542,9 +547,9 @@ at the target's forms, by both of the checker's paths:
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
-  integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The conversions to
-  and from integers in a general register (`cvt(t)ss2si`, `movmskps` and the others) and vector results in several
-  registers are #1193's.
+  integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The sign masks and
+  the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
+  several registers and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
   intrinsics, shuffles of every element size, SSE4.1's and AVX2's) at the three levels natively against clang -O0's build
   at the same `-march`, and checks each refusal by name.
@@ -1343,25 +1348,27 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
-- **aggregates** (#137), at locations written by hand: 14 fixtures of what `abi_assign` makes rarely or never on its
+- **aggregates** (#137), at locations written by hand: 16 fixtures of what `abi_assign` makes rarely or never on its
   own and of the parts' edges (each kind of general and XMM part, both kinds in one aggregate, the high eightbyte alone
   in each kind of register and on the stack, the low eightbyte alone of a larger aggregate on the stack (`LOW`) before
   a value in the next slot, SPLIT both ways in both kinds, an ignored aggregate, aggregates on the stack
   whole, in place and in a slot misaligned for them, and results in rax and rdx, xmm0 and xmm1, both mixed orders, the
-  high eightbyte alone in each kind, a vector, 5 and 6 bytes, and through a hidden pointer), each run natively both
-  ways:
+  high eightbyte alone in each kind, a vector, 5 and 6 bytes, through a hidden pointer, and a vector split across
+  xmm0 and xmm1 and across xmm0 to xmm3, #1193's), each run natively both ways:
   - **aggregate calls:** Tier 0's caller, by both paths, passes the aggregates' bytes from pages that end or start at a
     `PROT_NONE` page to a probe, records of the test's own, which records every argument register and its stack slots:
     each value and part must be where its location says, and a result the probe returns must land in its object;
   - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
     copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
     the result in its registers or through the hidden pointer, which must come back in rax;
-  - **aggregate errors:** 61 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+  - **aggregate errors:** 67 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
     malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
     falling off it, by a jump and by a branch, a jump that takes a value to the end, a function with a hidden result
     that returns nothing or falls off its end, an aggregate's two parts in one register, a register two parameters
     take, a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
-    as a parameter, and a low eightbyte alone of 8 bytes, with `HIGH`, in registers and past the call's area.
+    as a parameter, a low eightbyte alone of 8 bytes, with `HIGH`, in registers and past the call's area, and a split
+    vector's registers out of order, in three of them, of 64-byte parts, its size unlike theirs, with `HIGH`, and a
+    call's split vector object too small for them.
 - **tail calls** (#147, `tier0_tail_test.c`): a tail-calling function per aggregate fixture in five frames, run from a
   driver, whose probe must find the arguments, the stack and the callee-saved registers as "Tail calls" (above) says,
   the saved registers' frame first calling a function that clobbers every register a call may; and **tail errors**,

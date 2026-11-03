@@ -21,8 +21,9 @@
 //
 // A push sets code alone and measure to all: its pull request's run measured what it changes. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
-// --root (the repository by default). The selector is CI tooling outside the compile path and has no vector path: it
-// reads a few hundred lines and files.
+// --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy)
+// and the hosted test job's shards, its list and N alike (changes_shard_policy). The selector is CI tooling outside the
+// compile path and has no vector path: it reads a few hundred lines and files.
 //
 // Layout: Text and Arena; reading files; ChangesTables (changes_modules, changes_benchmarks); the workflow's steps
 // (changes_split_steps); a unit's include closure (changes_includes); changes_decide; changes_print; the self-test;
@@ -2444,6 +2445,92 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
     }
 }
 
+// The hosted test job's shards (docs/ci.md): its matrix's `shard: [1, ..., N]`, consecutive from 1, and the same N in the
+// job's name (`shard ${{ matrix.shard }} of N)`), in the run step's `--shard "${{ matrix.shard }}/N"`, and in the O1
+// rows' include entries, shards 1 to N of each architecture. `parallel --shard K/N` deals the inventory to N shards, so a
+// list and an N that disagree would leave a shard's commands unrun (or run some twice) with every job green.
+static bool changes_shard_policy(Text workflow)
+{
+    const char* text = text_terminated(workflow);
+    const char* job = strstr(text, "\n  test:\n");
+    const char* next = job != NULL ? strstr(job + 1, "\n  fuzz:\n") : NULL;
+    const size_t length = next != NULL ? (size_t)(next - job) : 0;
+    static const char list[] = "\n        shard: [";
+    const char* found = length != 0 ? memmem(job, length, list, sizeof(list) - 1) : NULL;
+    uint32_t shards = 0;
+    bool valid = found != NULL;
+    const char* at = valid ? found + sizeof(list) - 1 : NULL;
+    // The list's numbers, each the next from 1, separated by ", " and closed by "]".
+    while (valid && *at != ']')
+    {
+        char* end = NULL;
+        const unsigned long value = *at >= '0' && *at <= '9' ? strtoul(at, &end, 10) : 0;
+        valid = value == (unsigned long)shards + 1 && end != NULL && (*end == ']' || (end[0] == ',' && end[1] == ' '));
+        shards += valid;
+        at = valid ? (*end == ']' ? end : end + 2) : at;
+    }
+    valid = valid && shards != 0 && at[1] == '\n';
+    char pattern[160];
+    snprintf(pattern, sizeof(pattern), "shard ${{ matrix.shard }} of %u)", shards);
+    valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
+    snprintf(pattern, sizeof(pattern), "--shard \"${{ matrix.shard }}/%u\"", shards);
+    valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
+    // The O1 rows: each architecture's shards 1 to N, and no other O1 entry.
+    static const char* const architectures[] = { "x86-64", "native" };
+    for (uint32_t a = 0; valid && a < sizeof(architectures) / sizeof(architectures[0]); a += 1)
+    {
+        for (uint32_t k = 1; valid && k <= shards; k += 1)
+        {
+            snprintf(pattern, sizeof(pattern), "{\"host_arch\": \"%s\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": %u}", architectures[a], k);
+            valid = memmem(job, length, pattern, strlen(pattern)) != NULL;
+        }
+    }
+    static const char entry[] = "\"optimization\": 1, \"shard\": ";
+    uint32_t entries = 0;
+    for (const char* e = valid ? memmem(job, length, entry, sizeof(entry) - 1) : NULL; e != NULL;
+         e = memmem(e + 1, length - (size_t)(e + 1 - job), entry, sizeof(entry) - 1))
+    {
+        entries += 1;
+    }
+    return valid && entries == shards * (uint32_t)(sizeof(architectures) / sizeof(architectures[0]));
+}
+
+static void changes_test_shard_policy(ChangesTest* test, Text workflow)
+{
+    changes_expect(test, changes_shard_policy(workflow), "shard policy: the test job's shard list, its N and the O1 rows' shards agree", (Text){ 0 });
+    static const struct
+    {
+        const char* before;
+        const char* after;
+    } mutants[] = {
+        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3]" },
+        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3, 4, 5]" },
+        { "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 4, 3]" },
+        { "        shard: [1, 2, 3, 4]", "        shard: [0, 1, 2, 3]" },
+        { "--shard \"${{ matrix.shard }}/4\"", "--shard \"${{ matrix.shard }}/5\"" },
+        { "--shard \"${{ matrix.shard }}/4\"", "--shard \"${{ matrix.shard }}/3\"" },
+        { "shard ${{ matrix.shard }} of 4)", "shard ${{ matrix.shard }} of 5)" },
+        { ", {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}", "" },
+        { "{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}",
+          "{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}" },
+        { "\"optimization\": 1, \"shard\": 4}]", "\"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 5}]" },
+    };
+    const char* original = text_terminated(workflow);
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        const char* found = strstr(original, mutants[i].before);
+        Text changed = workflow;
+        if (found != NULL)
+        {
+            const size_t prefix = (size_t)(found - original);
+            const size_t suffix = prefix + strlen(mutants[i].before);
+            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
+                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+        }
+        changes_expect(test, found != NULL && !changes_shard_policy(changed), "shard policy rejects a shard list and N that disagree", text_c(mutants[i].after));
+    }
+}
+
 static int changes_self_test(const char* root)
 {
     ChangesTest test = { 0 };
@@ -2459,6 +2546,7 @@ static int changes_self_test(const char* root)
         changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
         changes_test_oracle_policy(&test, workflow);
+        changes_test_shard_policy(&test, workflow);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
     return test.failures != 0 ? 1 : 0;
