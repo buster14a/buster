@@ -66,9 +66,10 @@ their paths in line markers even when Clang is staged outside `/usr/lib/clang`.
 The self-host qualification is a separate workflow,
 `.github/workflows/selfhost.yml`, and also runs only on GitHub-hosted runners.
 It builds the compiler with the compiler, runs a bounded smoke subset, and
-compares deterministic probe objects and executables. It is not part of the
-required correctness or benchmark path; see [the self-host guide](self-hosting-ci.md)
-for its hosted vector-path limitation and #1108.
+compares deterministic probe objects and executables, once for each host path:
+`native` (the vector path, skipped on a runner without it) and `x86-64` (the
+scalar path, #1193). It is not part of the required correctness or benchmark
+path; see [the self-host guide](self-hosting-ci.md).
 
 The hosted tests fetch the frozen corpus from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).
