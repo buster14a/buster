@@ -2708,7 +2708,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         const uint64_t scratch_mark = scratch.length;
         IrFunction result = preserved;
         const IrCheck check = ir_lower_typed_path(&frame, IR_VOID, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == 0 &&
+        ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_ERROR_UNSUPPORTED && check.instruction == 0 &&
                                         output.length == output_mark && scratch.length == scratch_mark &&
                                         result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
                              "the frame address refused at its entry without allocation", 0, vector);
