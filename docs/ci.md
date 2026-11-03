@@ -263,16 +263,24 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   commits. The build and the inventory read no Git metadata; the self-test
   fails if they start to.
 
-  What the repository doesn't pin is the host: its kernel, microcode, system
-  GCC (an oracle for some fixtures) and glibc, which every 9700X job records
-  as its host identity. In the nightly mode, such a push runs a
+  What the repository doesn't pin is the host. Every 9700X job records it as
+  its host identity, made of:
+
+  - the kernel, the microcode, GCC's version and glibc;
+  - a digest of the software the native inventory runs: the package
+    database's every package and version, and the contents of each external
+    tool the inventory calls and of every shared library those load. The tools
+    are GCC with its `cc1`, `cc1plus` and `collect2`, binutils, `gdb`, `perf`,
+    `valgrind`, `mold`, `wild`, `make`, `file` and the shell.
+
+  So an oracle replaced under the same version changes the identity. In the nightly mode, such a push runs a
   `host-identity` job on the 9700X. It takes the lock for seconds and reads
   the identity with the same step as the 9700X job; the self-test keeps the
   two steps identical. The 9700X job is skipped only when that identity
   equals the one the pull request's run recorded. A component that can't be
   read leaves no identity at all, never a placeholder that another unread
-  one would match, and the reuse accepts only an identity with every
-  component present. A different identity, an incomplete one, a record
+  one would match. A host without a package database is one such case. The
+  reuse accepts only an identity with every component present. A different identity, an incomplete one, a record
   without one, or a failed `host-identity` job runs native correctness after
   all, and the record then says `host-unconfirmed`.
 

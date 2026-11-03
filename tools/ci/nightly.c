@@ -1260,19 +1260,21 @@ static void nightly_record_from_environment(NightlyRecord* record)
 
 // --- Reuse: a push's 9700X work, by its pull request's newest run ---
 
-// A host identity whose every component was read: `9700X/KERNEL/MICROCODE/gcc-VERSION/glibc_VERSION`, none empty and
-// none a placeholder (`unknown`, `none`), so that two unread components can't match each other.
+// A host identity whose every component was read: `9700X/KERNEL/MICROCODE/gcc-VERSION/glibc_VERSION/sw-DIGEST`, none
+// empty and none a placeholder (`unknown`, `none`), so that two unread components can't match each other. DIGEST, 16
+// hexadecimal digits, covers the software the native inventory runs (9700x.yml's host steps): the package database and
+// the contents of the external tools and their libraries.
 static bool nightly_host_established(const char* host)
 {
     char copy[BUSTER_NIGHTLY_HOST];
     const size_t length = strlen(host);
     bool valid = length < sizeof(copy) && strncmp(host, "9700X/", 6) == 0 && nightly_host_value(host);
     uint32_t count = 0;
-    char* parts[6] = { NULL };
+    char* parts[7] = { NULL };
     if (valid)
     {
         memcpy(copy, host, length + 1);
-        for (char* at = copy; at != NULL && count < 6;)
+        for (char* at = copy; at != NULL && count < 7;)
         {
             parts[count] = at;
             count += 1;
@@ -1283,9 +1285,9 @@ static bool nightly_host_established(const char* host)
             }
             at = slash != NULL ? slash + 1 : NULL;
         }
-        valid = count == 5;
+        valid = count == 6;
     }
-    for (uint32_t i = 1; valid && i < 5; i += 1)
+    for (uint32_t i = 1; valid && i < 6; i += 1)
     {
         const char* part = parts[i];
         const size_t size = strlen(part);
@@ -1293,6 +1295,7 @@ static bool nightly_host_established(const char* host)
         valid = size != 0 && !placeholder;
     }
     valid = valid && strncmp(parts[3], "gcc-", 4) == 0 && parts[3][4] != 0 && strncmp(parts[4], "glibc_", 6) == 0 && parts[4][6] != 0;
+    valid = valid && strncmp(parts[5], "sw-", 3) == 0 && nightly_hex(parts[5] + 3, 16);
     return valid;
 }
 
@@ -2688,7 +2691,7 @@ static void nightly_test_record(NightlyRecord* record, uint64_t run, const char*
         [NIGHTLY_FIELD_BENCHMARK_RESULT] = "success",
         [NIGHTLY_FIELD_WINDOW] = "-",
         [NIGHTLY_FIELD_NATIVE] = "passed",
-        [NIGHTLY_FIELD_HOST] = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42",
+        [NIGHTLY_FIELD_HOST] = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef",
         [NIGHTLY_FIELD_QUALIFICATION_RESULT] = "success",
         [NIGHTLY_FIELD_OVERRIDE] = "-",
         [NIGHTLY_FIELD_COVERAGE] = "targeted",
@@ -2955,11 +2958,13 @@ static void nightly_test_reuse(NightlyTest* test)
         { .what = "a record without a completed measurement reuses nothing", .record_incomplete = true },
         { .what = "a record of plain coverage reuses nothing", .record_plain_coverage = true },
         { .what = "a record without a host identity reuses nothing", .record_no_host = true },
-        { .what = "a placeholder microcode reuses nothing", .record_host = "9700X/6.17.1-arch1/unknown/gcc-15.2.1/glibc_2.42" },
-        { .what = "an unread GCC reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-none/glibc_2.42" },
-        { .what = "an unread glibc reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/none" },
-        { .what = "an identity of the old shape reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1" },
-        { .what = "an empty kernel reuses nothing", .record_host = "9700X//0xb404023/gcc-15.2.1/glibc_2.42" },
+        { .what = "a placeholder microcode reuses nothing", .record_host = "9700X/6.17.1-arch1/unknown/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef" },
+        { .what = "an unread GCC reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-none/glibc_2.42/sw-0123456789abcdef" },
+        { .what = "an unread glibc reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/none/sw-0123456789abcdef" },
+        { .what = "an identity without its software digest reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42" },
+        { .what = "an unread software digest reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-none" },
+        { .what = "an identity of the older shape reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1" },
+        { .what = "an empty kernel reuses nothing", .record_host = "9700X//0xb404023/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef" },
     };
     char merge[41];
     char head[41];
@@ -3011,7 +3016,7 @@ static void nightly_test_reuse(NightlyTest* test)
         NightlyFacts facts = nightly_facts_new();
         const bool parsed = nightly_facts_parse(&facts, nightly_buffer_text(buffer));
         const NightlyReuse reuse = nightly_reuse(&facts, c->no_record ? NULL : record, merge, tree, parent_tree, now);
-        nightly_expect(test, parsed && reuse.native == c->native && reuse.measurement == c->measurement && (!reuse.native || (reuse.source == 500 && strcmp(reuse.host, "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42") == 0)), c->what);
+        nightly_expect(test, parsed && reuse.native == c->native && reuse.measurement == c->measurement && (!reuse.native || (reuse.source == 500 && strcmp(reuse.host, "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef") == 0)), c->what);
         nightly_facts_free(&facts);
     }
     free(buffer);

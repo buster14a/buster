@@ -210,7 +210,7 @@ write_record()
         printf 'workflow\t%s\nselector\t%s\ninventory\t%s\ntoolchain\t%s\ncorpus\t%s\nmode\toff\ncode\ttrue\nmeasure\t,lexer,\ngates\t-\n' "$other" "$other" "$other" "$other" "$other"
         printf 'changes_result\tsuccess\nevidence_result\tsuccess\nscope\tplain\nhosted\trun\nhosted_source\t-\nnative_evidence\trun\nnative_source\t-\n'
         printf 'measurement_evidence\trun\nmeasurement_source\t-\nhardware\tadmit\nhardware_reason\tadmitted\ntest_result\tsuccess\nfuzz_result\tskipped\n'
-        printf 'benchmark_result\tsuccess\nwindow\t-\nnative\tpassed\nhost\t9700X/6.17/0xb40/gcc-15/glibc_2.42\nqualification_result\tsuccess\noverride\t-\ncoverage\ttargeted\noutcome\tcomplete\n'
+        printf 'benchmark_result\tsuccess\nwindow\t-\nnative\tpassed\nhost\t9700X/6.17/0xb40/gcc-15/glibc_2.42/sw-0123456789abcdef\nqualification_result\tsuccess\noverride\t-\ncoverage\ttargeted\noutcome\tcomplete\n'
     } > "$record"
 }
 write_record "$work/record.tsv" "$tree" "$parent_tree"
@@ -218,7 +218,7 @@ write_record "$work/record.tsv" "$tree" "$parent_tree"
 GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'native=reused' 'a push reuses its pull request'"'"'s native correctness of the identical tree'
 expect_line "$GITHUB_OUTPUT" 'native_source=700' 'the reuse names its source run'
-expect_line "$GITHUB_OUTPUT" 'native_host=9700X/6.17/0xb40/gcc-15/glibc_2.42' 'and the host identity its run recorded, for the push to confirm'
+expect_line "$GITHUB_OUTPUT" 'native_host=9700X/6.17/0xb40/gcc-15/glibc_2.42/sw-0123456789abcdef' 'and the host identity its run recorded, for the push to confirm'
 expect_line "$GITHUB_OUTPUT" 'measurement=reused' 'and its measurements on the identical first-parent tree'
 expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'the nightly mode skips the 9700X for it'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=native-reused' 'and says why'
@@ -326,6 +326,43 @@ if window_case $((start_epoch + 600)) '' '' false 25; then
 fi
 window_case $((deadline_epoch + 3600)) "$start_epoch" "$deadline_epoch" true 25 || fail 'an override admits after the lock'
 
+# --- The host identity, as the workflow computes it, against stand-in tools ---
+
+# The lines of the 9700X job's host step from the kernel's to the identity's end, /proc/cpuinfo replaced by a fixture.
+identity_step="$work/identity-step.sh"
+awk '/^      - name: Verify benchmark host$/ { step = 1 } step && /^          kernel=\$\(uname -r/ { body = 1 }
+    body { line = $0; sub(/^          /, "", line); print line } body && /^          # The identity.s end\.$/ { exit }' \
+    "$root/.github/workflows/9700x.yml" | sed "s#/proc/cpuinfo#$work/cpuinfo#" > "$identity_step"
+grep -q 'sw-%s' "$identity_step" || fail 'the host step'"'"'s identity is found in the workflow'
+printf 'model name\t: AMD Ryzen 7 9700X\nmicrocode\t: 0xb404023\n' > "$work/cpuinfo"
+mkdir -p "$work/identity-bin"
+printf '#!/bin/sh\necho 6.17.1-arch1\n' > "$work/identity-bin/uname"
+printf '#!/bin/sh\necho glibc 2.42\n' > "$work/identity-bin/getconf"
+printf '#!/bin/sh\necho "gcc 15.2.1-1"\necho "binutils 2.45-1"\n' > "$work/identity-bin/pacman"
+printf '#!/bin/sh\ncase "$1" in -dumpfullversion) echo 15.2.1 ;; *) echo "$1" | sed "s/^-print-prog-name=//" ;; esac\n' > "$work/identity-bin/gcc"
+printf '#!/bin/sh\necho "GNU objdump 2.45"\n' > "$work/identity-bin/objdump"
+chmod +x "$work/identity-bin"/*
+identity()
+{
+    : > "$GITHUB_OUTPUT"
+    PATH="$work/identity-bin:$PATH" bash "$identity_step" > /dev/null 2>&1
+    sed -n 's/^host=//p' "$GITHUB_OUTPUT"
+}
+first=$(identity)
+[[ "$first" =~ ^9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-[0-9a-f]{16}$ ]] || fail "the host identity has every component: $first"
+test "$(identity)" = "$first" || fail 'the host identity is deterministic'
+# An external oracle replaced, its version the same, and nothing else changed: another identity, so no reuse matches.
+printf '#!/bin/sh\necho "GNU objdump 2.45"\n# rebuilt\n' > "$work/identity-bin/objdump"
+second=$(identity)
+[[ "$second" == 9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-* ]] && [ "$second" != "$first" ] || fail 'a replaced objdump of the same version changes the identity'
+# A package updated, every tool the same: another identity.
+printf '#!/bin/sh\necho "gcc 15.2.1-2"\necho "binutils 2.45-1"\n' > "$work/identity-bin/pacman"
+third=$(identity)
+[ "$third" != "$second" ] && [ "$third" != "$first" ] || fail 'a package rebuilt under the same GCC version changes the identity'
+# No package database: no identity at all.
+printf '#!/bin/sh\nexit 1\n' > "$work/identity-bin/pacman"
+test -z "$(identity)" || fail 'without a package database no identity is recorded'
+
 # --- The record job, in this repository's checkout ---
 
 : > "$GITHUB_OUTPUT"
@@ -334,7 +371,7 @@ RECORD_REPOSITORY=1421805693 RECORD_RUN=41 RECORD_ATTEMPT=1 RECORD_EVENT=workflo
     CHANGES_OUTPUTS='{"code":"true","checker":"true","zen5":"false","measure":",lexer,"}' RECORD_CHANGES_RESULT=success \
     RECORD_EVIDENCE_RESULT=success RECORD_SCOPE=plain RECORD_HOSTED=reused RECORD_HOSTED_SOURCE=40 RECORD_HARDWARE=admit \
     RECORD_HARDWARE_REASON=admitted RECORD_TEST_RESULT=skipped RECORD_FUZZ_RESULT=skipped RECORD_BENCHMARK_RESULT=success \
-    RECORD_WINDOW=open RECORD_NATIVE=passed RECORD_HOST=9700X/6.17/0xb40/gcc-15/glibc_2.42 \
+    RECORD_WINDOW=open RECORD_NATIVE=passed RECORD_HOST=9700X/6.17/0xb40/gcc-15/glibc_2.42/sw-0123456789abcdef \
     bash tools/ci/nightly.sh record "$work/record-job" > /dev/null
 expect_line "$GITHUB_OUTPUT" 'outcome=complete' 'a backlog run that measured is complete'
 expect_line "$work/record-job/record.tsv" $'gates\tchecker' 'the record names the selector'"'"'s true outputs'

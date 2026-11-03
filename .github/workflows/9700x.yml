@@ -680,20 +680,52 @@ jobs:
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          # The coverage record's host identity: what the repository doesn't pin (the kernel, the microcode, the
-          # system GCC that some fixtures use as their oracle, glibc). A component that can't be read leaves no
-          # identity at all, never a placeholder that another unread one would match: without one, no reuse holds.
+          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses. That
+          # is the kernel, the microcode, glibc, and the software the inventory runs: the package database's every
+          # package and version, and the contents of each external tool the inventory calls (GCC and its cc1, cc1plus
+          # and collect2; binutils; gdb, perf, valgrind, mold, wild, make, file, the shell) and of every shared library
+          # they load. A tool absent is recorded as absent. A component that can't be read (no package database,
+          # say) leaves no identity at all, never a placeholder that another unread one would match: no reuse holds.
+          # tests/ci/nightly.sh runs the lines from here to the identity's end against stand-in tools.
           kernel=$(uname -r 2> /dev/null || true)
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
           glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || true)
-          if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ]; then
-              host=$(printf '9700X/%s/%s/gcc-%s/%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
+          packages=$(pacman -Q 2> /dev/null || true)
+          software=''
+          if [ -n "$packages" ]; then
+              tools=(cc gcc g++ as ld ld.bfd readelf objdump objcopy nm ar gdb perf valgrind mold wild make file sh bash env)
+              for program in cc1 cc1plus collect2; do
+                  tools+=("$(gcc -print-prog-name="$program" 2> /dev/null || printf '%s' "$program")")
+              done
+              files=()
+              listing=''
+              for tool in "${tools[@]}"; do
+                  path=$(command -v "$tool" 2> /dev/null || true)
+                  if [ -n "$path" ] && [ -f "$path" ]; then
+                      real=$(readlink -f "$path")
+                      listing+="$tool $real"$'\n'
+                      files+=("$real")
+                      while IFS= read -r library; do
+                          files+=("$library")
+                      done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
+                  else
+                      listing+="$tool absent"$'\n'
+                  fi
+              done
+              hashes=$(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r file; do sha256sum "$file" 2> /dev/null || printf 'unreadable %s\n' "$file"; done)
+              if [[ "$hashes" != *unreadable* ]]; then
+                  software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
+              fi
+          fi
+          if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ] && [ -n "$software" ]; then
+              host=$(printf '9700X/%s/%s/gcc-%s/%s/sw-%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" "$software" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
               printf 'Host identity: %s\n' "$host"
               printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
           else
-              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s: incomplete, so none is recorded and no reuse can match it\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}"
+              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}"
           fi
+          # The identity's end.
 
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
@@ -738,20 +770,52 @@ jobs:
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          # The coverage record's host identity: what the repository doesn't pin (the kernel, the microcode, the
-          # system GCC that some fixtures use as their oracle, glibc). A component that can't be read leaves no
-          # identity at all, never a placeholder that another unread one would match: without one, no reuse holds.
+          # The coverage record's host identity: what the repository doesn't pin and the native inventory uses. That
+          # is the kernel, the microcode, glibc, and the software the inventory runs: the package database's every
+          # package and version, and the contents of each external tool the inventory calls (GCC and its cc1, cc1plus
+          # and collect2; binutils; gdb, perf, valgrind, mold, wild, make, file, the shell) and of every shared library
+          # they load. A tool absent is recorded as absent. A component that can't be read (no package database,
+          # say) leaves no identity at all, never a placeholder that another unread one would match: no reuse holds.
+          # tests/ci/nightly.sh runs the lines from here to the identity's end against stand-in tools.
           kernel=$(uname -r 2> /dev/null || true)
           microcode=$(sed -n 's/^microcode[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
           gcc_version=$(gcc -dumpfullversion 2> /dev/null || true)
           glibc_version=$(getconf GNU_LIBC_VERSION 2> /dev/null || true)
-          if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ]; then
-              host=$(printf '9700X/%s/%s/gcc-%s/%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
+          packages=$(pacman -Q 2> /dev/null || true)
+          software=''
+          if [ -n "$packages" ]; then
+              tools=(cc gcc g++ as ld ld.bfd readelf objdump objcopy nm ar gdb perf valgrind mold wild make file sh bash env)
+              for program in cc1 cc1plus collect2; do
+                  tools+=("$(gcc -print-prog-name="$program" 2> /dev/null || printf '%s' "$program")")
+              done
+              files=()
+              listing=''
+              for tool in "${tools[@]}"; do
+                  path=$(command -v "$tool" 2> /dev/null || true)
+                  if [ -n "$path" ] && [ -f "$path" ]; then
+                      real=$(readlink -f "$path")
+                      listing+="$tool $real"$'\n'
+                      files+=("$real")
+                      while IFS= read -r library; do
+                          files+=("$library")
+                      done < <(ldd "$real" 2> /dev/null | sed -n -e 's/^.*=> \(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p' -e 's/^[[:space:]]*\(\/[^ ]*\) (0x[0-9a-f]*)$/\1/p')
+                  else
+                      listing+="$tool absent"$'\n'
+                  fi
+              done
+              hashes=$(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u | while IFS= read -r file; do sha256sum "$file" 2> /dev/null || printf 'unreadable %s\n' "$file"; done)
+              if [[ "$hashes" != *unreadable* ]]; then
+                  software=$(printf '%s\n%s%s\n' "$packages" "$listing" "$hashes" | sha256sum | cut -c 1-16)
+              fi
+          fi
+          if [ -n "$kernel" ] && [ -n "$microcode" ] && [ -n "$gcc_version" ] && [ -n "$glibc_version" ] && [ -n "$software" ]; then
+              host=$(printf '9700X/%s/%s/gcc-%s/%s/sw-%s' "$kernel" "$microcode" "$gcc_version" "$glibc_version" "$software" | tr -c 'A-Za-z0-9._/+-' '_' | cut -c 1-120)
               printf 'Host identity: %s\n' "$host"
               printf 'host=%s\n' "$host" >> "$GITHUB_OUTPUT"
           else
-              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s: incomplete, so none is recorded and no reuse can match it\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}"
+              printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}"
           fi
+          # The identity's end.
 
       - name: Admit nightly work inside the Europe/Madrid window, holding the lock
         # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
