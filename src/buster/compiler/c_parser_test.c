@@ -904,6 +904,9 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void g(void) { const *p ); }\n", "1:23: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "struct S { const *p ) };\n", "1:19: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "*f() 1;\n", "1:6: expected function body after function declarator", 0 },
+    { "int f( (a, b);\n", "1:10: expected ')'", 0 },
+    { "(*x 1;\n", "1:5: expected ')'", 0 },
+    { "(x;\n", "1:3: expected ')'", 0 },
     { "*f() int x;\n", "1:2: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     // At the end of the file: a function's body, a do-statement's while, a head's or a label's statement.
     { "int f(void)\n", "1:12: expected function body after function declarator", 0 },

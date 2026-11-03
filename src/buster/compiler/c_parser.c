@@ -3794,7 +3794,11 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     }
     else if (kind == PARSE_KIND_SEMI)
     {
-        parse_scalar_complete_declarator(parser, declaration, false);
+        // (In the declarator's parentheses, their missing `)` comes first, #1127.)
+        if (group != PARSE_ROLE_OPEN_GROUP)
+        {
+            parse_scalar_complete_declarator(parser, declaration, false);
+        }
         parse_scalar_terminator(parser, i, frame, step);
     }
     else if (kind == PARSE_KIND_COLON && group == PARSE_ROLE_OPEN_STRUCT)
@@ -3856,8 +3860,9 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     {
         // What can't continue a declarator ends it, a closer too, and clang's Sema takes it (saying a missing type)
         // before the parser looks for the `,`, `;` or `)` due, but after it asks for a function's body, at the end of
-        // the file too (ParseDeclGroup), and after a keyword it takes for a parameter's name (#1127).
-        if (!parse_scalar_fn_body_due(parser, i, frame) && !parse_scalar_keyword_parameter(parser, i, frame))
+        // the file too (ParseDeclGroup), and after a keyword it takes for a parameter's name (#1127). In the
+        // declarator's own parentheses it hasn't ended: their `)` is due, and clang's parser says so first.
+        if (group != PARSE_ROLE_OPEN_GROUP && !parse_scalar_fn_body_due(parser, i, frame) && !parse_scalar_keyword_parameter(parser, i, frame))
         {
             parse_scalar_typeless_note(parser, declaration);
         }
