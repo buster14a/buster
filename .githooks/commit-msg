@@ -1,11 +1,10 @@
 #!/bin/sh
-# Git's commit-msg hook (AGENTS.md, "David's sign-off"). David's opt-in is
-# BUSTER_DCO_SIGN_OFF=davidgmbb, or, when that variable is absent, the local
-# Git setting buster.dcoSignOff=davidgmbb. A present environment value wins,
-# including empty or off. Global Git settings do not authorize a sign-off.
-# Where enabled, end the message with his sign-off once, after existing
-# trailers, as CONTRIBUTING.md authorizes. Otherwise do nothing, including
-# during rebases and cherry-picks: copies keep their existing certifications.
+# Git's commit-msg hook (AGENTS.md, "David's sign-off"). sign-off-lib.sh
+# resolves David's opt-in: a present BUSTER_DCO_SIGN_OFF decides, else Git
+# configuration may opt out, else this worktree's marker opts in. Where it is
+# on, end the message with his sign-off once, after existing trailers, as
+# CONTRIBUTING.md authorizes. Otherwise do nothing, including during rebases
+# and cherry-picks: copies keep their existing certifications.
 #
 # git interpret-trailers runs outside the repository with no configuration, so
 # that no trailer.* setting changes the line it adds, but the comment prefix,
@@ -18,21 +17,11 @@
 # learn, nor even whether it wrote comments (GIT_EDITOR=: may be the caller's
 # no-op editor), so the hook refuses the commit rather than guess.
 
-copying()
-{
-    [ -e "$(git rev-parse --git-path rebase-merge)" ] || [ -e "$(git rev-parse --git-path rebase-apply)" ] || [ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]
-}
+. "$(dirname "$0")/sign-off-lib.sh"
 
-automatic()
-{
-    keys='^core\.comment(char|string)$'
-    [ "$(echo x | git -c core.commentString=// stripspace --comment-lines)" = "// x" ] || keys='^core\.commentchar$'
-    git config --get-regexp "$keys" | tail -n 1 | cut -d ' ' -f 2- | grep -q -i -x auto
-}
-
-sign_off=${BUSTER_DCO_SIGN_OFF-$(git config --local --get buster.dcoSignOff)}
-if [ "$sign_off" = davidgmbb ] && ! copying; then
-    if automatic; then
+dco_consent
+if [ "$dco_on" = yes ] && ! dco_copying; then
+    if dco_automatic; then
         echo "commit-msg: core.commentChar (or core.commentString) is auto, so this hook can't tell comments from the message. Select an explicit comment prefix for this commit (git -c core.commentChar=# commit ...), or suppress this session's trailer with BUSTER_DCO_SIGN_OFF=off (AGENTS.md, \"David's sign-off\")." >&2
         false
     else
