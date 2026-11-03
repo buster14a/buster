@@ -139,6 +139,8 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_FUZZ_AVAILABLE` | `0` | `1` adds libFuzzer and `--fuzz`, with AddressSanitizer unless a sanitizer is given |
 | `BUSTER_FUZZ_ENTRY` | `fuzz.c` | the fuzzing entry's C file, with `BUSTER_FUZZ_AVAILABLE=1` alone |
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
+| `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
+| `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -234,6 +236,34 @@ that executable's parallel runner, which gives each command the executable as
 calls. The inventory needs CI's tools and frozen inputs ([CI](../ci.md)) and
 every core, so it runs alone. `./build.sh test --config Debug -- -L build`
 runs the first label in Debug.
+
+## A profile-guided build
+
+`BUSTER_PGO=1` builds the Release executable, and `shifts`' executables, with a
+profile of the compiler's own compiles (#880), in a tree of its own
+(`VARIANT-pgo`) with the Release configuration alone. Under its `pgo/`: the
+sources compiled with `-fprofile-instr-generate`, without debug information,
+into an executable left unbaked, since its counters are writable memory outside
+`buster_baked`, which `bake-tables` refuses; that executable compiles each
+source as `-E -P`, `-fsyntax-only` and `-c` (a Ninja step per source, one per
+core at a time), a profile per process; and the `llvm-profdata` beside `clang`
+(or on `PATH`) merges them into `pgo/compiler.profdata`, with which every unit
+then compiles (`-fprofile-instr-use`). Each step reruns when its inputs
+change: an edited source retrains the profile, and a new profile recompiles
+every unit. `print-compile-flags` leaves the profile out, since only a build
+trains it. `BUSTER_PGO_TRAIN=SCRIPT` replaces the training with a bash script
+of your own, run in `pgo/` with `BUSTER_PGO_COMPILER` naming the instrumented
+executable. On the 9700X, the compiler's own sources gave a better profile
+than the frozen `sqlite3.c`, musl and c-testsuite of buster-performance#182
+("The compiler's own code and a profile", `docs/compile-time.md`).
+
+The mode isn't the default, and no CI job builds with it. Sanitizer builds,
+`BUSTER_HOST_RUNTIME` and `lexer-variant` refuse it (the lexer variants change
+`main.c`'s code, so a profile of the build without them no longer matches it),
+as do invalid values of `BUSTER_PGO` and `BUSTER_PGO_TRAIN`; the settings'
+checks make each refusal before any tree is configured, and
+`.github/workflows/build-pgo.yml` runs them on GitHub's runner with a `clang`
+that fails at any compile.
 
 ## Experiments
 

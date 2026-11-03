@@ -127,6 +127,8 @@ fuzz_entry="${BUSTER_FUZZ_ENTRY:-}"
 [ -z "$fuzz_entry" ] || fuzz_entry="$(absolute "$fuzz_entry")"
 host_runtime="${BUSTER_HOST_RUNTIME:-}"
 [ -z "$host_runtime" ] || host_runtime="$(absolute "$host_runtime")"
+pgo_train="${BUSTER_PGO_TRAIN:-}"
+[ -z "$pgo_train" ] || pgo_train="$(absolute "$pgo_train")"
 settings=(
     "-DBUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native}"
     "-DBUSTER_HOST_RUNTIME=$host_runtime"
@@ -138,6 +140,8 @@ settings=(
     "-DBUSTER_FUZZ_AVAILABLE=${BUSTER_FUZZ_AVAILABLE:-0}"
     "-DBUSTER_FUZZ_ENTRY=$fuzz_entry"
     "-DBUSTER_BAKE=${BUSTER_BAKE:-1}"
+    "-DBUSTER_PGO=${BUSTER_PGO:-0}"
+    "-DBUSTER_PGO_TRAIN=$pgo_train"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
@@ -237,6 +241,8 @@ shift_source=""
 shift_bytes=""
 case "$command" in
     lexer-variant)
+        # The variants change main.c's code, which the profile of the compiler without them would no longer match.
+        [ "${BUSTER_PGO:-0}" = 0 ] || die "lexer-variant: BUSTER_PGO builds build/compiler and the shifts' executables alone"
         # Other lexers in the executable, for benchmark-lexer to check and time beside c_tokenize in one process: each
         # SOURCE is a copy of c_lexer.c (compiled through src/buster/compiler/c_lexer_variant.c into
         # c_lexer_variant_NAME), or that file's assembly (.s), which lexer-variant-assembly writes, and label-spills
@@ -284,6 +290,12 @@ case "$command" in
         ;;
 esac
 
+# BUSTER_PGO's tree has the Release configuration alone, which its profile is for.
+configurations="Debug;Release"
+if [ "${BUSTER_PGO:-0}" = 1 ]; then
+    [ "$config" = Release ] || die "BUSTER_PGO builds the Release configuration alone"
+    configurations=Release
+fi
 mkdir -p "$root/build/cmake"
 tree="$root/build/cmake/$variant"
 binary="$tree/$config/compiler"
@@ -331,7 +343,7 @@ configure_arguments=(
     -S "$root" -B "$tree" -G "Ninja Multi-Config"
     "-DCMAKE_MAKE_PROGRAM=$ninja"
     "-DCMAKE_C_COMPILER=$clang"
-    "-DCMAKE_CONFIGURATION_TYPES=Debug;Release"
+    "-DCMAKE_CONFIGURATION_TYPES=$configurations"
     -DCMAKE_DEFAULT_BUILD_TYPE=Release
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     # CMake would take these from the environment once, at the first configure, and keep them.

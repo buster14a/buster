@@ -31,6 +31,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `correctness.tests / CI selection` | `tools/ci/correctness.tests` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite` | `c_testsuite.c` | [c-testsuite](c-testsuite.md) |
+| `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
 | `test-dataflow, benchmark-dataflow` | `dataflow.c` | [dataflow](dataflow.md) |
 | `test-debug, benchmark-debug` | `debug.c` | [debug](debug.md) |
 | `test-checker-deferred, benchmark-checker-deferred` | `c_check_deferred_test.c` | [deferred](deferred.md) |
@@ -131,6 +132,7 @@ The original section titles are retained in their owning guides.
 - [Foreign tests](foreign.md#foreign-tests).
 - [Foreign benchmark](foreign.md#foreign-benchmark).
 - [Foreign corpus test](foreign-corpus.md#foreign-corpus-test).
+- [DCO sign-off tooling](dco.md#dco-sign-off-tooling).
 - [Dataflow tests](dataflow.md#dataflow-tests).
 - [Dataflow benchmark](dataflow.md#dataflow-benchmark).
 - [Preprocessor harness tests](preprocessor-fuzz.md#preprocessor-harness-tests).

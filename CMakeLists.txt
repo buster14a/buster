@@ -41,6 +41,8 @@ set(BUSTER_SANITIZER_OPTIMIZATION 3 CACHE STRING "A sanitizer build's Release op
 set(BUSTER_FUZZ_AVAILABLE 0 CACHE STRING "1 builds in libFuzzer and the --fuzz driver")
 set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/compiler/fuzz.c when empty)")
 set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
+set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's own compiles (Release alone)")
+set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
@@ -50,6 +52,12 @@ buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
 message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}")
+if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
+    message(FATAL_ERROR "buster: BUSTER_PGO builds the Release configuration alone; configure with CMAKE_CONFIGURATION_TYPES=Release")
+endif()
+if(buster_pgo AND NOT BUSTER_LEXER_VARIANTS STREQUAL "")
+    message(FATAL_ERROR "buster: lexer-variant: BUSTER_PGO builds build/compiler and the shifts' executables alone")
+endif()
 
 find_program(BUSTER_NM NAMES nm llvm-nm NO_CACHE REQUIRED)
 
@@ -125,11 +133,19 @@ endif()
 # The compile options of a unit of the executable: the Release configuration's debug information and optimization
 # (BusterSettings.cmake) or the Debug configuration's, around the flags, then the definitions, as print-compile-flags
 # prints them.
+# With BUSTER_PGO, the profile follows the flags, as -fprofile-instr-use; the trained profile is built before the
+# units and recompiles them when it changes.
+set(pgo "${CMAKE_BINARY_DIR}/pgo")
+set(profile_use "")
+if(buster_pgo)
+    set(profile_use "-fprofile-instr-use=${pgo}/compiler.profdata")
+endif()
 function(buster_unit_options target definitions)
     target_compile_options(${target} PRIVATE
         "$<$<CONFIG:Release>:${buster_debug}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
         "${flags_group}"
+        ${profile_use}
         "$<IF:$<CONFIG:Debug>,${BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION},${buster_optimization}>"
         ${definitions}
         "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=")
@@ -149,6 +165,7 @@ foreach(source IN LISTS BUSTER_SOURCES)
     get_filename_component(name "${source}" NAME_WE)
     list(APPEND unit_names ${name})
 endforeach()
+
 
 # Each lexer variant, after the units: a copy of c_lexer.c compiled through c_lexer_variant.c into
 # c_lexer_variant_NAME, or that function's assembly (build.sh lexer-variant-assembly), assembled as it is.
@@ -179,6 +196,13 @@ endforeach()
 # 1.5 ms with 113 (#86: link-foreign and the tests run it as a process of its own, and a small link's work is 0.8 ms).
 # With BUSTER_HOST_RUNTIME, CI's emulated old CPU's runtime, linked explicitly: the host's startup objects and loader
 # can require a newer ISA even with -march=x86-64.
+# The link's arguments before the objects and after them, without BUSTER_HOST_RUNTIME, which buster_link adds itself:
+# into `before` and `after`.
+function(buster_link_arguments before after)
+    set(${before} ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags} PARENT_SCOPE)
+    set(${after} ${buster_fuzz_libraries} -lm -ldl PARENT_SCOPE)
+endfunction()
+
 function(buster_link target)
     set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)
     if(NOT BUSTER_HOST_RUNTIME STREQUAL "")
@@ -192,8 +216,9 @@ function(buster_link target)
         target_link_libraries(${target} PRIVATE "${library}/libm.so.6" "${library}/libc.so.6" "${support}"
             "${library}/crtn.o")
     else()
-        target_link_options(${target} PRIVATE ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags})
-        target_link_libraries(${target} PRIVATE ${buster_fuzz_libraries} -lm -ldl)
+        buster_link_arguments(before after)
+        target_link_options(${target} PRIVATE ${before})
+        target_link_libraries(${target} PRIVATE ${after})
     endif()
 endfunction()
 
@@ -208,6 +233,95 @@ function(buster_post_link target output)
         COMMENT "Baking and checking ${target}'s executable"
         VERBATIM)
 endfunction()
+
+# BUSTER_PGO's profile of the compiler's own compiles (#880), under pgo/: the sources compiled with
+# -fprofile-instr-generate, without debug information, into an executable left unbaked (its counters are writable
+# memory outside buster_baked, which bake-tables refuses); that executable compiles each source as -E -P,
+# -fsyntax-only and -c (or runs BUSTER_PGO_TRAIN, a bash script, in pgo/train with BUSTER_PGO_COMPILER naming it), a
+# profile per process; and llvm-profdata, beside clang or on PATH, merges them into pgo/compiler.profdata, which every
+# unit then compiles with. Each step reruns when its inputs change: an edited source retrains the profile, and the new
+# profile recompiles every unit. On the 9700X, the compiler's own sources took 3.8 to 5.2% off -c's time
+# (docs/compile-time.md).
+if(buster_pgo)
+    get_filename_component(compiler_directory "${compiler_file}" DIRECTORY)
+    find_program(BUSTER_LLVM_PROFDATA NAMES llvm-profdata HINTS "${compiler_directory}" NO_CACHE)
+    if(NOT BUSTER_LLVM_PROFDATA)
+        message(FATAL_ERROR "buster: BUSTER_PGO needs llvm-profdata")
+    endif()
+    set(instrumented_objects "")
+    foreach(name IN LISTS unit_names)
+        list(FIND unit_names "${name}" index)
+        list(GET BUSTER_SOURCES ${index} source)
+        set(object "${pgo}/objects/${name}.o")
+        add_custom_command(OUTPUT "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -c "${CMAKE_SOURCE_DIR}/${source}" -o "${object}" ${flags} -fprofile-instr-generate
+                ${buster_optimization} ${buster_defines} "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=" -MD -MF "${object}.d"
+            DEPFILE "${object}.d"
+            COMMENT "Building ${source} with -fprofile-instr-generate"
+            VERBATIM)
+        list(APPEND instrumented_objects "${object}")
+    endforeach()
+    buster_link_arguments(before after)
+    add_custom_command(OUTPUT "${pgo}/compiler"
+        COMMAND "${CMAKE_C_COMPILER}" ${before} -fprofile-instr-generate ${instrumented_objects} ${after} -o "${pgo}/compiler"
+        DEPENDS ${instrumented_objects}
+        COMMENT "Linking the instrumented executable"
+        VERBATIM)
+    set(trained "")
+    set(trained_directories "")
+    if(buster_pgo_train STREQUAL "")
+        foreach(name IN LISTS unit_names)
+            list(FIND unit_names "${name}" index)
+            list(GET BUSTER_SOURCES ${index} source)
+            set(profiles "${pgo}/profiles/${name}")
+            set(run "${CMAKE_COMMAND}" -E env "LLVM_PROFILE_FILE=${profiles}/%p.profraw" "${pgo}/compiler")
+            add_custom_command(OUTPUT "${pgo}/train/${name}.stamp"
+                COMMAND "${CMAKE_COMMAND}" -E rm -rf "${profiles}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${profiles}" "${pgo}/train"
+                COMMAND ${run} -E -P "${source}" ${buster_flags} ${buster_defines} -o /dev/null
+                COMMAND ${run} -fsyntax-only "${source}" ${buster_flags} ${buster_defines}
+                COMMAND ${run} -c "${source}" ${buster_flags} ${buster_defines} -o "${pgo}/train/${name}.o"
+                COMMAND "${CMAKE_COMMAND}" -E touch "${pgo}/train/${name}.stamp"
+                DEPENDS "${pgo}/compiler" "${CMAKE_SOURCE_DIR}/${source}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                COMMENT "Training the profile on ${source}"
+                VERBATIM)
+            list(APPEND trained "${pgo}/train/${name}.stamp")
+            if(trained_directories STREQUAL "")
+                set(trained_directories "${name}")
+            else()
+                string(APPEND trained_directories ",${name}")
+            endif()
+        endforeach()
+    else()
+        add_custom_command(OUTPUT "${pgo}/train/script.stamp"
+            COMMAND "${CMAKE_COMMAND}" -E rm -rf "${pgo}/profiles" "${pgo}/train"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${pgo}/profiles/script" "${pgo}/train"
+            COMMAND "${CMAKE_COMMAND}" -E env "LLVM_PROFILE_FILE=${pgo}/profiles/script/%p.profraw"
+                "BUSTER_PGO_COMPILER=${pgo}/compiler" bash "${buster_pgo_train}"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${pgo}/train/script.stamp"
+            DEPENDS "${pgo}/compiler" "${buster_pgo_train}"
+            WORKING_DIRECTORY "${pgo}"
+            COMMENT "Training the profile with ${buster_pgo_train}"
+            VERBATIM)
+        set(trained "${pgo}/train/script.stamp")
+        set(trained_directories script)
+    endif()
+    add_custom_command(OUTPUT "${pgo}/compiler.profdata"
+        COMMAND "${CMAKE_COMMAND}" "-DLLVM_PROFDATA=${BUSTER_LLVM_PROFDATA}" "-DPROFILES=${pgo}/profiles"
+            "-DDIRECTORIES=${trained_directories}" "-DOUTPUT=${pgo}/compiler.profdata"
+            -P "${CMAKE_SOURCE_DIR}/cmake/BusterMergeProfile.cmake"
+        DEPENDS ${trained} "${CMAKE_SOURCE_DIR}/cmake/BusterMergeProfile.cmake"
+        COMMENT "Merging the profile"
+        VERBATIM)
+    add_custom_target(pgo-profile DEPENDS "${pgo}/compiler.profdata")
+    foreach(name IN LISTS unit_names)
+        list(FIND unit_names "${name}" index)
+        list(GET BUSTER_SOURCES ${index} source)
+        set_source_files_properties("${source}" PROPERTIES OBJECT_DEPENDS "${pgo}/compiler.profdata")
+        add_dependencies(buster_${name} pgo-profile)
+    endforeach()
+endif()
 
 set(objects "")
 foreach(name IN LISTS unit_names)
@@ -314,7 +428,9 @@ set(settings_environment
     "BUSTER_SANITIZER_OPTIMIZATION=${BUSTER_SANITIZER_OPTIMIZATION}"
     "BUSTER_FUZZ_AVAILABLE=${BUSTER_FUZZ_AVAILABLE}"
     "BUSTER_FUZZ_ENTRY=${BUSTER_FUZZ_ENTRY}"
-    "BUSTER_BAKE=${BUSTER_BAKE}")
+    "BUSTER_BAKE=${BUSTER_BAKE}"
+    "BUSTER_PGO=${BUSTER_PGO}"
+    "BUSTER_PGO_TRAIN=${BUSTER_PGO_TRAIN}")
 add_test(NAME baked-tables COMMAND "${compiler}" test-baked-tables)
 add_test(NAME parallel-runner COMMAND "${compiler}" test-parallel)
 set_tests_properties(baked-tables parallel-runner PROPERTIES LABELS build)
