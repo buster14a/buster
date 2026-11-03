@@ -606,9 +606,13 @@ LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
 
   ```sh
   cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_model.c -o build/generate_x86_cpu_model
+  build/generate_x86_cpu_model --self-test
   build/generate_x86_cpu_model /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def "llvm-23-dev 1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92 (apt.llvm.org)" "$(sha256sum /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def | cut -d' ' -f1)" > c_builtin_cpu.inc.new
   ```
 
+  The generator succeeds only when it has read the whole input and written
+  and flushed the whole table. `--self-test` checks this against a synthetic
+  input, a write to `/dev/full`, an unreadable input and a malformed row.
   The output's sha256 is
   `fe9cf559b3168f24d27e2a228c980af2c0a4b0bab8d552b37422f9ffb47588d7`. Its 183
   rows are byte-identical to the table that first came in with #148. That
