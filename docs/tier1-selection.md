@@ -271,10 +271,14 @@ patterns are:
   was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
   which only a vector type makes, and a call whose parts in registers take more
   than the red zone's 14 staging slots of 8 bytes, a whole vector register's its
-  bytes' (`tier1_select_part_slots`). Every function and
-  call with records goes to the CFG consumer. Before a call's moves, it copies
-  the call's aggregates from their addresses into their stack slots, or into the
-  red zone's staging slots, whose registers it loads after the moves. An address
+  bytes' (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
+  register past xmm15, and only an AVX-512F target passes a zmm one), so that a
+  call takes all eight of its vector registers' 64-byte vectors. Every function
+  and call with records goes to the CFG consumer. Before a call's moves, it
+  copies the call's aggregates from their addresses into their stack slots, or
+  into the red zone's staging slots or a 64-byte part's zmm register, whose
+  argument registers it loads or moves after the moves. An address
   in a slot, or recomputed, goes through the scratch register, with rax saved
   below rsp, so its use needn't be required: a call may pass more aggregates than
   its first allocation gives its uses registers. The consumer stores an
