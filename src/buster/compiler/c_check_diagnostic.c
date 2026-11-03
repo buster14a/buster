@@ -266,7 +266,7 @@ static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input
 
 static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
 {
-    const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
+    const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) && token < input->token_count ? check_input_attributes_at(input, token) : NULL;
     uint32_t warnings = 0;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
@@ -382,7 +382,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
             first = member->token;
         }
     }
-    for (uint32_t at = 0; policies && input->attributes != NULL && at < input->token_count && at < first; at += 1)
+    for (uint32_t at = 0; policies && check_sparse_wide_present(input->attributes) && at < input->token_count && at < first; at += 1)
     {
         const uint32_t warnings = check_diagnostic_attribute_warnings(input, at);
         if (warnings != 0 && check_diagnostic_severity(input, at, warnings) >= CHECK_WARNING_ERROR)

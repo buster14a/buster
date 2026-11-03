@@ -83,10 +83,14 @@ struct Tier1EmitDiagnostic
     uint32_t error;
 };
 
-// The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_DIRECT and _GOT, which
-// c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot.
+// The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*, which
+// c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot; and a thread-local's (#141), the
+// thread pointer plus its offset, a TPOFF32 immediate for one of the image's (local-exec) or the offset from its GOT slot
+// (initial-exec), as Tier 0's.
 #define BUSTER_TIER1_ACCESS_DIRECT 0
 #define BUSTER_TIER1_ACCESS_GOT 1
+#define BUSTER_TIER1_ACCESS_LOCAL_EXEC 2
+#define BUSTER_TIER1_ACCESS_INITIAL_EXEC 3
 
 typedef struct Tier1EmitOptions Tier1EmitOptions;
 struct Tier1EmitOptions
@@ -98,7 +102,7 @@ struct Tier1EmitOptions
     bool vector;
     bool rematerialize;
     // How each symbol below `symbol_count` is reached (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*: directly,
-    // through its GOT slot, or a thread-local's, which the consumers refuse), for its address (IR_SYMBOL_ADDR). Null
+    // through its GOT slot, or a thread-local's from the thread pointer, #141), for its address (IR_SYMBOL_ADDR). Null
     // reaches every symbol directly.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
@@ -803,6 +807,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     uint32_t part_slots[BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t part_count = 0;
     uint32_t slot_count = 0;
+    // The 64-byte parts (#141) wait in zmm16 and on instead (tier1_select_part_in_zmm): part_slots holds their register.
+    uint32_t zmm_count = 0;
     Tier1SelectPlaces places = { 0 };
     for (uint32_t argument = 0; argument < call->argument_count; argument += 1)
     {
@@ -825,10 +831,12 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         {
             if (parts[k].reg != BUSTER_ABI_REGISTER_NONE)
             {
+                const bool zmm = tier1_select_part_in_zmm(parts[k].bytes);
                 part_registers[part_count] = parts[k].reg;
                 part_bytes[part_count] = parts[k].bytes;
-                part_slots[part_count] = slot_count;
-                slot_count += tier1_select_part_slots(parts[k].bytes);
+                part_slots[part_count] = zmm ? BUSTER_TIER1_SELECT_PART_ZMM + zmm_count : slot_count;
+                slot_count += tier1_select_argument_part_slots(parts[k].bytes);
+                zmm_count += zmm ? 1 : 0;
                 part_count += 1;
             }
         }
@@ -914,16 +922,17 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     }
     // The aggregates' parts from their staging slots (#789), each its 8 bytes, or a whole vector register's its bytes (#141)
     // from its slots' lowest (tier1_emit_staging_part): past an aggregate's end, the register's bytes are padding, which the
-    // callee ignores.
-    error = error == TIER1_EMIT_OK && slot_count > BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS ? TIER1_EMIT_ALLOCATION : error;
+    // callee ignores. A 64-byte part (#141) from the zmm register it waits in (tier1_emit_cfg_aggregate_zmm).
+    error = error == TIER1_EMIT_OK && (slot_count > BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS || zmm_count > BUSTER_ABI_VECTOR_ARGUMENTS) ? TIER1_EMIT_ALLOCATION : error;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         const bool vector_part = (part_registers[k] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const bool zmm = vector_part && tier1_select_part_in_zmm(part_bytes[k]);
         const X86Instruction load = {
-            .displacement = tier1_emit_staging_part(part_slots[k], part_bytes[k]),
+            .displacement = zmm ? 0 : tier1_emit_staging_part(part_slots[k], part_bytes[k]),
             .reg = (uint8_t)(part_registers[k] & 0x1f),
-            .rm = X86_REGISTER_RSP,
-            .mode = BUSTER_X86_MEMORY_BASE,
+            .rm = zmm ? (uint8_t)part_slots[k] : X86_REGISTER_RSP,
+            .mode = zmm ? BUSTER_X86_REGISTER_DIRECT : BUSTER_X86_MEMORY_BASE,
             .form = vector_part ? tier1_select_part_form(part_bytes[k], true) : X86_FORM_MOV_R64_RM64,
         };
         error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;

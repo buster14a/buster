@@ -671,7 +671,8 @@ static const char check_test_tier1_float_other_source[] =
 // size, a part of each class in one aggregate, _Float16's odd xmm part, and the memory class's on the stack and through
 // the hidden pointer), each made, hashed and passed back by the other unit (clang -O2's) and twisted and returned by this
 // one (Tier 1's), so that aggregates cross between the compilers both ways as arguments and as results; a call of nine
-// arguments whose aggregates run past the registers, each way; and a variadic call of three aggregates.
+// arguments whose aggregates run past the registers, each way; and a variadic call of three aggregates. Its hashes are
+// unsigned, so that the oracle's output is a defined program's: a signed one overflows (#141, as the vectors' fixture).
 static const char check_test_tier1_records_header[] =
     "#include <stdio.h>\n"
     "typedef struct { char c[1]; } S1;\n"
@@ -694,24 +695,24 @@ static const char check_test_tier1_records_header[] =
     "typedef struct { _Float16 h[3]; } H3;\n"
     "typedef struct { long a, b, c; } Big;\n"
     "#define SHAPES(X) X(S1) X(S2) X(S3) X(S5) X(S6) X(S7) X(S8) X(S9) X(S12) X(S15) X(S16) X(S17) X(F1) X(F3) X(D2) X(DI) X(ID) X(H3) X(Big)\n"
-    "#define DECLARE(S) S b_make_##S(int seed); long b_hash_##S(S s); long b_back_##S(int seed); S a_twist_##S(S s, int k);\n"
+    "#define DECLARE(S) S b_make_##S(int seed); unsigned long b_hash_##S(S s); unsigned long b_back_##S(int seed); S a_twist_##S(S s, int k);\n"
     "SHAPES(DECLARE)\n"
-    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
-    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
-    "long b_call_many(int seed);\n"
-    "long b_vsum(int n, ...);\n";
+    "unsigned long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "unsigned long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w);\n"
+    "unsigned long b_call_many(int seed);\n"
+    "unsigned long b_vsum(int n, ...);\n";
 
 static const char check_test_tier1_records_other_source[] =
     "#include \"tier1-records.h\"\n"
     "#include <stdarg.h>\n"
     "#define DEFINE(S) \\\n"
     "S b_make_##S(int seed) { S s; unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(seed * 7 + i * 13 + 1); return s; } \\\n"
-    "long b_hash_##S(S s) { const unsigned char* p = (const unsigned char*)&s; long h = 0; for (unsigned i = 0; i < sizeof s; i += 1) h = h * 31 + p[i]; return h; } \\\n"
-    "long b_back_##S(int seed) { S s = b_make_##S(seed); S t = a_twist_##S(s, seed); return b_hash_##S(t) * 3 + b_hash_##S(s); }\n"
+    "unsigned long b_hash_##S(S s) { const unsigned char* p = (const unsigned char*)&s; unsigned long h = 0; for (unsigned i = 0; i < sizeof s; i += 1) h = h * 31 + p[i]; return h; } \\\n"
+    "unsigned long b_back_##S(int seed) { S s = b_make_##S(seed); S t = a_twist_##S(s, seed); return b_hash_##S(t) * 3 + b_hash_##S(s); }\n"
     "SHAPES(DEFINE)\n"
-    "long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return a + b * 2 + c * 3 + d * 4 + b_hash_S16(t) + b_hash_Big(x) * 5 + b_hash_DI(y) * 7 + b_hash_S6(z) * 11 + b_hash_S1(w) * 13; }\n"
-    "long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
-    "long b_vsum(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
+    "unsigned long b_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return a + b * 2 + c * 3 + d * 4 + b_hash_S16(t) + b_hash_Big(x) * 5 + b_hash_DI(y) * 7 + b_hash_S6(z) * 11 + b_hash_S1(w) * 13; }\n"
+    "unsigned long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
+    "unsigned long b_vsum(int n, ...) { va_list ap; va_start(ap, n); unsigned long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
 
 // The dynamic stack's fixture (#141): variable-length arrays in a loop's body (a save and a restore per iteration), beside
 // calls with stack arguments (each with its outgoing area at its own rsp), in a frame realigned by an object aligned to 64
@@ -763,13 +764,13 @@ static const char check_test_tier1_records_source[] =
     "#include \"tier1-records.h\"\n"
     "#define TWIST(S) S a_twist_##S(S s, int k) { unsigned char* p = (unsigned char*)&s; for (unsigned i = 0; i < sizeof s; i += 1) p[i] = (unsigned char)(p[i] + k + i); return s; }\n"
     "SHAPES(TWIST)\n"
-    "long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return b_many(a + 1, b, c, d, t, x, y, z, w) + b_hash_S1(w); }\n"
-    "#define PRINT(S) printf(\"%s %ld %ld %ld\\n\", #S, b_hash_##S(b_make_##S(5)), b_hash_##S(a_twist_##S(b_make_##S(9), 3)), b_back_##S(11));\n"
+    "unsigned long a_many(long a, long b, long c, long d, S16 t, Big x, DI y, S6 z, S1 w) { return b_many(a + 1, b, c, d, t, x, y, z, w) + b_hash_S1(w); }\n"
+    "#define PRINT(S) printf(\"%s %lu %lu %lu\\n\", #S, b_hash_##S(b_make_##S(5)), b_hash_##S(a_twist_##S(b_make_##S(9), 3)), b_back_##S(11));\n"
     "int main(void)\n"
     "{\n"
     "    SHAPES(PRINT)\n"
-    "    printf(\"%ld %ld\\n\", b_call_many(4), a_many(1, 2, 3, 4, b_make_S16(1), b_make_Big(2), b_make_DI(3), b_make_S6(4), b_make_S1(5)));\n"
-    "    printf(\"%ld\\n\", b_vsum(3, b_make_S12(1), b_make_S12(2), b_make_S12(3)));\n"
+    "    printf(\"%lu %lu\\n\", b_call_many(4), a_many(1, 2, 3, 4, b_make_S16(1), b_make_Big(2), b_make_DI(3), b_make_S6(4), b_make_S1(5)));\n"
+    "    printf(\"%lu\\n\", b_vsum(3, b_make_S12(1), b_make_S12(2), b_make_S12(3)));\n"
     "    return 0;\n"
     "}\n";
 
@@ -2628,9 +2629,53 @@ static void check_test_driver_tier1_stack_vectors(CheckTest* test, const char* c
     unlink(other_object);
 }
 
+// The 64-byte vector arguments' fixture (#141), for x86-64-v4: calls of two, eight and nine 64-byte vectors (the ninth on
+// the stack) and of vectors of each width among integers and a double, more of them in zmm registers than the red zone's
+// 14 staging slots hold, which wait in zmm16 and on between their copies and the moves (tier1_select_part_in_zmm), from
+// this unit (Tier 1's) to the other's (clang -O2's), which hashes them.
+static const char check_test_tier1_zmm_header[] =
+    "#include <stdio.h>\n"
+    "typedef int V16 __attribute__((vector_size(64)));\n"
+    "typedef int V8 __attribute__((vector_size(32)));\n"
+    "typedef int V4 __attribute__((vector_size(16)));\n"
+    "unsigned long b_two(V16 a, V16 b);\n"
+    "unsigned long b_eight(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h);\n"
+    "unsigned long b_mixed(long x, V16 a, V8 b, double d, V4 c, V16 e, V8 f, long y);\n"
+    "unsigned long b_nine(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h, V16 i);\n"
+    "unsigned long a_two(V16* p, int k);\n"
+    "unsigned long a_eight(V16* p, int k);\n"
+    "unsigned long a_mixed(V16* p, V8* q, V4* r, int k);\n"
+    "unsigned long a_nine(V16* p, int k);\n";
+
+static const char check_test_tier1_zmm_source[] =
+    "#include \"tier1-zmm.h\"\n"
+    "unsigned long a_two(V16* p, int k) { V16 s = p[0] + p[2]; return b_two(s, p[1] * p[k]); }\n"
+    "unsigned long a_eight(V16* p, int k) { V16 t = p[7] ^ p[k]; return b_eight(p[0], p[1] + p[k], p[2], p[3] - p[k], p[4], p[5], p[6], t); }\n"
+    "unsigned long a_mixed(V16* p, V8* q, V4* r, int k) { V4 c = r[0] + r[0]; return b_mixed(k, p[0], q[0], k * 0.5, c, p[1] + p[k], q[1], -k); }\n"
+    "unsigned long a_nine(V16* p, int k) { return b_nine(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8] + p[k]); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    V16 p[9];\n"
+    "    V8 q[2];\n"
+    "    V4 r[1];\n"
+    "    for (int i = 0; i < 9; i += 1) for (int j = 0; j < 16; j += 1) p[i][j] = i * 100 + j * 7 - 50;\n"
+    "    for (int i = 0; i < 2; i += 1) for (int j = 0; j < 8; j += 1) q[i][j] = i * 30 + j * 3 + 1;\n"
+    "    for (int j = 0; j < 4; j += 1) r[0][j] = j * 11 - 5;\n"
+    "    for (int k = 0; k < 3; k += 1) printf(\"%lu %lu %lu %lu\\n\", a_two(p, k), a_eight(p, k), a_mixed(p, q, r, k), a_nine(p, k));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_zmm_other_source[] =
+    "#include \"tier1-zmm.h\"\n"
+    "static unsigned long fold(unsigned long h, const int* v, int n) { for (int i = 0; i < n; i += 1) h = h * 31 + (unsigned)v[i]; return h; }\n"
+    "unsigned long b_two(V16 a, V16 b) { unsigned long h = fold(1, (int*)&a, 16); return fold(h, (int*)&b, 16); }\n"
+    "unsigned long b_eight(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h) { V16 v[8] = { a, b, c, d, e, f, g, h }; return fold(3, (int*)v, 128); }\n"
+    "unsigned long b_mixed(long x, V16 a, V8 b, double d, V4 c, V16 e, V8 f, long y) { unsigned long h = fold((unsigned long)x * 7 + (unsigned long)y, (int*)&a, 16); h = fold(h, (int*)&b, 8); h = fold(h, (int*)&c, 4); h = fold(h, (int*)&e, 16); h = fold(h, (int*)&f, 8); return h + (unsigned long)(d * 4); }\n"
+    "unsigned long b_nine(V16 a, V16 b, V16 c, V16 d, V16 e, V16 f, V16 g, V16 h, V16 i) { V16 v[9] = { a, b, c, d, e, f, g, h, i }; return fold(5, (int*)v, 144); }\n";
+
 // The vectors' fixture (#141), for x86-64-v4, run where the host has every feature of it: both compilers' code is
 // x86-64-v4's (EVEX forms at each width, VL's among them, and whatever else clang selects for it; #1204's review). Then
-// the stack-passed vectors' check, on the same hosts.
+// the stack-passed vectors' check and the 64-byte vector arguments' fixture, on the same hosts.
 static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     X86Target v4 = { 0 };
@@ -2639,6 +2684,8 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
                                   check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
     check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-zmm", "64-byte vector arguments'", check_test_tier1_zmm_header, check_test_tier1_zmm_source,
+                                  check_test_tier1_zmm_other_source, "-march=x86-64-v4", host);
 }
 
 // The convention's rarer shapes' fixture (#141).
@@ -2646,6 +2693,67 @@ static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, c
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
                                   check_test_tier1_shapes_other_source, NULL, true);
+}
+
+// The thread-locals' fixture (#141): this unit's own thread-locals (a long, a static array and a struct), whose addresses
+// Tier 1 takes from the thread pointer at their TPOFF32 offsets (local-exec), and the other unit's (clang -O2's), from
+// its GOT slot's GOTTPOFF offset (initial-exec), read, written and returned as addresses by Tier 1's functions on four
+// threads the other unit starts and on the main thread, each thread's results its own copies'.
+static const char check_test_tier1_tls_header[] =
+    "#include <stdio.h>\n"
+    "extern _Thread_local long b_counter;\n"
+    "long a_bump(long k);\n"
+    "long a_peek(void);\n"
+    "long* a_own_address(void);\n"
+    "long* a_other_address(void);\n"
+    "long a_sum(int n);\n"
+    "unsigned long b_run(unsigned long* results, int n);\n";
+
+static const char check_test_tier1_tls_source[] =
+    "#include \"tier1-tls.h\"\n"
+    "_Thread_local long a_own = 7;\n"
+    "static _Thread_local long a_array[16];\n"
+    "_Thread_local struct { int x; long y; } a_pair = { 3, 4 };\n"
+    "long a_bump(long k) { a_own += k; b_counter += 2 * k; for (int i = 0; i < 16; i += 1) a_array[i] += k * i; a_pair.y += k; return a_own * 3 + b_counter; }\n"
+    "long a_peek(void) { return a_own; }\n"
+    "long* a_own_address(void) { return &a_own; }\n"
+    "long* a_other_address(void) { return &b_counter; }\n"
+    "long a_sum(int n) { long s = a_pair.x; for (int i = 0; i < n && i < 16; i += 1) s += a_array[i]; return s + a_pair.y; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long results[4];\n"
+    "    const unsigned long main_result = b_run(results, 4);\n"
+    "    printf(\"%lu %lu %lu %lu %lu\\n\", results[0], results[1], results[2], results[3], main_result);\n"
+    "    printf(\"%ld %ld %ld\\n\", a_own, b_counter, a_sum(16));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_tls_other_source[] =
+    "#include <pthread.h>\n"
+    "#include \"tier1-tls.h\"\n"
+    "_Thread_local long b_counter = 100;\n"
+    "static void* b_worker(void* p)\n"
+    "{\n"
+    "    const long k = (long)p;\n"
+    "    unsigned long r = 0;\n"
+    "    for (int i = 0; i < 5; i += 1) r = r * 7 + (unsigned long)a_bump(k + i);\n"
+    "    r = r * 11 + (unsigned long)a_sum(16);\n"
+    "    r = r * 13 + (a_other_address() == &b_counter) + 2 * (*a_own_address() == a_peek());\n"
+    "    return (void*)r;\n"
+    "}\n"
+    "unsigned long b_run(unsigned long* results, int n)\n"
+    "{\n"
+    "    pthread_t threads[4];\n"
+    "    for (int t = 0; t < n; t += 1) pthread_create(&threads[t], 0, b_worker, (void*)(long)(t + 1));\n"
+    "    for (int t = 0; t < n; t += 1) { void* r; pthread_join(threads[t], &r); results[t] = (unsigned long)r; }\n"
+    "    return (unsigned long)b_worker((void*)9L);\n"
+    "}\n";
+
+// The thread-locals' fixture (#141).
+static void check_test_driver_tier1_tls(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-tls", "thread-locals'", check_test_tier1_tls_header, check_test_tier1_tls_source, check_test_tier1_tls_other_source, NULL,
+                                  true);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

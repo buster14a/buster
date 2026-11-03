@@ -168,6 +168,23 @@ table. The kinds are:
   the scalar validator, as it does a tail call's; the C producer gives a fence of a constant order one
   (`check_program_direct_fence`, [the builtin integration guide](c-builtins-integration.md)'s "Helper contracts and
   direct forms").
+- An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
+  `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
+  bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
+  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
+  the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
+  shape.
+- `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and
+  pushes the object's old value of `class`: `value` its operation (`BUSTER_TYPED_RMW_ADD` for an addition, an exchange
+  without it) and a C memory order, any of the six. Tier 0 defers it and emits `xchg` (an exchange) or `lock xadd` (an
+  addition) of the operand's register with the object, the class's bytes, a full barrier on x86-64 that every order
+  takes, then the old value into the address's register, extended as the class's load extends it. No consumer moves an
+  access across it or drops it; `ir_lower` makes it the IR's `rmw` with its class's natural alignment. The typed
+  interpreter runs it as one thread does, refusing a misaligned object and checking it as a load's (undefined bytes are
+  reported) before a store's. The C producer
+  gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
+  `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
+  guide](c-builtins-integration.md)'s "Direct read/modify/writes").
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs

@@ -447,6 +447,69 @@ executor traces a fence among the stores, volatile loads and calls), and
 `tests/ir-source/fences.c` runs through both lowerings, promotion, the text's
 round trip and the IR's three forms against clang.
 
+### Atomic accesses (#1059)
+
+A `load` or a `store` with `BUSTER_IR_ATOMIC` in its flags is an atomic access
+of a C memory order (`BUSTER_IR_ORDER`'s bits: a load's `relaxed`, `consume`,
+`acquire` or `seq_cst`; a store's `relaxed`, `release` or `seq_cst`), of an
+integer of 1, 2, 4 or 8 bytes or a pointer, whose `align=N` is its size at
+least; printed after `align=N` (and `volatile`) as `atomic ORDER`. It is one access of its type's bytes that no pass
+splits, widens, merges, eliminates, forwards or moves past another access, a
+call or a fence: the guarantees of a volatile access (`BUSTER_IR_OBSERVABLE`,
+which promotion, private-field replacement, Tier 1's folding and both
+interpreters read in place of `BUSTER_IR_VOLATILE`) and those of its order. Its
+machine obligations are an ordinary access's, since a naturally aligned access
+of 1, 2, 4 or 8 bytes is atomic on x86-64 and its total store order gives a
+load's and a release store's orders, and, for a seq_cst store, the
+`fence.void seq_cst` after it, which the producer writes as its own instruction.
+Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
+any row with flags past `volatile` to the scalar rule), and the type and the
+alignment (`ir_atomic_access`): an atomic access declared below its natural
+alignment is refused, since the backend emits one access of its size whatever
+the address. The typed stream's producer is the C lowering's direct
+atomic load or store ([the builtin integration guide](c-builtins-integration.md)'s
+"Helper contracts and direct forms"): its marked `LOAD`, `STORE` or `SET`
+(`BUSTER_TYPED_ACCESS_ATOMIC`), which `ir_lower` translates with its class's
+natural alignment, which the checker proved, and refuses in another shape. `tests/ir/atomics.ir` reads every order back, `test-ir`'s verifier
+cases refuse an order a kind doesn't take, an order without the flag and an
+order past `seq_cst` and an 8-byte access aligned to 1 or 4 (as `test-ir-parse`
+refuses one written as text), and `tests/ir-source/atomics.c` runs through both
+lowerings, promotion, the text's round trip and the IR's three forms against
+clang, its `long`'s accesses printed `align=8`.
+
+### Atomic read/modify/writes (#1059)
+
+`rmw` (an integer of 1, 2, 4 or 8 bytes, a pointer's as `i64`; `a` the object's
+address, `b` the operand, of the result's type, `c` its operation,
+`BUSTER_IR_RMW_EXCHANGE` or `BUSTER_IR_RMW_ADD`; its flags `BUSTER_IR_ATOMIC` and
+a C memory order, any of the six, since the locked access is a full barrier;
+printed `rmw.iN %p, %v align=N xchg|add ORDER`) returns the object's old value
+and leaves the operand (an exchange) or the sum (an addition) in it, as one
+atomic access of its type's bytes: the typed stream's `ATOMIC_RMW`, which the C
+producer gives an exchange, an addition or a subtraction of a constant order
+([the builtin integration guide](c-builtins-integration.md)'s "Direct
+read/modify/writes"). Its alignment is its size at least, as an atomic load's
+is, and `ir_lower` gives it its class's natural one. No pass moves an access or a
+call across it, merges it or drops it: it is an optimizer root, neither value
+numbering nor loop-invariant motion takes it, and its address counts as taken,
+so promotion and private-field replacement leave its object in memory; dataflow
+reads its address and its operand, as a store's. Both verifiers check its flags
+(`ir_rmw_flags_valid`) and its type and alignment (`ir_atomic_access`, its own
+rule's, `IR_RULE_ATOMIC_RMW`); both interpreters run it as one thread does, a
+byte at a time through volatile accesses, refusing an address misaligned for its
+declared alignment and checking its object as a load's (undefined bytes are
+reported) before a store's. Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
+the operand copied to the scratch register, `xchg` or `lock xadd` of the object's
+width (never the narrow value's 32-bit register's), and the old value
+zero-extended as a load's is, a barrier no load folds past. `tests/ir/atomics.ir`
+reads every width, operation and order back, `test-ir`'s verifier cases refuse
+an operation past an addition, a non-atomic or a volatile one, an order past
+`seq_cst` and an 8-byte one aligned to 4 (and `test-ir-parse` one written as text
+aligned below its size), `test-tier1-select` runs each width's exchange and
+addition on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
+through both lowerings, promotion, the text's round trip and the IR's three forms
+against clang.
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |

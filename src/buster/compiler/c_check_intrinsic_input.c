@@ -321,7 +321,7 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
     const uint32_t bound = intrinsics ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
     const uint32_t entry = bound != 0 ? reader->intrinsic_names[name] : 0;
     const bool declared = entry != 0 && reader->bindings.kind[bound - 1] == C_BINDING_FUNCTION &&
-                          reader->linkage[reader->bindings.declaration[bound - 1]] == 2;
+                          check_input_linkage(reader->declaration_bits, reader->bindings.declaration[bound - 1]) == 2;
     const uint32_t hinted = declared ? entry : 0;
     const BuiltinIntrinsicInfo* header = NULL;
     if (hinted != 0)

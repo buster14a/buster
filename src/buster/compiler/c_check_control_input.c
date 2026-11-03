@@ -316,7 +316,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         }
         if (valid && empty && fallthrough)
         {
-            reader->output->attributes[after] = attributes;
+            check_input_set_attributes_at(reader->output, after, attributes);
         }
         if (valid && returns && musttail != BUSTER_CHECK_NONE)
         {
@@ -1135,7 +1135,8 @@ static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t 
     const BuiltinIntrinsicInfo* info = name != 0 && !declared ? check_input_implicit_info(reader, name) : NULL;
     const bool marked = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
     const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
-    const bool builtin = marked && (!library || (function && reader->linkage[declaration] == 2 && check_input_library_enabled(info, &reader->pp->options)));
+    const bool builtin = marked && (!library || (function && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
+                                                 check_input_library_enabled(info, &reader->pp->options)));
     bool noreturn = declared || builtin || check_input_fallthrough_trap(reader, callee);
     if (!noreturn && callee < count && declaration >= count && reader->pp != NULL)
     {
@@ -1435,7 +1436,7 @@ static bool check_input_fallthrough_straight(CheckInputReader* reader, uint32_t 
         straight = kind != PARSE_KIND_QUESTION && kind != PARSE_KIND_PIPEPIPE && (kind != PARSE_KIND_AMPAMP || role == PARSE_ROLE_PREFIX) &&
                    kind != PARSE_KIND_RETURN && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_BREAK && kind != PARSE_KIND_CONTINUE &&
                    kind != PARSE_KIND_DO && kind != PARSE_KIND_IF && kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH &&
-                   role != PARSE_ROLE_LABEL && role != PARSE_ROLE_CLOSE_CASE && (kind != PARSE_KIND_SEMI || reader->output->attributes[at] == 0) &&
+                   role != PARSE_ROLE_LABEL && role != PARSE_ROLE_CLOSE_CASE && (kind != PARSE_KIND_SEMI || check_input_attributes_at(reader->output, at) == 0) &&
                    (role != PARSE_ROLE_CLOSE_CALL || !check_input_fallthrough_noreturn(reader, at));
     }
     return straight;
@@ -1895,7 +1896,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                     check_input_report(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token, CHECK_INPUT_LABEL_UNDECLARED);
                 }
             }
-            else if (kind == PARSE_KIND_SEMI && reader->output->attributes[token] != 0)
+            else if (kind == PARSE_KIND_SEMI && check_input_attributes_at(reader->output, token) != 0)
             {
                 bool enclosed = false;
                 for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && !enclosed; ancestor = parser->tree.parents[ancestor])
@@ -1906,7 +1907,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 }
                 // clang's error at the fallthrough's name (check_input_statement_attributes records a null statement's
                 // attributes for it alone).
-                const CheckInputAttributes* attributes = reader->output->attributes[token];
+                const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
                 uint32_t at = token;
                 for (uint32_t i = attributes->count; i-- > 0;)
                 {
