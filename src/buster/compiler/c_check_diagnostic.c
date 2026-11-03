@@ -100,6 +100,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wunused-const-variable", "-Wunused-variable", "unused variable" },
     { "-Wformat-extra-args", "-Wformat", "data argument not used by format string" },
     { "-Wformat-insufficient-args", "-Wformat", "more '%' conversions than data arguments" },
+    { "-Wformat-invalid-specifier", "-Wformat", "invalid conversion specifier" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

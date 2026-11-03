@@ -511,6 +511,97 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "void g(void) { printf(\"%hhd\\n\", 1L); }\n"
         "void h(void) { printf(\"%hd\\n\", 1L); }\n"
         "void i(void) { printf(\"%tu\\n\", 1LL); }\n";
+    static const char format_specifiers[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%D\\n\", 1); }\n"
+        "void b(void) { printf(\"%D\\n\", 1, 2); }\n"
+        "void c(void) { printf(\"%D %d\\n\", 1, 2); }\n"
+        "void d(void) { printf(\"%!\\n\", 1); }\n"
+        "void e(void) { printf(\"%*!\\n\", 1, 2); }\n"
+        "void f(void) { printf(\"%.*!\\n\", 1, 2, 3); }\n"
+        "void g(void) { printf(\"%*0$d\\n\", 1, 2); }\n"
+        "void h(void) { printf(\"%*1$d\\n\", 1, 2); }\n"
+        "void i(void) { printf(\"%2$*0$d\\n\", 1, 2); }\n"
+        "void j(void) { printf(\"%$\\n\"); }\n"
+        "void k(void) { printf(\"%1$!\\n\", 1); }\n"
+        "void l(void) { printf(\"%2$!\\n\", 1, 2); }\n"
+        "void m(void) { printf(\"%m\\n\"); }\n"
+        "void n(void) { printf(\"%D %s\\n\", 1, \"x\"); }\n"
+        "void o(void) { printf(\"%Z %s\\n\", 1, \"x\"); }\n"
+        "void p(void) { printf(\"%%\\n\", 1); }\n"
+        "void q(void) { printf(\"%d %1$d\\n\", 1, 2); }\n";
+    static const char format_modifiers[] =
+        "#include <stdio.h>\n"
+        "void a(void) { printf(\"%qd\\n\", 1); }\n"
+        "void b(void) { printf(\"%qd\\n\", 1LL); }\n"
+        "void c(void) { printf(\"%qn\\n\", (long long*)0); }\n"
+        "void d(void) { printf(\"%qn\\n\", (char*)0); }\n"
+        "void e(void) { printf(\"%qs\\n\", (int*)0); }\n"
+        "void f(void) { printf(\"%qc\\n\", 1.5); }\n"
+        "void g(void) { printf(\"%qp\\n\", 1); }\n"
+        "void h(void) { printf(\"%qf\\n\", 1); }\n"
+        "void i(void) { printf(\"%wd\\n\", \"x\"); }\n"
+        "void j(void) { printf(\"%wc\\n\", 1LL); }\n"
+        "void k(void) { printf(\"%ws\\n\", \"x\"); }\n"
+        "void l(void) { printf(\"%wp\\n\", 1); }\n"
+        "void m(void) { printf(\"%wn\\n\", (int*)0); }\n"
+        "void n(void) { printf(\"%w64d\\n\", 1LL); }\n"
+        "void o(void) { printf(\"%q64d\\n\", 1LL); }\n"
+        "void p(void) { printf(\"%w$d\\n\", 1); }\n"
+        "void q(void) { printf(\"%qw$d\\n\", 1); }\n"
+        "void r(void) { printf(\"%q!d\\n\", 1); }\n";
+    static const char format_argument_order[] =
+        "#include <stdio.h>\n"
+        "char *s; int x;\n"
+        "void a(void) { printf(\"%s %d %d\\n\", 1, s, 3); }\n"
+        "void b(void) { printf(\"%s %d %d\\n\", 1, 2); }\n"
+        "void c(void) { printf(\"%s %d %d %d\\n\", 1, 2, 3, 4); }\n"
+        "void d(void) { printf(\"%*s %d\\n\", s, s, 3); }\n"
+        "void e(void) { printf(\"%s %*d\\n\", 1, x, s); }\n"
+        "void f(void) { printf(\"%n %d\\n\", s, x); }\n";
+    static const char comma_statements[] =
+        "int y;\n"
+        "struct S { int m; };\n"
+        "void a(void) { int a; (a, y); }\n"
+        "void b(void) { int b; (b + 1, y); }\n"
+        "void c(void) { int c; ((int)c, y); }\n"
+        "void d(void) { int d; ((long)d, y); }\n"
+        "void e(void) { int e; (e = 1, y); y = e; }\n"
+        "void f(int x) { (x == 1, y); }\n"
+        "void g(int x) { (x != 1, y); }\n"
+        "void h(void) { int h; ((void)h, y); }\n"
+        "void i(void) { int *p; ((void*)p, y); }\n"
+        "void j(void) { int j; (j ? j : 1, y); }\n"
+        "void k(void) { int k; ((k), (k), y); }\n"
+        "void l(void) { int l; (l + 0, y); }\n"
+        "void m(void) { int m; m, y; }\n"
+        "void n(void) { struct S s; (s.m, y); }\n"
+        "void o(void) { for (int i = 0, j = 0; i < 3; i++) y += j; }\n"
+        "void p(void) { int v = (v, 1); (void)v; }\n"
+        "void q(void) { int q; q; (q, y); }\n"
+        "void r(void) { long r; ((void*)r, y); }\n"
+        "void s(void) { long s; ((const void*)s, y); }\n"
+        "void t(void) { int t; (t, (void*)&t); }\n"
+        "void u(void) { long u; (void*)u; y += u; }\n";
+    static const char self_init_edges[] =
+        "int a(void) { int x = x; return x; }\n"
+        "int b(void) { int x = { x }; return x; }\n"
+        "int c(void) { int x = { x + 1 }; return x; }\n"
+        "int d(void) { int x = { (x = 2, x) }; return x; }\n"
+        "int e(void) { int x; x = x; x; return 0; }\n"
+        "int f(void) { int x; x = x; return x; }\n"
+        "int g(void) { int x = { (x, 1) }; return x; }\n"
+        "int h(void) { int x = { (int)x }; return x; }\n"
+        "int i(void) { int x = { x = x }; return x; }\n"
+        "int j(void) { int x = { x++ }; return x; }\n"
+        "int k(void) { int x = { 0 ? x : 1 }; return x; }\n"
+        "int l(void) { int x = { 1 ? 1 : x }; return x; }\n"
+        "int m(void) { int x = { sizeof(x) ? 0 : x }; return x; }\n"
+        "int n(void) { int x = { !x }; return x; }\n"
+        "int o(void) { int x = { x || 1 }; return x; }\n"
+        "int p(void) { int x = { x && 1 }; return x; }\n"
+        "int q(void) { int x = (x = x); return x; }\n"
+        "int r(void) { int x; x = (x); x; return 0; }\n";
     static const struct
     {
         const char* source;
@@ -552,6 +643,11 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { comma_unparenthesized, { "-Wall", "-Wextra", NULL, NULL } },
         { positional_format_edges, { "-Wall", NULL, NULL, NULL } },
         { format_integer_class, { "-Wall", NULL, NULL, NULL } },
+        { format_specifiers, { "-Wall", NULL, NULL, NULL } },
+        { format_modifiers, { "-Wall", NULL, NULL, NULL } },
+        { format_argument_order, { "-Wall", NULL, NULL, NULL } },
+        { comma_statements, { "-Wall", "-Wextra", NULL, NULL } },
+        { self_init_edges, { "-Wall", NULL, NULL, NULL } },
         { wall, { "-Wall", "-Wno-unused-variable", "-Wno-switch", "-Wno-dangling-else", NULL } },
         { clean, { "-Wall", "-Wextra", "-Werror", NULL } },
     };
