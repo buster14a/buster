@@ -981,9 +981,9 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
     }
     // Left tokens are counted in units the coded walk takes alone: in another, the walk's visit takes every token. The
     // tokens acted at by class are each class's tokens less those it left (check_input_expressions_coded's count).
-    // A unit is coded unless it defers system headers' bodies (-flazy-system-headers) or limits its diagnostics, and in a
-    // coded unit nearly every token's class acts on it (sqlite3.c: 98%), so the visit is out of the path (#1175).
-    if (__builtin_expect(!acted, 0))
+    // Not hinted, though 98% of sqlite3.c's tokens act: with the visit's counters and clock in this branch, a hint
+    // that the visit is rare took 19 thousand more taken branches (#1175).
+    if (!acted)
     {
         reader->output->expression_left[code] += coded;
         if (reader->expression_declined != NULL)
