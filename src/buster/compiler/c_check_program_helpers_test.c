@@ -194,7 +194,8 @@ static uint32_t check_test_helper_unknown_forms(const CheckProgramHelper* helper
 // whose effects are bounds its code may stay within: a claim of the floating environment, errno or a fault needs no
 // record of its. The callee-saved registers its code may write are those its frame saves and restores (its code's
 // frame_saved, Tier0Frame.saved's bits, and with frame_pointer rbp: an x86 leaf's frame); every other must stay as the
-// call's convention leaves it. Returns whether it holds, and says why not into `reason`.
+// call's convention leaves it at a return, which code that never returns owes nothing (__builtin_longjmp's leaf, whose
+// rbp and rsp are the frame it jumps to). Returns whether it holds, and says why not into `reason`.
 static bool check_test_helper_contract(const CheckProgramHelper* helper, const Tier0Code* code, Arena* scratch, const char** reason)
 {
     const CheckProgramHelperFamily family = check_program_helper_family(helper);
@@ -223,7 +224,7 @@ static bool check_test_helper_contract(const CheckProgramHelper* helper, const T
     {
         *reason = "its code has a form x86_semantics.c doesn't cover, where its contract models every effect";
     }
-    else if ((physical.writes & callee_saved & ~restored) != 0)
+    else if ((physical.writes & callee_saved & ~restored) != 0 && !ends)
     {
         *reason = "its code writes a callee-saved register";
     }

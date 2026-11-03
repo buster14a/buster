@@ -707,6 +707,9 @@ struct CheckLowerWriter
     // Whether the body calls __builtin_unwind_init, whose function saves every callee-saved register
     // (Tier0Function.unwind_init).
     bool unwind_init;
+    // Whether the body calls __builtin_setjmp, whose function keeps nothing in a callee-saved register
+    // (Tier0Function.returns_twice).
+    bool returns_twice;
     bool vectors;
     // Whether the function's x86 builtins take or give masks in Tier 0's mask class (Tier0Function.masks, #179).
     bool masks;
@@ -8358,6 +8361,9 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
             // __builtin_unwind_init's leaf does nothing: its function saves every callee-saved register, as LLVM's
             // llvm.eh.unwind.init makes it (#1126's review), which Tier 0's frame does (Tier0Function.unwind_init).
             writer->unwind_init |= leaf == CBUILTIN_X86_HELPER_UNWIND_INIT;
+            // __builtin_setjmp's leaf returns twice (c_builtin_x86_helpers.c's SjLj): its function's frame keeps nothing in a
+            // register a longjmp leaves as a deeper frame left it (Tier0Function.returns_twice).
+            writer->returns_twice |= leaf == CBUILTIN_X86_HELPER_SETJMP;
             check_lower_helper(writer, node);
         }
     }
@@ -12304,6 +12310,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->x87 = check_lower_x87(writer, result);
         writer->int128 = false;
         writer->unwind_init = false;
+        writer->returns_twice = false;
         writer->vectors = false;
         writer->masks = false;
         writer->operation_count = 0;
@@ -12753,6 +12760,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         function->int128 = writer->int128;
         function->unwind_init = writer->unwind_init;
+        function->returns_twice = writer->returns_twice;
         function->vectors = writer->vectors;
         function->masks = writer->masks;
         if (writer->vectors)

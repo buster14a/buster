@@ -120,6 +120,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_FALLTHROUGH_PLACEMENT: result = "fallthrough annotation does not directly precede switch label"; break;
         case CHECK_INPUT_VERBOSE_TRAP_STRING: result = "argument to __builtin_verbose_trap must be a pointer to a constant string"; break;
         case CHECK_INPUT_VERBOSE_TRAP_DOLLAR: result = "argument to __builtin_verbose_trap must not contain $"; break;
+        case CHECK_INPUT_LONGJMP_INTEGER: result = "argument to '__builtin_longjmp' must be a constant integer"; break;
+        case CHECK_INPUT_LONGJMP_ONE: result = "argument to __builtin_longjmp must be a constant 1"; break;
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;

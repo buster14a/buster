@@ -1409,7 +1409,28 @@ features. Their prototypes are clang's metadata's:
   MXCSR's 13 and 14). Both go through the red zone below the leaf's return
   address;
 - `__builtin_extend_pointer(p)`: p as an `unsigned long long`;
-- `__builtin_verbose_trap(category, message)`: `ud2`, as `__builtin_trap`'s.
+- `__builtin_verbose_trap(category, message)`: `ud2`, as `__builtin_trap`'s;
+- `__builtin_setjmp(buf)` and `__builtin_longjmp(buf, 1)`: LLVM's SjLj lowering
+  (X86's `emitEHSjLjSetJmp` and `emitEHSjLjLongJmp`) as leaves. setjmp stores
+  the caller's frame pointer (rbp, its frame's address where it has one, as
+  clang's `llvm.frameaddress`), the resume address (the leaf's own return
+  address, after the caller's call) and the caller's stack pointer (clang's
+  `llvm.stacksave`) in the buffer's words 0 to 2, and returns 0. longjmp loads
+  rbp and rsp back, sets eax to 1 and jumps to the resume address, where the
+  call of setjmp returns again with 1; a `ud2` ends it, which no path reaches.
+  Since a longjmp from a deeper frame leaves every other register as that frame
+  left it, the function that calls setjmp has the frame LLVM's setjmp, which
+  clobbers every register, gives it (`Tier0Function.returns_twice`): it saves
+  every callee-saved register and restores it, as `unwind_init`'s does, keeps no
+  local in one and no value of its stacks either (its integer depths are the
+  nine caller-saved registers'), and a realigned frame whose base is r15 (an
+  over-aligned object beside `alloca` or a VLA) is refused. A value of an
+  enclosing expression pending across the call is reloaded from its call save
+  slot after the second return, which a later call with values pending at that
+  depth may have reused; C's contexts for setjmp (a condition, compared with a
+  constant) have none. Ordinary Tier 1 leaves such a function to Tier 0.
+  longjmp's second argument must be a constant 1, wherever the call is, with
+  clang's two errors at the call (`check_input_longjmp_argument`).
 
 A call's size of `memcpy_inline` and `memset_inline` must be an integer
 constant expression (the prototype's `I`). A non-constant one is refused at the

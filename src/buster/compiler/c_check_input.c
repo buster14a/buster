@@ -114,6 +114,10 @@ typedef enum CheckInputMessage
     // with a `$` (check_input_verbose_trap_arguments).
     CHECK_INPUT_VERBOSE_TRAP_STRING,
     CHECK_INPUT_VERBOSE_TRAP_DOLLAR,
+    // __builtin_longjmp's second argument (#148), at the call's first token: one that is no integer constant, and a
+    // constant other than 1 (check_input_longjmp_argument).
+    CHECK_INPUT_LONGJMP_INTEGER,
+    CHECK_INPUT_LONGJMP_ONE,
     // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
     // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
     CHECK_INPUT_UNKNOWN_BUILTIN,
@@ -204,6 +208,8 @@ static const char* const check_input_messages[] =
     "fallthrough annotation does not directly precede switch label",
     "argument to __builtin_verbose_trap must be a pointer to a constant string",
     "argument to __builtin_verbose_trap must not contain $",
+    "argument to '__builtin_longjmp' must be a constant integer",
+    "argument to __builtin_longjmp must be a constant 1",
     "use of unknown builtin",
     "attribute multiversioning cannot be combined with another attribute",
     "multiversioning attributes are not compatible",
@@ -6920,12 +6926,35 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
     }
 }
 
+// __builtin_longjmp's second argument as clang's Sema takes it (#148, BuiltinLongjmp): an integer constant, else clang's
+// BuiltinConstantArg error, and 1, else its own; each at the call's first token, its name's, wherever the call is.
+static void check_input_longjmp_argument(CheckInputReader* reader, const CheckInputIntrinsicCall* call)
+{
+    const uint32_t keyword = call->keyword;
+    const CheckInputIntrinsicArgument span = call->arguments[1];
+    CheckValue value = { 0 };
+    const bool constant = check_input_evaluate_cached(reader, span.first, span.end, &value) && check_input_integer_constant(reader, &value);
+    if (!constant)
+    {
+        check_input_report(reader, keyword, CHECK_INPUT_LONGJMP_INTEGER);
+    }
+    else if (value.integer != 1)
+    {
+        check_input_report(reader, keyword, CHECK_INPUT_LONGJMP_ONE);
+    }
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
     CheckGraph* graph = &reader->output->graph;
     const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
     static const char verbose_trap[] = "__builtin_verbose_trap";
+    static const char longjmp[] = "__builtin_longjmp";
+    if (call->argument_count == 2 && declaration->info->name_length == sizeof(longjmp) - 1 && memcmp(declaration->info->name, longjmp, sizeof(longjmp) - 1) == 0)
+    {
+        check_input_longjmp_argument(reader, call);
+    }
     if (call->argument_count == 2 && declaration->info->name_length == sizeof(verbose_trap) - 1 &&
         memcmp(declaration->info->name, verbose_trap, sizeof(verbose_trap) - 1) == 0)
     {

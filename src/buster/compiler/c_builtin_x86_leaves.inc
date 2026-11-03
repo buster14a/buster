@@ -54,6 +54,10 @@
     // constant of 0 to 7 (c_check_builtin_x86.c's rule): its code prefetches nothing, as __builtin_prefetch's doesn't
     // (a prefetch has no effect a program sees), past its address's evaluation.
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_MM_PREFETCH, BUSTER_CBUILTIN_X86_HELPER("_mm_prefetch", 2, false, cbuiltin_x86_helper_nothing, 0))
+    // __builtin_setjmp and __builtin_longjmp (c_builtin_x86_helpers.c's): longjmp's second argument is a constant 1
+    // (c_check_input.c's check_input_longjmp_argument).
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_SETJMP, BUSTER_CBUILTIN_X86_HELPER("__builtin_setjmp", 1, true, cbuiltin_x86_helper_setjmp, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_LONGJMP, BUSTER_CBUILTIN_X86_HELPER("__builtin_longjmp", 2, false, cbuiltin_x86_helper_longjmp, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_PAUSE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XGETBV, "__builtin_ia32_xgetbv", sizeof("__builtin_ia32_xgetbv") - 1, 1, true, cbuiltin_x86_helper_xgetbv,
                                      BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false, false)

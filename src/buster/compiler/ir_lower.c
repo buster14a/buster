@@ -1138,10 +1138,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && input->unwind_init)
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice))
     {
-        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), is Tier 0's:
-        // ordinary Tier 1 falls back to it.
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), and
+        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), are Tier 0's: ordinary Tier 1 falls
+        // back to them.
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)
