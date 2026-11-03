@@ -175,7 +175,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         {
             plan->symbol = object_symbols[object->object];
             const uint8_t symbol_type = link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE;
-            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS) ||
+            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS && symbol_type != BUSTER_LINK_SYMBOL_COMMON) ||
                      (link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_PROGRAM && link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_NONE) ||
                      link->symbols.atom[plan->symbol] != 0)
             {
@@ -689,12 +689,15 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         {
             plan->symbol = object_symbols[object->object];
             const uint8_t symbol_type = link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE;
-            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS) ||
+            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS && symbol_type != BUSTER_LINK_SYMBOL_COMMON) ||
                 (link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_PROGRAM && link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_NONE) ||
                 link->symbols.atom[plan->symbol] != 0)
             {
                 status = CHECK_DATA_SYMBOL;
             }
+            // A common symbol of no bytes (`int x[0];`, an empty struct, #147) has one, as clang's code publishes it
+            // (LLVM's AsmPrinter: `.comm Foo, 0` is undefined), so that two of them don't share an address.
+            plan->size = symbol_type == BUSTER_LINK_SYMBOL_COMMON && plan->size == 0 ? 1 : plan->size;
         }
     }
     const CheckInitializer* initializer = object->initializer_plan;

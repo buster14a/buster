@@ -11795,6 +11795,62 @@ static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* 
 
 // Expands a builtin macro whose name was just read, from the context it was read in (`expansion_end` from
 // pp_expansion_end, for __LINE__ and __FILE__ in a token a macro made).
+// The last component of presumed file name `path` (`length` bytes), as clang's processPathToFileName takes it for
+// __FILE_NAME__ and __builtin_FILE_NAME (llvm::sys::path::filename, POSIX style): the bytes past its last '/'; "." for a
+// name that ends in '/' past its root directory ("/foo/", "a/"); the root directory for a name that is only that ("/",
+// "//"), and a "//net" root name whole; and the whole name where the component is empty. Its bytes are `*component`.
+static __attribute__((unused)) uint32_t pp_path_file_name(const char* path, uint32_t length, const char** component)
+{
+    // The root directory's position (root_dir_start): a "//net" root name's separator after it, or a leading '/'.
+    uint32_t root = UINT32_MAX;
+    if (length > 3 && path[0] == '/' && path[1] == '/' && path[2] != '/')
+    {
+        for (uint32_t i = length; i-- > 2;)
+        {
+            root = path[i] == '/' ? i : root;
+        }
+    }
+    else if (length > 0 && path[0] == '/')
+    {
+        root = 0;
+    }
+    // The component's end, past trailing separators but the root directory's.
+    uint32_t end = length;
+    while (end > 0 && end - 1 != root && path[end - 1] == '/')
+    {
+        end -= 1;
+    }
+    const char* bytes = path;
+    uint32_t size = 0;
+    if (length != 0 && path[length - 1] == '/' && (root == UINT32_MAX || end == 0 || end - 1 > root))
+    {
+        bytes = ".";
+        size = 1;
+    }
+    else
+    {
+        // The component's start (filename_pos): the separator a name ends in, or past its last one, but a "//net"'s.
+        uint32_t start = 0;
+        if (end > 0 && path[end - 1] == '/')
+        {
+            start = end - 1;
+        }
+        else
+        {
+            uint32_t separator = UINT32_MAX;
+            for (uint32_t i = 0; i + 1 < end; i += 1)
+            {
+                separator = path[i] == '/' ? i : separator;
+            }
+            start = separator == UINT32_MAX || (separator == 1 && path[0] == '/') ? 0 : separator + 1;
+        }
+        bytes = path + start;
+        size = end - start;
+    }
+    *component = size != 0 ? bytes : path;
+    return size != 0 ? size : length;
+}
+
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     const uint32_t saved_history = pp->history_current;
@@ -11817,12 +11873,9 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
         case PP_BUILTIN_FILE_NAME:
         {
             pp_presumed(pp, where, &file_name, &file_name_length);
-            uint32_t skip = 0;
-            for (uint32_t i = 0; builtin == PP_BUILTIN_FILE_NAME && i < file_name_length; i += 1)
-            {
-                skip = file_name[i] == '/' ? i + 1 : skip;
-            }
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)file_name + skip, file_name_length - skip, flags));
+            const char* component = file_name;
+            const uint32_t component_length = builtin == PP_BUILTIN_FILE_NAME ? pp_path_file_name(file_name, file_name_length, &component) : file_name_length;
+            pp_emit(pp, pp_string_token(pp, (const uint8_t*)component, component_length, flags));
             break;
         }
         case PP_BUILTIN_BASE_FILE:
@@ -16345,7 +16398,7 @@ static const PPFeature pp_features_attribute[] = {
     { "mig_server_routine", 1 }, { "minsize", 1 }, { "mode", 1 }, { "ms_abi", 1 }, { "musttail", 1 }, { "naked", 1 }, { "no_builtin", 1 },
     { "no_caller_saved_registers", 1 }, { "no_instrument_function", 1 }, { "no_profile_instrument_function", 1 }, { "no_sanitize", 1 },
     { "no_sanitize_address", 1 }, { "no_sanitize_thread", 1 }, { "no_specializations", 1 }, { "no_split_stack", 1 }, { "no_stack_protector", 1 },
-    { "nocf_check", 1 }, { "nodebug", 1 }, { "noderef", 1 }, { "noescape", 1 }, { "noinline", 1 }, { "nomerge", 1 }, { "nonallocating", 1 },
+    { "nocf_check", 1 }, { "nocommon", 1 }, { "nodebug", 1 }, { "noderef", 1 }, { "noescape", 1 }, { "noinline", 1 }, { "nomerge", 1 }, { "nonallocating", 1 },
     { "nonblocking", 1 }, { "nonnull", 1 }, { "nonstring", 1 }, { "noreturn", 1 }, { "not_tail_called", 1 }, { "nothrow", 1 }, { "nouwtable", 1 },
     { "ns_consumed", 1 }, { "ns_returns_retained", 1 }, { "objc_boxable", 1 }, { "objc_designated_initializer", 1 }, { "objc_independent_class", 1 },
     { "objc_root_class", 1 }, { "objc_runtime_visible", 1 }, { "optnone", 1 }, { "overloadable", 1 }, { "packed", 1 },
@@ -16432,7 +16485,7 @@ static const PPFeature pp_features_c_attribute[] = {
     { "gnu::malloc", 1 }, { "gnu::may_alias", 1 }, { "gnu::mode", 1 }, { "gnu::ms_abi", 1 }, { "gnu::naked", 1 },
     { "gnu::no_caller_saved_registers", 1 }, { "gnu::no_instrument_function", 1 }, { "gnu::no_profile_instrument_function", 1 },
     { "gnu::no_sanitize", 1 }, { "gnu::no_sanitize_address", 1 }, { "gnu::no_split_stack", 1 }, { "gnu::no_stack_protector", 1 },
-    { "gnu::nocf_check", 1 }, { "gnu::noinline", 1 }, { "gnu::nonnull", 1 }, { "gnu::nonstring", 1 }, { "gnu::noreturn", 1 }, { "gnu::nothrow", 1 },
+    { "gnu::nocf_check", 1 }, { "gnu::nocommon", 1 }, { "gnu::noinline", 1 }, { "gnu::nonnull", 1 }, { "gnu::nonstring", 1 }, { "gnu::noreturn", 1 }, { "gnu::nothrow", 1 },
     { "gnu::packed", 1 }, { "gnu::patchable_function_entry", 1 }, { "gnu::pure", 1 }, { "gnu::regcall", 1 }, { "gnu::retain", 1 },
     { "gnu::returns_nonnull", 1 }, { "gnu::returns_twice", 1 }, { "gnu::section", 1 }, { "gnu::sentinel", 1 }, { "gnu::sysv_abi", 1 },
     { "gnu::target", 1 }, { "gnu::target_clones", 1 }, { "gnu::tls_model", 1 }, { "gnu::transparent_union", 1 }, { "gnu::unused", 1 },
@@ -16769,6 +16822,7 @@ static const PPFeature pp_implemented_attribute[] = {
     { "alias", 1 },
     { "aligned", 1 },
     { "cleanup", 1 },
+    { "common", 1 },
     { "constructor", 1 },
     { "destructor", 1 },
     { "ext_vector_type", 1 },
@@ -16777,6 +16831,7 @@ static const PPFeature pp_implemented_attribute[] = {
     { "ifunc", 1 },
     { "mode", 1 },
     { "naked", 1 },
+    { "nocommon", 1 },
     { "overloadable", 1 },
     { "packed", 1 },
     { "retain", 1 },
@@ -16796,6 +16851,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
     { "gnu::cleanup", 1 },
+    { "gnu::common", 1 },
     { "gnu::constructor", 1 },
     { "gnu::destructor", 1 },
     { "gnu::fallthrough", 1 },
@@ -16803,6 +16859,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::ifunc", 1 },
     { "gnu::mode", 1 },
     { "gnu::naked", 1 },
+    { "gnu::nocommon", 1 },
     { "gnu::packed", 1 },
     { "gnu::retain", 1 },
     { "gnu::section", 1 },
@@ -16824,6 +16881,10 @@ static const PPFeature pp_implemented_feature[] = {
     { "c_thread_local", 1, 2011 },
 };
 static const PPFeature pp_implemented_builtin[] = {
+    // The keywords of builtins the checker works out where it reads them (#148, c_check_input.c's
+    // check_input_source_builtin), in the table's byte order.
+    { "__builtin_COLUMN", 1 }, { "__builtin_FILE", 1 }, { "__builtin_FILE_NAME", 1 }, { "__builtin_FUNCTION", 1 }, { "__builtin_LINE", 1 },
+    { "__builtin_omp_required_simd_align", 1 }, { "__builtin_vectorelements", 1 },
     { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
 };
 
@@ -17104,6 +17165,7 @@ static const char pp_predefines_base[] =
     "#define __FPCLASS_POSZERO 0x0040\n"
     "#define __FPCLASS_QNAN 0x0002\n"
     "#define __FPCLASS_SNAN 0x0001\n"
+    "#define __GCC_ASM_FLAG_OUTPUTS__ 1\n"
     "#define __GCC_CONSTRUCTIVE_SIZE 64\n"
     "#define __GCC_DESTRUCTIVE_SIZE 64\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1\n"
@@ -18577,6 +18639,41 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
 {
     const bool valid = token < pp->output.count && pp->output.locations != 0;
     return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
+}
+
+// The end of output token `token`'s outermost expansion, as clang's SourceManager::getExpansionRange(...).getEnd()
+// resolves it (#148's source-location builtins, #1126's review): a function-like invocation's closing parenthesis, an
+// object-like macro's name, followed while that end was itself made by an expansion (PPExpansion.end_origin); an
+// argument's or a generated token's is the end of the expansion that substituted or made it; a file token's is its own
+// location. `origin` is the token's (pp_history_at's). Returns 0 when its history doesn't lead to a location.
+static __attribute__((unused)) uint32_t pp_output_expansion_end(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    bool valid = token < pp->output.count && pp->output.locations != 0;
+    uint32_t location = valid ? pp->output.locations[token] : 0;
+    const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
+    for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+        {
+            valid = index < pp->substitution_count;
+            origin = valid ? pp->substitutions[index].expansion : 0;
+        }
+        else if (kind == BUSTER_PP_ORIGIN_GENERATED)
+        {
+            valid = index < pp->generated_count;
+            origin = valid ? pp->generated[index].expansion : 0;
+        }
+        else
+        {
+            valid = kind == 0 && index < pp->history_count;
+            location = valid ? pp->history[index].end : location;
+            origin = valid ? pp->history[index].end_origin : 0;
+        }
+    }
+    valid &= origin == 0;
+    return valid ? location : 0;
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current

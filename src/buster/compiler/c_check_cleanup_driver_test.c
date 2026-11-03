@@ -105,6 +105,10 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
         { "a switch into its scope", "void f(int *p);\nvoid g(int n) { switch (n) {\nint a __attribute__((cleanup(f)));\ncase 1:;\n} }\n", 0 },
         { "a computed goto out of its scope", "void f(int *p);\nvoid g(int n) { void *t[] = { &&l };\n{ int a __attribute__((cleanup(f)));\ngoto *t[0]; }\nl:;\n}\n", 0 },
         { "a computed goto into its scope", "void f(int *p);\nvoid g(int n) { void *t[] = { &&l };\n{ int a __attribute__((cleanup(f)));\nl:; }\ngoto *t[0];\n}\n", 0 },
+        // An asm goto's own labels (#1126's review): out of a cleanup's scope, into one and into an array's.
+        { "an asm goto out of its scope", "void f(int *p);\nint g(void) { { int a __attribute__((cleanup(f))) = 7;\n  asm goto(\"jmp %l0\" : : : : out); }\nout: return 1; }\n", 0 },
+        { "an asm goto into its scope", "void f(int *p);\nint g(void) {\n  asm goto(\"jmp %l0\" : : : : in);\n{ int a __attribute__((cleanup(f))) = 7;\nin: return a; } }\n", 0 },
+        { "an asm goto into an array's scope", "int g(int n) {\n  asm goto(\"jmp %l0\" : : : : in);\n{ int a[n]; a[0] = 1;\nin: return a[0]; } }\n", 0 },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/cleanup-errors.c", directory);

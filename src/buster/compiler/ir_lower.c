@@ -1138,6 +1138,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
+    if (check.error == IR_OK && input->unwind_init)
+    {
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), is Tier 0's:
+        // ordinary Tier 1 falls back to it.
+        check.error = IR_ERROR_UNSUPPORTED;
+    }
     if (check.error == IR_OK)
     {
         const Tier0Check typed = tier0_validate(input);

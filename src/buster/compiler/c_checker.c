@@ -41,6 +41,13 @@ struct CheckBuiltinCall
     const uint8_t* nan_payload;
     uint32_t nan_payload_length;
     bool nan_payload_known;
+    // Whether an explicit cast was stripped before that literal: clang's literal-only arguments (allow_runtime_check's,
+    // allow_sanitize_check's, cpu_supports' and cpu_is') refuse one, as annotation's doesn't (#1126's review).
+    bool nan_payload_cast;
+    // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
+    // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
+    uint32_t function_objects[4];
+    uint32_t function_object_count;
     bool string_literal_start;
     bool absolute_address_constant;
     bool complex_constant;
@@ -353,6 +360,8 @@ struct CheckBuiltinMiscEffect
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    // cpu_supports's word and bit, or cpu_is's field and value (CheckBuiltinMiscResult.cpu_test).
+    uint64_t cpu_test;
 };
 
 typedef struct CheckBuiltinFloatEffect CheckBuiltinFloatEffect;
@@ -887,7 +896,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_LAUNDER))
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_COMPLEX) || cbuiltin_misc_last(id))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -1677,15 +1686,31 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     }
     const char* name = call->info->name;
     const uint32_t length = call->info->name_length;
-    // The library builtins (c_builtin_library.c) are calls of their prototypes too, those the lowering refuses by name
-    // among them, and a listed one folds where clang folds it.
+    // The library builtins (c_builtin_library.c) are calls of their prototypes too, and a listed one folds where clang
+    // folds it.
     const bool candidate = cbuiltin_library_candidate(name, length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
     const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
-                               (candidate && (cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC || cbuiltin_library_refusal(name, length) != NULL));
+                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC) ||
+                               (candidate && cbuiltin_library_alias(name, length) != CBUILTIN_LIBRARY_COUNT);
     if (library != CBUILTIN_LIBRARY_COUNT)
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
+    }
+    if (cbuiltin_library_half(library) && result->diagnostic == CHECK_DIAG_NONE)
+    {
+        // A builtin of __fp16 (#148, c_builtin_library.c): its function type's _Float16 stands for the prototype's __fp16,
+        // which the arguments convert to (binary16's rounding is the same) and the call's value has, a folded one too.
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, action->type, &count);
+        for (uint32_t i = 0; i < count && i < action->argument_count; i += 1)
+        {
+            if (parameters[i] == BUSTER_TYPE_FLOAT16 && action->argument_conversions[i].type == BUSTER_TYPE_FLOAT16)
+            {
+                action->argument_conversions[i].type = BUSTER_TYPE_HALF;
+            }
+        }
+        result->value.type = type_unqualified(result->value.type) == BUSTER_TYPE_FLOAT16 ? BUSTER_TYPE_HALF : result->value.type;
     }
     if (ordinary_call)
     {
@@ -1933,6 +1958,12 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
             .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
+            .string_known = witness != NULL && witness->nan_payload_known,
+            .string_cast = witness != NULL && witness->nan_payload_cast,
+            .function_objects = witness != NULL ? witness->function_objects : NULL,
+            .function_object_count = witness != NULL ? witness->function_object_count : 0,
+            .string_bytes = witness != NULL ? witness->nan_payload : NULL,
+            .string_length = witness != NULL ? witness->nan_payload_length : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
@@ -1963,6 +1994,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .allocates_stack = checked.allocates_stack,
             .alignment_offset_known = checked.alignment_offset_known,
+            .cpu_test = checked.cpu_test,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_FLOAT)

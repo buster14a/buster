@@ -118,6 +118,8 @@ enum
     X86_MATCH_IS4,
     // XMM0, written out (SSE4.1's blends and SHA's rounds read it implicitly; GNU as and clang print it).
     X86_MATCH_XMM0,
+    // The x87's st(0), which an ST_RM or RM_ST form names beside its st(i) (#147).
+    X86_MATCH_ST0,
 };
 
 static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
@@ -267,6 +269,17 @@ static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
         roles[3] = X86_MATCH_RM;
         count = 4;
         break;
+    case X86_SYNTAX_ST_RM:
+        // fadd st(0), st(i), in Intel's order (the AT&T parser reverses its operands, #147).
+        roles[0] = X86_MATCH_ST0;
+        roles[1] = X86_MATCH_RM;
+        count = 2;
+        break;
+    case X86_SYNTAX_RM_ST:
+        roles[0] = X86_MATCH_RM;
+        roles[1] = X86_MATCH_ST0;
+        count = 2;
+        break;
     default:
         break;
     }
@@ -319,13 +332,14 @@ static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
 }
 
 // Whether the parser has a grammar for an operand descriptor (#1134): no operand, memory addressed by general registers,
-// or a register of a class it names (general registers, XMM, YMM and ZMM registers, and opmasks). The x87's stack,
-// MMX, bound, control, debug, segment and tile registers, vector-indexed (VSIB) memory, register pairs and blocks and a
-// default flags value aren't the parser's, and neither are the forms that take them.
+// or a register of a class it names (general registers, XMM, YMM and ZMM registers, opmasks, and the x87's stack: %st
+// and %st(i), Intel's st and st(i), #147). MMX, bound, control, debug, segment and tile registers, vector-indexed
+// (VSIB) memory, register pairs and blocks and a default flags value aren't the parser's, and neither are the forms that
+// take them.
 static bool x86_match_descriptor_parsed(uint16_t descriptor)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
-    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK;
+    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST;
     const uint16_t unparsed = BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK | BUSTER_X86_OPERAND_DFV | BUSTER_X86_OPERAND_TEST;
     return named && (descriptor & unparsed) == 0;
 }
@@ -519,10 +533,10 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 {
                     kinds = 1u << X86_OPERAND_IMMEDIATE;
                 }
-                else if (role == X86_MATCH_XMM0)
+                else if (role == X86_MATCH_XMM0 || role == X86_MATCH_ST0)
                 {
                     kinds = 1u << X86_OPERAND_REGISTER;
-                    class = BUSTER_X86_CLASS_XMM;
+                    class = role == X86_MATCH_ST0 ? BUSTER_X86_CLASS_ST : BUSTER_X86_CLASS_XMM;
                     fixed = 1;
                 }
                 else if (role == X86_MATCH_ACC || role == X86_MATCH_CL)
@@ -677,6 +691,9 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
             break;
         case X86_MATCH_XMM0:
             result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_XMM && operand->reg == 0;
+            break;
+        case X86_MATCH_ST0:
+            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_ST && operand->reg == 0;
             break;
         default:
             result = false;

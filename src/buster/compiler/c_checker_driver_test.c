@@ -3439,7 +3439,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -3857,7 +3857,7 @@ static void check_test_driver_reports(CheckTest* test)
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
                                     (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {
@@ -4904,6 +4904,8 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
 #include "c_check_musttail_driver_test.c"
+#include "c_check_label_attribute_driver_test.c"
+#include "c_check_generic_builtin_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -5310,6 +5312,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // of section.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
+#include "c_check_common_driver_test.c"
+#include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_fence_driver_test.c"
 
@@ -6437,6 +6441,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
+            check_test_driver_label_attributes(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_generic_builtins(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_const(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -6536,6 +6548,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_retained(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_commons(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_conventions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

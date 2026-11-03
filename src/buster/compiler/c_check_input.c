@@ -38,11 +38,12 @@ typedef enum CheckInputMessage
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
     CHECK_INPUT_OPTIMIZE,
-    // A goto, a switch's case and a computed goto that enter a variable-length array's or a cleanup's scope, or for a
-    // computed goto leave a cleanup's, as clang's JumpScopeChecker reports them.
+    // A goto, a switch's case, a computed goto and an asm goto that enter a variable-length array's or a cleanup's scope,
+    // or for a computed goto and an asm goto leave a cleanup's, as clang's JumpScopeChecker reports them.
     CHECK_INPUT_JUMP_GOTO,
     CHECK_INPUT_JUMP_SWITCH,
     CHECK_INPUT_JUMP_INDIRECT,
+    CHECK_INPUT_JUMP_ASM,
     // GNU's cleanup attribute's argument and function (c_check_cleanup_input.c).
     CHECK_INPUT_CLEANUP_FUNCTION,
     CHECK_INPUT_CLEANUP_PARAMETERS,
@@ -99,6 +100,23 @@ typedef enum CheckInputMessage
     CHECK_INPUT_MUSTTAIL_ARGUMENTS,
     CHECK_INPUT_MUSTTAIL_DECLARATION,
     CHECK_INPUT_MUSTTAIL_STATEMENT,
+    // A GNU attribute on a label that clang refuses there (check_input_label_refusal), at its name (#147).
+    CHECK_INPUT_LABEL_ATTRIBUTE,
+    // A statement's attribute that clang refuses on a statement, and fallthrough on one that isn't empty, at its name
+    // (#147, check_input_statement_attribute_kinds).
+    CHECK_INPUT_STATEMENT_ATTRIBUTE,
+    CHECK_INPUT_FALLTHROUGH_STATEMENT,
+    // A fallthrough null statement outside a switch, at the attribute's name, and one in a switch whose next statement
+    // isn't a case or default label, at its first token (check_input_fallthrough_placed).
+    CHECK_INPUT_FALLTHROUGH_SWITCH,
+    CHECK_INPUT_FALLTHROUGH_PLACEMENT,
+    // __builtin_verbose_trap's arguments (#148), at the argument's first token: one that is no constant, and a string
+    // with a `$` (check_input_verbose_trap_arguments).
+    CHECK_INPUT_VERBOSE_TRAP_STRING,
+    CHECK_INPUT_VERBOSE_TRAP_DOLLAR,
+    // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
+    // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
+    CHECK_INPUT_UNKNOWN_BUILTIN,
     // GNU's function multiversioning: a function attribute clang refuses beside target("default"), target_clones or
     // cpu_specific/cpu_dispatch, at the function's name, naming the attribute; and a target attribute incompatible with
     // another multiversioning attribute, at the later attribute, with a note at the earlier one.
@@ -142,6 +160,7 @@ static const char* const check_input_messages[] =
     "cannot jump from this goto statement to its label",
     "cannot jump from switch statement to this case label",
     "cannot jump from this indirect goto statement to one of its possible targets",
+    "cannot jump from this asm goto statement to one of its possible targets",
     "'cleanup' argument is not a function",
     "'cleanup' function must take 1 parameter",
     "'cleanup' function's parameter has a type incompatible with the variable's address",
@@ -178,6 +197,14 @@ static const char* const check_input_messages[] =
     "'musttail' attribute takes no arguments",
     "'musttail' attribute cannot be applied to a declaration",
     "'musttail' attribute only applies to return statements",
+    "attribute cannot be applied to a label",
+    "attribute cannot be applied to a statement",
+    "'fallthrough' attribute only applies to empty statements",
+    "fallthrough annotation is outside switch statement",
+    "fallthrough annotation does not directly precede switch label",
+    "argument to __builtin_verbose_trap must be a pointer to a constant string",
+    "argument to __builtin_verbose_trap must not contain $",
+    "use of unknown builtin",
     "attribute multiversioning cannot be combined with another attribute",
     "multiversioning attributes are not compatible",
     "attribute cannot appear more than once on a declaration",
@@ -332,6 +359,10 @@ struct CheckInputNakedDiagnostic
 #define CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY 0x20u
 // Source-prefix evidence for ISO inline rules; later declarations never rewrite an already emitted warning.
 #define CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION 0x40u
+// A function declared noreturn (_Noreturn, [[noreturn]], [[_Noreturn]] or GNU's noreturn, an attribute not ignored), or
+// redeclaring one, which inherits it as clang's redeclarations inherit the attribute and the function type's noreturn:
+// the fallthrough analysis's calls that never complete (check_input_fallthrough_noreturn, #1126's review).
+#define CHECK_INPUT_FUNCTION_NORETURN 0x80u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -426,11 +457,16 @@ struct CheckInput
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
     bool implicit_function_c99;
+    // -fcommon (PredefinesOptions.common, #147): the emission makes every tentative definition a common symbol.
+    bool common_tentatives;
     bool implicit_function_system;
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
     uint8_t* function_flags;
+    // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
+    // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
+    TypeId implicit_library_types[4];
     // Named K&R parameters bound the extra entry conversions without inflating ordinary units' reservations.
     uint32_t kr_parameter_count;
     CheckInputKrDiagnostic* kr_diagnostics;
@@ -610,6 +646,35 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 #define BUSTER_CHECK_SYNTAX_ATTRIBUTE 0x02u
 // A string, or __func__, __FUNCTION__ or __PRETTY_FUNCTION__ (check_input_function_name_token).
 #define BUSTER_CHECK_SYNTAX_STRING 0x04u
+
+// Whether a name is one of the builtins of a constant the walk works out where it reads it (#148,
+// check_input_builtin_constant_prepare): the place's __builtin_LINE, __builtin_COLUMN, __builtin_FILE, __builtin_FILE_NAME
+// and __builtin_FUNCTION, and the queries of a type, __builtin_vectorelements and __builtin_omp_required_simd_align.
+static bool check_input_source_builtin(uint32_t name)
+{
+    return name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN || name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME ||
+           name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN;
+}
+
+// The span of predefined names (c_intern.c's order) that holds those builtins: __builtin_COLUMN's to
+// __builtin_vectorelements', with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
+// them. The token count tests a name against the span with one comparison (check_input_count_tokens, and its twin
+// check_input_syntax_of), where a comparison per builtin cost the count's vector loop 8.4 million instructions of a
+// sqlite3.c -c (#148); the span's other names only make a few more tokens visited and the table of constants larger.
+#define BUSTER_CHECK_SOURCE_BUILTIN_FIRST ((uint32_t)C_NAME_BUILTIN_COLUMN)
+#define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN + 1))
+_Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_BUILTIN_VECTORELEMENTS && C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN < 16 &&
+               C_NAME_BUILTIN_LINE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_LINE < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_FILE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_FILE_NAME > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE_NAME < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_FUNCTION > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FUNCTION < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS,
+               "the builtins of constants the walk works out lie in one short span of predefined names");
+
+static bool check_input_source_builtin_span(uint32_t name)
+{
+    return name - BUSTER_CHECK_SOURCE_BUILTIN_FIRST < BUSTER_CHECK_SOURCE_BUILTIN_SPAN;
+}
 
 // Which tokens the two walks' vector paths visit (#529), and what they test there: CheckInputReader.visits, a byte a
 // token. Before the walk in source order (check_input_resolve_range), the reasons it may act at the token, a bit each,
@@ -1030,6 +1095,12 @@ struct CheckInputReader
     CheckConstexprValue* constexpr_values;
     uint32_t constexpr_count;
     uint32_t implicit_function_capacity;
+    // The fallthrough null statements whose placement clang's analysis of the function's CFG checks, which the controls'
+    // walk records (check_input_fallthrough_record) and check_input_fallthrough_placements checks once the bindings'
+    // replay has resolved the uses that analysis reads: a callee's declaration, a constant's (#1126's review).
+    uint32_t* fallthrough_tokens;
+    uint32_t fallthrough_count;
+    uint32_t fallthrough_capacity;
     uint32_t kr_diagnostic_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
@@ -1946,6 +2017,18 @@ static uint32_t check_input_scan_pointers(const void* const* column, uint32_t fi
 
 #include "c_check_attribute.c"
 static const CheckInputAttribute* check_input_naked_attribute(const CheckInputAttributes* attributes);
+
+// Whether a declaration's attributes hold a noreturn one that isn't ignored: the _Noreturn keyword's, [[noreturn]],
+// [[_Noreturn]], GNU's noreturn, or an implicit library declaration's (CHECK_INPUT_FUNCTION_NORETURN).
+static bool check_input_noreturn_attribute(const CheckInputAttributes* attributes)
+{
+    bool noreturn = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        noreturn |= attributes->records[i].kind == CHECK_ATTRIBUTE_NORETURN && !attributes->records[i].ignored;
+    }
+    return noreturn;
+}
 static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous);
 
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
@@ -5436,6 +5519,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
                         reader->naked_functions = true;
                     }
+                    if (function && !is_typedef && check_input_noreturn_attribute(attributes))
+                    {
+                        reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NORETURN;
+                    }
                 }
                 // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793).
                 reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2;
@@ -5683,7 +5770,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             reader->objects[token] = reader->objects[previous];
             if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
             {
-                reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
+                reader->output->function_flags[token] |= reader->output->function_flags[previous] & (CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION | CHECK_INPUT_FUNCTION_NORETURN);
             }
             check_input_naked_inherit(reader, token, previous);
             const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
@@ -5735,7 +5822,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 reader->objects[token] = reader->objects[previous];
                 if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
                 {
-                    reader->output->function_flags[token] |= reader->output->function_flags[previous] & CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION;
+                    reader->output->function_flags[token] |= reader->output->function_flags[previous] & (CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION | CHECK_INPUT_FUNCTION_NORETURN);
                 }
                 check_input_naked_inherit(reader, token, previous);
                 if (library_redeclaration && compatible == TYPE_ANSWER_NO)
@@ -6296,6 +6383,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 check_input_selection_prepare(reader, i);
             }
+            if (!reader->ignored[i] && check_input_source_builtin(parser->tokens.names[i]) && reader->output->report_count == 0 && !reader->output->resource)
+            {
+                check_input_builtin_constant_prepare(reader, i);
+            }
             if (!reader->ignored[i] && (parser->tokens.names[i] == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || parser->tokens.names[i] == C_NAME_BUILTIN_OFFSETOF))
             {
                 const uint32_t close = i + 1 < parser->tokens.count ? parser->tree.parents[i + 1] : parser->tokens.count;
@@ -6754,11 +6845,79 @@ static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t
     return first;
 }
 
+// __builtin_verbose_trap's two arguments as clang's Sema takes them (#148): each a constant string whose bytes hold no
+// `$`, else an error at the argument's first token. A narrow string literal or __func__'s name, under parentheses and
+// casts, is read whole; an argument that is no address constant of an object (an automatic variable's value, an
+// integer, a null pointer) is no constant string. Another address constant (a const array's, a literal's past its start) clang
+// reads through its constant evaluator, whose reading of an object's bytes this reader doesn't model: it is refused.
+static void check_input_verbose_trap_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call)
+{
+    const Parser* parser = reader->parser;
+    for (uint32_t index = 0; index < call->argument_count; index += 1)
+    {
+        const CheckInputIntrinsicArgument span = call->arguments[index];
+        uint32_t first = span.first;
+        uint32_t end = span.end;
+        bool stripping = true;
+        while (stripping && first < end)
+        {
+            const uint8_t role = parser->tree.roles[first];
+            const uint32_t close = parser->tree.parents[first];
+            if (parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && close == end - 1 && role == PARSE_ROLE_OPEN_GROUP)
+            {
+                first += 1;
+                end -= 1;
+            }
+            else if (role == PARSE_ROLE_OPEN_CAST && close > first && close + 1 < end)
+            {
+                first = close + 1;
+            }
+            else
+            {
+                stripping = false;
+            }
+        }
+        const bool named = first < end && (parser->tokens.kinds[first] == PARSE_KIND_STRING || check_input_function_name_token(parser, first));
+        uint32_t after = first + (named && parser->tokens.kinds[first] != PARSE_KIND_STRING);
+        while (named && after < end && parser->tokens.kinds[after] == PARSE_KIND_STRING)
+        {
+            after += 1;
+        }
+        const CheckInitString* string = named && after == end ? check_input_string(reader, first) : NULL;
+        CheckValue value = { 0 };
+        if (string != NULL)
+        {
+            // A wide literal's conversion to const char* is the call's own error.
+            const TypeId element = type_element(reader->types, string->type);
+            if (type_size(reader->types, element) == 1 && memchr(string->bytes, '$', string->byte_count) != NULL)
+            {
+                check_input_report(reader, span.first, CHECK_INPUT_VERBOSE_TRAP_DOLLAR);
+            }
+        }
+        else if (!check_input_evaluate_cached(reader, span.first, span.end, &value) || value.constant_kind != CHECK_CONSTANT_ADDRESS || value.object == 0 ||
+                 (value.category == CHECK_LVALUE && (value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 &&
+                  !type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, value.type)))))
+        {
+            check_input_report(reader, span.first, CHECK_INPUT_VERBOSE_TRAP_STRING);
+        }
+        else
+        {
+            check_input_report(reader, span.first, CHECK_INPUT_UNSUPPORTED);
+        }
+    }
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
     CheckGraph* graph = &reader->output->graph;
     const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
+    static const char verbose_trap[] = "__builtin_verbose_trap";
+    if (call->argument_count == 2 && declaration->info->name_length == sizeof(verbose_trap) - 1 &&
+        memcmp(declaration->info->name, verbose_trap, sizeof(verbose_trap) - 1) == 0)
+    {
+        check_input_verbose_trap_arguments(reader, call);
+    }
     const bool constant_context = reader->constant_contexts[call->closing] != 0;
     const uint64_t required = declaration->types.ice_parameters | check_graph_x86_ice_mask(declaration->info, constant_context);
     const uint32_t offset = graph->argument_count;
@@ -8119,7 +8278,7 @@ typedef enum CheckInputCountGroup
     CHECK_INPUT_COUNT_GROUPS,
 } CheckInputCountGroup;
 
-#define BUSTER_CHECK_INPUT_COUNT_NAMES 16u
+#define BUSTER_CHECK_INPUT_COUNT_NAMES 24u
 
 // What check_input_run sizes its tables by: the tokens of a few kinds and roles, and of the names it is given, each
 // name (0 for one the unit hasn't) in one of CHECK_INPUT_COUNT_GROUPS.
@@ -8144,7 +8303,8 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
 {
     const uint32_t name = parser->tokens.names[token];
     const bool named = name == C_NAME_BUILTIN_VA_ARG || name == C_NAME_BUILTIN_CONVERTVECTOR || name == C_NAME_BUILTIN_BIT_CAST || name == C_NAME_GENERIC ||
-                       name == C_NAME_BUILTIN_CHOOSE_EXPR || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF;
+                       name == C_NAME_BUILTIN_CHOOSE_EXPR || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF ||
+                       check_input_source_builtin_span(name);
     const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING || check_input_function_name_token(parser, token);
     return (uint8_t)((named ? BUSTER_CHECK_SYNTAX_NAMED : 0) | (check_input_attribute_starts(parser, token, parser->tokens.count) ? BUSTER_CHECK_SYNTAX_ATTRIBUTE : 0) |
                      (string ? BUSTER_CHECK_SYNTAX_STRING : 0));
@@ -8242,6 +8402,10 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             {
                 matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)names[i]));
             }
+            // The span of the builtins of constants the walk works out (check_input_source_builtin_span), one comparison.
+            const __mmask16 source = _mm512_mask_cmplt_epu32_mask(present, _mm512_sub_epi32(name, _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_FIRST)),
+                                                                  _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_SPAN));
+            matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= source;
             for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
             {
                 result.groups[group] += group != CHECK_INPUT_COUNT_OVERLOADABLE ? (uint32_t)__builtin_popcount(matched[group]) : 0;
@@ -8254,7 +8418,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                 const int64_t depth = attribute_depth + __builtin_popcountll(_bzhi_u64(list_opens, lane + 1)) - __builtin_popcountll(_bzhi_u64(list_closes, lane));
                 result.groups[CHECK_INPUT_COUNT_OVERLOADABLE] += roles == 0 || depth > 0;
             }
-            __mmask16 syntax_matched[3] = { 0 };
+            __mmask16 syntax_matched[3] = { source, 0, 0 };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
             {
                 syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(present, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
@@ -8314,6 +8478,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         {
             matched[groups[i]] |= name == names[i];
         }
+        matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= name != 0 && check_input_source_builtin_span(name);
         for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
         {
             result.groups[group] += matched[group] && (group != CHECK_INPUT_COUNT_OVERLOADABLE || roles == NULL || attribute_depth > 0);
@@ -8394,6 +8559,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
+                         .common_tentatives = pp->options.predefines.common,
                          .implicit_function_system = pp->options.implicit_function_system,
                          .fatal_errors = pp->options.fatal_errors };
     check_input_warning_policy(input, &pp->options);
@@ -8406,6 +8572,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const char* const vararg_spellings[] =
     {
         "__builtin_va_start",
+        "__builtin_stdarg_start",
         "__builtin_c23_va_start",
         "__builtin_va_arg",
         "__builtin_va_copy",
@@ -8418,6 +8585,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         "overloadable",
         "__overloadable__",
     };
+    // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them: the
+    // type queries' names here, and the place's and the type queries' keywords by their span, which the count tests itself
+    // (check_input_source_builtin_span).
     uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR };
     uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES] =
     {
@@ -9010,6 +9180,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
+            if (reader.fallthrough_count != 0 && !input->resource)
+            {
+                check_input_fallthrough_placements(&reader);
+            }
             check_input_diagnostic_recover(&reader, resolved);
             for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)
             {
