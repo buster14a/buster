@@ -947,6 +947,21 @@ static bool c_testsuite_expect(const CTestsuite* suite, const char* scenario, co
     return same;
 }
 
+// Waits for a self-test scenario's `child` to end, through interruptions: its pid, with its status in `status`, or -1 for
+// a failed wait or a child that never started (-1). Only a wait that was made and interrupted is made again: errno is
+// read after waitpid alone, so a stale EINTR from an earlier call can't keep a child that never started waiting.
+static pid_t c_testsuite_wait_scenario(pid_t child, int* status)
+{
+    pid_t waited = -1;
+    bool waiting = child > 0;
+    while (waiting)
+    {
+        waited = waitpid(child, status, 0);
+        waiting = waited < 0 && errno == EINTR;
+    }
+    return waited;
+}
+
 // The harness on three tests of its own, with the stand-in compiler, in six scenarios: from a DIR and a $TMPDIR relative
 // to the current directory; waiting without a pidfd, by polling; with --cross-check where -c refuses what the direct
 // path compiles, which must fail; with refusals that name their feature but are then killed by a signal or for their
@@ -1067,16 +1082,20 @@ static int c_testsuite_self_test(CTestsuite* suite)
             _exit(expected ? 0 : 1);
         }
     }
+    // A child that never started isn't waited for, even with an interrupted call's errno left over from before.
+    errno = EINTR;
+    int unstarted_status = 0;
+    if (c_testsuite_wait_scenario(-1, &unstarted_status) != -1)
+    {
+        fprintf(stderr, "test-c-testsuite: self-test: a child that never started was waited for\n");
+        failures += 1;
+    }
     for (uint32_t scenario = 0; scenario < scenario_count; scenario += 1)
     {
         // A scenario whose process didn't start (a failed fork) ran nothing, and fails.
         const bool started = children[scenario] > 0;
         int status = 0;
-        pid_t waited = -1;
-        do
-        {
-            waited = started ? waitpid(children[scenario], &status, 0) : -1;
-        } while (waited < 0 && errno == EINTR);
+        const pid_t waited = c_testsuite_wait_scenario(children[scenario], &status);
         const bool ended = started && waited == children[scenario] && WIFEXITED(status);
         const bool expected = ended && WEXITSTATUS(status) == 0;
         if (valid && !started)
