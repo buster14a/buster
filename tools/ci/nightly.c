@@ -2798,13 +2798,15 @@ static void nightly_test_records(NightlyTest* test)
     fclose(stream);
     data[size - 1] = 0;
     nightly_expect(test, !nightly_record_parse((NightlyText){ .data = data, .length = size - 1 }, parsed), "a record without its last newline is refused");
-    char* swap = strstr(data, "event\t");
-    char* next = swap != NULL ? strstr(swap, "purpose\t") : NULL;
-    if (swap != NULL && next != NULL)
+    // The newline back, the record is whole again and valid: then one key misnamed is the only fault.
+    data[size - 1] = '\n';
+    nightly_expect(test, nightly_record_parse((NightlyText){ .data = data, .length = size }, parsed), "the record with its last newline back is accepted");
+    char* swap = strstr(data, "\nevent\t");
+    if (swap != NULL)
     {
-        memcpy(swap, "evenx", 5);
+        memcpy(swap + 1, "evenx", 5);
     }
-    nightly_expect(test, swap != NULL && !nightly_record_parse((NightlyText){ .data = data, .length = size - 1 }, parsed), "a record with a misnamed key is refused");
+    nightly_expect(test, swap != NULL && !nightly_record_parse((NightlyText){ .data = data, .length = size }, parsed), "a record with a misnamed key is refused");
     free(data);
 
     // The outcome over every combination of the results it reads: completion, blocks and deferrals only as allowed.
