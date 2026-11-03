@@ -1287,6 +1287,18 @@ report, on standard error after the command, a row per stage.
   N`, and one for a source without code to emit), and `lanes`, those its flow
   ran on, one after a failed start.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
+- **The lowering's phases** inside its stage (#1048) are TSC ticks the emission
+  adds to the clock (`check_clock_lower`): `lower.prepare`,
+  `check_lower_prepare`'s; and on one lane each part's (`CheckLowerPart`'s
+  ticks: with the option alone, three TSC reads a part and two a body)
+  `lower.statements`, its bodies' statements, their controls and tasks' loops;
+  `lower.bodies`, the rest of its bodies' walks (frames, parameters, locals,
+  labels and the columns' copies); and `lower.validate`, its ABI rows (the
+  calls' and the locations', the signatures' checks and each function's
+  parameters and result), `abi_assign` and `tier0_validate`. The last row,
+  `lower.rest`, is the rest of the stage: the parts' own bookkeeping and
+  `check_lower_finish`'s merge. On several lanes, the parts run in the `lanes`
+  stage and read no TSC, and only the preparation and the rest remain.
 - **The expressions' walk** inside `check-input` is a line of its own after the
   total, `time-check expressions MILLISECONDS PERCENT`: the TSC's ticks across
   `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
@@ -1344,6 +1356,10 @@ without the option, with it, and the reference compiler.
   and `wait4`'s rusage gives its user and system time, peak RSS and faults.
 - **Checks.** Every process must exit with status 0, the two objects of every
   run must be the same bytes, and every report must be whole.
+- **Coverage.** After the runs, with the medians, it prints the first
+  `--time-stages` report's `lowering-nodes` line (every run's is the same), as
+  `lowering coverage:`: the evaluated nodes and the shares #624's fragments
+  and #1048's node templates took, on the host's path.
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
   ranked by elapsed time. The preprocessor's phases and the expressions' walk
