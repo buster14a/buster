@@ -549,7 +549,8 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
     {
         const uint8_t from = plan.from[i];
         const bool defined = from != BUSTER_CHECK_BASE_UNDEFINED;
-        upper = i >= half && defined ? from : upper;
+        // The upper half's source is its first defined element's, which every other defined one there must share.
+        upper = i >= half && defined && upper == BUSTER_CHECK_BASE_UNDEFINED ? from : upper;
         concatenates &= !defined || ((i < half ? from == BUSTER_CHECK_BASE_FROM_A : from == upper) && plan.index[i] == i % half);
         extracts_high &= !defined || (from == BUSTER_CHECK_BASE_FROM_A && plan.index[i] == i + half);
         splats &= !defined || ((splat == BUSTER_CHECK_BASE_UNDEFINED || from == splat) && plan.index[i] == 0);
