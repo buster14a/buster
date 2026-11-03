@@ -26,6 +26,8 @@
 # NUL-delimited argv, without building (cmake/BusterPrint.cmake); consumers read arrays rather than reevaluating shell
 # text from this script. print-output prints the configuration's executable's path.
 set -euo pipefail
+# Command substitutions fail as the commands in them do: a failed description stops the script.
+shopt -s inherit_errexit
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 caller="$PWD"
@@ -82,6 +84,7 @@ while [ $# -gt 0 ]; do
         --config=*) config="${1#*=}"; config_given=1; shift ;;
         --target=*) targets+=("${1#*=}"); shift ;;
         --jobs=*) jobs="${1#*=}"; shift ;;
+        -j?*) jobs="${1#-j}"; shift ;;
         --verbose|-v) verbose=1; shift ;;
         --all) clean_all=1; shift ;;
         --) shift; arguments+=("$@"); break ;;
@@ -137,24 +140,43 @@ settings=(
     "-DBUSTER_BAKE=${BUSTER_BAKE:-1}"
 )
 
-temporary=()
-cleanup()
+# The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
+# interrupt or termination of this script goes on to: a signal for this script alone, as `timeout` sends, stops them at
+# once rather than once they end. Ninja stops its commands when it stops.
+child=""
+stop()
 {
-    [ "${#temporary[@]}" -eq 0 ] || rm -rf "${temporary[@]}"
+    if [ -n "$child" ]; then
+        kill "-$1" -- "-$child" 2> /dev/null || true
+        wait "$child" 2> /dev/null || true
+    fi
+    exit "$2"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'stop INT 130' INT
+trap 'stop TERM 143' TERM
+run()
+{
+    local status=0
+    set -m
+    "$@" &
+    child=$!
+    set +m
+    wait "$child" || status=$?
+    child=""
+    return "$status"
+}
 
-# The description's $1 (cmake/BusterPrint.cmake) for the settings, one argument per line, to standard output.
+# The description's $1 (cmake/BusterPrint.cmake) for the settings, one argument per line, to standard output. Its
+# file is removed here, since a command substitution's or pipeline's subshell can't add it to the script's cleanup.
 describe()
 {
-    local output
+    local output status=0
     output="$(mktemp)"
-    temporary+=("$output")
     "$cmake" "-DBUSTER_PRINT=$1" "-DBUSTER_PRINT_OUTPUT=$output" "-DBUSTER_PRINT_CONFIG=$config" \
-        "-DBUSTER_C_COMPILER=$clang" "${settings[@]}" -P "$root/cmake/BusterPrint.cmake" >&2
-    cat "$output"
+        "-DBUSTER_C_COMPILER=$clang" "${settings[@]}" -P "$root/cmake/BusterPrint.cmake" >&2 || status=$?
+    [ "$status" -ne 0 ] || cat "$output"
+    rm -f -- "$output"
+    return "$status"
 }
 
 # The number of cores of the CPUs this process may run on, by their core_cpus_list, or 0 if /sys doesn't say: a build
@@ -222,12 +244,13 @@ case "$command" in
         # BUSTER_BUILD_DEFINES.
         [ "${#arguments[@]}" -gt 0 ] || die "usage: ./build.sh lexer-variant NAME=SOURCE..."
         tags=""
+        # CMakeLists.txt checks the names and paths; this resolves each path from the caller's directory and checks an
+        # assembly's labels, which can change between builds.
         for entry in "${arguments[@]}"; do
             name="${entry%%=*}"
             source="${entry#*=}"
-            [[ "$entry" == *=* && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && -f "$(absolute "$source")" ]] || die "lexer-variant: $entry isn't NAME=SOURCE"
+            [[ "$entry" == *=* && -f "$(absolute "$source")" ]] || die "lexer-variant: $entry isn't NAME=SOURCE"
             source="$(realpath -e -- "$(absolute "$source")")"
-            [[ "$source" != *[\"\\\;]* && "$source" != *$'\n'* ]] || die "lexer-variant: $source has a quote, backslash, semicolon or newline"
             if [[ "$source" == *.s ]]; then
                 grep -q "^c_lexer_variant_$name:" "$source" || die "lexer-variant: $source doesn't define c_lexer_variant_$name; write it with ./build.sh lexer-variant-assembly $name"
                 # Two labeled variants of one tag would share their symbols, and spill-report would mix their samples.
@@ -247,19 +270,12 @@ case "$command" in
         # .text's alignment: its code and what the linker places after it move by SHIFT, the same instructions at
         # other addresses. The same code ran up to 2% faster or slower so on the 9700X (#509), so time-runs compares
         # builds over several placements.
+        # CMakeLists.txt checks the source's name and the shifts; a shift given twice is linked once.
         [ "${#arguments[@]}" -ge 3 ] || die "usage: ./build.sh shifts DIRECTORY SOURCE SHIFT..."
         shift_directory="$(absolute "${arguments[0]}")"
         shift_source="${arguments[1]}"
-        text="$(describe sources)"
-        mapfile -t sources <<< "$text"
-        found=0
-        for source in "${sources[@]}"; do
-            [ "${source##*/}" != "$shift_source" ] || found=1
-        done
-        [ "$found" = 1 ] || die "shifts: $shift_source isn't a source's file name"
         for bytes in "${arguments[@]:2}"; do
-            [[ "$bytes" =~ ^(0|[1-9][0-9]{0,6})$ ]] || die "shifts: $bytes isn't a shift of 0 to 9,999,999 bytes"
-            shift_bytes="$shift_bytes${shift_bytes:+;}$bytes"
+            [[ ";$shift_bytes;" == *";$bytes;"* ]] || shift_bytes="$shift_bytes${shift_bytes:+;}$bytes"
         done
         mkdir -p -- "$shift_directory"
         ;;
@@ -296,7 +312,9 @@ if [ "$command" = clean ]; then
             fi
         done
         if [ "$config_given" = 1 ]; then
-            [ ! -f "$tree/build.ninja" ] || "$cmake" --build "$tree" --config "$config" --target clean
+            # The configuration's objects and outputs alone: Ninja's clean of one configuration would take the outputs
+            # both share too (the call graph's IR, the lexer variants' assembly), whose edges are in each one's file.
+            rm -rf -- "$tree/$config" "$tree"/CMakeFiles/*.dir/"$config"
             echo "build.sh: cleaned ${tree#"$root/"}'s $config outputs" >&2
         else
             rm -rf -- "$tree"
@@ -306,9 +324,9 @@ if [ "$command" = clean ]; then
     exit 0
 fi
 
-# The tree's configuration, which CMake writes again only when it changed: the arguments, PATH (which finds the tools
-# and linkers) and the toolchain's identity. A different clang can't reuse the tree's objects, nor CMake its cache, so
-# the tree starts afresh.
+# The tree's configuration, which CMake writes again only when it changed: the arguments, the tools and linkers PATH
+# finds for it, and the toolchain's identity. A different clang (its path, its file or its version) can't reuse the
+# tree's objects, nor CMake its cache, so the tree starts afresh.
 configure_arguments=(
     -S "$root" -B "$tree" -G "Ninja Multi-Config"
     "-DCMAKE_MAKE_PROGRAM=$ninja"
@@ -325,22 +343,25 @@ configure_arguments=(
     "-DBUSTER_SHIFTS=$shift_bytes"
 )
 toolchain="clang $clang ($(realpath "$clang")): $("$clang" --version | sed -n 1p)"
+tools="$(command -v nm llvm-nm readelf llvm-readelf wild mold ld.lld ld.bfd | tr '\n' ' ' || true)"
 stamp="$tree/build.sh.configuration"
-wanted="$(printf '%s\n' "$toolchain" "cmake $cmake $cmake_version" "ninja $ninja $ninja_version" "PATH=$PATH" "${configure_arguments[@]}")"
+wanted="$(printf '%s\n' "$toolchain" "cmake $cmake $cmake_version" "ninja $ninja $ninja_version" "tools $tools" "${configure_arguments[@]}")"
 
 exec {lock}> "$tree.lock"
 if ! flock -n "$lock"; then
     echo "build.sh: waiting for another build of ${tree#"$root/"}" >&2
-    flock "$lock"
+    # In the background, as the build runs, so that a signal stops the wait at once; the lock is the descriptor's.
+    run flock "$lock"
 fi
 if [ -d "$tree" ]; then
     previous=""
     if [ -f "$stamp" ]; then
-        previous="$(head -n 1 "$stamp")"
-    elif [ -f "$tree/CMakeCache.txt" ]; then
-        # A tree a preset configured: its compiler is the cache's.
-        previous="$(sed -n 's/^CMAKE_C_COMPILER:[A-Z]*=//p' "$tree/CMakeCache.txt")"
-        [ "$previous" != "$clang" ] || previous="$toolchain"
+        previous="$(sed -n 1p "$stamp")"
+    elif [ -f "$tree/buster-toolchain.txt" ]; then
+        # A tree a preset configured: CMakeLists.txt records the same identity of the clang it configured with.
+        previous="$(sed -n 1p "$tree/buster-toolchain.txt")"
+    elif [ -e "$tree" ]; then
+        previous="an unknown one"
     fi
     if [ -n "$previous" ] && [ "$previous" != "$toolchain" ]; then
         echo "build.sh: ${tree#"$root/"} was configured for another toolchain ($previous); configuring it afresh" >&2
@@ -349,7 +370,7 @@ if [ -d "$tree" ]; then
 fi
 if [ "$command" = configure ] || [ ! -f "$stamp" ] || [ ! -f "$tree/build.ninja" ] || [ "$(cat "$stamp")" != "$wanted" ]; then
     rm -f -- "$stamp"
-    "$cmake" "${configure_arguments[@]}" >&2
+    run "$cmake" "${configure_arguments[@]}" >&2
     printf '%s\n' "$wanted" > "$stamp"
 fi
 [ "$command" != configure ] || exit 0
@@ -372,7 +393,7 @@ build()
         options+=(--target "$target")
     done
     now start
-    "$cmake" "${options[@]}" >&2
+    run "$cmake" "${options[@]}" >&2
     now end
     # Ninja appends a line for each command it ran; when it rewrites its log to compact it, the report is skipped.
     if [ -f "$log" ] && { [ -z "$inode" ] || [ "$(stat -c %i "$log")" = "$inode" ]; }; then
@@ -400,15 +421,14 @@ publish()
 {
     exec {publication}> "$root/build/.publish.lock"
     flock "$publication"
+    # Both files are made first, so that a failure leaves the published ones as they were.
+    local commands="$root/build/.compile_commands.json.$$" next="$root/build/.compiler.$$"
+    "$cmake" "-DINPUT=$tree/compile_commands.json" "-DOUTPUT=$commands" "-DCONFIG=$config" \
+        -P "$root/cmake/BusterCompileCommands.cmake" || { rm -f -- "$commands"; return 1; }
     if [ ! "$root/build/compiler" -ef "$binary" ]; then
-        local next="$root/build/.compiler.$$"
-        ln -f -- "$binary" "$next" 2> /dev/null || cp -f -- "$binary" "$next"
+        ln -f -- "$binary" "$next" 2> /dev/null || cp -f -- "$binary" "$next" || { rm -f -- "$commands" "$next"; return 1; }
         mv -f -T -- "$next" "$root/build/compiler"
     fi
-    local commands="$root/build/.compile_commands.json.$$"
-    temporary+=("$commands")
-    "$cmake" "-DINPUT=$tree/compile_commands.json" "-DOUTPUT=$commands" "-DCONFIG=$config" \
-        -P "$root/cmake/BusterCompileCommands.cmake"
     if cmp -s -- "$commands" "$root/build/compile_commands.json"; then
         rm -f -- "$commands"
     else
@@ -439,15 +459,17 @@ case "$command" in
         flock -u "$lock"
         ctest="${cmake%/*}/ctest"
         [ -x "$ctest" ] || ctest="$(command -v ctest)" || die "ctest isn't beside cmake or on PATH"
-        "$ctest" --test-dir "$tree" -C "$config" --output-on-failure "${arguments[@]}"
+        run "$ctest" --test-dir "$tree" -C "$config" --output-on-failure "${arguments[@]}"
         ;;
     check-call-graph)
         # The no-recursion rule on the call graph of the units' IR (CMakeLists.txt's call-graph-ir, captured at the
         # Release configuration's optimization whatever the configuration), checked by BUSTER_COMPILER, which the
-        # parallel runner gives its commands, or else by the configuration's built executable.
+        # parallel runner gives its commands, or else by the configuration's built executable, which must be there first.
+        checker="${BUSTER_COMPILER:-$binary}"
+        [ -x "$checker" ] || die "check-call-graph: $checker is missing; run ./build.sh first"
         build call-graph-ir
         flock -u "$lock"
-        "$cmake" "-DCOMPILER=${BUSTER_COMPILER:-$binary}" "-DIR=$tree/call-graph" -P "$root/cmake/BusterCallGraph.cmake"
+        run "$cmake" "-DCOMPILER=$checker" "-DIR=$tree/call-graph" -P "$root/cmake/BusterCallGraph.cmake"
         ;;
     lexer-variant)
         build compiler

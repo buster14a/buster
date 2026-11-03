@@ -219,7 +219,8 @@ function(buster_settings_normalize)
     if(fuzz)
         string(APPEND variant "-fuzz")
     endif()
-    if(debug_info STREQUAL "0")
+    # BUSTER_DEBUG_INFO decides the Release units' debug information but in a sanitizer build, which has line tables.
+    if(debug_info STREQUAL "0" AND sanitizer STREQUAL "none")
         string(APPEND variant "-g0")
     endif()
 

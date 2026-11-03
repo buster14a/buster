@@ -38,7 +38,8 @@ if [ ! -f "$destination/.complete" ] || [ "$(cat "$destination/.complete")" != "
         "https://github.com/ninja-build/ninja/releases/download/v$ninja_version/ninja-linux.zip" \
         --output "$temporary/ninja.zip"
     printf '%s  %s\n' "$ninja_digest" "$temporary/ninja.zip" | sha256sum --check --status
-    python3 -I -m zipfile -e "$temporary/ninja.zip" "$temporary/tree/bin"
+    # The CMake just staged extracts it: nothing else this needs may be on the host (unzip, Python).
+    (cd "$temporary/tree/bin" && ../bin/cmake -E tar xf "$temporary/ninja.zip")
     chmod 755 "$temporary/tree/bin/ninja"
     rm "$temporary/ninja.zip"
     test "$("$temporary/tree/bin/cmake" --version | head -n 1)" = "cmake version $cmake_version"

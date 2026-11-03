@@ -53,6 +53,14 @@ message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_link
 
 find_program(BUSTER_NM NAMES nm llvm-nm NO_CACHE REQUIRED)
 
+# The toolchain's identity, as build.sh records it, for build.sh to see when a tree a preset configured has another
+# clang now: CMake itself notices a compiler at another path, but not another file or version at the same one (after
+# which `cmake --fresh --preset NAME` configures the tree afresh).
+get_filename_component(compiler_file "${CMAKE_C_COMPILER}" REALPATH)
+execute_process(COMMAND "${CMAKE_C_COMPILER}" --version OUTPUT_VARIABLE compiler_version)
+string(REGEX MATCH "^[^\n]*" compiler_version "${compiler_version}")
+file(WRITE "${CMAKE_BINARY_DIR}/buster-toolchain.txt" "clang ${CMAKE_C_COMPILER} (${compiler_file}): ${compiler_version}\n")
+
 # The flags are the description's alone: CMake's defaults (Release's -DNDEBUG among them), CFLAGS and LDFLAGS, which
 # CMake would read once and keep, take no part. The flags' only differences from a direct clang command are the
 # build's mechanics: CMake's depfile options and CMAKE_INTDIR, a definition no source reads, the include directory's
@@ -217,6 +225,9 @@ add_custom_target(compiler ALL DEPENDS "${compiler}")
 # builds over their code's placements: the same code ran up to 2% faster or slower so on the 9700X (#509).
 set(shifted "")
 if(NOT BUSTER_SHIFTS STREQUAL "")
+    # A shift given twice is linked once.
+    set(shifts ${BUSTER_SHIFTS})
+    list(REMOVE_DUPLICATES shifts)
     get_filename_component(shift_name "${BUSTER_SHIFT_SOURCE}" NAME_WE)
     list(FIND unit_names "${shift_name}" shift_index)
     if(shift_index EQUAL -1 OR NOT BUSTER_SHIFT_SOURCE STREQUAL "${shift_name}.c")
@@ -224,7 +235,7 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
     endif()
     find_program(BUSTER_READELF NAMES readelf llvm-readelf NO_CACHE REQUIRED)
     set(shift_object "$<TARGET_OBJECTS:buster_${shift_name}>")
-    foreach(bytes IN LISTS BUSTER_SHIFTS)
+    foreach(bytes IN LISTS shifts)
         if(NOT bytes MATCHES "^(0|[1-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?)$")
             message(FATAL_ERROR "build.sh shifts: ${bytes} isn't a shift of 0 to 9,999,999 bytes")
         endif()

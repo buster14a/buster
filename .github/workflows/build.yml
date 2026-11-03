@@ -2,7 +2,7 @@ name: Build
 
 # The build's own regressions, on GitHub's runners rather than the 9700X, since they time nothing: fresh, unchanged,
 # edited, failed, interrupted and switched builds, the settings, the presets, the print commands, shifts and lexer
-# variants (tools/ci/build-regression.sh, docs/commands/build.md); and build.sh's now() under locales whose decimal
+# variants (tools/ci/build_regression.c, docs/commands/build.md); and build.sh's now() under locales whose decimal
 # point isn't a period (#409).
 on:
   pull_request:
@@ -11,7 +11,7 @@ on:
       - CMakeLists.txt
       - CMakePresets.json
       - 'cmake/**'
-      - tools/ci/build-regression.sh
+      - tools/ci/build_regression.c
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
       - .github/workflows/build.yml
@@ -22,7 +22,7 @@ on:
       - CMakeLists.txt
       - CMakePresets.json
       - 'cmake/**'
-      - tools/ci/build-regression.sh
+      - tools/ci/build_regression.c
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
       - .github/workflows/build.yml
@@ -53,7 +53,10 @@ jobs:
         run: bash tools/ci/setup-hosted.sh
 
       - name: Check the build's regressions
-        run: bash tools/ci/build-regression.sh
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/build-regression" tools/ci/build_regression.c
+          TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/build-regression"
 
   now:
     # build.sh times its builds from $EPOCHREALTIME, which bash writes with the locale's decimal point: a comma in

@@ -43,8 +43,8 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 - **test** builds and publishes as `build` does, then runs the tree's CTest
   tests for the configuration (below) without holding the tree's lock.
 - **clean** removes this environment's tree; with `--config`, that
-  configuration's outputs in it; with `--all`, every tree and the published
-  files. Nothing else under `build/` (fixtures, `predefines.h`) is touched, and
+  configuration's objects and outputs in it, not those both share (the call
+  graph's IR); with `--all`, every tree and the published files. Nothing else under `build/` (fixtures, `predefines.h`) is touched, and
   no ordinary build deletes anything.
 - **configure** configures this environment's tree and builds nothing.
 - **print-sources**, **print-compile-flags** and **print-sanitizer-flags** print
@@ -88,9 +88,8 @@ own; switching between them builds nothing that is up to date.
 - **Debug** is the same flags with `-O0 -g` in place of the debug information
   and optimization: the same language and aliasing contracts, host ISA,
   sanitizers and definitions, with every variable readable in a debugger.
-  It compiles in about a fifth of Release's time, and its tests run three to
-  four times slower (test-lexer 15.4 s against 4.3 s on a 4-vCPU Xeon VM).
-  The bake and the canary check run on it as on Release.
+  It compiles in a fraction of Release's time, and its tests run several times
+  slower. The bake and the canary check run on it as on Release.
 
 The flags differ from a direct clang command only in the build's mechanics:
 CMake's depfile options, `CMAKE_INTDIR`, a definition no source reads, the
@@ -106,21 +105,27 @@ the build ID, a hash over the whole file, differ.
 
 `build.sh` keeps a tree per toolchain and variant, `build/cmake/VARIANT`: the
 host ISA, then `-runtime` (`BUSTER_HOST_RUNTIME`), `-SANITIZER-ON` (the
-sanitizer and its optimization), `-fuzz` and `-g0` (`BUSTER_DEBUG_INFO=0`) where
-they apply, and `-lexer` for lexer variants: `native`, `x86-64-g0`,
+sanitizer and its optimization), `-fuzz` and `-g0` (`BUSTER_DEBUG_INFO=0`, but
+in a sanitizer build, whose units have line tables either way) where they
+apply, and `-lexer` for lexer variants: `native`, `x86-64-g0`,
 `native-address-O3`, `x86-64-address-O1-fuzz`. These change every unit's flags,
 so each has its objects apart and switching between them rebuilds nothing.
 
 It passes every setting to CMake explicitly, so unsetting an environment
 variable restores the default rather than leaving a tree's cached value, and
-configures only when the arguments, `PATH` (which finds the tools and linkers)
+configures only when the arguments, the tools and linkers `PATH` finds for it
 or the toolchain changed since it last did (`build.sh.configuration` in the
-tree). A different `clang` (path or version) starts the tree afresh, since its
-objects and CMake's cache can't be reused; any other change reconfigures in
-place, and Ninja reruns exactly the steps whose commands changed:
-`BUSTER_BUILD_DEFINES` recompiles every unit, `BUSTER_LINKER` relinks, and
-`BUSTER_BAKE` reruns the post-link step alone. A tree that a preset configured
-is reused when its compiler is the same.
+tree). A different `clang` (its path, its file or its version) starts the tree
+afresh, since its objects and CMake's cache can't be reused; any other change
+reconfigures in place, and Ninja reruns exactly the steps whose commands
+changed: `BUSTER_BUILD_DEFINES` recompiles every unit, `BUSTER_LINKER` relinks,
+and `BUSTER_BAKE` reruns the post-link step alone. A tree that a preset
+configured is reused when its clang is the one it records
+(`buster-toolchain.txt`). CMake alone notices a compiler at another path, but
+not another file or version at the same one: after such an upgrade, configure
+a preset's tree with `cmake --fresh --preset NAME`, or build it with
+`build.sh`. An interrupt or termination of `build.sh` stops the build it runs
+(its own process group) at once.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -254,13 +259,11 @@ it.
 
 ## Regressions and timings
 
-`tools/ci/build-regression.sh` (the `Build` workflow, on GitHub's runners)
-checks a fresh, an unchanged, an edited, a failed, an interrupted and a
-switched build, the settings that change one step, the presets, the print
-commands, shifts and a lexer variant. On a 4-vCPU Xeon VM with Clang 23
-(4 jobs), the old script's Release build took 145.8 s and the CMake build's
-fresh one 143.5 s (each unit compiled once, in the same order), an unchanged
-build 0.1 s with nothing run, one edited benchmark unit 3 s, a change to
-`c_lexer.c` its 16 dependents, and Debug's fresh build 30.4 s. Timings on the
-9700X are taken under its lock, and their raw records go to
+`tools/ci/build_regression.c` (the `Build` workflow, on GitHub's runners)
+checks a fresh, an unchanged, an edited, a failed, an interrupted, a
+terminated and a switched build, an invalid setting, a configuration's clean,
+the settings that change one step, the presets, the print commands, shifts and
+a lexer variant: what runs, what is published and what is left behind, not how
+long it takes. The build's clean, unchanged and edited timings come from the
+9700X under its lock, with their raw records in
 [buster-performance](https://github.com/buster14a/buster-performance).
