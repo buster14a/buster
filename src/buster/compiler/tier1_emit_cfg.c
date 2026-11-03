@@ -2124,6 +2124,28 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function)
     return records;
 }
 
+// The long double phis' copies' records (#141, tier1_emit_cfg_x87_phis), past every node's share: on each edge, an fld and
+// an fstp per long double phi of its target, at most 8 before the edge is refused. A join's phis copy on each of its
+// incoming edges, so their records grow with the edges, not with the phis (#1204's review). Scalar: it runs only in
+// functions with a long double, over their edges.
+static uint64_t tier1_emit_cfg_x87_copy_records(const IrFunction* function, const Tier1CfgInput* input, uint32_t x87_count)
+{
+    const uint32_t added = input->block_count - function->block_count;
+    uint64_t records = 0;
+    for (uint32_t edge = 0; x87_count != 0 && edge < input->edge_count; edge += 1)
+    {
+        const uint32_t successor = input->successors[edge];
+        const bool ir_block = successor >= added;
+        uint32_t phis = 0;
+        for (uint32_t node = ir_block ? function->block_offsets[successor - added] : 0; ir_block && phis < 8 && node < function->block_offsets[successor - added + 1] && function->op[node] == IR_PHI; node += 1)
+        {
+            phis += function->type[node] == IR_F80;
+        }
+        records += 2u * phis;
+    }
+    return records;
+}
+
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
@@ -2137,7 +2159,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function) +
-                              (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
+                              tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;

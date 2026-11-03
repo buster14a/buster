@@ -15,7 +15,8 @@
 // encoders into the same bytes, and run natively in a child process on every buffer, which must leave the expected
 // bytes. The programs: hand-written fixtures (every operation the split takes, sqlite3Multiply128's product of two
 // zero extensions, which must leave one imul and one mul, phis around a loop, unaligned and volatile accesses, addresses
-// with an index), eight long double phis rotated around a loop, every edge's copy of all eight through the x87 stack, and
+// with an index), eight long double phis rotated around a loop, every edge's copy of all eight through the x87 stack,
+// eight long double phis at a join of 200 predecessors, whose copies' records the emitter must make room for, and
 // random straight-line programs of every operation on values loaded or computed before. And the
 // refusals: an I128 parameter, a division, a conversion to a floating value, a switch, which the split refuses as
 // unsupported; a function without an I128 instruction, returned as it is; and the scan's vector path against its scalar
@@ -40,7 +41,7 @@
 #define BUSTER_TIER1_WIDE_TEST_ENTRY 1u
 #define BUSTER_TIER1_WIDE_TEST_BINDING 100u
 #define BUSTER_TIER1_WIDE_TEST_PROGRAMS 120
-#define BUSTER_TIER1_WIDE_TEST_TEXT 16384
+#define BUSTER_TIER1_WIDE_TEST_TEXT 65536
 // Tier 0's random 128-bit programs (tier0_int128_test.c) that tier1_wide_test_typed takes through Tier 1.
 #define BUSTER_TIER1_WIDE_TEST_TYPED 300
 
@@ -1336,6 +1337,49 @@ static void tier1_wide_test_x87_phi_text(char* text, uint32_t n)
     snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = ret.void\n}\n", stores + 3 * n);
 }
 
+// A join of `n` predecessors with eight long double phis (#1204's review): each edge's copies (tier1_emit_cfg_x87_phis,
+// an fld and an fstp per phi) are records past the phis' own, which the records' capacity must count. b0 converts the
+// buffer's first eight words to long doubles; blocks 1 to n go to the join, every one but the last only where the count
+// is below 2, the last always; phi j takes word (j + k) % 8 from block k, so the first edge and the last copy different
+// values; the phis are stored back as doubles.
+static void tier1_wide_test_x87_join_text(char* text, uint32_t n)
+{
+    uint32_t length = (uint32_t)snprintf(text, BUSTER_TIER1_WIDE_TEST_TEXT, "function (ptr, i64) -> void {\nb0:\n  %%0 = param.ptr 0\n  %%1 = param.i64 1\n");
+    for (uint32_t j = 0; j < 8; j += 1)
+    {
+        const uint32_t at = 2 + 3 * j;
+        length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = address.ptr %%0 offset=%u\n  %%%u = load.i64 %%%u align=8\n  %%%u = sitofp.f80 %%%u\n", at, 8 * j, at + 1, at,
+                                     at + 2, at + 1);
+    }
+    length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%26 = const.i64 0x2\n  %%27 = icmp.i1 %%1, %%26 ult\n  %%28 = br.void b1\n");
+    const uint32_t join = n + 1;
+    for (uint32_t k = 1; k <= n; k += 1)
+    {
+        const uint32_t at = 28 + k;
+        length += k < n ? (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "b%u:\n  %%%u = cbr.void %%27, b%u, b%u\n", k, at, join, k + 1) :
+                          (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "b%u:\n  %%%u = br.void b%u\n", k, at, join);
+    }
+    const uint32_t phis = 29 + n;
+    length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "b%u:\n", join);
+    for (uint32_t j = 0; j < 8; j += 1)
+    {
+        length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = phi.f80", phis + j);
+        for (uint32_t k = 1; k <= n; k += 1)
+        {
+            length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "%s [%%%u, b%u]", k == 1 ? "" : ",", 4 + 3 * ((j + k) % 8), k);
+        }
+        length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "\n");
+    }
+    const uint32_t stores = phis + 8;
+    for (uint32_t j = 0; j < 8; j += 1)
+    {
+        const uint32_t at = stores + 3 * j;
+        length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = ftrunc.f64 %%%u\n  %%%u = address.ptr %%0 offset=%u\n  %%%u = store.void %%%u, %%%u align=8\n", at, phis + j,
+                                     at + 1, 256 + 8 * j, at + 2, at + 1, at);
+    }
+    snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = ret.void\n}\n", stores + 24);
+}
+
 // The x87 stack's depth on an edge (#141's review): eight long double phis rotated, every edge's copy of all eight
 // through the stack, run natively against the interpreter as any program; and nine, which the CFG consumer refuses as
 // unsupported (an edge's copy past the stack's depth) on both paths rather than emit.
@@ -1343,6 +1387,9 @@ static void tier1_wide_test_x87_phis(Tier1WideTest* test, char* text)
 {
     tier1_wide_test_x87_phi_text(text, 8);
     tier1_wide_test_program(test, "eight long double phis rotated", text, 40, UINT32_MAX, UINT32_MAX, false, false);
+    // And a join of 200 predecessors with eight long double phis: 3,200 copies' records, run natively as any program.
+    tier1_wide_test_x87_join_text(text, 200);
+    tier1_wide_test_program(test, "eight long double phis at a join of 200 predecessors", text, 2, UINT32_MAX, UINT32_MAX, false, false);
     const uint64_t output_mark = test->output.length;
     tier1_wide_test_x87_phi_text(text, 9);
     IrFunction function;
@@ -1756,8 +1803,8 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
                 printf("test-tier1-wide: Tier 0's long double programs: %u of %u through the optimizer and Tier 1 natively\n", x87, BUSTER_TIER1_WIDE_TEST_TYPED);
                 typed += x87;
             }
-            // The fixtures, the eight long double phis' program (tier1_wide_test_x87_phis) and the random programs.
-            const uint64_t expected_runs = 4u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 1 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + 2u * typed;
+            // The fixtures, the long double phis' two programs (tier1_wide_test_x87_phis) and the random programs.
+            const uint64_t expected_runs = 4u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 2 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + 2u * typed;
             tier1_wide_test_expect(&test, file != 0 || test.native_runs == expected_runs, "every program runs natively on every input by both paths, with rematerialization and without");
             tier1_wide_test_expect(&test, file != 0 || test.refused == 2u * BUSTER_ARRAY_LENGTH(tier1_wide_test_refusals), "every refusal on both paths");
         }
