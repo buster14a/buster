@@ -4685,6 +4685,71 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+// Declaration specifiers that don't combine and numeric constants clang refuses (#1127): the first error's place and its
+// exact text are clang's, by every route, where the checker's own words were generic ("invalid or unsupported").
+static void check_test_driver_declspec_literals(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+    } fixtures[] =
+    {
+        { "a repeated type", "double double x;\n" },
+        { "a third long", "int a;\nlong long long x;\n" },
+        { "short then long", "short long x;\n" },
+        { "signed then unsigned", "signed unsigned x;\n" },
+        { "a typedef name then a type", "typedef int T; T int x;\n" },
+        { "a type then a struct's definition", "int struct S { int a; } x;\n" },
+        { "typedef then a storage class", "typedef static int x;\n" },
+        { "a thread storage class then register", "_Thread_local register int x;\n" },
+        { "a parameter's repeated type", "void f(int int x);\n" },
+        { "a cast's third long", "int g(int v) { return (long long long)v; }\n" },
+        { "an unsigned double, at the sign", "unsigned double x;\n" },
+        { "a long char, at the width", "char long x;\n" },
+        { "long long double, at the first long", "long double long x;\n" },
+        { "long __int128", "long __int128 x;\n" },
+        { "a signed float in sizeof", "int g(void) { return sizeof(signed float); }\n" },
+        { "_Complex _Bool", "_Complex _Bool b;\n" },
+        { "an exponent without digits", "double d = 1e;\n" },
+        { "a spliced exponent without digits", "double d = 1\\\ne;\n" },
+        { "an octal constant's decimal digit", "int o = 0129;\n" },
+        { "an octal digit from a macro", "#define L 08\nint c = L;\n" },
+        { "a binary constant's digit", "int b = 0b102;\n" },
+        { "a floating constant's suffix", "double q = 1.5b;\n" },
+        { "long long on a floating constant", "void f(void) { double a = 1.5ll; }\n" },
+        { "an integer constant's suffix", "int x = 1lul;\n" },
+        { "a hexadecimal floating constant without an exponent", "double h = 0x1.5;\n" },
+        { "an integer constant past 64 bits", "int big = 99999999999999999999999;\n" },
+    };
+    const char* arguments[] = { "-std=gnu17", "-w" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[384];
+        snprintf(source, sizeof(source), "%s/declspec-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/declspec-%u.o", directory, i);
+        CheckCorpusOracle oracle = { 0 };
+        const bool ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        check_test_expect(test, ready && oracle.rejected, fixtures[i].name);
+        const uint32_t routes = executable != NULL ? 4 : 2;
+        for (uint32_t route = 0; ready && route < routes; route += 1)
+        {
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, true, lazy, &checked, &warnings);
+            snprintf(description, sizeof(description), "%s, route %u: first error %u:%u \"%s\", clang %u:%u \"%s\"", fixtures[i].name, route, checked.line,
+                     checked.column, checked.message, oracle.line, oracle.column, oracle.message);
+            check_test_expect(test, ran && checked.rejected && checked.line == oracle.line && checked.column == oracle.column &&
+                              strcmp(checked.message, oracle.message) == 0, description);
+        }
+        unlink(object);
+        unlink(source);
+    }
+}
+
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
@@ -6259,6 +6324,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (check_test_driver_takes())
         {
             check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_declspec_literals(&test, clang, executable, directory, lazy);
         }
         if (check_test_driver_takes())
         {

@@ -105,6 +105,13 @@ typedef enum CheckInputMessage
     CHECK_INPUT_MULTIVERSION_DUPLICATE,
     // clang's no_builtin on a function declaration, which isn't a definition.
     CHECK_INPUT_NO_BUILTIN_DEFINITION,
+    // Declaration specifiers that don't combine, as clang's DeclSpec words it (c_check_declspec.c, #1127): a conflict
+    // with an earlier specifier of the same kind, a signed or unsigned type that can't be, a width or _Complex that the
+    // type doesn't take. The report's `specifier` and `specifier_type` say which specifiers the message names.
+    CHECK_INPUT_SPECIFIER_COMBINE,
+    CHECK_INPUT_SPECIFIER_SIGN,
+    CHECK_INPUT_SPECIFIER_WIDTH,
+    CHECK_INPUT_SPECIFIER_COMPLEX,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -173,6 +180,10 @@ static const char* const check_input_messages[] =
     "multiversioning attributes are not compatible",
     "attribute cannot appear more than once on a declaration",
     "no_builtin attribute is permitted on definitions only",
+    "cannot combine with previous declaration specifier",
+    "type cannot be signed or unsigned",
+    "invalid width for the type",
+    "invalid _Complex type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -220,6 +231,9 @@ struct CheckInputReport
     uint8_t note_kind;
     // The multiversioning kind a message names (CheckInputMultiversionKind, c_check_attribute.c), or 0.
     uint8_t multiversion;
+    // The specifiers a CHECK_INPUT_SPECIFIER_* message names (CheckDeclspecName, c_check_declspec.c), or 0.
+    uint8_t specifier;
+    uint8_t specifier_type;
     // A token to order this report by instead of `token`, or 0: an alias definition's error is clang's after the
     // multiversioning error at the function's name, though its attribute is earlier.
     uint32_t sort;
@@ -2050,6 +2064,32 @@ static TypeId check_input_predefined_type(CheckInputReader* reader, uint32_t nam
     return result;
 }
 
+#include "c_check_declspec.c"
+
+// The report of specifiers from `first` to `end` that don't combine: clang's error, its place and its message, if it
+// gives one; else CHECK_INPUT_DECLARATION at `fallback` (#1127).
+static void check_input_report_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t fallback)
+{
+    CheckDeclspecResult declspec;
+    if (check_declspec_error(reader->parser, first, end, &declspec))
+    {
+        const CheckInputMessage message = declspec.error == CHECK_DECLSPEC_ERROR_SIGN ? CHECK_INPUT_SPECIFIER_SIGN :
+                                          declspec.error == CHECK_DECLSPEC_ERROR_WIDTH ? CHECK_INPUT_SPECIFIER_WIDTH :
+                                          declspec.error == CHECK_DECLSPEC_ERROR_COMPLEX ? CHECK_INPUT_SPECIFIER_COMPLEX : CHECK_INPUT_SPECIFIER_COMBINE;
+        const uint32_t count = reader->output->report_count;
+        check_input_report(reader, declspec.token, message);
+        if (reader->output->report_count != count)
+        {
+            reader->output->reports[count].specifier = declspec.first;
+            reader->output->reports[count].specifier_type = declspec.second;
+        }
+    }
+    else
+    {
+        check_input_report(reader, fallback, CHECK_INPUT_DECLARATION);
+    }
+}
+
 static bool check_input_specifier_combination(const TypeTable* types, TypeId base, uint32_t longs, uint32_t shorts,
                                               uint32_t signedness, bool integer_seen)
 {
@@ -2420,6 +2460,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     bool complex = false;
     bool atomic = false;
     bool reported = false;
+    const uint32_t reports = reader->output->report_count;
     // Whether a _BitInt base is this list's own keyword's, which the list's signedness makes signed or unsigned below;
     // a typedef name's or a typeof's keeps the signedness it has.
     bool bit_int = false;
@@ -2689,10 +2730,16 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             valid &= check_input_specifier_combination(reader->types, base, longs, shorts, signedness, integer_seen);
             if (!valid)
             {
-                if (!reported)
+                CheckDeclspecResult declspec;
+                if (!reported && auto_type != BUSTER_CHECK_NONE && !check_declspec_error(parser, first, end, &declspec))
                 {
-                    check_input_report(reader, auto_type != BUSTER_CHECK_NONE ? check_input_auto_type_clash(reader, first, i, end, auto_clash) : i, CHECK_INPUT_DECLARATION);
+                    check_input_report(reader, check_input_auto_type_clash(reader, first, i, end, auto_clash), CHECK_INPUT_DECLARATION);
                 }
+                else if (!reported)
+                {
+                    check_input_report_specifiers(reader, first, end, i);
+                }
+                reported = true;
                 break;
             }
             reader->ignored[i] = true;
@@ -2815,6 +2862,13 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     if (valid && plain_complex)
     {
         check_input_warning(reader, CHECK_WARNING_ID_PLAIN_COMPLEX, CHECK_WARNING_EVENT_PLAIN_COMPLEX, complex_token, CHECK_WARNING_COMPLETE_AT_TOKEN, i);
+    }
+    CheckDeclspecResult declspec;
+    if (!valid && reader->output->report_count == reports && check_declspec_error(parser, first, end, &declspec))
+    {
+        // The list refused as a whole once it ended (a sign or a width the type doesn't take, typedef with a storage
+        // class), which no report says yet: clang's.
+        check_input_report_specifiers(reader, first, end, first);
     }
     *cursor = i;
     *storage_class = storage;
