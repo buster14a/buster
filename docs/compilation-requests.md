@@ -259,10 +259,10 @@ objects are byte for byte the base's. `benchmark-backend-source` and
 functions, entries, records and lowered counts, apart from the new receipt
 lines.
 
-On the locked 9700X, #1141's merge (`4670b2eb`) against its first parent
-(`754475d4`), as whole processes interleaved by `time-runs` on CPU 2, shows no
-measurable cost ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/request-preparation-1057-2026-11-03),
-with its raw logs):
+On the locked 9700X, [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/request-preparation-1057-2026-11-03)
+(with its raw logs) measured #1141's merge (`4670b2eb`) against its first
+parent (`754475d4`) as whole processes interleaved by `time-runs` on CPU 2,
+medians of 5 to 41 runs:
 
 | Command | runs | wall time, base → merge | instructions, base → merge |
 |---|---:|---|---|
@@ -271,18 +271,30 @@ with its raw logs):
 | `-c` of `tools/ci/changes.c` | 21 | 7.917 → 7.883 ms | 63,570,059 → 63,568,455 (−1,604) |
 | `-c` of the frozen corpus's `sqlite3.c` | 11 | 112.309 → 112.223 ms | 1,215,785,766 → 1,215,786,163 (+397) |
 | `-fsyntax-only` of it | 11 | 89.167 → 89.370 ms | 903,854,433 → 903,855,020 (+587) |
+| `--lanes 1 -fsyntax-only` of Lua 5.4.8's 33 units | 11 | 59.950 → 60.159 ms | 741,327,601 → 741,307,598 (−20,003) |
+| `--lanes 1 -c` of them | 11 | 70.094 → 70.599 ms | 847,785,264 → 847,765,941 (−19,323) |
 | `benchmark-backend-source` of `sqlite3.c` | 5 | 656.661 → 660.375 ms | 9,630,170,403 → 9,629,561,143 (−609,260) |
 | `benchmark-lowering-source` of `sqlite3.c` | 5 | 1,024.968 → 1,023.769 ms | 14,479,142,381 → 14,483,648,230 (+4,505,849) |
 
-The wall times' ranges overlap in every row. The instruction counts, which
-vary by under 900 within a build, are the change's whole per-command work: a
-few hundred instructions either way, whatever the input's size, so no work
-per token. Every `-c` object is byte for byte the base's. Both source
-benchmarks report the same counts and timed regions, with the receipt line the
-only addition; `benchmark-lowering-source`'s process runs 0.031% more
-instructions, in no more time, for the selection and target-feature check
-that its preparation now runs once per file, as `-c` does, outside its timed
-region.
+What these inputs show, and no more:
+
+- The driver's commands run between 1,604 fewer and 587 more instructions
+  for one file, and about 600 fewer per unit for Lua's 33. Each difference is
+  larger than its row's spread between runs (under 900 instructions for the
+  single files, up to 5,299 for Lua's), so it is the change's own work, and on
+  inputs from a tiny file to `sqlite3.c` it doesn't grow with their size: no
+  added work per token on them.
+- No time regression shows: every wall-time median is within 1.22% of the
+  base's and each build's range overlaps the other's, which leaves open a
+  cost below the runs' spread.
+- Every `-c` object is byte for byte the base's, Lua's 33 included.
+- Both source benchmarks report the same counts and timed regions, with the
+  receipt line the only addition. Their processes differ outside the timed
+  regions: `benchmark-backend-source` runs 0.006% fewer instructions, and
+  `benchmark-lowering-source` 0.031% more in no more wall time, for the
+  selection and target-feature check that its preparation now runs once per
+  file, as `-c` does.
+- The corpus is two programs, `sqlite3.c` and Lua; other inputs may differ.
 
 ## Still separate
 
