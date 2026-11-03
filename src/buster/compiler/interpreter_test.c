@@ -394,6 +394,174 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, added && runtime.memory_count == 0, "heap allocation removal");
 }
 
+// #1059's atomic read/modify/writes as one thread runs them: an addition and an exchange of an int return its old values
+// and leave the sum and the operand, a byte's exchange returns its old value as its class normalizes it, and the object
+// is checked as a load's and a store's: reading its undefined bytes, a misaligned object and a value that is no
+// ATOMIC_RMW's are refused.
+static void interpreter_test_atomic_rmw(InterpreterTestTally* tally, Arena* scratch)
+{
+    // x = 5; old = atomic x += 3 (5, x 8); old += atomic x <- 40 (8, x 40); c = -1; old += atomic c <- 1 (-1); x + old.
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_CONVERT,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I8,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    uint64_t values[] = {
+        0,
+        5,
+        0,
+        0,
+        3,
+        BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST,
+        0,
+        40,
+        0,
+        0,
+        1,
+        (uint64_t)-1,
+        0,
+        1,
+        1,
+        BUSTER_TYPED_FENCE_SEQ_CST,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I8,
+    };
+    Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = local_classes,
+        .local_count = 2,
+    };
+    InterpreterResult result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 52, "atomic addition and exchanges return old values and leave the sum and the operands");
+    values[5] = 0x40;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "an atomic read/modify/write of no operation rejected");
+    values[5] = BUSTER_TYPED_RMW_ADD | BUSTER_TYPED_FENCE_SEQ_CST;
+    // The int's read/modify/write before any store: its bytes are undefined.
+    const uint8_t undefined_kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t undefined_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    const uint64_t undefined_values[] = {
+        0,
+        3,
+        BUSTER_TYPED_RMW_ADD,
+        0,
+    };
+    function.kinds = undefined_kinds;
+    function.classes = undefined_classes;
+    function.values = undefined_values;
+    function.count = BUSTER_ARRAY_LENGTH(undefined_kinds);
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_UNDEFINED, "an atomic read/modify/write of undefined bytes diagnosed");
+    InterpreterOptions options = interpreter_default_options();
+    options.check_undefined = false;
+    result = interpreter_test_run(&function, scratch, &options);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK, "an atomic read/modify/write's undefined-byte check can be disabled");
+    // An int's addition at a long's address plus one, inside its object but misaligned.
+    const uint8_t misaligned_kinds[] = {
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_PTR_ADD,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_ATOMIC_RMW,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t misaligned_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+    };
+    const uint64_t misaligned_values[] = {
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        7,
+        BUSTER_TYPED_RMW_ADD,
+        0,
+    };
+    const uint8_t long_class = BUSTER_TYPED_CLASS_U64;
+    function.kinds = misaligned_kinds;
+    function.classes = misaligned_classes;
+    function.values = misaligned_values;
+    function.count = BUSTER_ARRAY_LENGTH(misaligned_kinds);
+    function.local_classes = &long_class;
+    function.local_count = 1;
+    result = interpreter_test_run(&function, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_MEMORY, "a misaligned atomic read/modify/write rejected");
+}
+
 // The memories' disjoint prefix (InterpreterRuntime.disjoint_count, #1229) never changes which memory an access finds,
 // the first that holds it: a memory that overlaps one in the prefix stays past it, and the prefix's one, found first,
 // decides; a last-match hint that a removal left pointing at another memory isn't taken; the prefix stops growing at
@@ -1289,6 +1457,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_atomic_rmw(&tally, &scratch);
         interpreter_test_lookup(&tally);
         interpreter_test_copy(&tally, &scratch);
         interpreter_test_limits(&tally, &scratch);

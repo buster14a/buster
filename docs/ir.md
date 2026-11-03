@@ -477,6 +477,39 @@ refuses one written as text), and `tests/ir-source/atomics.c` runs through both
 lowerings, promotion, the text's round trip and the IR's three forms against
 clang, its `long`'s accesses printed `align=8`.
 
+### Atomic read/modify/writes (#1059)
+
+`rmw` (an integer of 1, 2, 4 or 8 bytes, a pointer's as `i64`; `a` the object's
+address, `b` the operand, of the result's type, `c` its operation,
+`BUSTER_IR_RMW_EXCHANGE` or `BUSTER_IR_RMW_ADD`; its flags `BUSTER_IR_ATOMIC` and
+a C memory order, any of the six, since the locked access is a full barrier;
+printed `rmw.iN %p, %v align=N xchg|add ORDER`) returns the object's old value
+and leaves the operand (an exchange) or the sum (an addition) in it, as one
+atomic access of its type's bytes: the typed stream's `ATOMIC_RMW`, which the C
+producer gives an exchange, an addition or a subtraction of a constant order
+([the builtin integration guide](c-builtins-integration.md)'s "Direct
+read/modify/writes"). Its alignment is its size at least, as an atomic load's
+is, and `ir_lower` gives it its class's natural one. No pass moves an access or a
+call across it, merges it or drops it: it is an optimizer root, neither value
+numbering nor loop-invariant motion takes it, and its address counts as taken,
+so promotion and private-field replacement leave its object in memory; dataflow
+reads its address and its operand, as a store's. Both verifiers check its flags
+(`ir_rmw_flags_valid`) and its type and alignment (`ir_atomic_access`, its own
+rule's, `IR_RULE_ATOMIC_RMW`); both interpreters run it as one thread does, a
+byte at a time through volatile accesses, refusing an address misaligned for its
+declared alignment and checking its object as a load's (undefined bytes are
+reported) before a store's. Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
+the operand copied to the scratch register, `xchg` or `lock xadd` of the object's
+width (never the narrow value's 32-bit register's), and the old value
+zero-extended as a load's is, a barrier no load folds past. `tests/ir/atomics.ir`
+reads every width, operation and order back, `test-ir`'s verifier cases refuse
+an operation past an addition, a non-atomic or a volatile one, an order past
+`seq_cst` and an 8-byte one aligned to 4 (and `test-ir-parse` one written as text
+aligned below its size), `test-tier1-select` runs each width's exchange and
+addition on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
+through both lowerings, promotion, the text's round trip and the IR's three forms
+against clang.
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |

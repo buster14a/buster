@@ -120,8 +120,11 @@ patterns are:
   plan's pass, its store made the operands' walk reload the function's columns
   (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
   order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
-  gives their orders, with a seq_cst store's `fence` after it; other atomic operations reach it as calls of the unit's
-  leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
+  gives their orders, with a seq_cst store's `fence` after it. An exchange, an addition or a subtraction of a constant
+  order reaches it as the IR's `rmw` (`TIER1_RULE_ATOMIC_RMW`): the operand copied to the scratch register, `xchg` or
+  `lock xadd` of the object's width (a byte's and a short's at their own, never their 32-bit register's, which
+  `test-tier1-select` runs on guard bytes), and the old value zero-extended into its register as a load's is, a barrier
+  no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared

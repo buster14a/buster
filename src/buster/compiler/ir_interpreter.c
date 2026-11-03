@@ -1080,6 +1080,36 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     // One thread's accesses in program order, as this interpreter runs them, are what any fence orders
                     // them into (#1059): nothing to do. It is no model of other threads' views of memory.
                     break;
+                case IR_ATOMIC_RMW:
+                {
+                    // An atomic read/modify/write (#1059), as one thread runs it: its object's old value read, the operand
+                    // (an exchange) or the sum (an addition) written, a byte at a time through volatile accesses as an
+                    // atomic load's and store's are here, the old value the result. With memory checks, its address is
+                    // refused where its declared alignment isn't, whatever its bytes hold; then its object is checked as a
+                    // load's, which reports reading undefined bytes, before a store's marks them written.
+                    const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
+                    const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
+                    result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
+                    if (result.status == INTERPRETER_OK)
+                    {
+                        result.status = interpreter_memory_access(&runtime, av.low, bytes, true);
+                    }
+                    if (result.status == INTERPRETER_OK)
+                    {
+                        uint64_t old = 0;
+                        volatile uint8_t* object = (volatile uint8_t*)(uintptr_t)av.low;
+                        for (uint32_t byte = 0; byte < bytes; byte += 1)
+                        {
+                            old |= (uint64_t)object[byte] << (8 * byte);
+                        }
+                        const uint64_t written = c == BUSTER_IR_RMW_ADD ? old + bv.low : bv.low;
+                        for (uint32_t byte = 0; byte < bytes; byte += 1)
+                        {
+                            object[byte] = (uint8_t)(written >> (8 * byte));
+                        }
+                        value = ir_interpreter_value(old, type);
+                    }
+                } break;
                 case IR_ALLOCA:
                     result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
                     break;

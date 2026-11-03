@@ -629,6 +629,16 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
             // One thread's accesses in program order, as this runs them: nothing to do. A fence orders other threads' views
             // of them (#1059).
             break;
+        case IR_ATOMIC_RMW:
+        {
+            // An atomic read/modify/write (#1059), as one thread runs it: the old value, and the operand or the sum stored.
+            uint64_t old = 0;
+            memcpy(&old, (const void*)(uintptr_t)values[left], width);
+            const uint64_t written = third == BUSTER_IR_RMW_ADD ? old + values[right] : values[right];
+            memcpy((void*)(uintptr_t)values[left], &written, width);
+            values[i] = old;
+            break;
+        }
         default:
             assert(false);
             break;
@@ -934,7 +944,8 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 // have no lea for the costed cover to prefer over the fold (an add's: the cover keeps its load apart). A call's shape
 // is planned alone, since this emitter refuses calls (tier1_select_test_call_barriers runs them through the native
 // one); a fence (#1059), a thread fence of seq_cst's mfence or a signal fence's no record, keeps the load's own record
-// before it. An atomic load is a barrier too, and folds into nothing itself (#1059).
+// before it. An atomic load and an atomic read/modify/write are barriers too, and an atomic load folds into nothing
+// itself (#1059).
 typedef struct Tier1SelectTestBarrier Tier1SelectTestBarrier;
 struct Tier1SelectTestBarrier
 {
@@ -973,12 +984,14 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
     { "not past an acquire fence", { IR_ADDRESS, IR_LOAD, IR_FENCE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 2, 6 }, { 1, N, N, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
     { "not past an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, false },
     { "not an atomic load", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, { 0, BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past an atomic exchange", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_ATOMIC_RMW, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT }, { 0, 3, 0, 5, 2, 7 }, { 1, N, N, 2, 4, N }, { 0, N, 2, BUSTER_IR_RMW_EXCHANGE, N, N }, 6, 4, 7, false },
+    { "not past an atomic addition", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_ATOMIC_RMW, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_ATOMIC }, { 0, 3, 0, 5, 2, 7 }, { 1, N, N, 2, 4, N }, { 0, N, 2, BUSTER_IR_RMW_ADD, N, N }, 6, 4, 7, false },
 };
 #undef N
 
 // tier1_select_barriers against its scalar twin and an oracle (each node's last barrier before it, by a scan back), on
-// random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, loads volatile,
-// atomic or neither, other nodes, and flag bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
+// random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, atomic
+// read/modify/writes, loads volatile, atomic or neither, other nodes, and flag bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
 // page, the entries' page poisoned before them.
 static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
 {
@@ -991,8 +1004,8 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
     uint32_t* scalar = calloc(most, sizeof(uint32_t));
     uint32_t* oracle = calloc(most, sizeof(uint32_t));
     tier1_select_test_expect(test, ready && scalar != 0 && oracle != 0, "barrier scan's guarded columns");
-    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
-    const uint32_t barrier_kinds = 6;
+    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
+    const uint32_t barrier_kinds = 7;
     static const uint32_t counts[] = { 255, 256, 257, 1000, 4095, 4096 };
     uint64_t random = UINT64_C(0x2c1b3c6dd9b0f6a1);
     bool same = ready && scalar != 0 && oracle != 0;
@@ -1018,7 +1031,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             uint32_t before = node;
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
-                                    ops[before - 1] == IR_FENCE || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_OBSERVABLE) != 0)))
+                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_OBSERVABLE) != 0)))
             {
                 before -= 1;
             }
@@ -1139,6 +1152,87 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
             }
         }
         arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+// #1059's atomic read/modify/writes of every width, an exchange and an addition, selected by both paths and run on a
+// word of guard bytes: the result and the memory the original IR's, so that a byte's or a short's xchg or lock xadd
+// writes its object's bytes alone, never its 32-bit register's.
+static void tier1_select_test_atomic_rmw_widths(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    static const uint8_t types[] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(types); t += 1)
+    {
+        for (uint32_t operation = BUSTER_IR_RMW_EXCHANGE; operation <= BUSTER_IR_RMW_ADD; operation += 1)
+        {
+            const uint8_t type = types[t];
+            const bool narrow = type != IR_I64;
+            const uint32_t count = narrow ? 6 : 5;
+            const IrSizes sizes =
+            {
+                .instruction_count = count,
+                .block_count = 1,
+                .parameter_count = 3,
+            };
+            IrFunction function;
+            const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+            tier1_select_test_expect(test, created, "create atomic read/modify/write fixture");
+            if (created)
+            {
+                function.result_type = IR_I64;
+                function.block_offsets[1] = count;
+                function.parameter_types[0] = IR_PTR;
+                function.parameter_types[1] = type;
+                function.parameter_types[2] = IR_I64;
+                tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 3, IR_ATOMIC_RMW, type, 0, 1, operation);
+                function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT;
+                function.alignment_log2[3] = (uint8_t)t;
+                if (narrow)
+                {
+                    tier1_select_test_node(&function, 4, IR_ZEXT, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                }
+                tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, narrow ? X86_REGISTER_R8 : X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    Tier1SelectPlan plan;
+                    uint32_t failed = 0;
+                    const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &failed);
+                    char message[160];
+                    snprintf(message, sizeof(message), "an i%u atomic %s selects", ir_type_bits[type], operation == BUSTER_IR_RMW_ADD ? "addition" : "exchange");
+                    tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[3].rule == TIER1_RULE_ATOMIC_RMW, message);
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed) : planned;
+                    snprintf(message, sizeof(message), "an i%u atomic %s emits", ir_type_bits[type], operation == BUSTER_IR_RMW_ADD ? "addition" : "exchange");
+                    tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, message);
+                    if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                    {
+                        // The object the middle word's first bytes, its neighbours guard bytes whose sum with the operand
+                        // carries past any narrower width.
+                        uint64_t actual_memory[3] = { 0xa5a5a5a5a5a5a5a5u, 0xfedcba98f0f1f2f3u, 0x5a5a5a5a5a5a5a5au };
+                        uint64_t expected_memory[3];
+                        memcpy(expected_memory, actual_memory, sizeof(actual_memory));
+                        const uint64_t operand = 0x8182838485868788u;
+                        const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)&expected_memory[1], operand, 0);
+                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)&actual_memory[1], operand, 0);
+                        snprintf(message, sizeof(message), "an i%u atomic %s returns the old value and writes its object's bytes alone", ir_type_bits[type],
+                                 operation == BUSTER_IR_RMW_ADD ? "addition" : "exchange");
+                        tier1_select_test_expect(test, expected == actual && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0, message);
+                    }
+                    arena_pop_to(&output, 0);
+                }
+            }
+            arena_pop_to(&input, 0);
+        }
     }
     arena_release(&scratch);
     arena_release(&output);
@@ -4011,6 +4105,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
+            tier1_select_test_atomic_rmw_widths(&test);
             tier1_select_test_errors(&test);
             tier1_select_test_guarded(&test);
             tier1_select_test_calls(&test);

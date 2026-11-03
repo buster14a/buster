@@ -661,7 +661,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 | Family | Effects | Requirements | Direct form |
 | --- | --- | --- | --- |
 | `atomic-access` (`load_n`, `store_n`, C11's, an `_Atomic` object's) | reads or writes, atomic, orders, barrier | none | an aligned integer's, enumeration's or pointer's, of a constant order: the typed stream's marked `LOAD` or `SET` (and a seq_cst store's `FENCE`); an implicit `_Atomic` object's aligned load or store, and an update's first load, seq_cst's |
-| `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | none yet |
+| `atomic-rmw` (exchange, compare-exchange, fetch ops, test-and-set, clear, `__sync`) | reads and writes, atomic, orders, barrier; the IEEE maximum and minimum also the floating environment and exceptions | fixed registers | an aligned integer's or enumeration's exchange, or addition or subtraction returning the old or the new value (a pointer's exchange and a test-and-set's too), of a constant order: the typed stream's `ATOMIC_RMW` (`xchg` or `lock xadd`); an implicit `_Atomic` integer's increment, decrement, `+=` or `-=` |
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
 | `flt-rounds` | floating environment, barrier | none | none |
@@ -751,19 +751,55 @@ GCC's older mapping, equally a full barrier; which is cheaper on Zen 5 is for th
 to seq_cst), a scoped family's, a floating object's and an unaligned or wider
 one keep their helper or libatomic's call. The planner reserves an implicit
 object's compare-exchange leaf for a width only where a compound assignment,
-increment or decrement updates such an object, and a builtin's width's leaves
+increment or decrement updates such an object (but an integer's addition or
+subtraction: "Direct read/modify/writes", below), and a builtin's width's leaves
 where a builtin takes them; no leaf for a direct load or store, and a leaf for a
 generic form's or a representation's (a floating or another object's builtin)
-that keeps one. The compiler's own
-`main.c` takes 77 atomic accesses directly and keeps 8 helper calls of them (its
-tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the unit plans no
-helper.
+that keeps one. The compiler's own `main.c`, every function lowered
+(`--lower-all`), takes 91 atomic accesses directly and keeps 8 helper calls of
+them (its tests' dynamic orders); SQLite 3.50.4's 38 are all direct, and the
+unit plans no helper.
+
+**Direct read/modify/writes.** `check_program_direct_rmw` admits an exchange
+(`__atomic_exchange_n`, `__sync_lock_test_and_set`, `__sync_swap`,
+`__c11_atomic_exchange`, and `__atomic_test_and_set` of its byte with 1) and an
+addition or a subtraction returning the old value or the new one
+(`__atomic_fetch_add` and `_sub`, `__atomic_add_fetch` and `_sub_fetch`, the
+`__sync` ones, `__c11_atomic_fetch_add` and `_sub`), unscoped, of an integer's
+or an enumeration's object (an exchange's of a pointer's or a bool's too) of 1,
+2, 4 or 8 bytes, its value's size, known aligned to it (a native one, for C11's),
+of an order the checker knows (any of C's: the locked access is a full barrier,
+which every order takes; a `__sync` builtin's is seq_cst) whose argument evaluates
+for no effect, its effect's shape its rule's. The planner and the lowering ask it
+alike; the lowering (`check_lower_atomic_rmw_direct`) evaluates the pointer and
+the operand converted to the object's type (negated for a subtraction), writes the
+typed stream's `ATOMIC_RMW` of the object's class (`BUSTER_TYPED_RMW_ADD` for an
+addition, and the order), and for a new value adds the operand to the old one in
+`int` (a narrow object's) and converts it back. An implicit `_Atomic` integer's
+or enumeration's increment, decrement, `+=` or `-=` whose operands are computed as
+integers is one too (`check_program_atomic_update_direct`): its update's
+compare-exchange loop becomes one `ATOMIC_RMW` addition of the operand narrowed to
+the object's width, and its plan reserves no compare-exchange leaf. Tier 0 emits
+`xchg` or `lock xadd` of the object's width with the operand in its register,
+the old value extended as the class's load extends it ([the Tier 0
+guide](tier0.md)); the IR keeps it as `rmw` ([the IR guide](ir.md)'s "Atomic
+read/modify/writes"), an atomic access no pass moves, merges or drops, and Tier 1
+selects the same instructions, the object's width and never its narrow value's
+32-bit register's, as a barrier no load folds past. clang -O0's code is the same
+(`xchg`, `lock xadd`); -O2's has a `lock add` where an addition's result is unused.
+A compare-exchange, the bitwise, minimum, maximum and floating operations, a
+dynamic order, a scoped family's and an implicit update of another operation keep
+their helper or loop. The compiler's own `main.c` calls 3 read/modify/write
+helpers where it called 19 (16 direct; 2 helpers planned where 7 were), and with
+every function lowered 305 where it called 403 (102 direct; 152 planned where 176
+were); SQLite 3.50.4 has none, and its object is unchanged.
 
 **Coverage.** `--helper-report` prints on standard error, after the command, a
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
-forms, an atomic access's marked `LOAD`, `STORE` or `SET` and a fence's `FENCE`
-(but a seq_cst store's own), `helper`: the lowered code's call sites of a helper,
+forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
+`ATOMIC_RMW` and a fence's `FENCE` (but a seq_cst store's own), `helper`: the
+lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
 asm statement's alike, and `planned`: helpers emitted) and a line per family
 (`helpers.fence`, `direct=`, `helper=`, `planned=`). A family without a direct
@@ -803,13 +839,32 @@ lowers loads and stores of each width and order, C11's, a pointer's and an
 implicit object's by both paths, checks each function's marked entries, its
 fences, its calls and Tier 0's records by both twins, the lowered code's marked accesses and the plan's helper uses,
 then runs every width and order, the implicit object's loads, stores and
-updates and the helpers' cases natively against clang. `test-checker-driver`'s
-report unit pins `--helper-report`'s direct forms and calls of a unit with
-every kind of each, and Tier 1's selection tests keep a load from folding past
-a fence of any order or an atomic load, and an atomic load from folding at all.
+updates and the helpers' cases natively against clang. Its read/modify/write
+section (`c_check_program_atomic_rmw_test.c`) lowers exchanges, additions and
+subtractions of each width, the `__sync`, C11, pointer and test-and-set forms
+and an implicit object's increment by both paths, checks each function's
+`ATOMIC_RMW` entries and values, its calls and Tier 0's one locked access by both
+twins, the helpers' cases (a compare-exchange, a bitwise operation, a dynamic
+order, an implicit multiplication's loop), the lowered code's read/modify/writes and the plan's helper uses, then runs every
+width, operation and form natively against clang. `test-checker-driver`'s counter
+unit is the read/modify/writes' concurrent control: four threads add to shared
+counters by every direct form (two of them a short's and a byte's, which wrap)
+and take a spin lock by an exchange around a plain increment, by both paths, by
+Tier 0 and by `--tier1`; every count must be exact, and a volatile counter's
+increments, the control, show the threads overlap (on the 4-CPU container under
+the other parts' load, 1,000,000 and 3,225,039 of 4,000,000 kept in two of the
+four builds; a run whose threads take turns on one CPU keeps them all, which
+leaves the exact counts weaker, not wrong). It found Tier 1 selecting a byte's
+and a short's `xchg` and `lock xadd` at 32 bits, writing past the object, which
+`test-tier1-select` now runs on guard bytes. `test-checker-driver`'s report unit
+pins `--helper-report`'s direct forms and calls of a unit with every kind of
+each, and Tier 1's selection tests keep a load from folding past a fence of any
+order, an atomic load or a read/modify/write, and an atomic load from folding at
+all.
 
-**Pending** (#1059): the read/modify/writes (exchange, compare-exchange and the
-fetch operations: `lock` forms or a compare-exchange loop), C's volatile
+**Pending** (#1059): the other read/modify/writes (compare-exchange, and the
+bitwise, minimum and maximum fetch operations: `lock cmpxchg`, a `lock` form
+where the result is unused, or a compare-exchange loop), C's volatile
 accesses carried to the IR as such, the asm statements' operations placed in
 their callers (slice 4), and the paired 9700X measurements of helper calls,
 save and reload traffic, code size, compile time and runtime.
