@@ -305,6 +305,8 @@ static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocesso
         .initializer_references = unit->data.references,
         .initializer_reference_count = unit->data.reference_count,
         .scalar = scalar,
+        .target = options.target,
+        .predefines = &options.predefines,
     };
     ready = ready && check_program(&unit->program, parser, &unit->input, &unit->stream, &unit->types, program_options, &unit->output, &unit->scratch) &&
             check_program_select(&unit->selected, &unit->program, &unit->data, scalar, &unit->output, &unit->scratch);
