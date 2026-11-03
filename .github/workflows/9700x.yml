@@ -1267,7 +1267,7 @@ jobs:
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           ./build/compiler benchmark-check-units --lanes 1,2,4,8 --runs 5 -- "${options[@]}"
 
       - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc

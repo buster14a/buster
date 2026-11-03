@@ -60,7 +60,7 @@
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the first program's objects and executable as by --lanes 1.
 // - The benchmark (benchmark-check-units, #1128) of three units by --lanes 1 and 2, a run each, which must report both
-//   counts, and a lane count of 0, which it must refuse.
+//   counts; a lane count of 0, which it must refuse; and a command that fails each run, which it must fail.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
 //   --poison-arenas: each file's status and object as with the file alone, and its diagnostics in their place, in the
 //   files' order.
@@ -1828,9 +1828,14 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
     char* refused[] = { (char*)executable, "benchmark-check-units", "--lanes", "1,0", NULL };
     const int refusal = BUSTER_HOST_VECTOR ? check_units_test_run(directory, refused, "/dev/null", "/dev/null", false) : 1;
     check_units_test_expect(tally, refusal == 1, "the units' benchmark took no lanes as a lane count", directory);
+    // A command that fails every time, as one with an option the driver doesn't take: the same status each run, which
+    // time-runs alone would pass.
+    char* failing[] = { (char*)executable, "benchmark-check-units", "--units", "2", "--functions", "2", "--lanes", "1", "--runs", "1", "--", "--no-such-option", NULL };
+    const int failed = BUSTER_HOST_VECTOR ? check_units_test_run(directory, failing, "/dev/null", "/dev/null", false) : 1;
+    check_units_test_expect(tally, failed == 1, "the units' benchmark passed a command that fails", directory);
     if (BUSTER_HOST_VECTOR)
     {
-        printf("  benchmark: benchmark-check-units by 1 and 2 lanes, and a count of none refused\n");
+        printf("  benchmark: benchmark-check-units by 1 and 2 lanes; a count of none, and a command that fails, refused\n");
     }
 }
 

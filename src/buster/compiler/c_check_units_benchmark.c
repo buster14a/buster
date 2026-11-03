@@ -100,8 +100,9 @@ static int run_check_units_benchmark(int argc, char** argv)
     uint64_t* starts = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, lane_count);
     uint64_t* counts = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, lane_count);
     uint64_t* medians = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)lane_count * BUSTER_PROFILE_TIME_FIELDS);
+    int* statuses = BUSTER_ARENA_PUSH_ARRAY(&arena, int, lane_count);
     char* lane_text = BUSTER_ARENA_PUSH_ARRAY(&arena, char, (uint64_t)lane_count * 16);
-    bool ready = names != 0 && arguments != 0 && starts != 0 && counts != 0 && medians != 0 && lane_text != 0;
+    bool ready = names != 0 && arguments != 0 && starts != 0 && counts != 0 && medians != 0 && statuses != 0 && lane_text != 0;
     for (uint32_t u = 0; ready && u < units; u += 1)
     {
         names[u] = arena_push(&arena, 32, 1);
@@ -159,8 +160,21 @@ static int run_check_units_benchmark(int argc, char** argv)
             .warmups = 1,
             .output = STDOUT_FILENO,
             .medians = medians,
+            .statuses = statuses,
         };
         failures = profile_time_runs(&arena, &t);
+        // Every process the same as its count's first, which must have compiled the units: time-runs takes a status
+        // that stays the same, a failure among them, for a pass.
+        for (uint32_t l = 0; l < lane_count; l += 1)
+        {
+            const int status = statuses[profile_time_slot_index(&t, 0, 0, l)];
+            const bool compiled = status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            failures += !compiled;
+            if (!compiled)
+            {
+                fprintf(stderr, "benchmark-check-units: --lanes %u's command failed (status %d)\n", lanes[l], status != -1 && WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            }
+        }
         // Against the first count's, one lane's by default.
         const uint64_t* first = medians + profile_time_slot_index(&t, 0, 0, 0) * BUSTER_PROFILE_TIME_FIELDS;
         for (uint32_t l = 0; failures == 0 && l < lane_count; l += 1)

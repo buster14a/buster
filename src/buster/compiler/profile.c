@@ -1687,6 +1687,10 @@ struct ProfileTimeRuns
     // nanoseconds, the user and system times in microseconds, the peak in KiB, the minor and major faults, the user
     // cycles and the instructions.
     uint64_t* medians;
+    // And each slot's status in its first warm-up (null for none), as waitpid gives it, -1 if the process couldn't run:
+    // time-runs fails a run only where its status differs from that one, which a caller that needs every process to
+    // succeed checks.
+    int* statuses;
 };
 #define BUSTER_PROFILE_TIME_FIELDS 8
 
@@ -2166,6 +2170,10 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
             if (warmup && run == 0)
             {
                 expected[s] = one.status;
+                if (t->statuses != 0)
+                {
+                    t->statuses[s] = one.status;
+                }
             }
             const bool same = exited && one.status == expected[s];
             failures += !same;

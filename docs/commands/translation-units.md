@@ -68,24 +68,13 @@ parts, `--shared-parts`' report, into objects their own alone and executables
 one lane's); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
 jobserver's tokens held while the link writes; lanes that don't start; and
-`benchmark-check-units` by `--lanes` 1 and 2, and its refusal of a count of 0;
+`benchmark-check-units` by `--lanes` 1 and 2, and its refusals of a count of 0
+and of a command that fails every run;
 with `-g`, the executables by `--lanes` 1 and 8, poisoned and by each path the
 same bytes, and each unit's `-c -g` object its own alone. With `--corpus DIR`
 it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
 each alone, and with `--generate DIR` it writes a program of synth's shape
 (512 units of 200 functions by default) for measurements, and tests nothing.
-
-`./build/compiler benchmark-check-units [--executable PATH] [--units N]
-[--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]` (#1128) times one
-command of synth's shape (64 units of 200 functions by default) by `-c`, with
-the options after `--` (absolute paths: the processes run in the program's
-directory), by each lane count (1, 2, 4 and 8 by default), as processes in
-`time-runs`' rotated order, 5 runs of each after a warm-up. Then it prints each
-count's wall time and system time against the first count's: lanes that
-serialize on the kernel, as #1128's did on the address space's lock, raise the
-system time where a busy machine's wall time may hide it. The 9700X job runs it
-by 1, 2, 4 and 8 lanes with the frozen corpus's headers and predefines, where
-`tools/ci/changes.c`'s `check-units` says.
 [docs/translation-units.md](../../docs/translation-units.md) has the design and the
 measurements. The end-to-end single- and multi-unit contract, with the
 mixed-tier and actual command-team receipts, is
@@ -93,3 +82,16 @@ mixed-tier and actual command-team receipts, is
 `tests/driver/multicore.c` runs it in the shared correctness suite. What
 #149's remaining whole-process performance acceptance still needs is there
 too.
+
+`./build/compiler benchmark-check-units [--executable PATH] [--units N]
+[--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]` (#1128) times one
+command of synth's shape (64 units of 200 functions by default) by `-c`, with
+the options after `--` (absolute paths: the processes run in the program's
+directory), by each lane count (1, 2, 4 and 8 by default), as processes in
+`time-runs`' rotated order, 5 runs of each after a warm-up, every one of which
+must compile the units (`time-runs` alone passes a status that stays the same).
+Then it prints each count's wall time and system time against the first
+count's: lanes that serialize on the kernel, as #1128's did on the address
+space's lock, raise the system time where a busy machine's wall time may hide
+it. The 9700X job runs it by 1, 2, 4 and 8 lanes with the frozen corpus's
+headers and predefines, where `tools/ci/changes.c`'s `check-units` says.
