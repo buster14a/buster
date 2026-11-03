@@ -49,7 +49,7 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults. On:
 
-- snippets: 202 of valid and invalid code, each with the first error clang gives
+- snippets: 357 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
   same message; `--clang` checks each expectation against clang too, which
   must be a parse issue but for the snippets marked as the errors clang's
@@ -103,8 +103,9 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
 - mutations (`--mutations N`, with files): N copies of the files' -E text with
   a token deleted, duplicated or swapped with the next. With `--clang`, a copy
   clang accepts must parse, and one whose first error is a parse issue must fail
-  with its first error on the same line; without, both paths must agree as on
-  any file.
+  with the same first error, at its line and column with its message (#1127;
+  `--reports N` prints that many of the mismatches); without, both paths must
+  agree as on any file.
 
 `--explain` tallies instead why the checks sent valid code to the scalar parser,
 by signature, with an example of each, and `--print-tree FILE [FIRST LAST]`
