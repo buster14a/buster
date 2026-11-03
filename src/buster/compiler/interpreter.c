@@ -65,17 +65,23 @@ struct InterpreterMemory
     uint32_t owner;
 };
 
+// The most memories the disjoint prefix (InterpreterRuntime.disjoint_count) grows to: a memory registered past it is
+// compared with none, so a frame of many locals (the limits allow 65,536) registers each in constant time, and finds
+// them by the in-order search, as before the prefix; a program's recursions of a few locals per frame stay in it.
+#define BUSTER_INTERPRETER_DISJOINT_PREFIX 1024u
+
 typedef struct InterpreterRuntime InterpreterRuntime;
 struct InterpreterRuntime
 {
     InterpreterMemory* memories;
     uint32_t memory_count;
     uint32_t memory_capacity;
-    // How many memories, from the first, interpreter_memory_add found pairwise disjoint (no byte in two of them). While
-    // that is all of them, a range lies in at most one, so interpreter_memory_access may look where the last access
-    // matched and then from the newest memory down, where a frame's own slots are, rather than from the oldest: the
-    // memory it finds is the first that holds the range all the same. A runtime whose memories were set some other way
-    // keeps 0 and looks in order.
+    // How many memories, from the first, are known pairwise disjoint (no byte in two of them): interpreter_memory_add
+    // grows this prefix while it is the whole list and shorter than BUSTER_INTERPRETER_DISJOINT_PREFIX, comparing the
+    // new memory with each in it, and a removal keeps the memories it kept from it. A range lies in at most one memory
+    // of the prefix, and that one comes before any past it, so interpreter_memory_find may look there from the newest
+    // down, where a frame's own slots are, rather than from the oldest: the memory it finds is the first that holds the
+    // range all the same. A runtime whose memories were set some other way keeps 0 and looks in order.
     uint32_t disjoint_count;
     // The memory the last access found, a guess interpreter_memory_access checks before it trusts it.
     uint32_t last_match;
@@ -236,8 +242,9 @@ static bool interpreter_memory_add(InterpreterRuntime* runtime, uint8_t* bytes, 
     {
         InterpreterMemory* const memories = runtime->memories;
         const uint32_t count = runtime->memory_count;
-        // Still all disjoint if they were and the new memory shares no byte with any: an empty one shares none.
-        bool disjoint = runtime->disjoint_count == count;
+        // The prefix grows by the new memory if it is the whole list, still short enough to compare with
+        // (BUSTER_INTERPRETER_DISJOINT_PREFIX), and the new memory shares no byte with any in it: an empty one shares none.
+        bool disjoint = runtime->disjoint_count == count && count < BUSTER_INTERPRETER_DISJOINT_PREFIX;
         for (uint32_t i = 0; disjoint && size != 0 && i < count; i += 1)
         {
             const uint64_t base = (uint64_t)(uintptr_t)memories[i].bytes;
@@ -256,41 +263,36 @@ static bool interpreter_memory_add(InterpreterRuntime* runtime, uint8_t* bytes, 
     return result;
 }
 
-// After a removal: memories that were all disjoint still are; otherwise none is known to be until all are gone.
-static void interpreter_memory_removed(InterpreterRuntime* runtime, uint32_t count)
+// Removes the memories `removed` says to, keeping the others in their order. The disjoint prefix becomes the memories
+// kept from it, which stay first and pairwise disjoint.
+static void interpreter_memory_compact(InterpreterRuntime* runtime, uint8_t* bytes, bool by_owner, uint32_t owner)
 {
-    runtime->disjoint_count = runtime->disjoint_count == runtime->memory_count ? count : 0;
-    runtime->memory_count = count;
+    InterpreterMemory* const memories = runtime->memories;
+    const uint32_t count = runtime->memory_count;
+    const uint32_t prefix = runtime->disjoint_count;
+    uint32_t destination = 0;
+    uint32_t kept_prefix = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const bool removed = by_owner ? memories[i].owner == owner : memories[i].bytes == bytes;
+        if (!removed)
+        {
+            kept_prefix += i < prefix;
+            memories[destination++] = memories[i];
+        }
+    }
+    runtime->memory_count = destination;
+    runtime->disjoint_count = kept_prefix;
 }
 
 static void interpreter_memory_remove(InterpreterRuntime* runtime, uint8_t* bytes)
 {
-    InterpreterMemory* const memories = runtime->memories;
-    const uint32_t count = runtime->memory_count;
-    uint32_t destination = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        if (memories[i].bytes != bytes)
-        {
-            memories[destination++] = memories[i];
-        }
-    }
-    interpreter_memory_removed(runtime, destination);
+    interpreter_memory_compact(runtime, bytes, false, 0);
 }
 
 static void interpreter_memory_remove_owner(InterpreterRuntime* runtime, uint32_t owner)
 {
-    InterpreterMemory* const memories = runtime->memories;
-    const uint32_t count = runtime->memory_count;
-    uint32_t destination = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        if (memories[i].owner != owner)
-        {
-            memories[destination++] = memories[i];
-        }
-    }
-    interpreter_memory_removed(runtime, destination);
+    interpreter_memory_compact(runtime, 0, true, owner);
 }
 
 // Whether `memory` holds all `bytes` (at least 1) from `address`.
@@ -301,29 +303,24 @@ static bool interpreter_memory_holds(const InterpreterMemory* memory, uint64_t a
     return address >= base && offset <= memory->size && bytes <= memory->size - offset;
 }
 
-// The first memory that holds all `bytes` (at least 1) from `address`, or memory_count if none does. While the
-// memories are all disjoint (InterpreterRuntime.disjoint_count) at most one holds them: the last access's memory first,
-// then the newest down; otherwise each from the first.
+// The first memory that holds all `bytes` (at least 1) from `address`, or memory_count if none does. One in the
+// disjoint prefix (InterpreterRuntime.disjoint_count) is the first, before any past it, and the only one in it: so
+// first the last access's memory if it is in the prefix, then the prefix from its newest down, then the memories past it
+// from the first.
 static uint32_t interpreter_memory_find(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes)
 {
     const InterpreterMemory* const memories = runtime->memories;
     const uint32_t count = runtime->memory_count;
+    const uint32_t prefix = runtime->disjoint_count;
     const uint32_t hint = runtime->last_match;
-    uint32_t found = count;
-    if (runtime->disjoint_count == count)
+    uint32_t found = hint < prefix && interpreter_memory_holds(&memories[hint], address, bytes) ? hint : count;
+    for (uint32_t i = prefix; found == count && i > 0; i -= 1)
     {
-        found = hint < count && interpreter_memory_holds(&memories[hint], address, bytes) ? hint : count;
-        for (uint32_t i = count; found == count && i > 0; i -= 1)
-        {
-            found = interpreter_memory_holds(&memories[i - 1], address, bytes) ? i - 1 : count;
-        }
+        found = interpreter_memory_holds(&memories[i - 1], address, bytes) ? i - 1 : count;
     }
-    else
+    for (uint32_t i = prefix; found == count && i < count; i += 1)
     {
-        for (uint32_t i = 0; found == count && i < count; i += 1)
-        {
-            found = interpreter_memory_holds(&memories[i], address, bytes) ? i : count;
-        }
+        found = interpreter_memory_holds(&memories[i], address, bytes) ? i : count;
     }
     runtime->last_match = found != count ? found : hint;
     return found;
