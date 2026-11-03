@@ -283,8 +283,8 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   So an oracle, runtime or header replaced under the same version changes the
   identity. In the nightly mode, such a push runs a
   `host-identity` job on the 9700X. It takes the lock for seconds and reads
-  the identity with the same step as the 9700X job; the self-test keeps the
-  two steps identical. The 9700X job is skipped only when that identity
+  the identity with the same steps as the 9700X job: the host's check, then
+  the identity. The self-test keeps both pairs identical. The 9700X job is skipped only when that identity
   equals the one the pull request's run recorded. A component that can't be
   read leaves no identity at all, never a placeholder that another unread
   one would match. The cases are:
@@ -388,10 +388,14 @@ again. An admitted run older than two hours is cancelled.
 - at dispatch, by the coordinator's planner;
 - at admission, by the `evidence` job;
 - after the 9700X job's hook took the lock, by its first step after the host's
-  own check. That step compares the clock with the cycle's 04:00 and 07:00,
-  which the `evidence` job computed as instants. It runs before the checkout,
-  the cache and the toolchain's staging, so a job that took the lock too late
-  does nothing but refuse.
+  own check. That check reads only the operating system, the architecture and
+  the CPU model. The window step compares the clock with the cycle's 04:00 and
+  07:00, which the `evidence` job computed as instants. It runs before the host
+  identity's package queries and hashing, and before the checkout, the cache
+  and the toolchain's staging. So a job that took the lock too late does
+  nothing but refuse. The self-test pins that order, and the glue test runs
+  the job's first steps in order with the window closed to check that no
+  package is queried and nothing is hashed.
 
 If the database is unavailable, nothing is admitted. The self-test checks the
 database against the EU's rule every hour from 2026 to 2030. A run is admitted

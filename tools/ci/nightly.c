@@ -3501,9 +3501,24 @@ static void nightly_test_metadata(NightlyTest* test, const char* root)
     }
 }
 
-// The 9700X job's window step must come before any substantive setup (the checkout, the toolchain's staging), right
-// after the host's own check, so that a job that took the lock too late does nothing but refuse; and the host identity
-// that the push's host-identity job compares must be computed exactly as the 9700X job's is.
+// The step that starts at `name` in `job`, to the blank line that ends it (NULL when either is missing).
+static const char* nightly_step(const char* job, const char* name, const char** end)
+{
+    const char* step = job != NULL ? strstr(job, name) : NULL;
+    *end = step != NULL ? strstr(step + 8, "\n\n") : NULL;
+    return *end != NULL ? step : NULL;
+}
+
+// Whether two steps are the same, byte for byte.
+static bool nightly_same_step(const char* a, const char* a_end, const char* b, const char* b_end)
+{
+    return a != NULL && b != NULL && a_end - a == b_end - b && memcmp(a, b, (size_t)(a_end - a)) == 0;
+}
+
+// The 9700X job's window step must come right after the host's own check (the operating system and the CPU model,
+// nothing more) and before the host identity's package queries and hashing and any setup (the checkout, the
+// toolchain's staging), so that a job that took the lock too late does nothing but refuse; and the host identity that
+// the push's host-identity job compares must be computed exactly as the 9700X job's is.
 static void nightly_test_workflow(NightlyTest* test, const char* root)
 {
     char path[4096];
@@ -3517,11 +3532,25 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
     NightlyText text = found ? nightly_read(path) : (NightlyText){ 0 };
     const char* job = found ? strstr(text.data, "\n  benchmarks:\n") : NULL;
     const char* end = job != NULL ? strstr(job + 1, "\n  agent-guide-size:\n") : NULL;
-    const char* verify = job != NULL ? strstr(job, "      - name: Verify benchmark host\n") : NULL;
+    const char* verify_end = NULL;
+    const char* verify = nightly_step(job, "      - name: Verify benchmark host\n", &verify_end);
     const char* window = job != NULL ? strstr(job, "      - name: Admit nightly work inside the Europe/Madrid window, holding the lock\n") : NULL;
+    const char* identity_end = NULL;
+    const char* identity = nightly_step(job, "      - name: Record the host identity\n", &identity_end);
     const char* checkout = job != NULL ? strstr(job, "      - name: Check out triggering commit\n") : NULL;
     const char* stage = job != NULL ? strstr(job, "      - name: Stage official Clang 23.1.4 in the private runner cache\n") : NULL;
-    nightly_expect(test, end != NULL && verify != NULL && window != NULL && checkout != NULL && stage != NULL && verify < window && window < checkout && window < stage && stage < end, "the 9700X job checks the window right after the host, before any setup");
+    const char* first = job != NULL ? strstr(job, "      - name: ") : NULL;
+    const char* after_verify = verify != NULL ? strstr(verify + 8, "\n      - name: ") : NULL;
+    nightly_expect(test, end != NULL && first == verify && after_verify != NULL && after_verify + 1 == window && window < identity && identity < checkout && identity < stage && stage < end, "the 9700X job checks the window right after the host, before the host identity and any setup");
+    // The host's own check, before the window, does none of the identity's work.
+    bool light = verify != NULL;
+    const char* const heavy[] = { "pacman", "sha256sum", "xargs", "ldd", "gcc", "kernel=" };
+    for (size_t i = 0; light && i < sizeof(heavy) / sizeof(heavy[0]); i += 1)
+    {
+        const char* at = strstr(verify, heavy[i]);
+        light = at == NULL || at >= verify_end;
+    }
+    nightly_expect(test, light, "the host check before the window queries no package and hashes nothing");
     // The window step reads no checked-out file: it compares the evidence job's epochs with the clock.
     const char* window_end = window != NULL ? strstr(window + 8, "\n      - name: ") : NULL;
     bool reads_checkout = window == NULL || window_end == NULL;
@@ -3530,13 +3559,14 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
         reads_checkout = at != window && at < window_end;
     }
     nightly_expect(test, !reads_checkout, "the window step needs nothing checked out");
-    // The host identity: the host-identity job's and the 9700X job's steps, byte for byte.
-    const char* identity = found ? strstr(text.data, "\n  host-identity:\n") : NULL;
-    const char* identity_step = identity != NULL ? strstr(identity, "      - name: Verify benchmark host\n") : NULL;
-    const char* identity_end = identity_step != NULL ? strstr(identity_step + 8, "\n\n") : NULL;
-    const char* verify_end = verify != NULL ? strstr(verify + 8, "\n\n") : NULL;
-    const bool same = identity_end != NULL && verify_end != NULL && identity_end - identity_step == verify_end - verify && memcmp(identity_step, verify, (size_t)(verify_end - verify)) == 0;
-    nightly_expect(test, same, "the host-identity job computes the host identity as the 9700X job does");
+    // The host-identity job's two steps, each the 9700X job's byte for byte, and in the same order.
+    const char* confirm = found ? strstr(text.data, "\n  host-identity:\n") : NULL;
+    const char* confirm_verify_end = NULL;
+    const char* confirm_verify = nightly_step(confirm, "      - name: Verify benchmark host\n", &confirm_verify_end);
+    const char* confirm_identity_end = NULL;
+    const char* confirm_identity = nightly_step(confirm, "      - name: Record the host identity\n", &confirm_identity_end);
+    nightly_expect(test, confirm != NULL && job != NULL && confirm < job && confirm_identity != NULL && confirm_identity < job && nightly_same_step(confirm_verify, confirm_verify_end, verify, verify_end), "the host-identity job checks the host as the 9700X job does");
+    nightly_expect(test, confirm_verify != NULL && confirm_verify < confirm_identity && nightly_same_step(confirm_identity, confirm_identity_end, identity, identity_end), "the host-identity job computes the host identity as the 9700X job does");
     free(text.data);
 }
 

@@ -674,12 +674,17 @@ jobs:
       host: ${{ steps.host.outputs.host }}
     steps:
       - name: Verify benchmark host
-        id: host
+        # The operating system, the architecture and the CPU model, and nothing more: in the 9700X job the window's
+        # check follows at once, so that a job that took the lock too late refuses before any other work.
         run: |
           test "$(uname -s)" = Linux
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+
+      - name: Record the host identity
+        id: host
+        run: |
           # The coverage record's host identity: what the repository doesn't pin and the native inventory uses: the
           # kernel, the microcode, glibc, and a digest of the software. The digest covers the package database's every
           # package and version; each external tool the inventory calls (GCC and its cc1, cc1plus and collect2,
@@ -823,12 +828,51 @@ jobs:
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
     steps:
       - name: Verify benchmark host
-        id: host
+        # The operating system, the architecture and the CPU model, and nothing more: in the 9700X job the window's
+        # check follows at once, so that a job that took the lock too late refuses before any other work.
         run: |
           test "$(uname -s)" = Linux
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+
+      - name: Admit nightly work inside the Europe/Madrid window, holding the lock
+        # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
+        # may have waited past its window for it: right after the host's own check, before the host identity's package
+        # queries and hashing and before any setup, the job's whole bound (its timeout and 5 minutes to clean up) must
+        # still end by 07:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch gave an
+        # override's reason. A refusal fails the job here, having done nothing else, which the record reads as a
+        # deferral, not a failure; the job's timeout bounds the rest.
+        id: window
+        if: github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')
+        env:
+          WINDOW_START: ${{ needs.evidence.outputs.window_start }}
+          WINDOW_DEADLINE: ${{ needs.evidence.outputs.window_deadline }}
+          WINDOW_OVERRIDE: ${{ needs.evidence.outputs.window_override }}
+          BOUND: ${{ inputs.purpose == 'backlog' && 25 || 30 }}
+        run: |
+          set -euo pipefail
+          now=$(date +%s)
+          open=false
+          if [ "$WINDOW_OVERRIDE" = true ]; then
+              open=true
+              printf 'Nightly window: overridden by the dispatch'"'"'s reason (reported in its evidence job)\n'
+          elif [[ "$WINDOW_START" =~ ^[0-9]+$ && "$WINDOW_DEADLINE" =~ ^[0-9]+$ ]] && [ "$now" -ge "$WINDOW_START" ] && [ "$((now + BOUND * 60))" -le "$WINDOW_DEADLINE" ]; then
+              open=true
+              printf 'Nightly window: %s seconds left after this job'"'"'s %s-minute bound\n' "$((WINDOW_DEADLINE - now - BOUND * 60))" "$BOUND"
+          fi
+          if [ "$open" = true ]; then
+              printf 'window=open\n' >> "$GITHUB_OUTPUT"
+          else
+              printf 'window=closed\n' >> "$GITHUB_OUTPUT"
+              printf 'Nightly window: closed at %s for a %s-minute bound (window %s to %s)\n' "$now" "$BOUND" "${WINDOW_START:-unknown}" "${WINDOW_DEADLINE:-unknown}"
+              printf '%s\n' '::notice title=Nightly window::The window closed while this job waited; deferred, not failed.'
+              exit 1
+          fi
+
+      - name: Record the host identity
+        id: host
+        run: |
           # The coverage record's host identity: what the repository doesn't pin and the native inventory uses: the
           # kernel, the microcode, glibc, and a digest of the software. The digest covers the package database's every
           # package and version; each external tool the inventory calls (GCC and its cc1, cc1plus and collect2,
@@ -934,39 +978,6 @@ jobs:
               printf '::warning title=Host identity::kernel %s, microcode %s, GCC %s, glibc %s, software %s: incomplete, so none is recorded and no reuse can match it%s\n' "${kernel:-?}" "${microcode:-?}" "${gcc_version:-?}" "${glibc_version:-?}" "${software:-?}" "${incomplete:+ (software: ${incomplete%; })}"
           fi
           # The identity's end.
-
-      - name: Admit nightly work inside the Europe/Madrid window, holding the lock
-        # The runner's hook took the shared lock before this job's first step, and a nightly run admitted while queued
-        # may have waited past its window for it: before any setup, the job's whole bound (its timeout and 5 minutes to
-        # clean up) must still end by 07:00 Europe/Madrid, the evidence job's instants for the cycle, unless the dispatch
-        # gave an override's reason. A refusal fails the job here, having done nothing else, which the record reads as a
-        # deferral, not a failure; the job's timeout bounds the rest.
-        id: window
-        if: github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')
-        env:
-          WINDOW_START: ${{ needs.evidence.outputs.window_start }}
-          WINDOW_DEADLINE: ${{ needs.evidence.outputs.window_deadline }}
-          WINDOW_OVERRIDE: ${{ needs.evidence.outputs.window_override }}
-          BOUND: ${{ inputs.purpose == 'backlog' && 25 || 30 }}
-        run: |
-          set -euo pipefail
-          now=$(date +%s)
-          open=false
-          if [ "$WINDOW_OVERRIDE" = true ]; then
-              open=true
-              printf 'Nightly window: overridden by the dispatch'"'"'s reason (reported in its evidence job)\n'
-          elif [[ "$WINDOW_START" =~ ^[0-9]+$ && "$WINDOW_DEADLINE" =~ ^[0-9]+$ ]] && [ "$now" -ge "$WINDOW_START" ] && [ "$((now + BOUND * 60))" -le "$WINDOW_DEADLINE" ]; then
-              open=true
-              printf 'Nightly window: %s seconds left after this job'"'"'s %s-minute bound\n' "$((WINDOW_DEADLINE - now - BOUND * 60))" "$BOUND"
-          fi
-          if [ "$open" = true ]; then
-              printf 'window=open\n' >> "$GITHUB_OUTPUT"
-          else
-              printf 'window=closed\n' >> "$GITHUB_OUTPUT"
-              printf 'Nightly window: closed at %s for a %s-minute bound (window %s to %s)\n' "$now" "$BOUND" "${WINDOW_START:-unknown}" "${WINDOW_DEADLINE:-unknown}"
-              printf '%s\n' '::notice title=Nightly window::The window closed while this job waited; deferred, not failed.'
-              exit 1
-          fi
 
       - name: Use the runner's private cache for verified inputs
         # The frozen corpus's archive, c-testsuite's commit and the pragma oracle, each kept under what identifies it and

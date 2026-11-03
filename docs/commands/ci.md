@@ -153,7 +153,9 @@ the policy. In short:
   dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows, and enforces
   04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
-  takes the lock, before any setup.
+  takes the lock, right after the host's OS and CPU-model check. That is
+  before the host identity's package queries and hashing, and before any
+  setup.
 - Every run's `record` job writes the `coverage-record-ATTEMPT` artifact. The
   coordinator, `.github/workflows/nightly-backfill.yml`, harvests those
   records into its ledger. It pins the cycle's snapshot, prepares hosted

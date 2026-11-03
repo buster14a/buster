@@ -328,15 +328,15 @@ window_case $((deadline_epoch + 3600)) "$start_epoch" "$deadline_epoch" true 25 
 
 # --- The host identity, as the workflow computes it, against stand-in tools ---
 
-# The lines of the 9700X job's host step from the kernel's to the identity's end, /proc/cpuinfo replaced by a fixture.
+# The lines of the host identity's step from the kernel's to the identity's end, /proc/cpuinfo replaced by a fixture.
 identity_step="$work/identity-step.sh"
-awk '/^      - name: Verify benchmark host$/ { step = 1 } step && /^          kernel=\$\(uname -r/ { body = 1 }
+awk '/^      - name: Record the host identity$/ { step = 1 } step && /^          kernel=\$\(uname -r/ { body = 1 }
     body { line = $0; sub(/^          /, "", line); print line } body && /^          # The identity.s end\.$/ { exit }' \
     "$root/.github/workflows/9700x.yml" | sed "s#/proc/cpuinfo#$work/cpuinfo#" > "$identity_step"
-grep -q 'sw-%s' "$identity_step" || fail 'the host step'"'"'s identity is found in the workflow'
+grep -q 'sw-%s' "$identity_step" || fail 'the host identity'"'"'s step is found in the workflow'
 printf 'model name\t: AMD Ryzen 7 9700X\nmicrocode\t: 0xb404023\n' > "$work/cpuinfo"
 mkdir -p "$work/identity-bin"
-printf '#!/bin/sh\necho 6.17.1-arch1\n' > "$work/identity-bin/uname"
+printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo 6.17.1-arch1 ;; esac\n' > "$work/identity-bin/uname"
 printf '#!/bin/sh\necho glibc 2.42\n' > "$work/identity-bin/getconf"
 # A stand-in package database that answers as pacman does: -Q lists the packages (FAKE_VERSIONS); -Qo names glibc as the
 # runtime fixtures' owner, and for any other file says on stderr that no package owns it; -Ql lists the owners' files
@@ -445,6 +445,40 @@ for failure in 'listing-fails:the owners file listing failed' 'listing-warns:the
 done
 changed=$(identity)
 [ -n "$changed" ] && [ "$changed" != "$header" ] || fail 'the header changed while the database failed changes the identity'
+# The 9700X job's steps from its first to the host identity's, run in order as the runner does (each in the workflow's
+# shell, the job ending at the first that fails): with the window closed when the job took the lock, it refuses
+# before any package query or hash; open, it records the identity after the window's check.
+sequence="$work/sequence"
+mkdir -p "$sequence/bin"
+awk -v out="$sequence" '/^  benchmarks:$/ { job = 1; next } job && /^  [a-z]/ { exit }
+    job && /^      - name: / { body = 0; if ($0 ~ /Use the runner.s private cache/) exit; steps += 1; file = sprintf("%s/step-%02d.sh", out, steps) }
+    job && steps && /^        run: \|$/ { body = 1; next }
+    job && body && /^          / { line = $0; sub(/^          /, "", line); print line > file; next }
+    job && body && /^$/ { print "" > file }' "$root/.github/workflows/9700x.yml"
+test "$(find "$sequence" -name 'step-*.sh' | wc -l)" -eq 3 || fail 'the 9700X job starts with the host check, the window and the host identity'
+for tool in pacman sha256sum; do
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "%s/work.log"\nPATH="%s" exec %s "$@"\n' "$tool" "$sequence" "$work/identity-bin:$PATH" "$tool" > "$sequence/bin/$tool"
+done
+chmod +x "$sequence/bin"/*
+sequence_case()
+{
+    : > "$GITHUB_OUTPUT"
+    : > "$sequence/work.log"
+    local step
+    for step in "$sequence"/step-*.sh; do
+        sed "s#/proc/cpuinfo#$work/cpuinfo#" "$step" > "$sequence/current.sh"
+        FAKE_NOW=$1 WINDOW_START=$start_epoch WINDOW_DEADLINE=$deadline_epoch WINDOW_OVERRIDE=false BOUND=25 \
+            PATH="$sequence/bin:$work/clock:$work/identity-bin:$PATH" bash -eo pipefail "$sequence/current.sh" > /dev/null 2>&1 || return 0
+    done
+}
+sequence_case $((deadline_epoch + 600))
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'a job that took the lock after 07:00 refuses'
+test ! -s "$sequence/work.log" || { cat "$sequence/work.log" >&2; fail 'and queries no package and hashes nothing first'; }
+expect_no_match "$GITHUB_OUTPUT" '^host=' 'nor records an identity'
+sequence_case $((start_epoch + 600))
+expect_line "$GITHUB_OUTPUT" 'window=open' 'a job inside the window is admitted'
+expect_line "$GITHUB_OUTPUT" "host=$changed" 'and records the host identity after the window'"'"'s check'
+expect_match "$sequence/work.log" '^pacman -Q' 'by the package queries'
 # A package's file that can't be read leaves no identity.
 chmod 000 "$work/runtime/crt1.o"
 if [ "$(id -u)" != 0 ]; then
