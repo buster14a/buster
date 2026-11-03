@@ -208,7 +208,11 @@ the option, each unit's report added to the command's.
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
 frame's layout), symbols' addresses (`lea` from `rip`, or a load of the GOT slot
-where the emission's access column says so; thread-locals are Tier 0's),
+where the emission's access column says so; a thread-local's, as Tier 0's,
+the thread pointer `fs:[0]` plus its offset: a TPOFF32 immediate for the
+image's own, or the offset from its GOT slot for one that may be outside it,
+which `test-checker-driver`'s thread-locals' fixture runs on five threads
+against clang -O0's build),
 parameters anywhere in the entry block and narrow ones (zero-extended into
 their canonical storage at the entry), variadic calls of integer arguments (`al`
 zero), calls through a pointer (the callee moved into `r10` with the

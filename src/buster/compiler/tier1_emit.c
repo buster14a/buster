@@ -83,10 +83,14 @@ struct Tier1EmitDiagnostic
     uint32_t error;
 };
 
-// The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_DIRECT and _GOT, which
-// c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot.
+// The access column's values the consumers take (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*, which
+// c_check_tier1.c checks are these): a symbol's address directly, or from its GOT slot; and a thread-local's (#141), the
+// thread pointer plus its offset, a TPOFF32 immediate for one of the image's (local-exec) or the offset from its GOT slot
+// (initial-exec), as Tier 0's.
 #define BUSTER_TIER1_ACCESS_DIRECT 0
 #define BUSTER_TIER1_ACCESS_GOT 1
+#define BUSTER_TIER1_ACCESS_LOCAL_EXEC 2
+#define BUSTER_TIER1_ACCESS_INITIAL_EXEC 3
 
 typedef struct Tier1EmitOptions Tier1EmitOptions;
 struct Tier1EmitOptions
@@ -98,7 +102,7 @@ struct Tier1EmitOptions
     bool vector;
     bool rematerialize;
     // How each symbol below `symbol_count` is reached (Tier0Function.symbol_access's BUSTER_TIER0_ACCESS_*: directly,
-    // through its GOT slot, or a thread-local's, which the consumers refuse), for its address (IR_SYMBOL_ADDR). Null
+    // through its GOT slot, or a thread-local's from the thread pointer, #141), for its address (IR_SYMBOL_ADDR). Null
     // reaches every symbol directly.
     const uint8_t* symbol_access;
     uint32_t symbol_count;

@@ -308,7 +308,8 @@ static uint16_t tier1_emit_cfg_inverse(uint16_t form)
 
 // The values a fragment may recompute rather than reload (#178), by node, into the recipes' columns (zero where none):
 // - a constant;
-// - a symbol's address, from rip or read from its GOT slot as its access says (a thread-local's the consumer refuses);
+// - a symbol's address, from rip or read from its GOT slot as its access says (a thread-local's none: the consumer
+//   computes it where it is defined, from the thread pointer, #141);
 // - a frame object's address, from the frame's base, which nothing moves between the prologue and the epilogues: rsp
 //   where nothing else moves rsp either, and rbp (or a realigned frame's r15) where the dynamic stack does (#141);
 // - a copy of one of them: a pointer's conversion, which the C driver's typed streams put around every address, their
@@ -2667,21 +2668,37 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         selected_records.records[selected_records.count - 1].displacement = total;
                     }
                 }
-                // A symbol's address, its reference the record's: a lea of it, or a load of its GOT slot; a thread-local's
-                // is the driver's Tier 0's.
+                // A symbol's address, its reference the record's: a lea of it, or a load of its GOT slot. A thread-local's
+                // (#141), as Tier 0's: the thread pointer, fs:[0], plus its offset, a TPOFF32 immediate for the image's own
+                // (local-exec); or for one that may be outside the image (initial-exec), its offset from its GOT slot, a
+                // GOTTPOFF on the mov the linkers rewrite, plus the thread pointer. Neither has a recipe, so no copy
+                // recomputes one (tier1_emit_cfg_recipes); no flag lives past the node for its add to clobber
+                // (BUSTER_TIER1_EMIT_BOUNDARY_FLAGS).
                 if (plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS && error == TIER1_EMIT_OK)
                 {
                     const uint32_t symbol = (uint32_t)plan->patterns[node].immediate;
                     const uint8_t access = symbol < emitted->symbol_access_count ? emitted->symbol_access[symbol] : BUSTER_TIER1_ACCESS_DIRECT;
-                    error = selected_records.count == 1 && emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;
-                    error = error != TIER1_EMIT_OK || access == BUSTER_TIER1_ACCESS_DIRECT || access == BUSTER_TIER1_ACCESS_GOT ? error : TIER1_EMIT_UNSUPPORTED;
-                    selected_records.records[0].form = access == BUSTER_TIER1_ACCESS_GOT ? X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP : selected_records.records[0].form;
+                    const bool local_exec = access == BUSTER_TIER1_ACCESS_LOCAL_EXEC;
+                    const bool initial_exec = access == BUSTER_TIER1_ACCESS_INITIAL_EXEC;
+                    const uint8_t destination = selected_records.records[0].reg;
+                    error = selected_records.count == 1 && !selected_records.requested && emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;
+                    error = error != TIER1_EMIT_OK || access == BUSTER_TIER1_ACCESS_DIRECT || access == BUSTER_TIER1_ACCESS_GOT || local_exec || initial_exec ? error : TIER1_EMIT_UNSUPPORTED;
+                    const X86Instruction thread_pointer = {
+                        .form = (local_exec ? X86_FORM_MOV_R64_RM64 : X86_FORM_ADD_R64_RM64) + BUSTER_X86_FORM_FS,
+                        .reg = destination,
+                        .mode = BUSTER_X86_MEMORY_ABSOLUTE,
+                    };
+                    const X86Instruction offset = { .form = X86_FORM_ADD_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .rm = destination, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    const X86Instruction slot = { .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP, .reg = destination, .mode = BUSTER_X86_MEMORY_RIP };
+                    selected_records.records[0] = local_exec ? thread_pointer : access == BUSTER_TIER1_ACCESS_GOT || initial_exec ? slot : selected_records.records[0];
+                    selected_records.records[1] = local_exec ? offset : thread_pointer;
+                    selected_records.count = local_exec || initial_exec ? 2 : 1;
                     if (error == TIER1_EMIT_OK)
                     {
                         emitted->references[emitted->reference_count++] = (LinkReference){
-                            .instruction = buffer.count,
-                            .field = X86_FIXUP_DISPLACEMENT,
-                            .kind = access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
+                            .instruction = buffer.count + (local_exec ? 1u : 0u),
+                            .field = local_exec ? X86_FIXUP_IMMEDIATE : X86_FIXUP_DISPLACEMENT,
+                            .kind = local_exec ? BUSTER_LINK_FIXUP_TPOFF32 : initial_exec ? BUSTER_LINK_FIXUP_GOTTPOFF : access == BUSTER_TIER1_ACCESS_GOT ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
                             .target = symbol,
                             .addend = 0,
                         };

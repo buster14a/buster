@@ -2649,6 +2649,67 @@ static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, c
                                   check_test_tier1_shapes_other_source, NULL, true);
 }
 
+// The thread-locals' fixture (#141): this unit's own thread-locals (a long, a static array and a struct), whose addresses
+// Tier 1 takes from the thread pointer at their TPOFF32 offsets (local-exec), and the other unit's (clang -O2's), from
+// its GOT slot's GOTTPOFF offset (initial-exec), read, written and returned as addresses by Tier 1's functions on four
+// threads the other unit starts and on the main thread, each thread's results its own copies'.
+static const char check_test_tier1_tls_header[] =
+    "#include <stdio.h>\n"
+    "extern _Thread_local long b_counter;\n"
+    "long a_bump(long k);\n"
+    "long a_peek(void);\n"
+    "long* a_own_address(void);\n"
+    "long* a_other_address(void);\n"
+    "long a_sum(int n);\n"
+    "unsigned long b_run(unsigned long* results, int n);\n";
+
+static const char check_test_tier1_tls_source[] =
+    "#include \"tier1-tls.h\"\n"
+    "_Thread_local long a_own = 7;\n"
+    "static _Thread_local long a_array[16];\n"
+    "_Thread_local struct { int x; long y; } a_pair = { 3, 4 };\n"
+    "long a_bump(long k) { a_own += k; b_counter += 2 * k; for (int i = 0; i < 16; i += 1) a_array[i] += k * i; a_pair.y += k; return a_own * 3 + b_counter; }\n"
+    "long a_peek(void) { return a_own; }\n"
+    "long* a_own_address(void) { return &a_own; }\n"
+    "long* a_other_address(void) { return &b_counter; }\n"
+    "long a_sum(int n) { long s = a_pair.x; for (int i = 0; i < n && i < 16; i += 1) s += a_array[i]; return s + a_pair.y; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long results[4];\n"
+    "    const unsigned long main_result = b_run(results, 4);\n"
+    "    printf(\"%lu %lu %lu %lu %lu\\n\", results[0], results[1], results[2], results[3], main_result);\n"
+    "    printf(\"%ld %ld %ld\\n\", a_own, b_counter, a_sum(16));\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_test_tier1_tls_other_source[] =
+    "#include <pthread.h>\n"
+    "#include \"tier1-tls.h\"\n"
+    "_Thread_local long b_counter = 100;\n"
+    "static void* b_worker(void* p)\n"
+    "{\n"
+    "    const long k = (long)p;\n"
+    "    unsigned long r = 0;\n"
+    "    for (int i = 0; i < 5; i += 1) r = r * 7 + (unsigned long)a_bump(k + i);\n"
+    "    r = r * 11 + (unsigned long)a_sum(16);\n"
+    "    r = r * 13 + (a_other_address() == &b_counter) + 2 * (*a_own_address() == a_peek());\n"
+    "    return (void*)r;\n"
+    "}\n"
+    "unsigned long b_run(unsigned long* results, int n)\n"
+    "{\n"
+    "    pthread_t threads[4];\n"
+    "    for (int t = 0; t < n; t += 1) pthread_create(&threads[t], 0, b_worker, (void*)(long)(t + 1));\n"
+    "    for (int t = 0; t < n; t += 1) { void* r; pthread_join(threads[t], &r); results[t] = (unsigned long)r; }\n"
+    "    return (unsigned long)b_worker((void*)9L);\n"
+    "}\n";
+
+// The thread-locals' fixture (#141).
+static void check_test_driver_tier1_tls(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-tls", "thread-locals'", check_test_tier1_tls_header, check_test_tier1_tls_source, check_test_tier1_tls_other_source, NULL,
+                                  true);
+}
+
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
 // function but main Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both
 // prints: the arguments past the registers reach clang's callees in their stack slots, and the parameters past them
