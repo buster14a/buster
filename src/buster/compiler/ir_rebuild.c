@@ -374,6 +374,8 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             uint32_t mask = ir_rebuild_values(op);
             mask |= op == IR_ADDRESS && b != BUSTER_IR_NONE ? 2u : 0u;
             mask |= op == IR_RET && a != BUSTER_IR_NONE ? 1u : 0u;
+            // A compare-exchange's desired value (#1059).
+            mask |= op == IR_ATOMIC_RMW && c != BUSTER_IR_NONE ? 4u : 0u;
             const uint32_t old_values[] = { a, b, c };
             uint32_t* new_values[] = { candidate.a + i, candidate.b + i, candidate.c + i };
             for (uint32_t p = 0; check.error == IR_OK && p < 3; p += 1)

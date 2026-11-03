@@ -622,6 +622,9 @@ rm -rf "$errors" "$directory"
 # The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
 # print their natural alignment.
 test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
+# Each compare-exchange of the fixture's (GNU's, __sync's, C11's and the generic one, twice each, and three implicit
+# objects' loops) is the typed stream's ATOMIC_CAS and the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atomics.c | grep -c ' cas ')" -eq 26
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution

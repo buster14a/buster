@@ -552,8 +552,10 @@ static void ir_interpreter_test_memory(IrInterpreterTestTally* tally, Arena* mem
 }
 
 // #1059's atomic read/modify/writes, rmw, as one thread runs them: an addition and an exchange of an i32 in a slot return
-// its old values and leave the sum and the operand, and the object is checked as a load's and a store's: its undefined
-// bytes reported (or not, when the check is off), and an address misaligned for the access's declared alignment refused.
+// its old values and leave the sum and the operand, compare-exchanges the desired value where the old one is the expected
+// one alone (an undefined desired value a use either way), and the object is checked as a load's and a store's: its
+// undefined bytes reported (or not, when the check is off), and an address misaligned for the access's declared alignment
+// refused.
 static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -578,8 +580,8 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         ir_interpreter_test_instruction(&function, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_RMW_ADD);
-        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_RMW_EXCHANGE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 6, IR_ADD, IR_I32, 4, 5, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 7, IR_LOAD, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_interpreter_test_instruction(&function, 8, IR_ADD, IR_I32, 6, 7, BUSTER_IR_NONE);
@@ -588,12 +590,31 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         {
             function.alignment_log2[i] = i == 2 || i == 4 || i == 5 || i == 7 ? 2 : 0;
         }
-        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT;
-        function.flags[5] = BUSTER_IR_ATOMIC;
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
+        function.flags[5] = BUSTER_IR_ATOMIC | BUSTER_IR_RMW_EXCHANGE;
         const IrInterpreterFunction code = { .symbol = 71, .function = &function };
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 18 },
                                 "atomic addition and exchange return old values and leave the sum and the operand");
+        // a = cas x, 5, 3 (5, x 3); b = cas x, 5, 5 (3, x 3): a + b + x, 13 had the second stored and 15 had the first
+        // not.
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 1, 3);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, 1);
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE;
+        function.flags[5] = BUSTER_IR_ATOMIC | BUSTER_IR_RMW_COMPARE;
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 11 },
+                                "atomic compare-exchanges return old values and store the desired one where the old one is the expected one alone");
+        // A desired value undefined: diagnosed as a use, as the compare-exchange reads it whether or not it stores it.
+        ir_interpreter_test_instruction(&function, 3, IR_UNDEF, IR_I32, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 1, 1);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, 3);
+        ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){ 0 },
+                                "an atomic compare-exchange of an undefined desired value diagnosed");
+        ir_interpreter_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 0, 3, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 0, 1, BUSTER_IR_NONE);
+        function.flags[4] = BUSTER_IR_ATOMIC | BUSTER_IR_FENCE_SEQ_CST << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
+        function.flags[5] = BUSTER_IR_ATOMIC | BUSTER_IR_RMW_EXCHANGE;
         // Its store a constant's in place: the read/modify/writes read undefined bytes.
         ir_interpreter_test_instruction(&function, 2, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         function.alignment_log2[2] = 0;
@@ -607,8 +628,8 @@ static void ir_interpreter_test_atomic_rmw(IrInterpreterTestTally* tally, Arena*
         ir_interpreter_test_instruction(&function, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
         function.alignment_log2[2] = 2;
         ir_interpreter_test_instruction(&function, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
-        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_RMW_ADD);
-        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_RMW_EXCHANGE);
+        ir_interpreter_test_instruction(&function, 4, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_ATOMIC_RMW, IR_I32, 3, 1, BUSTER_IR_NONE);
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_MEMORY, (InterpreterValue){ 0 },
                                 "a misaligned atomic read/modify/write rejected");
     }

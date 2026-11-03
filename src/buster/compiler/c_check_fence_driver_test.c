@@ -233,7 +233,9 @@ static void check_test_driver_fences(CheckTest* test, const char* executable, co
 
 // #1059's concurrent read/modify/writes: four threads add to shared counters by every direct form (GNU's fetch_add, a
 // __sync_ one, an implicit _Atomic object's increment, C11's fetch_sub of a short and GNU's add_fetch of a byte, which
-// wrap) and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
+// wrap) and by compare-exchange loops of each direct form (GNU's weak compare-exchange of a long, __sync's val form of a
+// short and bool form of a byte, which wrap, C11's weak one of an int, and an implicit _Atomic double's +=, its plan's
+// loop), and take a spin lock by GNU's exchange and release it by a store, around a plain increment; then four threads
 // increment a volatile counter ten times as often, the control, which may lose updates. Every atomic count must be
 // exact. Each run's threads start together, past a barrier of an add_fetch and an acquire load, so that they overlap
 // where they have CPUs of their own.
@@ -251,6 +253,11 @@ static const char check_test_counter_litmus_source[] =
     "static _Atomic long implicit;\n"
     "static _Atomic short down;\n"
     "static unsigned char bytes;\n"
+    "static long swapped;\n"
+    "static short valued;\n"
+    "static unsigned char flagged;\n"
+    "static _Atomic int c11;\n"
+    "static _Atomic double floating;\n"
     "static int lock;\n"
     "static long guarded;\n"
     "static volatile long plain;\n"
@@ -274,6 +281,15 @@ static const char check_test_counter_litmus_source[] =
     "        implicit++;\n"
     "        __c11_atomic_fetch_sub(&down, 1, __ATOMIC_ACQ_REL);\n"
     "        __atomic_add_fetch(&bytes, 3, __ATOMIC_SEQ_CST);\n"
+    "        long expected = __atomic_load_n(&swapped, __ATOMIC_RELAXED);\n"
+    "        while (!__atomic_compare_exchange_n(&swapped, &expected, expected + 1, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}\n"
+    "        short old;\n"
+    "        do old = __atomic_load_n(&valued, __ATOMIC_RELAXED); while (__sync_val_compare_and_swap(&valued, old, (short)(old - 1)) != old);\n"
+    "        unsigned char seen;\n"
+    "        do seen = __atomic_load_n(&flagged, __ATOMIC_RELAXED); while (!__sync_bool_compare_and_swap(&flagged, seen, (unsigned char)(seen + 5)));\n"
+    "        int current = __c11_atomic_load(&c11, __ATOMIC_RELAXED);\n"
+    "        while (!__c11_atomic_compare_exchange_weak(&c11, &current, current + 2, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {}\n"
+    "        floating += 1.0;\n"
     "        for (int spins = 0; __atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE) != 0; spins++)\n"
     "        {\n"
     "            if (spins > 64) sched_yield();\n"
@@ -304,7 +320,8 @@ static const char check_test_counter_litmus_source[] =
     "    alarm(120);\n"
     "    if (sched_getaffinity(0, sizeof(set), &set) != 0 || CPU_COUNT(&set) < 2) { printf(\"skipped\\n\"); return 0; }\n"
     "    if (!run(worker) || !run(control)) return 1;\n"
-    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld\\n\", gnu, legacy, (long)implicit, (int)down, (int)bytes, guarded, (long)plain);\n"
+    "    printf(\"gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld\\n\", gnu, legacy,\n"
+    "           (long)implicit, (int)down, (int)bytes, guarded, (long)plain, swapped, (int)valued, (int)flagged, (int)c11, (long)floating);\n"
     "    return 0;\n"
     "}\n";
 
@@ -343,11 +360,12 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         arguments[count] = NULL;
         char* text = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        // The worker's six read/modify/writes and the barrier's one, and four atomic accesses (the lock's release, the
-        // barrier's load, and main's loads of the two _Atomic counters), are the typed stream's, none a helper's call.
-        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=7\thelper=0\tplanned=0\n") != NULL &&
-                              strstr(text, "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n") != NULL &&
-                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=11\thelper=0\tplanned=0\n") != NULL;
+        // The worker's six read/modify/writes and five compare-exchanges and the barrier's addition, and eleven atomic
+        // accesses (the lock's release, the barrier's load, the compare-exchange loops' first loads, and main's loads of the
+        // four _Atomic counters), are the typed stream's, none a helper's call.
+        const bool reported = text != NULL && strstr(text, "helpers.atomic-rmw\tdirect=12\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers.atomic-access\tdirect=11\thelper=0\tplanned=0\n") != NULL &&
+                              strstr(text, "helpers\tunits=1\trefused=0\tdirect=23\thelper=0\tplanned=0\n") != NULL;
         const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
         if ((status != 0 || !reported) && text != NULL)
         {
@@ -367,13 +385,21 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
         int bytes = -1;
         long guarded = -1;
         long plain = -1;
+        long swapped = -1;
+        int valued = -1;
+        int flagged = -1;
+        int c11 = -1;
+        long floating = -1;
         const bool skipped = ran && strcmp(captured, "skipped\n") == 0;
-        const bool read = ran && sscanf(captured, "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld", &gnu, &legacy, &implicit, &down, &bytes, &guarded,
-                                        &plain) == 7;
+        const bool read = ran && sscanf(captured, "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld plain=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld", &gnu,
+                                        &legacy, &implicit, &down, &bytes, &guarded, &plain, &swapped, &valued, &flagged, &c11, &floating) == 12;
         const bool exact = read && gnu == total && legacy == 2 * total && implicit == total && down == (int16_t)-total && bytes == (uint8_t)(3 * total) && guarded == total &&
-                           plain >= 1 && plain <= control;
-        snprintf(message, sizeof(message), "counters (%s): every atomic count is exact (gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld)", way, gnu, legacy,
-                 implicit, down, bytes, guarded);
+                           plain >= 1 && plain <= control && swapped == total && valued == (int16_t)-total && flagged == (uint8_t)(5 * total) && c11 == 2 * total &&
+                           floating == total;
+        char message_counts[200];
+        snprintf(message_counts, sizeof(message_counts), "gnu=%ld legacy=%d implicit=%ld down=%d bytes=%d guarded=%ld swapped=%ld valued=%d flagged=%d c11=%d floating=%ld", gnu,
+                 legacy, implicit, down, bytes, guarded, swapped, valued, flagged, c11, floating);
+        snprintf(message, sizeof(message), "counters (%s): every atomic count is exact (%s)", way, message_counts);
         check_test_expect(test, skipped || exact, message);
         if (read)
         {
@@ -392,11 +418,11 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
 }
 
 // --helper-report's counts (#1059) of a unit with every kind of direct form and helper call: an implicit _Atomic store,
-// load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store and load, a fence, and
-// an asm statement with instructions. Its `direct` columns are the lowered code's direct forms (four accesses, one
-// read/modify/write, one fence: a seq_cst store's own isn't one), its `helper` columns its call sites of each family's
-// helpers, every call in the object (the statement's), and `planned` the signatures (the statement's helper alone: the
-// update takes no compare-exchange's leaf). By both paths.
+// load and compound assignment (its lock xadd, the typed stream's ATOMIC_RMW), an explicit store, compare-exchange (its
+// ATOMIC_CAS) and load, a fence, and an asm statement with instructions. Its `direct` columns are the lowered code's
+// direct forms (four accesses, two read/modify/writes, one fence: a seq_cst store's own isn't one), its `helper` columns
+// its call sites of each family's helpers, every call in the object (the statement's), and `planned` the signatures (the
+// statement's helper alone: neither read/modify/write takes a leaf). By both paths.
 static void check_test_driver_helper_report(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "_Atomic int a;\n"
@@ -406,14 +432,16 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    a = 1;\n"
                                   "    a += 2;\n"
                                   "    __atomic_store_n(&counter, 3, __ATOMIC_RELEASE);\n"
+                                  "    int expected = 3;\n"
+                                  "    __atomic_compare_exchange_n(&counter, &expected, 4, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);\n"
                                   "    __atomic_thread_fence(__ATOMIC_SEQ_CST);\n"
                                   "    __asm__ volatile(\"nop\" ::: \"memory\");\n"
                                   "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE);\n"
                                   "}\n";
     static const char* const lines[] = {
-        "helpers\tunits=1\trefused=0\tdirect=6\thelper=1\tplanned=1\n",
+        "helpers\tunits=1\trefused=0\tdirect=7\thelper=1\tplanned=1\n",
         "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
-        "helpers.atomic-rmw\tdirect=1\thelper=0\tplanned=0\n",
+        "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
         "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
         "helpers.asm\tdirect=0\thelper=1\tplanned=1\n",
         "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",

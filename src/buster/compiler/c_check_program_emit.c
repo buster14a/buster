@@ -407,7 +407,7 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             const bool access = (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && class >= BUSTER_TYPED_CLASS_I8 &&
                                 class <= BUSTER_TYPED_CLASS_U64 && (function->values[e] & BUSTER_TYPED_ACCESS_ATOMIC) != 0;
             report->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += access;
-            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kind == BUSTER_TYPED_ATOMIC_RMW;
+            report->direct[CHECK_PROGRAM_HELPER_ATOMIC_RMW] += kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
             report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE && !store;
             store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
         }

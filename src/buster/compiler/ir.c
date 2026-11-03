@@ -151,10 +151,12 @@ typedef enum IrOp
     // product, which Tier 1's split of the 128-bit integers into halves makes (ir_wide.c), and x86's mul gives in rdx.
     IR_MULHU,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
-    // 1, 2, 4 or 8 bytes), `c` its operation (BUSTER_IR_RMW_EXCHANGE or BUSTER_IR_RMW_ADD), and its flags BUSTER_IR_ATOMIC
-    // with its C memory order. It returns the object's old value and leaves the operand (an exchange) or the sum (an
-    // addition) in it, as one locked access; no pass moves an access across it or eliminates it, as an atomic store's and
-    // load's. The typed stream's ATOMIC_RMW.
+    // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
+    // (BUSTER_IR_RMW_OPERATION: an exchange, an addition or a compare-exchange, whose desired value, of the result's type,
+    // is its `c`, which the others haven't). It returns the object's old value and leaves the operand (an exchange), the
+    // sum (an addition) or, where the old value is the operand, the desired value (a compare-exchange) in it, as one
+    // locked access; no pass moves an access across it or eliminates it, as an atomic store's and load's. The typed
+    // stream's ATOMIC_RMW and ATOMIC_CAS.
     IR_ATOMIC_RMW,
     IR_OP_COUNT,
 } IrOp;
@@ -164,9 +166,12 @@ typedef enum IrOp
 #define BUSTER_IR_FENCE_ORDER 0x07u
 #define BUSTER_IR_FENCE_SIGNAL 0x08u
 #define BUSTER_IR_FENCE_SEQ_CST 5u
-// An IR_ATOMIC_RMW's operation (#1059), its `c`.
-#define BUSTER_IR_RMW_EXCHANGE 0u
-#define BUSTER_IR_RMW_ADD 1u
+// An IR_ATOMIC_RMW's operation (#1059), in its flags past its order: an exchange, an addition, or a compare-exchange,
+// whose desired value is its `c`.
+#define BUSTER_IR_RMW_OPERATION 0x60u
+#define BUSTER_IR_RMW_EXCHANGE 0x00u
+#define BUSTER_IR_RMW_ADD 0x20u
+#define BUSTER_IR_RMW_COMPARE 0x40u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -534,10 +539,11 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
-// is a full barrier, which every order takes.
+// is a full barrier, which every order takes; and of an exchange, an addition or a compare-exchange.
 static bool ir_rmw_flags_valid(uint8_t flags)
 {
-    return (flags & ~(BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)) == 0 && (flags & BUSTER_IR_ATOMIC) != 0 && (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT <= 5;
+    return (flags & ~(BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_RMW_OPERATION)) == 0 && (flags & BUSTER_IR_ATOMIC) != 0 &&
+           (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT <= 5 && (flags & BUSTER_IR_RMW_OPERATION) <= BUSTER_IR_RMW_COMPARE;
 }
 
 // Whether an atomic access may be of `type` aligned to 1 << `alignment_log2` bytes: an integer's of 1, 2, 4 or 8 bytes,
@@ -749,12 +755,14 @@ typedef enum IrRule
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
 #undef BUSTER_IR_OPERAND_ROW
 // The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
-// a return's value (a) and a call's destination for its aggregate result (c).
+// a return's value (a), a call's destination for its aggregate result (c) and an atomic compare-exchange's desired
+// value (c, #1059).
 static const uint8_t ir_optional_table[64] = {
     [IR_ADDRESS] = 2,
     [IR_RET] = 1,
     [IR_CALL] = 4,
     [IR_CALL_INDIRECT] = 4,
+    [IR_ATOMIC_RMW] = 4,
 };
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
@@ -1130,7 +1138,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
-            case IR_RULE_ATOMIC_RMW: valid = ta == IR_PTR && tb == type && c <= BUSTER_IR_RMW_ADD && ir_atomic_access(type, f->alignment_log2[i]); break;
+            case IR_RULE_ATOMIC_RMW:
+            {
+                // A compare-exchange's desired value of its type (an optional use, which the operand loop leaves
+                // unchecked), and the others' none.
+                const bool compare = (f->flags[i] & BUSTER_IR_RMW_OPERATION) == BUSTER_IR_RMW_COMPARE;
+                valid = ta == IR_PTR && tb == type && (compare ? c < f->instruction_count && f->type[c] == type : c == BUSTER_IR_NONE) &&
+                        ir_atomic_access(type, f->alignment_log2[i]);
+            } break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -2166,7 +2181,9 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         if (op == IR_ATOMIC_RMW)
                         {
                             const uint32_t order = (f->flags[i] & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
-                            fprintf(output, " align=%" PRIu32 " %s %s", UINT32_C(1) << f->alignment_log2[i], c == BUSTER_IR_RMW_ADD ? "add" : "xchg",
+                            const uint32_t operation = f->flags[i] & BUSTER_IR_RMW_OPERATION;
+                            fprintf(output, " align=%" PRIu32 " %s %s", UINT32_C(1) << f->alignment_log2[i],
+                                    operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
                                     order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)
