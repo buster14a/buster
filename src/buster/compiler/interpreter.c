@@ -71,6 +71,14 @@ struct InterpreterRuntime
     InterpreterMemory* memories;
     uint32_t memory_count;
     uint32_t memory_capacity;
+    // How many memories, from the first, interpreter_memory_add found pairwise disjoint (no byte in two of them). While
+    // that is all of them, a range lies in at most one, so interpreter_memory_access may look where the last access
+    // matched and then from the newest memory down, where a frame's own slots are, rather than from the oldest: the
+    // memory it finds is the first that holds the range all the same. A runtime whose memories were set some other way
+    // keeps 0 and looks in order.
+    uint32_t disjoint_count;
+    // The memory the last access found, a guess interpreter_memory_access checks before it trusts it.
+    uint32_t last_match;
     bool check_memory;
     bool check_undefined;
     uint64_t stack_serial;
@@ -226,41 +234,99 @@ static bool interpreter_memory_add(InterpreterRuntime* runtime, uint8_t* bytes, 
     bool result = runtime != 0 && runtime->memory_count < runtime->memory_capacity && size <= UINT64_MAX - address && (size == 0 || bytes != 0);
     if (result)
     {
-        runtime->memories[runtime->memory_count++] = (InterpreterMemory){
+        InterpreterMemory* const memories = runtime->memories;
+        const uint32_t count = runtime->memory_count;
+        // Still all disjoint if they were and the new memory shares no byte with any: an empty one shares none.
+        bool disjoint = runtime->disjoint_count == count;
+        for (uint32_t i = 0; disjoint && size != 0 && i < count; i += 1)
+        {
+            const uint64_t base = (uint64_t)(uintptr_t)memories[i].bytes;
+            disjoint = memories[i].size == 0 || address >= base + memories[i].size || base >= address + size;
+        }
+        memories[count] = (InterpreterMemory){
             .bytes = bytes,
             .size = size,
             .defined = defined,
             .writable = writable,
             .owner = owner,
         };
+        runtime->memory_count = count + 1;
+        runtime->disjoint_count = disjoint ? count + 1 : runtime->disjoint_count;
     }
     return result;
 }
 
+// After a removal: memories that were all disjoint still are; otherwise none is known to be until all are gone.
+static void interpreter_memory_removed(InterpreterRuntime* runtime, uint32_t count)
+{
+    runtime->disjoint_count = runtime->disjoint_count == runtime->memory_count ? count : 0;
+    runtime->memory_count = count;
+}
+
 static void interpreter_memory_remove(InterpreterRuntime* runtime, uint8_t* bytes)
 {
+    InterpreterMemory* const memories = runtime->memories;
+    const uint32_t count = runtime->memory_count;
     uint32_t destination = 0;
-    for (uint32_t i = 0; i < runtime->memory_count; i += 1)
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        if (runtime->memories[i].bytes != bytes)
+        if (memories[i].bytes != bytes)
         {
-            runtime->memories[destination++] = runtime->memories[i];
+            memories[destination++] = memories[i];
         }
     }
-    runtime->memory_count = destination;
+    interpreter_memory_removed(runtime, destination);
 }
 
 static void interpreter_memory_remove_owner(InterpreterRuntime* runtime, uint32_t owner)
 {
+    InterpreterMemory* const memories = runtime->memories;
+    const uint32_t count = runtime->memory_count;
     uint32_t destination = 0;
-    for (uint32_t i = 0; i < runtime->memory_count; i += 1)
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        if (runtime->memories[i].owner != owner)
+        if (memories[i].owner != owner)
         {
-            runtime->memories[destination++] = runtime->memories[i];
+            memories[destination++] = memories[i];
         }
     }
-    runtime->memory_count = destination;
+    interpreter_memory_removed(runtime, destination);
+}
+
+// Whether `memory` holds all `bytes` (at least 1) from `address`.
+static bool interpreter_memory_holds(const InterpreterMemory* memory, uint64_t address, uint64_t bytes)
+{
+    const uint64_t base = (uint64_t)(uintptr_t)memory->bytes;
+    const uint64_t offset = address - base;
+    return address >= base && offset <= memory->size && bytes <= memory->size - offset;
+}
+
+// The first memory that holds all `bytes` (at least 1) from `address`, or memory_count if none does. While the
+// memories are all disjoint (InterpreterRuntime.disjoint_count) at most one holds them: the last access's memory first,
+// then the newest down; otherwise each from the first.
+static uint32_t interpreter_memory_find(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes)
+{
+    const InterpreterMemory* const memories = runtime->memories;
+    const uint32_t count = runtime->memory_count;
+    const uint32_t hint = runtime->last_match;
+    uint32_t found = count;
+    if (runtime->disjoint_count == count)
+    {
+        found = hint < count && interpreter_memory_holds(&memories[hint], address, bytes) ? hint : count;
+        for (uint32_t i = count; found == count && i > 0; i -= 1)
+        {
+            found = interpreter_memory_holds(&memories[i - 1], address, bytes) ? i - 1 : count;
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; found == count && i < count; i += 1)
+        {
+            found = interpreter_memory_holds(&memories[i], address, bytes) ? i : count;
+        }
+    }
+    runtime->last_match = found != count ? found : hint;
+    return found;
 }
 
 static InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write)
@@ -276,29 +342,25 @@ static InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, 
     }
     else
     {
-        for (uint32_t i = 0; i < runtime->memory_count; i += 1)
+        const uint32_t found = interpreter_memory_find(runtime, address, bytes);
+        if (found != runtime->memory_count)
         {
-            InterpreterMemory* memory = &runtime->memories[i];
-            const uint64_t base = (uint64_t)(uintptr_t)memory->bytes;
-            const uint64_t offset = address - base;
-            if (address >= base && offset <= memory->size && bytes <= memory->size - offset)
+            const InterpreterMemory* memory = &runtime->memories[found];
+            const uint64_t offset = address - (uint64_t)(uintptr_t)memory->bytes;
+            result = write && !memory->writable ? INTERPRETER_MEMORY : INTERPRETER_OK;
+            if (result == INTERPRETER_OK && memory->defined != 0)
             {
-                result = write && !memory->writable ? INTERPRETER_MEMORY : INTERPRETER_OK;
-                if (result == INTERPRETER_OK && memory->defined != 0)
+                for (uint64_t b = 0; b < bytes; b += 1)
                 {
-                    for (uint64_t b = 0; b < bytes; b += 1)
+                    if (write)
                     {
-                        if (write)
-                        {
-                            memory->defined[offset + b] = 1;
-                        }
-                        else if (runtime->check_undefined && memory->defined[offset + b] == 0)
-                        {
-                            result = INTERPRETER_UNDEFINED;
-                        }
+                        memory->defined[offset + b] = 1;
+                    }
+                    else if (runtime->check_undefined && memory->defined[offset + b] == 0)
+                    {
+                        result = INTERPRETER_UNDEFINED;
                     }
                 }
-                break;
             }
         }
     }
