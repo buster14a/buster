@@ -13,8 +13,8 @@
 // none. A sequential interpreter shows no store buffer: the native runs are the evidence. A process with one CPU prints
 // that it skipped the runs. A concurrent counter litmus of the direct read/modify/writes (check_test_driver_counters),
 // built and checked the same four ways. And --helper-report's counts of a unit with every kind of helper call
-// (check_test_driver_helper_report). Include after c_check_tier1_driver_test.c, whose decoder of a function's object
-// and Tier 1 report readers this test takes.
+// (check_test_driver_helper_report), and Tier 1's order of two volatile reads (check_test_driver_volatile_order). Include
+// after c_check_tier1_driver_test.c, whose decoder of a function's object and Tier 1 report readers this test takes.
 
 static const char check_test_fence_litmus_source[] =
     "#define _GNU_SOURCE\n"
@@ -433,6 +433,52 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
             printf("counters (%s): the litmus skipped its runs: the process may run on one CPU\n", way);
         }
         unlink(output);
+    }
+    unlink(source);
+}
+
+// #1059's audit: two volatile reads through pointers keep their order by Tier 1, by both paths. Its load folding moves a
+// load into its consumer past no other load (tier1_select_fold_barrier), as the IR doesn't know a C access's volatility:
+// `ordered`'s first read, of p (rdi), comes before its second, of q (rsi), in the object's code, where folding the first
+// into the subtraction once read q first. clang's code reads them in this order too.
+static void check_test_driver_volatile_order(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "int ordered(volatile int* p, volatile int* q)\n"
+                                  "{\n"
+                                  "    int a = *p;\n"
+                                  "    int b = *q;\n"
+                                  "    return b - a;\n"
+                                  "}\n";
+    char source[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/volatile-order.c", directory);
+    snprintf(object, sizeof(object), "%s/volatile-order.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "volatile order: the source is written");
+    for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+    {
+        CheckTestTier1Build build;
+        const bool built = check_test_tier1_build(executable, source, "ordered", object, true, scalar != 0, true, false, NULL, &build);
+        X86Decoded records[64];
+        uint32_t offsets[64];
+        uint32_t types[64];
+        uint32_t relocations = 0;
+        const uint32_t count = built ? check_test_tier1_function(object, "ordered", records, 64, offsets, types, &relocations) : 0;
+        // Each pointer's first memory operand: its read.
+        uint32_t first_p = UINT32_MAX;
+        uint32_t first_q = UINT32_MAX;
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const X86Instruction* instruction = &records[r].instruction;
+            const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0 && (instruction->mode & BUSTER_X86_MODE_BASE) != 0;
+            const uint32_t base = instruction->rm & 15;
+            first_p = memory && base == X86_REGISTER_RDI && first_p == UINT32_MAX ? r : first_p;
+            first_q = memory && base == X86_REGISTER_RSI && first_q == UINT32_MAX ? r : first_q;
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "volatile order (%s path): Tier 1 reads p (record %u) before q (record %u)", scalar != 0 ? "scalar" : "vector", first_p, first_q);
+        check_test_expect(test, built && count != 0 && first_p < first_q && first_q != UINT32_MAX, message);
+        unlink(object);
     }
     unlink(source);
 }

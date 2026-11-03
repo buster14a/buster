@@ -526,6 +526,47 @@ turn) on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
 through both lowerings, promotion, the text's round trip and the IR's three forms
 against clang.
 
+### Effects through the consumers (#1059)
+
+An audit of every IR and Tier 1 consumer for the effects #1059 asks to survive:
+ordering (fences, atomic accesses and read/modify/writes), volatility, the
+floating environment and termination.
+
+- **Constant propagation and dead code** (`ir_optimize.c`). Loads, stores,
+  calls, fences, `rmw`s, branches, returns and `unreachable` are unconditional
+  roots (`ir_optimize_roots`), never dropped or folded. The floating operations
+  are roots too, and nothing folds them: the pass has no floating arithmetic, so
+  a `FENV_ACCESS` region's rounding and exception flags stay the code's.
+- **GVN and LICM** take allow-lists of pure operations (`ir_gvn_classify`'s and
+  `ir_licm_classify`'s tables). Neither numbers nor moves a load, a store, a call,
+  a fence, an `rmw` or a floating operation other than `fneg`, so a new operation
+  is impure until it is listed.
+- **SROA and promotion** leave every address-taken or volatile slot, and every
+  observable access, in memory. The C lowering marks a volatile local's slot
+  address-taken.
+- **The inliner and the rebuild** copy each node's flags and alignment, and map an
+  `rmw`'s optional desired value as a call's optional destination. Dataflow reads
+  every operand `ir_value_mask` gives.
+- **Tier 1's scheduler** pins every record that touches memory (a fence's effect
+  is one), control, calls or MXCSR, or may fault. So a locked access, `mfence` and
+  every SSE floating operation keep their places (`test-tier1-schedule`).
+- **Tier 1's load folding** moves a load into its single consumer past no store,
+  call, fence, `rmw`, stack move or other load (`tier1_select_fold_barrier`):
+  - The typed stream doesn't carry a C access's volatility, so the IR's loads of
+    volatile objects aren't flagged `volatile`. Two volatile reads must keep their
+    order, so the IR treats every unflagged load as possibly volatile.
+  - A volatile or atomic load folds into nothing.
+  - `test-checker-driver`'s volatile-order check compiles two volatile reads
+    through pointers by `--tier1`, which once read the second first.
+- **Tier 0** keeps every entry in the stream's order.
+- **Termination:** `unreachable` is a root that ends its block, and the terminal
+  builtins' calls are roots and barriers, as every call is.
+
+Carrying a C access's volatility in the typed stream (a marker on `LOAD`, `STORE`
+and `SET`, and on locals and globals) would let Tier 1 fold past ordinary loads
+again. That change touches every lowering path's access emission, and it isn't
+made here.
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |

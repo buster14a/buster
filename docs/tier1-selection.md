@@ -107,13 +107,16 @@ patterns are:
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
-  to the consumer (#141). It moves past the nodes between them that don't write
-  memory, call, access a volatile or atomic object, fence or move rsp
-  (arithmetic, constants, addresses, other nonvolatile loads) and past none that
-  do: a store to any address, a call, a volatile or atomic load (#1059:
-  `BUSTER_IR_OBSERVABLE`) or store, a fence of any order or scope (a signal
-  fence's too), an allocation or a restore of the dynamic stack; an atomic load
-  folds into nothing. A pass of its own after the plan's pass over
+  to the consumer (#141). It moves past the nodes between them that don't touch
+  memory, call, fence or move rsp (arithmetic, constants, addresses) and past
+  none that do: a store to any address, a call, any other load (#1059's audit:
+  the typed stream doesn't carry a C access's volatility, so that a load the IR
+  doesn't flag `BUSTER_IR_VOLATILE` may still be a volatile object's, and two
+  volatile reads keep their order: `tier1_select_fold_barrier`), an atomic
+  read/modify/write, a fence of any order or scope (a signal fence's too), an
+  allocation or a restore of the dynamic stack; a volatile or atomic load (#1059:
+  `BUSTER_IR_OBSERVABLE`) folds into nothing. On `main.c`'s `--tier1` build the
+  rule costs 6 records of 239,884 and 32 bytes of code. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
