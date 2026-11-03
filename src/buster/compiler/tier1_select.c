@@ -1497,9 +1497,10 @@ struct Tier1SelectForest
     const uint32_t* blocks;
     const uint32_t* uses;
     const uint32_t* costs;
-    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a stack allocation or restore, a
-    // fence or a volatile or atomic load (BUSTER_IR_OBSERVABLE), which a load isn't folded past (tier1_select_load_folds; tier1_select_barriers). An
-    // atomic access is never folded itself, and a load moved past a fence would leave the place its order keeps (#1059).
+    // Each node's last memory barrier before it, plus one (0 for none): a store, a call, a volatile or atomic load
+    // (BUSTER_IR_OBSERVABLE), a fence or a move of rsp, which a load isn't folded past (tier1_select_load_folds;
+    // tier1_select_barriers). An atomic access is never folded itself, and a load moved past a fence would leave the place
+    // its order keeps (#1059).
     const uint32_t* barriers;
     // Each narrow node's canonical-storage answer (tier1_select_canonical): its register holds zeros past its width.
     const uint8_t* canonical;
@@ -1509,6 +1510,8 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
+    // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
+    // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE ||
            (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }

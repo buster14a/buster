@@ -14,8 +14,10 @@
 // it is not an executable-only peak. Only --time-stages supplies a separate approximate post-exec RSS report.
 // It prints every run, each compile's medians with their ranges, what --time-stages costs (its median against the
 // default's), the default against the reference, and each stage's median, its range and its share of the median
-// span (the preprocessor's phases and the reader's expressions' walk, `check-input.expressions`, under their stages),
-// ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and exit). Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
+// span (the preprocessor's phases, the reader's expressions' walk, `check-input.expressions`, and the lowering's phases,
+// under their stages),
+// ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and exit), and the
+// lowering's coverage, the first report's `lowering-nodes` line. Every process must exit with status 0, every run's two objects must be the same bytes, and every report must
 // be whole, or the command fails. The caller pins it (taskset): the processes inherit its CPUs. DIR is a new directory
 // under --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
 // docs/compile-time.md has the 9700X's numbers for sqlite3.c, against tcc.
@@ -147,7 +149,7 @@ static double measure_compile_median(double* values, uint32_t count)
     return count != 0 ? values[count / 2] : 0;
 }
 
-// A run's row of --time-stages' report: each stage's milliseconds, the preprocessor's rows, the span, the process's
+// A run's row of --time-stages' report: each stage's milliseconds, the preprocessor's and the lowering's rows, the span, the process's
 // wall time outside it, each stage's system milliseconds, minor faults and peak KB added, and the reader's
 // expressions' walk inside its stage (#1038).
 #define BUSTER_MEASURE_SPAN (CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES)
@@ -168,6 +170,10 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     double* values = BUSTER_ARENA_PUSH_ARRAY(arena, double, m->runs + 1);
     char** argv = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)m->argument_count + 6);
     uint64_t failures = timed == NULL || rows == NULL || values == NULL || argv == NULL;
+    // The lowering's coverage, from the first --time-stages report: its `lowering-nodes` line (#624's fragments' and #1048's
+    // templates' shares of the evaluated nodes), which every run repeats, kept to print with the medians.
+    char coverage_line[512] = { 0 };
+    bool covered = false;
     for (uint32_t run = 0; failures == 0 && run < m->warmups + m->runs; run += 1)
     {
         const bool warmup = run < m->warmups;
@@ -185,6 +191,14 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             if (c == 1)
             {
                 row[BUSTER_MEASURE_OUTSIDE] = (double)one.wall_ns / 1e6 - row[BUSTER_MEASURE_SPAN];
+            }
+            const char* coverage = errors != NULL && !covered ? strstr(errors, "lowering-nodes\t") : NULL;
+            if (coverage != NULL)
+            {
+                const char* end = strchr(coverage, '\n');
+                const ptrdiff_t length = end != NULL ? end - coverage : (ptrdiff_t)strlen(coverage);
+                snprintf(coverage_line, sizeof(coverage_line), "%.*s", (int)length, coverage);
+                covered = true;
             }
             arena_pop_to(arena, mark);
             if (!exited || !reported)
@@ -236,6 +250,10 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
         printf("--time-stages costs %.3f ms (%.2f%%) of the default's median wall time\n", medians[1] - medians[0],
                medians[0] > 0 ? (medians[1] - medians[0]) * 100.0 / medians[0] : 0.0);
     }
+    if (failures == 0 && covered)
+    {
+        printf("lowering coverage: %s\n", coverage_line);
+    }
     if (failures == 0 && compiles == 3)
     {
         printf("default against reference: %.3f ms against %.3f ms, %.2f times, %.3f ms apart\n", medians[0], medians[2],
@@ -270,11 +288,14 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             sum += median[s];
             printf("  %-22s %9.3f  (%.3f to %.3f)  %5.1f%%  %8.3f  %7.0f  %8.0f\n", check_stage_names[s], median[s], low[s], high[s],
                    span > 0 ? median[s] * 100.0 / span : 0.0, used[0], used[1], used[2]);
-            for (uint32_t p = 0; s == CHECK_STAGE_PREPROCESS && p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
+            for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
             {
                 const uint32_t index = CHECK_STAGE_COUNT + p;
-                printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", check_clock_phase_names[p], median[index], low[index], high[index],
-                       span > 0 ? median[index] * 100.0 / span : 0.0);
+                if (check_clock_phase_stages[p] == s)
+                {
+                    printf("    %-20s %9.3f  (%.3f to %.3f)  %5.1f%%\n", check_clock_phase_names[p], median[index], low[index], high[index],
+                           span > 0 ? median[index] * 100.0 / span : 0.0);
+                }
             }
             if (s == CHECK_STAGE_CHECK_INPUT)
             {
