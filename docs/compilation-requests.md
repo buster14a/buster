@@ -259,11 +259,30 @@ objects are byte for byte the base's. `benchmark-backend-source` and
 functions, entries, records and lowered counts, apart from the new receipt
 lines.
 
-Pending: these costs, for a tiny file and a representative corpus, measured
-on the locked 9700X. Their raw evidence belongs in
-[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements).
-The pull request's own 9700X job runs the benchmarks above as it runs them
-for any change to their sources.
+On the locked 9700X, #1141's merge (`4670b2eb`) against its first parent
+(`754475d4`), as whole processes interleaved by `time-runs` on CPU 2, shows no
+measurable cost ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/request-preparation-1057-2026-11-03),
+with its raw logs):
+
+| Command | runs | wall time, base → merge | instructions, base → merge |
+|---|---:|---|---|
+| `-c` of a tiny file (one function, no header) | 41 | 0.831 → 0.839 ms | 1,531,831 → 1,531,002 (−829) |
+| `-fsyntax-only` of it | 41 | 0.735 → 0.744 ms | 1,428,388 → 1,427,677 (−711) |
+| `-c` of `tools/ci/changes.c` | 21 | 7.917 → 7.883 ms | 63,570,059 → 63,568,455 (−1,604) |
+| `-c` of the frozen corpus's `sqlite3.c` | 11 | 112.309 → 112.223 ms | 1,215,785,766 → 1,215,786,163 (+397) |
+| `-fsyntax-only` of it | 11 | 89.167 → 89.370 ms | 903,854,433 → 903,855,020 (+587) |
+| `benchmark-backend-source` of `sqlite3.c` | 5 | 656.661 → 660.375 ms | 9,630,170,403 → 9,629,561,143 (−609,260) |
+| `benchmark-lowering-source` of `sqlite3.c` | 5 | 1,024.968 → 1,023.769 ms | 14,479,142,381 → 14,483,648,230 (+4,505,849) |
+
+The wall times' ranges overlap in every row. The instruction counts, which
+vary by under 900 within a build, are the change's whole per-command work: a
+few hundred instructions either way, whatever the input's size, so no work
+per token. Every `-c` object is byte for byte the base's. Both source
+benchmarks report the same counts and timed regions, with the receipt line the
+only addition; `benchmark-lowering-source`'s process runs 0.031% more
+instructions, in no more time, for the selection and target-feature check
+that its preparation now runs once per file, as `-c` does, outside its timed
+region.
 
 ## Still separate
 
