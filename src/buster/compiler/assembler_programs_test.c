@@ -21,7 +21,9 @@ static const char asm_test_tls_fixture[] =
     "data16 leaq ext@tlsgd(%rip), %rdi\n.value 0x6666\nrex64\ncall __tls_get_addr@PLT\n"
     "leaq tl@tlsld(%rip), %rdi\ncall __tls_get_addr@PLT\nmovl tl@dtpoff(%rax), %eax\nleaq tl@DTPOFF+8(%rax), %rdx\naddq $tl@dtpoff, %rax\n"
     ".intel_syntax noprefix\nmov eax, dword ptr fs:[stl@TPOFF]\nmov esi, DWORD PTR fs:tl@tpoff\nlea rdi, stl@tlsld[rip]\nadd eax, DWORD PTR stl@dtpoff[rbx]\n"
-    "data16 lea rdi, ext@tlsgd[rip]\nmov rax, QWORD PTR ext@gottpoff[rip]\n.att_syntax prefix\n.p2align 4\n"
+    "data16 lea rdi, ext@tlsgd[rip]\nmov rax, QWORD PTR ext@gottpoff[rip]\n.att_syntax prefix\n"
+    // A TLS modifier through an alias: of an undefined symbol (which becomes STT_TLS), and of a label of .tbss.
+    ".set tls_alias, tls_alias_target\nmovq %fs:tls_alias@TPOFF, %rax\n.set tls_local_alias, tl+4\nmovl %fs:tls_local_alias@tpoff, %eax\n.p2align 4\n"
     ".section .rodata.offsets,\"a\",@progbits\n.long tl@dtpoff\n.long stl@DTPOFF+4\n.long tl@tpoff\n"
     ".section .tbss,\"awT\",@nobits\n.type tl, @object\ntl: .zero 16\n.local stl\nstl: .zero 4\n"
     ".section .tdata,\"awT\",@progbits\n.globl data\ndata: .long 7\n";
@@ -47,8 +49,12 @@ static const char asm_test_x87_fixture[] =
     "fld %st(0)\nfld %st(7)\nfst %st(3)\nfstp %st(1)\nfstp %st\nfucomip %st(1), %st\nfucompi %st(1), %st\nfcompi %st(2), %st\nfcomi\nfcomip\n"
     "fucomi %st(3)\nfcmovne %st(1), %st\nfcmovb %st(2), %st\nfcmovnbe %st(7), %ST\nfsubp %st(2)\nfsubrp %st(2)\nfadd %st(2)\nfdivr %st(3)\n"
     "fcom\nfcomp\nfucom\nfucomp\nfcom %st(4)\nfucomp %st(5)\nffree %st(1)\nffreep %st(2)\n"
+    // GNU as's translations (which it warns of): the arithmetic without operands is the pop, and faddp's and fmulp's
+    // ST(i) source the destination.
+    "fadd\nfmul\nfsub\nfsubr\nfdiv\nfdivr\nfaddp %st(1), %st\nfmulp %st(1), %st\nfaddp %st(3), %st\nfaddp %st(0), %st\n"
     ".intel_syntax noprefix\nfsub st(1), st\nfsubp st(1), st\nfsubr st(1), st\nfsubrp st(1), st\nfsub st, st(1)\nfdivp st(1), st\nfdivrp st(1), st\n"
-    "fmulp st(1), st\nfxch st(1)\nfld st\nfstp st(0)\nfucomip st, st(1)\nfsubp\nfdivrp\nfadd st, st(5)\nfcmove st, st(3)\n";
+    "fmulp st(1), st\nfxch st(1)\nfld st\nfstp st(0)\nfucomip st, st(1)\nfsubp\nfdivrp\nfadd st, st(5)\nfcmove st, st(3)\nfaddp st, st(1)\n"
+    "fmulp st, st(2)\n";
 static const char asm_test_predicate_fixture[] =
     ".text\npredicates:\ncmpltsd %xmm2, %xmm1\ncmpeqss (%rax), %xmm0\ncmpunordps %xmm1, %xmm2\ncmpnlepd %xmm3, %xmm4\ncmpordsd %xmm5, %xmm6\n"
     "cmpneqss %xmm7, %xmm8\ncmpnltpd 16(%rdi), %xmm9\ncmplesd %xmm10, %xmm11\n"
@@ -84,12 +90,17 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
             asm_test_pair(test, (String8){ .pointer = (char*)accepted[i].source, .length = strlen(accepted[i].source) }, 1, accepted[i].architecture);
         }
     }
+    // GNU as 2.43's .base64 (which GCC 15 writes for string literals), by its bytes: 2.42 doesn't take it, so it isn't
+    // compared with GNU as here; the program corpus compares GCC 15's with a GNU as that does.
+    static const uint8_t base64[] = { 'h', 'e', 'l', 'l', 'o', 0, 1, 2, 0xff, 'h', 'i' };
+    asm_test_bytes(test, ".data\n.base64 \"aGVsbG8=\", \"AAEC/w==\"\n.base64 \"\"\n.base64 \"aGk=\"\n", 2, base64, sizeof(base64), ".base64 decodes each string");
     // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`) or a
     // 64-bit one, @GOTTPOFF without RIP, 64-bit TLS offsets as data, a TLS modifier on a symbol outside a TLS section;
     // .comm's alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined
     // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
     // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
-    // characters; and %st(8).
+    // characters; %st(8); fsubp of ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an
+    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); and malformed base64.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
@@ -113,6 +124,16 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         "fadd %st(8)\n",
         "fld %st(x)\n",
         "fadd %st(1), %st(2)\n",
+        "fsubp %st(1), %st\n",
+        ".intel_syntax noprefix\nfadd\n",
+        "CMPLTSD %xmm0, %xmm1\n",
+        "DATA16\n",
+        ".data\n.base64 \"abc\"\n",
+        ".data\n.base64 \"ab$=\"\n",
+        ".data\n.base64 \"=AAA\"\n",
+        ".data\n.base64 \"A=AA\"\n",
+        ".data\n.base64 \"AA==AAAA\"\n",
+        ".data\n.base64 label\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
@@ -138,13 +159,46 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         okay = okay && (ELF64_ST_TYPE(symbol->st_info) == STT_OBJECT) == (block || word || (name != 0 && symbol->st_shndx == SHN_COMMON));
     }
     asm_test_check(test, okay && found == 3, "common symbols are SHN_COMMON objects and the GOT symbol is declared", error);
+    // A TLS modifier through an alias of an undefined symbol makes that symbol STT_TLS (GNU ld refuses a non-TLS
+    // reference to a TLS definition): linked with C that defines it, the read gives the thread's value.
+    if (cross_check)
+    {
+        static const char tls_alias[] = ".text\n.globl tls_alias_read\n.type tls_alias_read, @function\n.set tls_alias, tls_alias_target\n"
+                                        "tls_alias_read: movl %fs:tls_alias@TPOFF, %eax\nret\n.size tls_alias_read, .-tls_alias_read\n";
+        static const char caller[] = "_Thread_local int tls_alias_target = 41;\nint tls_alias_read(void);\n"
+                                     "int main(void) { tls_alias_target += 1; return tls_alias_read() == 42 ? 0 : 1; }\n";
+        char object_path[PATH_MAX];
+        char caller_path[PATH_MAX];
+        char executable[PATH_MAX];
+        char output[PATH_MAX];
+        char errors[PATH_MAX];
+        snprintf(object_path, sizeof(object_path), "%s/tls-alias.o", directory);
+        snprintf(caller_path, sizeof(caller_path), "%s/tls-alias-caller.c", directory);
+        snprintf(executable, sizeof(executable), "%s/tls-alias", directory);
+        snprintf(output, sizeof(output), "%s/tls-alias-output", directory);
+        snprintf(errors, sizeof(errors), "%s/tls-alias-errors", directory);
+        AsmResult result = asm_test_pair(test, (String8){ .pointer = (char*)tls_alias, .length = sizeof(tls_alias) - 1 }, 1, X86_ARCH_BASELINE);
+        const Object assembled = result.error == 0 ? asm_object(&result, BUSTER_S8("tls-alias.s"), &test->vector) : (Object){ .error = OBJECT_ERROR_RANGE };
+        char* link[] = { "cc", caller_path, object_path, "-o", executable, 0 };
+        char* run[] = { executable, 0 };
+        const bool ran = assembled.error == OBJECT_ERROR_NONE && object_write_file(object_path, assembled.bytes, assembled.size) == OBJECT_ERROR_NONE &&
+                         object_write_file(caller_path, (const uint8_t*)caller, sizeof(caller) - 1) == OBJECT_ERROR_NONE && object_test_run(link, output, errors) == 0 &&
+                         object_test_run(run, output, errors) == 0;
+        asm_test_check(test, ran, "a TLS modifier through an alias of an undefined symbol links with its TLS definition and reads it", result.error);
+        const char* const paths[] = { object_path, caller_path, executable, output, errors };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(paths); i += 1)
+        {
+            unlink(paths[i]);
+        }
+    }
 }
 
 typedef struct AsmProgramVariant AsmProgramVariant;
 struct AsmProgramVariant
 {
     const char* name;
-    const char* flags[2];
+    // Each variant names its -march: a compiler's default may be another (Ubuntu 26.04's GCC 15 writes AVX's at -O2).
+    const char* flags[3];
     X86Architecture architecture;
 };
 
@@ -297,10 +351,10 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
     static const char* const compilers[] = { "gcc", "clang" };
     static const char* const syntaxes[] = { "-masm=att", "-masm=intel" };
     static const AsmProgramVariant variants[] = {
-        { .name = "O0", .flags = { "-O0", "-march=x86-64" }, .architecture = X86_ARCH_BASELINE },
-        { .name = "O2", .flags = { "-O2", "-march=x86-64" }, .architecture = X86_ARCH_BASELINE },
-        { .name = "O2-pic", .flags = { "-O2", "-fPIC" }, .architecture = X86_ARCH_BASELINE },
-        { .name = "O3-v4", .flags = { "-O3", "-march=x86-64-v4" }, .architecture = X86_ARCH_V4 },
+        { .name = "O0", .flags = { "-O0", "-march=x86-64", "-fPIE" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O2", .flags = { "-O2", "-march=x86-64", "-fPIE" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O2-pic", .flags = { "-O2", "-march=x86-64", "-fPIC" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O3-v4", .flags = { "-O3", "-march=x86-64-v4", "-fPIE" }, .architecture = X86_ARCH_V4 },
     };
     static const char* const targets[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=x86-64-v4" };
     const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
@@ -356,6 +410,7 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                         (char*)compilers[compiler],
                         (char*)chosen->flags[0],
                         (char*)chosen->flags[1],
+                        (char*)chosen->flags[2],
                         (char*)syntaxes[syntax],
                         "-fcf-protection=none",
                         "-fcommon",

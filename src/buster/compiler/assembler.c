@@ -2129,9 +2129,12 @@ static int32_t asm_compare_predicate(String8* name)
 //   - the other arithmetic of one stack register ST(i) on ST(0) and it: `fadd %st(2)` is `fadd st, st(2)`;
 //   - fcomi, fcomip, fucomi and fucomip on ST(0) and ST(1), or their one operand;
 //   - fcom, fcomp, fucom, fucomp and fxch on ST(1) without an operand.
-// AT&T's subtraction and division then name the reversed operation where the destination is ST(i) (DC's and DE's
-// forms, which every pop is): `fsubp %st, %st(1)` is Intel's `fsubrp st(1), st` (DE E9), as GNU as reads AT&T, after
-// the System V assemblers. A destination of ST(0) (`fsub %st, %st(0)`) is D8's form, which isn't reversed.
+// And GNU as's translations, which it warns of: AT&T's arithmetic without operands is the pop (`fadd` is `faddp`), and
+// faddp and fmulp of ST(0) and ST(i), which are commutative, take ST(i) as the destination (`faddp %st(1), %st` is
+// `faddp %st, %st(1)`). AT&T's subtraction and division then name the reversed operation where the destination is
+// ST(i) (DC's and DE's forms, which every pop is): `fsubp %st, %st(1)` is Intel's `fsubrp st(1), st` (DE E9), as GNU
+// as reads AT&T, after the System V assemblers. A destination of ST(0) (`fsub %st, %st(0)`) is D8's form, which isn't
+// reversed.
 static const char* const asm_x87_pops[] = { "faddp", "fmulp", "fsubp", "fsubrp", "fdivp", "fdivrp" };
 static const char* const asm_x87_arithmetic[] = { "fadd", "fmul", "fsub", "fsubr", "fdiv", "fdivr" };
 static const char* const asm_x87_flags[] = { "fcomi", "fcomip", "fucomi", "fucomip" };
@@ -2179,6 +2182,12 @@ static void asm_x87_operands(AsmParser* parser, AsmInstruction* instruction)
     {
         one |= x86_match_name(request->mnemonic, asm_x87_ones[i]);
     }
+    if (!parser->options.intel && operation < BUSTER_ARRAY_LENGTH(asm_x87_arithmetic) && request->count == 0)
+    {
+        pop = operation;
+        operation = BUSTER_ARRAY_LENGTH(asm_x87_arithmetic);
+        request->mnemonic = (String8){ .pointer = (char*)asm_x87_pops[pop], .length = strlen(asm_x87_pops[pop]) };
+    }
     const X86Operand st0 = { .kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .reg = 0 };
     const X86Operand st1 = { .kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .reg = 1 };
     const bool stack = request->count == 1 && request->operands[0].kind == X86_OPERAND_REGISTER && request->operands[0].class == BUSTER_X86_CLASS_ST;
@@ -2214,6 +2223,12 @@ static void asm_x87_operands(AsmParser* parser, AsmInstruction* instruction)
     }
     const bool registers = request->count == 2 && request->operands[0].kind == X86_OPERAND_REGISTER && request->operands[0].class == BUSTER_X86_CLASS_ST &&
                            request->operands[1].kind == X86_OPERAND_REGISTER && request->operands[1].class == BUSTER_X86_CLASS_ST;
+    if (registers && pop <= 1 && request->operands[0].reg == 0)
+    {
+        const X86Operand source = request->operands[1];
+        request->operands[1] = request->operands[0];
+        request->operands[0] = source;
+    }
     if (!parser->options.intel && registers && pop < BUSTER_ARRAY_LENGTH(asm_x87_pops))
     {
         request->mnemonic = (String8){ .pointer = (char*)asm_x87_pops[reversed[pop]], .length = strlen(asm_x87_pops[reversed[pop]]) };
@@ -2427,7 +2442,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
 // (asm_assemble_code) has no bytes but its records', so its caller assembles a template with one whole.
 static void asm_prefix_statements(AsmParser* parser, uint32_t end)
 {
-    while (parser->at < end && parser->result.error == 0 && (asm_is_case(parser, parser->at, "data16") || asm_is_case(parser, parser->at, "rex64")))
+    while (parser->at < end && parser->result.error == 0 && (asm_is(parser, parser->at, "data16") || asm_is(parser, parser->at, "rex64")))
     {
         const uint32_t location = parser->tokens[parser->at].start;
         if (parser->code)
@@ -2449,7 +2464,7 @@ static void asm_prefix_statements(AsmParser* parser, uint32_t end)
             }
             else if (parser->result.error == 0)
             {
-                *byte = asm_is_case(parser, parser->at, "data16") ? 0x66 : 0x48;
+                *byte = asm_is(parser, parser->at, "data16") ? 0x66 : 0x48;
                 parser->fragments[fragment].bytes = byte;
                 parser->fragments[fragment].size = 1;
                 parser->sections[parser->section].data = false;
@@ -2528,6 +2543,57 @@ static void asm_string(AsmParser* parser, uint32_t end, bool terminated)
         if (terminated)
         {
             output->bytes[output->size++] = 0;
+        }
+        parser->at += 1;
+    } while (parser->result.error == 0 && asm_take(parser, ','));
+}
+
+// `.base64 "string"[, "string"...]` (GNU as 2.43's), each string's bytes in base64, which GCC 15 writes for its string
+// literals when the assembler takes it: groups of four of A-Z, a-z, 0-9, + and /, the last group ending in one or two
+// = for one or two bytes fewer (#1115).
+static void asm_base64(AsmParser* parser, uint32_t end)
+{
+    do
+    {
+        const AsmToken token = parser->tokens[parser->at];
+        if (parser->at >= end || token.kind != BUSTER_ASM_STRING)
+        {
+            asm_fail(parser, token.start, "expected string literal");
+            break;
+        }
+        const uint32_t length = token.end - token.start - 2;
+        const uint8_t* text = (const uint8_t*)parser->source.pointer + token.start + 1;
+        const uint32_t fragment = asm_fragment(parser, ASM_BYTES, token.start);
+        AsmFragment* output = &parser->fragments[fragment];
+        output->bytes = arena_push(parser->arena, length / 4 * 3 + 1, 1);
+        if (output->bytes == 0)
+        {
+            asm_fail(parser, token.start, "arena exhausted");
+            break;
+        }
+        bool valid = length % 4 == 0;
+        for (uint32_t group = 0; valid && group < length; group += 4)
+        {
+            uint32_t bits = 0;
+            uint32_t padding = 0;
+            for (uint32_t i = 0; valid && i < 4; i += 1)
+            {
+                const uint8_t byte = text[group + i];
+                const uint32_t value = byte >= 'A' && byte <= 'Z' ? byte - 'A' : byte >= 'a' && byte <= 'z' ? byte - 'a' + 26 : byte >= '0' && byte <= '9' ? byte - '0' + 52 :
+                                       byte == '+' ? 62 : byte == '/' ? 63 : 64;
+                // Padding ends the last group: its last one or two characters.
+                valid = value < 64 ? padding == 0 : byte == '=' && group + 4 == length && i >= 2;
+                padding += byte == '=';
+                bits = bits << 6 | (value < 64 ? value : 0);
+            }
+            for (uint32_t i = 0; valid && i < 3 - padding; i += 1)
+            {
+                output->bytes[output->size++] = (uint8_t)(bits >> (16 - 8 * i));
+            }
+        }
+        if (!valid)
+        {
+            asm_fail(parser, token.start, "invalid base64 string");
         }
         parser->at += 1;
     } while (parser->result.error == 0 && asm_take(parser, ','));
@@ -2695,7 +2761,9 @@ static void asm_resolve_aliases(AsmParser* parser)
             symbol->alias_target.plus = next.plus;
             symbol->alias_target.value += next.value;
         }
-        const AsmSymbol* target = &parser->symbols[symbol->alias_target.plus];
+        AsmSymbol* target = &parser->symbols[symbol->alias_target.plus];
+        // A TLS modifier on the alias is one on its target, which an undefined one's references become.
+        target->tls |= symbol->alias && symbol->tls && !target->defined;
         if (symbol->alias && target->alias)
         {
             asm_fail(parser, symbol->location, "circular symbol alias");
@@ -3023,6 +3091,11 @@ static void asm_directive(AsmParser* parser, uint32_t end)
     else if (asm_is(parser, token, ".ascii") || asm_is(parser, token, ".asciz") || asm_is(parser, token, ".string"))
     {
         asm_string(parser, end, !asm_is(parser, token, ".ascii"));
+        parser->sections[parser->section].data = true;
+    }
+    else if (asm_is(parser, token, ".base64"))
+    {
+        asm_base64(parser, end);
         parser->sections[parser->section].data = true;
     }
     else if (asm_is(parser, token, ".zero") || asm_is(parser, token, ".skip") || asm_is(parser, token, ".space") || asm_is(parser, token, ".nops") ||

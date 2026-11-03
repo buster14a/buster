@@ -112,6 +112,11 @@ or rotate of one operand shifts by 1 (`shrl %ecx`, `shr ecx`), the D1 form.
     operand;
   - `fcom`, `fcomp`, `fucom`, `fucomp` and `fxch` on ST(1).
 
+  GNU as's translations, which it warns of, are taken too: AT&T's arithmetic
+  without operands is the pop (`fadd` is `faddp`), and `faddp` and `fmulp` of
+  ST(0) and ST(i) take ST(i) as the destination (`faddp %st(1), %st` is
+  `faddp %st, %st(1)`). GNU as refuses the other pops so, and Intel's arithmetic
+  without operands, and so does this assembler.
   LLVM's `fucompi` and `fcompi` are `fucomip` and `fcomip`. As GNU as reads
   AT&T (the System V convention), a subtraction or division whose destination is
   ST(i) names the reversed operation: `fsubp %st, %st(1)` is Intel's
@@ -130,7 +135,8 @@ or rotate of one operand shifts by 1 (`shrl %ecx`, `shr ecx`), the D1 form.
   writes it: the general-dynamic TLS sequence is so written (clang's `data16` /
   `leaq x@TLSGD(%rip), %rdi` / `data16` / `data16` / `rex64` / `callq
   __tls_get_addr@PLT`, GCC's `data16 leaq ...` / `.value 0x6666` / `rex64` /
-  `call`). C's inline assembly assembles a template with one whole.
+  `call`). C's inline assembly assembles a template with one whole. They are
+  lowercase, as every mnemonic is here (GNU as takes either case).
 
 ### The admitted forms (#1134)
 
@@ -248,7 +254,7 @@ Directives:
 | Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
-| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.zero`, `.skip`/`.space` (with an optional fill byte) |
+| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (with an optional fill byte) |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
 | Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file`, `.loc`, and LLVM's `.prefalign` are accepted but add no debug or alignment information |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |
@@ -344,7 +350,9 @@ instruction. The TLS models' modifiers (#1115), in either case (clang writes
 - `@GOTTPOFF` (initial-exec), `@TLSGD` (general-dynamic) and `@TLSLD`
   (local-dynamic) on a RIP-relative displacement, as GOTTPOFF, TLSGD and TLSLD.
 
-As GNU as does, a TLS modifier makes its symbol `STT_TLS`, an undefined one too
+As GNU as does, a TLS modifier makes its symbol `STT_TLS`, an undefined one too,
+through an alias as well (`.set alias,target` then `alias@TPOFF` makes `target`
+one)
 (and a symbol of a TLS section is one, `.type x, @object` in `.tbss` as the
 compilers write it), and every modifier but `@PLT` declares
 `_GLOBAL_OFFSET_TABLE_`, an undefined global no relocation refers to. A TLS
@@ -1011,7 +1019,10 @@ named failure here rather than one a user meets. The programs are original
 
 GCC and Clang (Clang with `-fno-integrated-as`, as in the corpus above) compile
 each at `-O0`, `-O2`, `-O2 -fPIC` and `-O3 -march=x86-64-v4`, in AT&T and Intel
-syntax, with `-fcf-protection=none` and `-fcommon`: 48 sources. Each source must
+syntax, with `-fcf-protection=none` and `-fcommon`: 48 sources. Every variant
+names its `-march` (`x86-64` for the first three) and `-fPIE` or `-fPIC`: a
+compiler's defaults may be others (Ubuntu 26.04's GCC 15 writes AVX's
+instructions at `-O2` without one). Each source must
 assemble by both paths into the same object, by the `assemble` command too (with
 the variant's `-march`), and that object must have GNU as's sections, symbols
 and relocations (the comparator above). The program linked from it (by the
@@ -1028,11 +1039,12 @@ sections' alignment filled with `int3`, and the bytes where that object has
 and every other byte, section, symbol and relocation is compared as on 2.47.
 The programs' runs are compared on either.
 
-The first corpus run found two gaps beyond the issue's, which are fixed:
+The first corpus runs found three gaps beyond the issue's, which are fixed:
 
 - GCC's `.set .LC4,.LC11+4`, a constant pool's alias (above);
 - the 16-bit accumulator forms, which GNU as doesn't take where the imm8 form is
-  as long (above).
+  as long (above);
+- GCC 15's `.base64` (above), which it writes where GNU as takes it.
 
 `-g` output isn't in the corpus. Its `.loc`s give no `.debug_line` here, its
 TLS variables' DWARF uses `.quad x@dtpoff` (DTPOFF64), and GCC's view numbers
