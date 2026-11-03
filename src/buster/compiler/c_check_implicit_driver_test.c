@@ -415,6 +415,18 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int h(int x)\n{\n    while (x) ;\n}\n"
         "int i(int x)\n{\n    while (x) ;\n      if (x) ;\n    return 0;\n}\n"
         "int j(int x)\n{\n    switch (x) {\n    case 1:\n        while (x) ;\n        break;\n    }\n    return 0;\n}\n";
+    static const char for_increments[] =
+        "int a(int x) { for (; x; x) return 0; }\n"
+        "int b(int x) { for (; x; x) break; }\n"
+        "int c(int x) { for (; x; x) { x = 0; continue; } }\n"
+        "int d(int x) { for (; x; x) { x = 0; } }\n"
+        "int e(int x) { for (; x; x) { if (x > 1) return 1; } }\n"
+        "int f(int x) { for (; x; x) { if (x) return 1; else return 2; } }\n"
+        "int g(int x) { for (; x; x) { while (1) { x = 0; } } }\n"
+        "int h(int x) { int a[4]; for (; x; a[5]) return 0; }\n"
+        "int i(int x) { int a[4]; for (; x; a[5]) { x = 0; } }\n"
+        "int j(int x) { for (; x; x / 0) return 0; }\n"
+        "int k(int x) { for (; x; x / 0) { x = 0; } }\n";
     static const char zero_length_array[] =
         "int a(void) { int x[0]; return x[0]; }\n"
         "int b(void) { int x[0]; return x[1]; }\n";
@@ -642,6 +654,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },
         { empty_bodies, { "-Wall", NULL, NULL, NULL } },
+        { for_increments, { "-Wall", "-Wextra", NULL, NULL } },
         { zero_length_array, { "-Wall", NULL, NULL, NULL } },
         { switch_fixed_shadow, { "-Wall", NULL, NULL, NULL } },
         { format_mismatches, { "-Wall", NULL, NULL, NULL } },
