@@ -6,7 +6,8 @@
 // as clang's does; one that an initializer defines, a section or a weak attribute, thread-local storage or internal
 // linkage keeps a definition of its own. Each named symbol of the unit must be clang's (common or not, its value where it
 // is common, its size, type, binding and visibility), by both paths, whose objects are the same bytes. Then a program of
-// two units whose commons differ in size, a common beside a strong definition and beside a weak common, links from -c's
+// two units whose commons differ in size (one the larger, the other the more aligned, both of which the link keeps), a
+// common beside a strong definition and beside a weak common, links from -c's
 // objects by cc and as the direct path's executable of both units (by default, on one lane and by the scalar path), and
 // must run as clang's build does. -fcommon makes every tentative definition of external linkage a common one, but for
 // nocommon's. Include after c_check_alias_driver_test.c.
@@ -138,23 +139,27 @@ static void check_test_driver_commons(CheckTest* test, const char* clang, const 
         unlink(everything_objects[p]);
     }
     unlink(everything_path);
-    // Two units: commons of different sizes, whose largest the link keeps; a common beside a strong definition, which
+    // Two units: commons of different sizes, whose largest the link keeps, with the largest alignment of either (`e`, the
+    // larger one the less aligned: GNU ld's and lld's maxima, #1126's review); a common beside a strong definition, which
     // takes its place; a common beside a weak common one, which is a common one's place too.
     static const char first[] =
         "int a __attribute__((common));\n"
         "char b[8] __attribute__((common));\n"
         "int c __attribute__((common));\n"
         "long d __attribute__((common));\n"
-        "int first(void) { a += 1; b[7] = 'a'; return a + c + (int)d; }\n";
+        "char p __attribute__((common));\n"
+        "char e[64] __attribute__((common, aligned(1)));\n"
+        "int first(void) { a += 1; b[7] = 'a'; p = 1; e[63] = 'z'; return a + c + (int)d + e[63]; }\n";
     static const char second[] =
         "#include <stdio.h>\n#include <stdint.h>\n"
         "int a __attribute__((common));\n"
         "char b[64] __attribute__((common, aligned(32)));\n"
         "int c = 40;\n"
         "long d __attribute__((common, weak));\n"
+        "char e[8] __attribute__((common, aligned(64)));\n"
         "int first(void);\n"
         "int main(void) { a = 1; for (int i = 0; i < 64; i++) b[i] = (char)i; int r = first();\n"
-        "printf(\"%d %d %d %ld %d %zu\\n\", r, a, b[7], d, (int)((uintptr_t)b % 32), sizeof b); return 0; }\n";
+        "printf(\"%d %d %d %ld %d %zu %d\\n\", r, a, b[7], d, (int)((uintptr_t)b % 32), sizeof b, (int)((uintptr_t)e % 64)); return 0; }\n";
     char sources[2][512];
     snprintf(sources[0], sizeof(sources[0]), "%s/commons-first.c", directory);
     snprintf(sources[1], sizeof(sources[1]), "%s/commons-second.c", directory);
