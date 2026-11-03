@@ -23,26 +23,26 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 330400f6a6b3dfcfd3facbcf26e085e425459e0b
+          ref: 838da61f73d24e6ce11a00b5972c4e11680e4c1d
           path: implementation
-      - name: Commit the lane failure-stage fixture correction
+      - name: Pass target options into the lane test's program preparation
         id: publish
         working-directory: implementation
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 330400f6a6b3dfcfd3facbcf26e085e425459e0b
+          test "$(git rev-parse HEAD)" = 838da61f73d24e6ce11a00b5972c4e11680e4c1d
           git apply --check ../payload/.issue-1106-followup.patch
           git apply ../payload/.issue-1106-followup.patch
           git diff --check
-          git switch -c agent/1106-lane-fixture
+          git switch -c agent/1106-target-fixture
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           sh .githooks/enable-sign-off.sh --maintainer-session
           git add src/buster/compiler/c_check_lanes_test.c
-          git commit -m 'tests: preserve Tier 0 lane refusal coverage with mask depth' -m 'The oversized-object fixture was rejected by validation before code generation. Exercise the independent mask-depth bound instead, with an explicit target independent of host features, and assert the backend error as well as the pipeline status. No mask instructions are executed.' -m 'Agent model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          git commit -m 'tests: honor function target attributes in lane fixtures' -m 'Pass the parsed baseline target and predefines to check_program, as the public driver does. Without predefines, the explicit target attribute is ignored and the mask-depth fixture fails during builtin lowering rather than Tier 0 emission.' -m 'Agent model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
           test "$(git log -1 --format=%B | sed '/^$/d' | tail -n 1)" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
-          git push origin HEAD:refs/heads/agent/1106-lane-fixture
+          git push origin HEAD:refs/heads/agent/1106-target-fixture
           printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git show --stat --oneline HEAD
   validate:
@@ -70,11 +70,11 @@ jobs:
       - name: Public driver shard containing the deep regression
         if: ${{ !cancelled() }}
         shell: bash
-        run: set -o pipefail; ./build/compiler test-checker-driver --part 2/64 --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-driver.log"
+        run: set -o pipefail; ./build/compiler test-checker-driver --part 2/64 --executable "$PWD/build/compiler" 2>&1 | tee "$RUNNER_TEMP/issue-1106-driver.log"
       - name: Lane failure and retry semantics with the default program inventory
         if: ${{ !cancelled() }}
         shell: bash
-        run: set -o pipefail; ./build/compiler test-check-lanes --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1106-lanes.log"
+        run: set -o pipefail; ./build/compiler test-check-lanes --executable "$PWD/build/compiler" 2>&1 | tee "$RUNNER_TEMP/issue-1106-lanes.log"
       - name: Check module ownership
         if: ${{ !cancelled() }}
         shell: bash
