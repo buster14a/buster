@@ -1408,6 +1408,24 @@ znver5. The program that includes the header lowers only what its roots reach,
 as `-c` does (`check_test_program_includes`), since the header's MMX functions
 call builtins no row takes.
 
+#799's report and its follow-up name the immediate intrinsics that stb_image,
+xxHash and zstd call through `<immintrin.h>`: `_mm_shuffle_epi32`, the word
+shuffles, the byte shifts, `_mm_shuffle_ps` and `_mm_shuffle_pd`, the word
+insert and extract, `_mm_alignr_epi8` and `_mm_blend_epi16`, and AVX2's
+`_mm256_permute4x64_epi64`, `_mm256_shuffle_epi32`,
+`_mm256_permute2x128_si256`, `_mm256_alignr_epi8`, `_mm256_blend_epi32`, the
+byte shifts, `_mm256_extracti128_si256`, the word shuffles,
+`_mm256_permute_ps` and `_mm256_permute4x64_pd`. Each has its builtin's row
+and its SemaX86 range. The x86 programs' `x86-immediate-header-intrinsics` runs
+every one of them through the header at znver5, at its immediate's edges (0,
+the fields' widths and one past them, the lanes' and elements' counts, 255) and
+with its operands both ways, against clang -O0's build.
+`check_test_x86_header_ranges` gives each one past its range, below it or not a
+constant, and all of them at their ranges' tops. It requires clang's lines from
+both of the driver's paths: each error at the macro's use in the source, and the
+note that names the macro. At targets without AVX-512F and AVX-512VL, these
+intrinsics stop at #775's limits.
+
 #148's rest of clang's x86 builtins, which no build of this compiler calls, join
 the supplementary scope by family, each with its SemaX86 facts and the rows of
 the existing families or of new ones:
