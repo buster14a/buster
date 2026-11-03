@@ -150,6 +150,9 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 ir_test_expect(tally, checked.error == IR_OK && ir_verify_scalar(&optimized.function, scratch, NULL).error == IR_OK && scratch->length == 0,
                                "SCCP, dead code and CFG cleanup take a function of masks alone, into a function that verifies");
                 arena_pop_to(output, 0);
+                // GVN, LICM, SROA and the inliner find the masks by ir_function_has_simd_path, by their requested path
+                // (#141's review): a scalar run takes its scalar twin alone.
+                const uint64_t scans = ir_scan_vector_paths;
                 IrGvnResult gvn = { .function.instruction_count = 123 };
                 IrGvnOptions gvn_options = ir_gvn_options();
                 gvn_options.scalar = scalar != 0;
@@ -173,6 +176,8 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 inline_options.scalar = scalar != 0;
                 checked = ir_optimize_inline(&unit, output, scratch, inline_options, &inlined, NULL);
                 ir_test_expect(tally, checked.error == IR_ERROR_UNSUPPORTED && inlined.function_count == 123 && output->length == 0 && scratch->length == 0, "the inliner refuses masks");
+                ir_test_expect(tally, scalar != 0 ? ir_scan_vector_paths == scans : !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans,
+                               "the passes' scans for SIMD values take the requested path: none the vector path on a scalar run");
                 function.symbol_count = 0;
             }
         }

@@ -1081,6 +1081,9 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
                                   const uint64_t* counts, const uint8_t* expected)
 {
     const uint64_t output_mark = test->output.length;
+    // The scans for vectors that selection and the CFG consumer make, which must take the requested path (#141's review):
+    // a scalar run none by the vector path.
+    const uint64_t scans = ir_scan_vector_paths;
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
     const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, vector, &plan, &node);
@@ -1104,6 +1107,8 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         {
             printf("test-tier1-masks: %s, %s path: emission error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)error, node);
         }
+        tier1_masks_test_expect(test, vector ? !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans : ir_scan_vector_paths == scans,
+                                "selection's and the CFG consumer's scans for vectors take the requested path: none the vector path on a scalar run");
     }
     if (ok)
     {

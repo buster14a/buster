@@ -1282,7 +1282,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
 
     work->function = function;
     IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
-    if (check.error == IR_OK && !simd && ir_function_has_simd(function))
+    if (check.error == IR_OK && !simd && ir_function_has_simd_path(function, !scalar))
     {
         check.error = IR_ERROR_UNSUPPORTED;
     }

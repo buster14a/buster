@@ -741,6 +741,11 @@ static IrSimdShape ir_simd_shape(uint32_t type)
     return result;
 }
 
+// How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
+// took the vector path: test-tier1-masks and test-ir-simd read it to check that a scalar run takes each scan's scalar
+// twin, as --scalar promises (#141's review).
+static _Thread_local uint64_t ir_scan_vector_paths;
+
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
 // scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
 // instructions' types and operations, the scan's bulk, go 64 at a time on the vector path and one at a time on its scalar
@@ -752,6 +757,7 @@ static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
     bool found = function->vector_constant_count != 0 || function->result_type >= IR_V4I32;
     if (BUSTER_VECTOR_PATH(vector))
     {
+        ir_scan_vector_paths += 1;
         for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
         {
             const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
@@ -800,6 +806,7 @@ static bool ir_function_has_vectors_path(const IrFunction* function, bool vector
     bool found = function->vector_constant_count != 0 || ir_vector_type(function->result_type);
     if (BUSTER_VECTOR_PATH(vector))
     {
+        ir_scan_vector_paths += 1;
         for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
         {
             const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
