@@ -339,7 +339,23 @@ cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
 instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
 -O0 on both programs: 3,870 M against 3,908 M, and 7,610 M against 8,253 M.
 
-Cycles and run time remain to be measured on the 9700X.
+On the 9700X, `measure-tier1-programs` ([the command guide](commands/tier1.md))
+ran in #1230's Benchpress job at `eeeafb6d`, with clang 23.1.4
+([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/02f5d050157625614cafe17ae4fccd08f0dffb6d/docs/measurements/tier1-gap-1189-2026-11-03),
+every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
+
+| Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| speedtest1, ms | 258.2 | 207.0 | 271.0 | 129.3 | 269.7 | 1.60 |
+| speedtest1, user cycles, M | 1,336 | 1,051 | 1,397 | 626 | 1,398 | 1.68 |
+| Lua's scripts, ms | 335.2 | 260.8 | 358.7 | 167.4 | 393.6 | 1.56 |
+| Lua's scripts, user cycles, M | 1,839 | 1,424 | 1,957 | 910 | 2,157 | 1.57 |
+
+The `cc3387f` record had `--tier1` at 1.70× -O2's time on speedtest1 and 1.71×
+on Lua, before #1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1 and
+before the depth slots above. The 9700X job runs the measurement on its daily
+and dispatched runs, and on pull requests that change Tier 1's input or
+pipeline.
 
 ## Current integration boundary
 
