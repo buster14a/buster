@@ -1,0 +1,31 @@
+name: Issue 1207 isolated validation
+
+on:
+  push:
+    branches: [agent/1207-ci-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Preserve exact source snapshot for CI implementation tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/issue-1207-source"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/issue-1207-source/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/issue-1207-source/revision.txt"
+          git show -s --format='%P' HEAD > "$RUNNER_TEMP/issue-1207-source/base.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/issue-1207-source/tree.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1207-source
+          path: ${{ runner.temp }}/issue-1207-source
+          retention-days: 1
