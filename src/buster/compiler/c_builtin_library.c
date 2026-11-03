@@ -30,8 +30,9 @@
 // library's function, which calls of it reach as of any function; undeclared, its call declares it implicitly with the
 // row's prototype, which C99 and later make an error and C89 a warning, each naming the prototype and the header
 // (c_check_input.c's implicit library functions). c_builtin_library_plain.inc lists the rows this compiler implements so:
-// all of clang's in C's modes but those that need the unit's jmp_buf or ucontext_t or have no prototype to check
-// (setjmp and its kin, vfork, umask, pthread_create), and stdarg.h's va_start, va_end and va_copy.
+// all of clang's in C's modes but stdarg.h's va_start, va_end and va_copy. C23's <stdbit.h> functions (stdc_leading_zeros_uc
+// and the others) are C23's alone, and a call of the unit's declaration of one is a bit builtin of its own, computed
+// inline as clang computes it (c_builtin_catalog.c's cbuiltin_stdc_library).
 // Names are bounded slices, which need no terminator or readable padding.
 #ifndef BUSTER_C_BUILTIN_LIBRARY_INCLUDED
 #define BUSTER_C_BUILTIN_LIBRARY_INCLUDED
@@ -227,26 +228,38 @@ static __attribute__((unused)) uint32_t cbuiltin_library_libgcc(const char* name
     return result;
 }
 
-// The plain library builtins (c_builtin_library_plain.inc): each name, its length and whether it is a builtin of GNU's
-// modes alone, in the names' order.
+// The language modes of a plain library builtin's row (c_builtin_library_plain.inc's second column): every C mode's
+// (ALL_LANGUAGES, false), GNU's alone (ALL_GNU_LANGUAGES, true) or C23's and later (C23_LANG: <stdbit.h>'s functions).
+#define BUSTER_CBUILTIN_LIBRARY_ALL 0u
+#define BUSTER_CBUILTIN_LIBRARY_GNU 1u
+#define BUSTER_CBUILTIN_LIBRARY_C23 2u
+
+// The plain library builtins (c_builtin_library_plain.inc): each name, its length and its language modes, in the names'
+// order.
 typedef struct CBuiltinLibraryPlain CBuiltinLibraryPlain;
 struct CBuiltinLibraryPlain
 {
     const char* name;
     uint32_t length;
-    bool gnu;
+    uint8_t modes;
 };
 
 static const CBuiltinLibraryPlain cbuiltin_library_plains[] __attribute__((unused)) =
 {
-#define BUSTER_CBUILTIN_LIBRARY_PLAIN(name, gnu) { name, sizeof(name) - 1, gnu },
+#define BUSTER_CBUILTIN_LIBRARY_PLAIN(name, modes) { name, sizeof(name) - 1, modes },
 #include "c_builtin_library_plain.inc"
 #undef BUSTER_CBUILTIN_LIBRARY_PLAIN
 };
 
+// A plain library builtin's language token of clang's table, as its row's modes say.
+static __attribute__((unused)) const char* cbuiltin_library_plain_languages(const CBuiltinLibraryPlain* plain)
+{
+    return plain->modes == BUSTER_CBUILTIN_LIBRARY_GNU ? "ALL_GNU_LANGUAGES" : plain->modes == BUSTER_CBUILTIN_LIBRARY_C23 ? "C23_LANG" : "ALL_LANGUAGES";
+}
+
 #define BUSTER_CBUILTIN_LIBRARY_PLAIN_COUNT ((uint32_t)(sizeof(cbuiltin_library_plains) / sizeof(cbuiltin_library_plains[0])))
-// The longest listed name, _Block_object_dispose's, bounds every lookup (test-checker checks it).
-#define BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME 21u
+// The longest listed name, stdc_first_trailing_zero_ull's, bounds every lookup (test-checker checks it).
+#define BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME 28u
 
 // The plain library builtin a name spells, by a binary search: NULL for a name not listed.
 static __attribute__((unused)) const CBuiltinLibraryPlain* cbuiltin_library_plain(const char* name, uint32_t length)
@@ -316,7 +329,7 @@ static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes
 }
 
 // One type of a plain library builtin's encoding, from *position, as clang's TypePrinter spells it in a function type:
-// "const char *restrict", "_Complex double", a va_list parameter's "struct __va_list_tag *", wchar_t's int, size_t's
+// "const char *restrict", "unsigned short", "bool", "_Complex double", a va_list parameter's "struct __va_list_tag *", wchar_t's int, size_t's
 // __size_t where `sugared` says (clang's builtins' sugar for it, *sized set) and otherwise unsigned long, FILE and
 // ucontext_t likewise by their typedefs or their types (CBuiltinLibraryNamed), jmp_buf and sigjmp_buf decayed, and
 // pid_t as int, clang's process ID type on x86-64 Linux. False for a code the plain rows don't use, or a named type the
@@ -344,6 +357,9 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
     {
         case 'v': base = "void"; break;
         case 'c': base = is_unsigned ? "unsigned char" : is_signed ? "signed char" : "char"; break;
+        case 's': base = is_unsigned ? "unsigned short" : "short"; break;
+        // Only C23's rows (<stdbit.h>'s stdc_has_single_bit_*) take or return bool, which C23 spells as its keyword.
+        case 'b': base = "bool"; break;
         case 'i': base = longs == 2 ? (is_unsigned ? "unsigned long long" : "long long") : longs == 1 ? (is_unsigned ? "unsigned long" : "long") :
                          (is_unsigned ? "unsigned int" : "int"); break;
         case 'f': base = "float"; break;
@@ -438,6 +454,7 @@ static __attribute__((unused)) const char* cbuiltin_library_header(const char* t
         { "STDIO_H", "stdio.h" },
         { "STDLIB_H", "stdlib.h" },
         { "STRINGS_H", "strings.h" },
+        { "STDBIT_H", "stdbit.h" },
         { "STRING_H", "string.h" },
         { "UNISTD_H", "unistd.h" },
         { "WCHAR_H", "wchar.h" },

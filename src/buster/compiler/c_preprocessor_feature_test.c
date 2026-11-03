@@ -294,7 +294,7 @@ static bool pp_test_builtin_targets(const char* directory)
         const CBuiltinLibraryPlain* plain = cbuiltin_library_plain(info->name, info->name_length);
         if (plain != NULL)
         {
-            result &= strcmp(info->language_token, plain->gnu ? "ALL_GNU_LANGUAGES" : "ALL_LANGUAGES") == 0 && info->features[0] == 0;
+            result &= strcmp(info->language_token, cbuiltin_library_plain_languages(plain)) == 0 && info->features[0] == 0;
             facts += 1;
         }
     }

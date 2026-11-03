@@ -296,6 +296,37 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     unlink(source);
 }
 
+// C23's <stdbit.h> functions (cbuiltin_stdc_library): each of the 70 declared, by a macro over their operations and
+// types, called on boundary values converted to its parameter's type, and the unit's own definition of one, which clang's
+// calls of the name don't reach (they compute inline) where its address does; then folds in an enumerator and a static
+// initializer, a double's and a negative argument's conversions, and an argument whose effect runs once.
+#define BUSTER_CHECK_TEST_STDC_PROGRAM \
+    "int printf(const char*,...);\n" \
+    "#define U(t) unsigned int\n#define B(t) _Bool\n#define S(t) t\n" \
+    "#define EACH(X,op,R) X(op,R(unsigned char),unsigned char,uc) X(op,R(unsigned short),unsigned short,us) X(op,R(unsigned int),unsigned int,ui) " \
+    "X(op,R(unsigned long),unsigned long,ul) X(op,R(unsigned long long),unsigned long long,ull)\n" \
+    "#define OPS(X) EACH(X,leading_zeros,U) EACH(X,leading_ones,U) EACH(X,trailing_zeros,U) EACH(X,trailing_ones,U) EACH(X,first_leading_zero,U) " \
+    "EACH(X,first_leading_one,U) EACH(X,first_trailing_zero,U) EACH(X,first_trailing_one,U) EACH(X,count_zeros,U) EACH(X,count_ones,U) " \
+    "EACH(X,has_single_bit,B) EACH(X,bit_width,U) EACH(X,bit_floor,S) EACH(X,bit_ceil,S)\n" \
+    "#define DECLARE(op,r,t,s) r stdc_##op##_##s(t);\nOPS(DECLARE)\n" \
+    "unsigned int stdc_leading_zeros_ui(unsigned int x){(void)x;return 99;}\n" \
+    "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n" \
+    "static int calls;static unsigned next(unsigned v){calls++;return v;}\n" \
+    "enum{E=stdc_bit_ceil_ul(1000)+stdc_count_ones_ull(-1)};static unsigned s=stdc_first_trailing_one_us(8);\n" \
+    "#define CALL(op,r,t,s) mix(stdc_##op##_##s(v));\n" \
+    "int main(void){static const unsigned long long values[]={0,1,2,3,0x7f,0x80,0xff,0x100,0x7fff,0x8000,0xffff,0x12345678,0x7fffffff,0x80000000,0xffffffff," \
+    "0x100000000ull,0x123456789abcdef0ull,0x7fffffffffffffffull,0x8000000000000000ull,0xffffffffffffffffull,0x5555555555555555ull,37};\n" \
+    "for(unsigned i=0;i<sizeof values/sizeof values[0];i++){unsigned long long v=values[i];OPS(CALL)}\n" \
+    "unsigned (*p)(unsigned)=stdc_leading_zeros_ui;volatile double d=3.9;volatile int m=-1;\n" \
+    "printf(\"%llx %u %u %u %d %u %u %u %d\\n\",h,stdc_leading_zeros_ui(1),p(1),stdc_bit_width_ui(d),E,s,stdc_count_ones_uc(m)," \
+    "stdc_count_ones_ui(next(7))+stdc_bit_floor_us(next(300)),calls);return 0;}\n"
+
+// One plain declaration of a <stdbit.h> function and the unit's definition of it, whose call is the builtin's (31) in
+// C23 and the definition's (99) where the options or the mode make the name no builtin.
+#define BUSTER_CHECK_TEST_STDC_DEFINED \
+    "int printf(const char*,...);\nunsigned int stdc_leading_zeros_ui(unsigned int x){(void)x;return 99;}\n" \
+    "int main(void){volatile unsigned v=1;printf(\"%u %u\\n\",stdc_leading_zeros_ui(1),stdc_leading_zeros_ui(v));return 0;}\n"
+
 static void check_test_library_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -351,6 +382,36 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
         {
             "__builtin_abort",
             "int main(int argc,char**argv){if(argc>0)__builtin_abort();return 3;}\n",
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "C23's <stdbit.h> functions compute inline",
+            BUSTER_CHECK_TEST_STDC_PROGRAM,
+            "-std=gnu23",
+            NULL,
+        },
+        {
+            "a <stdbit.h> function's definition is no builtin's call in C23",
+            BUSTER_CHECK_TEST_STDC_DEFINED,
+            "-std=gnu23",
+            NULL,
+        },
+        {
+            "-fno-builtin keeps a <stdbit.h> function's call the definition's",
+            BUSTER_CHECK_TEST_STDC_DEFINED,
+            "-std=gnu23",
+            "-fno-builtin",
+        },
+        {
+            "-fno-builtin-NAME keeps a <stdbit.h> function's call the definition's",
+            BUSTER_CHECK_TEST_STDC_DEFINED,
+            "-std=gnu23",
+            "-fno-builtin-stdc_leading_zeros_ui",
+        },
+        {
+            "C17 keeps a <stdbit.h> function's call the definition's",
+            BUSTER_CHECK_TEST_STDC_DEFINED,
             "-std=gnu17",
             NULL,
         },

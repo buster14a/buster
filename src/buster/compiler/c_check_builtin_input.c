@@ -51,18 +51,11 @@ static void check_input_builtin_type(CheckInputReader* reader, uint32_t first)
     }
 }
 
+// The builtin an identifier names (check_constant_builtin_name): the catalog's, or one of C23's <stdbit.h> functions,
+// which a call is only where it calls the unit's declaration (check_input_stdc_library_call).
 static uint16_t check_input_builtin_id(CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t identifier = reader->parser->tokens.names[token];
-    uint16_t builtin = reader->builtin_names[identifier];
-    if (builtin == UINT16_MAX)
-    {
-        const InternSpan span = reader->pp->table->spans[identifier];
-        const char* spelling = (const char*)reader->pp->table->records + span.offset;
-        builtin = (uint16_t)cbuiltin_resolve(spelling, span.length);
-        reader->builtin_names[identifier] = builtin;
-    }
-    return builtin;
+    return check_constant_builtin_name(reader, reader->parser->tokens.names[token]);
 }
 
 static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keyword, uint16_t builtin)

@@ -1315,6 +1315,57 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
     return valid;
 }
 
+// The builtin an identifier names, cached per identifier (CheckInputReader.builtin_names): the catalog's
+// (cbuiltin_resolve), or one of C23's <stdbit.h> functions as library builtins (cbuiltin_stdc_library_resolve), which a
+// call is only where it calls the unit's declaration of the function (check_input_stdc_library_call), never where no
+// declaration binds the name.
+static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t identifier)
+{
+    uint16_t builtin = reader->builtin_names[identifier];
+    if (builtin == UINT16_MAX)
+    {
+        const InternSpan span = reader->pp->table->spans[identifier];
+        const char* spelling = (const char*)reader->pp->table->records + span.offset;
+        builtin = (uint16_t)cbuiltin_resolve(spelling, span.length);
+        builtin = builtin != CBUILTIN_NONE ? builtin : (uint16_t)cbuiltin_stdc_library_resolve(spelling, span.length);
+        reader->builtin_names[identifier] = builtin;
+    }
+    return builtin;
+}
+
+// Whether the identifier at `token`, bound to the declaration of binding `handle`, is a call of C23's <stdbit.h> function
+// `builtin` as clang's library builtin (#148, cbuiltin_stdc_library): the name a builtin of the unit (pp_library_builtin:
+// C23's, unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise), its declaration a function of external
+// linkage of the row's prototype (Sema's BuiltinAttr: unsigned int, bool or the parameter's type, of unsigned char,
+// short, int, long or long long), called with one argument. clang computes such a call inline (its fold, or the generic
+// builtin's code), whatever function the unit defines of that name; a call of another count stays the declaration's
+// call, which gives the count's errors as clang does. Any other use of the name (its address) is the declaration's.
+static bool check_input_stdc_library_call(CheckInputReader* reader, uint32_t token, uint32_t handle, uint16_t builtin)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t close = token < parser->tokens.count ? parser->tree.parents[token] : parser->tokens.count;
+    const bool call = handle != 0 && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && token + 1 < close &&
+                      parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL && token + 2 < close &&
+                      check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA) == close;
+    const uint32_t declaration = call ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
+    const IdentId name = parser->tokens.names[token];
+    bool result = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && reader->linkage[declaration] == 2 &&
+                  pp_library_builtin(&reader->pp->options, intern_bytes(reader->pp->table, name), intern_length(reader->pp->table, name));
+    const TypeTable* types = reader->types;
+    const TypeId function = result ? type_strip_aligned(types, reader->declared_types[declaration]) : 0;
+    result = result && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    const uint8_t flags = result ? types->types.flags[type_index(function)] : 0;
+    uint32_t count = 0;
+    const TypeId* parameters = result ? type_parameters(types, function, &count) : NULL;
+    const CBuiltinId generic = cbuiltin_stdc_generic(builtin);
+    const TypeId parameter = check_builtin_bits_parameter((CBuiltinId)builtin);
+    const TypeId returned = generic == CBUILTIN_STDC_HAS_SINGLE_BIT ? BUSTER_TYPE_BOOL :
+                            generic == CBUILTIN_STDC_BIT_FLOOR || generic == CBUILTIN_STDC_BIT_CEIL ? parameter : BUSTER_TYPE_UINT;
+    result = result && (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && (flags & BUSTER_TYPE_FLAG_VARIADIC) == 0 && count == 1 &&
+             type_unqualified(type_strip_aligned(types, parameters[0])) == parameter && type_unqualified(type_strip_aligned(types, type_return(types, function))) == returned;
+    return result;
+}
+
 static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32_t token, uint32_t handle)
 {
     CheckInputReader* reader = input->reader;
@@ -1322,27 +1373,34 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
     const uint32_t open = token + 1;
     const uint32_t close = open < input->end ? parser->tree.parents[open] : input->end;
     uint16_t builtin = CBUILTIN_NONE;
-    if (handle == 0 && open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
-        (input->raw || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL))
+    const bool called = open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
+                        (input->raw || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL);
+    if (called && handle == 0)
     {
         builtin = reader->builtins[close];
         if (!input->cached)
         {
-            const uint32_t identifier = parser->tokens.names[token];
-            builtin = reader->builtin_names[identifier];
-            if (builtin == UINT16_MAX)
-            {
-                const InternSpan span = reader->pp->table->spans[identifier];
-                const char* spelling = (const char*)reader->pp->table->records + span.offset;
-                builtin = (uint16_t)cbuiltin_resolve(spelling, span.length);
-                reader->builtin_names[identifier] = builtin;
-            }
+            builtin = check_constant_builtin_name(reader, parser->tokens.names[token]);
+            // A <stdbit.h> function's name that no declaration binds is no builtin (an implicit declaration's call).
+            builtin = cbuiltin_stdc_library(builtin) ? CBUILTIN_NONE : builtin;
             if (builtin > CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT))
             {
                 check_input_rare_claim(reader, &reader->builtins[close]);
                 reader->builtins[close] = builtin;
             }
         }
+    }
+    else if (called)
+    {
+        // A call of the unit's declaration of a <stdbit.h> function that clang makes the builtin (an enumerator's).
+        builtin = input->cached ? reader->builtins[close] : check_constant_builtin_name(reader, parser->tokens.names[token]);
+        const bool library = cbuiltin_stdc_library(builtin) && (input->cached || check_input_stdc_library_call(reader, token, handle, builtin));
+        if (library && !input->cached)
+        {
+            check_input_rare_claim(reader, &reader->builtins[close]);
+            reader->builtins[close] = builtin;
+        }
+        builtin = library ? builtin : CBUILTIN_NONE;
     }
     return builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT ? builtin : CBUILTIN_NONE;
 }

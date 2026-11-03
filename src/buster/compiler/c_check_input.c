@@ -6611,7 +6611,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
             }
             const uint16_t builtin = check_input_builtin_id(reader, i);
-            if (builtin != CBUILTIN_NONE && role == PARSE_ROLE_OPERAND && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) == 0)
+            const uint32_t bound = builtin != CBUILTIN_NONE ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
+            // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
+            // function that clang makes the builtin.
+            const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
+            if (builtin != CBUILTIN_NONE && role == PARSE_ROLE_OPERAND && claimed)
             {
                 const uint32_t close = parser->tree.parents[i];
                 const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&

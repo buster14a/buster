@@ -2021,11 +2021,12 @@ folding, for which its `-pedantic` warns; this doesn't). Pointer results
 (`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
-**Plain names.** `c_builtin_library_plain.inc` lists the 373 `f` rows of C's
+**Plain names.** `c_builtin_library_plain.inc` lists the 443 `f` rows of C's
 modes but `<stdarg.h>`'s `va_start`, `va_end` and `va_copy`, whose prototypes
 take a `va_list` by reference. Each is a builtin of the unit unless `-fno-builtin`,
-`-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
-`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
+`-ffreestanding` or `-fno-builtin-NAME` says otherwise, one of
+`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone,
+and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
 answers by. A declaration of such a name is the library's function, which calls
@@ -2057,6 +2058,29 @@ checking their prototypes (attribute `T`: `setjmp` and its kin, `getcontext`,
 `savectx`, `vfork`, Sema's `allowTypeMismatch`), which warn of nothing. `umask`
 and `pthread_create` have no prototype: their uses are any undeclared
 function's, as clang's are.
+
+**C23's `<stdbit.h>` functions.** `stdc_leading_zeros_uc` to
+`stdc_bit_ceil_ull`, the 14 operations of `__builtin_stdc_leading_zeros` to
+`__builtin_stdc_bit_ceil` (clang's `BIstdc_*`) of a parameter of `unsigned
+char`, `short`, `int`, `long` or `long long` each, are computed inline, as
+clang's code computes them: a call of the unit's declaration of one, where
+the name is a builtin of the unit (C23's, `pp_library_builtin`), the
+declaration has external linkage and the row's prototype (`unsigned int`,
+`bool` for `has_single_bit` or the parameter's type for `bit_floor` and
+`bit_ceil`, of the parameter's type), and the call has one argument, is the
+builtin (`check_input_stdc_library_call`, in the walk and in the reader's
+constant evaluator for an enumerator's value). It has an identity of its own
+(`CBUILTIN_STDC_LIBRARY_FIRST` + the operation × 5 + the type), which the bit
+builtins check as a fixed prototype's (`check_builtin_bits_parameter`: the
+argument converted as by assignment, a pointer's or a record's refused) and
+fold, and lower, as their generic builtin's of the parameter's type. So
+`stdc_leading_zeros_ui(1)` is 31 in an `_Static_assert`, and a call computes it
+even where the unit defines the function itself, whose address the name still
+is. A call of another count is the declaration's, with its count's error; a
+declaration of another prototype or of internal linkage, and every other mode,
+make the call the function's. `__has_constexpr_builtin` answers 1 for them in
+C23. Their implicit declarations' diagnostics spell `unsigned short` and C23's
+`bool`.
 
 **Refused.** The classification builtins of custom checking
 (`__builtin_isnormal` and its kin) and `__builtin_signbitf` and `signbitl`,

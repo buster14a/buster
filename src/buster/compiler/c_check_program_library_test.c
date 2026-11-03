@@ -54,7 +54,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(plain->name, plain->length);
         plains &= info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL && !info->custom_typechecking &&
                   memchr(info->encoding, 'A', info->encoding_length) == NULL && info->features_length == 0 &&
-                  strcmp(info->language_token, plain->gnu ? "ALL_GNU_LANGUAGES" : "ALL_LANGUAGES") == 0;
+                  strcmp(info->language_token, cbuiltin_library_plain_languages(plain)) == 0;
         plains &= plain->length == strlen(plain->name) && plain->length <= BUSTER_CBUILTIN_LIBRARY_PLAIN_MAX_NAME &&
                   cbuiltin_library_plain(plain->name, plain->length) == plain && (p == 0 || strcmp(cbuiltin_library_plains[p - 1].name, plain->name) < 0);
     }
@@ -185,6 +185,8 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         { "strtod", true, "double (const char *, char **)", "double (const char *, char **)" },
         { "wcslen", true, "__size_t (const int *)", "unsigned long (const int *)" },
         { "_Block_object_dispose", true, "void (const void *, const int)", "void (const void *, const int)" },
+        { "stdc_leading_zeros_us", true, "unsigned int (unsigned short)", "unsigned int (unsigned short)" },
+        { "stdc_has_single_bit_ull", true, "bool (unsigned long long)", "bool (unsigned long long)" },
     };
     bool spelled = true;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
