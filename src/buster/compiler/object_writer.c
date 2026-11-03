@@ -1975,7 +1975,8 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
     };
     bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
                  (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count) &&
-                 (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count);
+                 (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count) &&
+                 (options.declared_symbol_count == 0 || options.declared_symbols != 0);
     for (uint32_t i = 0; built && i < options.declared_symbol_count; i += 1)
     {
         built = options.declared_symbols[i] != 0 && options.declared_symbols[i] < link->symbols.count && link->symbols.atom[options.declared_symbols[i]] == 0;

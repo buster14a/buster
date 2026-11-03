@@ -23,8 +23,9 @@ static const char asm_test_tls_fixture[] =
     ".intel_syntax noprefix\nmov eax, dword ptr fs:[stl@TPOFF]\nmov esi, DWORD PTR fs:tl@tpoff\nlea rdi, stl@tlsld[rip]\nadd eax, DWORD PTR stl@dtpoff[rbx]\n"
     "data16 lea rdi, ext@tlsgd[rip]\nmov rax, QWORD PTR ext@gottpoff[rip]\n.att_syntax prefix\n"
     // A TLS modifier through an alias: of an undefined symbol (which becomes STT_TLS), and of a label of .tbss.
-    ".set tls_alias, tls_alias_target\nmovq %fs:tls_alias@TPOFF, %rax\n.set tls_local_alias, tl+4\nmovl %fs:tls_local_alias@tpoff, %eax\n.p2align 4\n"
-    ".section .rodata.offsets,\"a\",@progbits\n.long tl@dtpoff\n.long stl@DTPOFF+4\n.long tl@tpoff\n"
+    ".set tls_alias, tls_alias_target\nmovq %fs:tls_alias@TPOFF, %rax\nmovq tls_alias@GOTTPOFF(%rip), %rax\nleaq tls_alias@TLSGD(%rip), %rdi\n"
+    "leaq tls_alias@TLSLD(%rip), %rdi\nmovl tls_alias@DTPOFF(%rax), %eax\n.set tls_local_alias, tl+4\nmovl %fs:tls_local_alias@tpoff, %eax\n.p2align 4\n"
+    ".section .rodata.offsets,\"a\",@progbits\n.long tl@dtpoff\n.long stl@DTPOFF+4\n.long tl@tpoff\n.long tls_alias@DTPOFF\n"
     ".section .tbss,\"awT\",@nobits\n.type tl, @object\ntl: .zero 16\n.local stl\nstl: .zero 4\n"
     ".section .tdata,\"awT\",@progbits\n.globl data\ndata: .long 7\n";
 static const char asm_test_common_fixture[] =
@@ -142,7 +143,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // The object's common symbols and _GLOBAL_OFFSET_TABLE_, without --cross-check too: SHN_COMMON with the alignment as
     // the value, and an undefined global no relocation refers to; and a C template's .comm, which the checker refuses
     // (asm_assemble's common_count).
-    AsmResult common = asm_test_pair(test, BUSTER_S8(".comm block,40\n.comm word,4,8\nmovq x@GOTPCREL(%rip), %rax\n"), 1, X86_ARCH_BASELINE);
+    AsmResult common = asm_test_pair(test, BUSTER_S8(".comm block,40\n.comm word,4,8\ncommon_reader: movq x@GOTPCREL(%rip), %rax\n"), 1, X86_ARCH_BASELINE);
     const Object object = common.error == 0 ? asm_object(&common, BUSTER_S8("common.s"), &test->vector) : (Object){ .error = OBJECT_ERROR_RANGE };
     ObjectView view;
     char error[256] = "no object";
@@ -159,6 +160,39 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         okay = okay && (ELF64_ST_TYPE(symbol->st_info) == STT_OBJECT) == (block || word || (name != 0 && symbol->st_shndx == SHN_COMMON));
     }
     asm_test_check(test, okay && found == 3, "common symbols are SHN_COMMON objects and the GOT symbol is declared", error);
+    // The writer refuses declared symbols it can't take before it writes: a count without a list, a defined symbol, an
+    // id past the table, and common alignments short of the symbols.
+    ObjectUnits units;
+    ObjectSymbols symbols;
+    if (common.error == 0 && object_prepare(&units, &common.link, 1, &test->vector) && object_map_symbols(&symbols, &common.link, &test->vector))
+    {
+        const uint64_t saved = test->vector.length;
+        ObjectOptions options = common.object_options;
+        options.declared_symbols = 0;
+        const Object no_list = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
+        SymbolId defined = 0;
+        for (SymbolId s = 1; s < common.link.symbols.count; s += 1)
+        {
+            defined = defined == 0 && common.link.symbols.atom[s] != 0 ? s : defined;
+        }
+        const SymbolId wrong[2] = { defined, common.link.symbols.count };
+        options = common.object_options;
+        options.declared_symbols = &wrong[0];
+        options.declared_symbol_count = 1;
+        const Object declared_defined = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
+        options.declared_symbols = &wrong[1];
+        const Object declared_past = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
+        options = common.object_options;
+        options.common_alignment_count -= 1;
+        const Object short_alignments = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
+        asm_test_check(test, defined != 0 && no_list.error == OBJECT_ERROR_RANGE && declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE &&
+                                 short_alignments.error == OBJECT_ERROR_RANGE && test->vector.length == saved,
+                       "invalid declared symbols and common alignments are refused before output allocation", 0);
+    }
+    else
+    {
+        asm_test_check(test, false, "declared symbol fixture allocation", common.error);
+    }
     // A TLS modifier through an alias of an undefined symbol makes that symbol STT_TLS (GNU ld refuses a non-TLS
     // reference to a TLS definition): linked with C that defines it, the read gives the thread's value.
     if (cross_check)
