@@ -106,9 +106,15 @@ there at a time, so everything takes one lock:
   step that hide its command in each must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
-  `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
+  `zen5`'s digit, closures through includes, `build.sh`, pushes). It also
+  fails when the hosted test job's shards disagree (`changes_shard_policy`):
+  its matrix's `shard: [1, ..., N]` must count from 1 without a gap, and the
+  same N must be in the job's name, the run step's `--shard
+  "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1 to N of
+  each architecture), since a list and an N that disagree would leave a shard's
+  commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
-  benchmark's step or the tables.
+  benchmark's step, the tables or the shards.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.

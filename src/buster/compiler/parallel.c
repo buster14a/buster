@@ -55,6 +55,7 @@
 // ParallelOutput and parallel_output_write, parallel_reap, parallel_stop, parallel_run), and the command
 // (run_parallel_command).
 
+#include "buster/compiler/test_deal.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -447,42 +448,17 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
     return result;
 }
 
-// Deals the list's commands to `shards` shards: the costliest first (the earlier in the list of two that cost the same),
-// each to the shard whose commands cost the least so far (the first of those). A command's shard, from 0, goes in
-// assigned[i]. The deal depends on the list and the costs alone, so that every shard's runner, on any machine, deals the
-// same. While fewer commands than the list's have been dealt, one of its first `count` shards has none and so costs the
-// least, the first such costing no more than any shard after it: no command goes past them, and the deal needs room for
-// those alone, however many shards --shard asks for.
+// Deals the list's commands to `shards` shards by their costs (test_deal: the costliest first, each to the shard whose
+// commands cost the least so far): a command's shard, from 0, goes in assigned[i]. The deal needs room for no more shards
+// than commands, however many --shard asks for.
 static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t shards, uint64_t* assigned)
 {
-    shards = shards < list->count ? shards : list->count;
     uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, list->count + 1);
-    uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, shards + 1);
+    uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (shards < list->count ? shards : list->count) + 1);
     const bool valid = order != 0 && loads != 0;
-    for (uint64_t i = 0; valid && i < list->count; i += 1)
+    if (valid)
     {
-        // Insertion by cost, descending; equal costs keep the list's order.
-        uint64_t at = i;
-        while (at > 0 && costs[order[at - 1]] < costs[i])
-        {
-            order[at] = order[at - 1];
-            at -= 1;
-        }
-        order[at] = i;
-    }
-    for (uint64_t s = 0; valid && s < shards; s += 1)
-    {
-        loads[s] = 0;
-    }
-    for (uint64_t k = 0; valid && k < list->count; k += 1)
-    {
-        uint64_t lightest = 0;
-        for (uint64_t s = 1; s < shards; s += 1)
-        {
-            lightest = loads[s] < loads[lightest] ? s : lightest;
-        }
-        assigned[order[k]] = lightest;
-        loads[lightest] += costs[order[k]];
+        test_deal(costs, list->count, shards, order, loads, assigned);
     }
     return valid;
 }

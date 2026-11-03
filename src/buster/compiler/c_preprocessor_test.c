@@ -38,6 +38,7 @@
 // comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
 // keywords, features, -f option sets and timestamps checks, and run_preprocessor_tests.
 
+#include "buster/compiler/test_deal.h"
 #include "buster/compiler/test_paths.h"
 #include <errno.h>
 #include <stdint.h>
@@ -7968,7 +7969,7 @@ static bool pp_test_no_external_files(const char* directory)
 // beside the others (#465's test-checker parts): each check weighs about what it takes, in tenths of a second of one CPU
 // (on a 4-CPU Xeon VM, the cases' and the fuzz batch's workers counted whole), and the deal gives each check, the
 // heaviest first (of two that weigh the same, the earlier), to the part that weighs the least so far (of those, the
-// first), as parallel_shards deals the runner's commands. The parts together run every check once; the weights only
+// first), the deal the runner's shards take too (test_deal.h). The parts together run every check once; the weights only
 // balance them, from a run on one CPU without the oracle cache (a check under 0.1 s weighs 1). A check's output and
 // failures are its part's.
 #define BUSTER_PP_TEST_MAX_SECTIONS 128
@@ -7993,9 +7994,9 @@ struct PPTestDeal
     // once.
     uint32_t collected;
     bool shifted;
-    uint32_t weights[BUSTER_PP_TEST_MAX_SECTIONS];
+    uint64_t weights[BUSTER_PP_TEST_MAX_SECTIONS];
     // Each check's part, from 0.
-    uint32_t assigned[BUSTER_PP_TEST_MAX_SECTIONS];
+    uint64_t assigned[BUSTER_PP_TEST_MAX_SECTIONS];
 };
 
 // Whether the next check runs: never while the deal weighs them (it records the check's weight), and then if it is
@@ -8020,38 +8021,20 @@ static bool pp_test_section(PPTestDeal* deal, uint32_t weight)
 // A check `call` (a bool) of `weight` tenths of a second: its result if the part runs it, and true if not.
 #define PP_TEST_SECTION(deal, weight, call) (pp_test_section((deal), (weight)) ? (call) : true)
 
-// Deals the weighed checks to the parts, heaviest first, each to the lightest part so far. False if there are more checks
-// than the deal can hold.
+// Deals the weighed checks to the parts as the runner deals its shards (test_deal: heaviest first, each to the lightest
+// part so far). False if there are more checks than the deal can hold.
 static bool pp_test_deal(PPTestDeal* deal)
 {
     const bool valid = deal->count <= BUSTER_PP_TEST_MAX_SECTIONS && deal->parts >= 1;
-    uint32_t order[BUSTER_PP_TEST_MAX_SECTIONS];
-    uint64_t loads[BUSTER_PP_TEST_MAX_SECTIONS] = { 0 };
+    uint64_t order[BUSTER_PP_TEST_MAX_SECTIONS];
+    uint64_t loads[BUSTER_PP_TEST_MAX_SECTIONS];
     const uint32_t count = valid ? deal->count : 0;
+    test_deal(deal->weights, count, deal->parts, order, loads, deal->assigned);
+    deal->collected = count;
+    deal->dealt = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        uint32_t at = i;
-        while (at > 0 && deal->weights[order[at - 1]] < deal->weights[i])
-        {
-            order[at] = order[at - 1];
-            at -= 1;
-        }
-        order[at] = i;
-    }
-    // More parts than checks leave the extra parts none; the loads only need a part's room each up to the checks.
-    const uint32_t parts = deal->parts < BUSTER_PP_TEST_MAX_SECTIONS ? deal->parts : BUSTER_PP_TEST_MAX_SECTIONS;
-    deal->dealt = 0;
-    deal->collected = count;
-    for (uint32_t k = 0; k < count; k += 1)
-    {
-        uint32_t lightest = 0;
-        for (uint32_t p = 1; p < parts; p += 1)
-        {
-            lightest = loads[p] < loads[lightest] ? p : lightest;
-        }
-        deal->assigned[order[k]] = lightest;
-        loads[lightest] += deal->weights[order[k]];
-        deal->dealt += lightest + 1 == deal->part;
+        deal->dealt += deal->assigned[i] + 1 == deal->part;
     }
     if (!valid)
     {
@@ -8282,14 +8265,20 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         }
         else if (strcmp(argument, "--part") == 0)
         {
-            // K/N, K from 1 to N.
-            unsigned first = 0;
-            unsigned second = 0;
-            char end = 0;
-            valid = valid && !parted && next != 0 && sscanf(next, "%u/%u%c", &first, &second, &end) == 2 && first >= 1 && first <= second &&
-                    second <= BUSTER_PP_TEST_MAX_SECTIONS && next[0] >= '1' && next[0] <= '9';
-            part = first;
-            parts = second;
+            // K/N: decimal K from 1 to N, a '/', and decimal N up to the deal's checks, digits alone on either side.
+            const char* slash = next != 0 ? strchr(next, '/') : 0;
+            char first_text[24] = { 0 };
+            const size_t first_length = slash != 0 ? (size_t)(slash - next) : 0;
+            if (first_length < sizeof(first_text))
+            {
+                memcpy(first_text, next, first_length);
+            }
+            uint64_t first = 0;
+            uint64_t second = 0;
+            valid = valid && !parted && slash != 0 && first_length < sizeof(first_text) && pp_test_number(first_text, &first) &&
+                    pp_test_number(slash + 1, &second) && first >= 1 && first <= second && second <= BUSTER_PP_TEST_MAX_SECTIONS;
+            part = (uint32_t)first;
+            parts = (uint32_t)second;
             parted = true;
             i += 1;
         }
@@ -8338,7 +8327,11 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     {
         // The checks, all of them or --part's, in their order (pp_test_sections): first a pass that only weighs them,
         // then the deal, then the pass that runs this part's.
-        PPTestDeal deal = { .part = part, .parts = parts, .collecting = true };
+        PPTestDeal deal = {
+            .part = part,
+            .parts = parts,
+            .collecting = true,
+        };
         pp_test_sections(&deal, directory, with_clang, keep, &fuzz, id_order, count);
         passed_all = pp_test_deal(&deal);
         if (parts > 1)

@@ -140,7 +140,8 @@ jobs:
         optimization: [3]
         # Each row's inventory runs as 4 shards, a runner each (`parallel --shard K/4`, dealt by
         # tools/ci/correctness.costs): a plain row's test step took about 14.5 minutes on one 4-CPU runner, and its
-        # shards take about 4 to 5. The run step's `/4` and the O1 rows' shards below must match this list.
+        # shards take about 2 to 4. The job's name, the run step's `/4` and the O1 rows' shards below must match this
+        # list, which tools/ci/changes.c's self-test checks (changes_shard_policy).
         shard: [1, 2, 3, 4]
         include: >-
           ${{ fromJSON(github.event_name == 'pull_request' && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 4}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 4}]') }}
@@ -170,7 +171,9 @@ jobs:
           bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
 
       - name: Fetch generic baseline startup objects and runtime for emulation
-        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
+        # Every shard of the row, not its shard 1 alone: the step exports BUSTER_HOST_RUNTIME, which build.sh links the
+        # compiler against, so each shard tests the baseline-linked executable that the QEMU step runs.
+        if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none'
         run: bash tools/ci/setup-baseline-runtime.sh
 
       - name: Fetch and verify frozen corpus inputs

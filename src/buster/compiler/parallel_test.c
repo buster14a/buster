@@ -1411,25 +1411,32 @@ static void parallel_test_shards(ParallelTest* test)
     struct ParallelTestCosts
     {
         const char* text;
+        uint64_t length;
         const char* error;
     };
+    // A case's text, its length (sizeof's, past any NUL in it) and its error.
+#define BUSTER_PARALLEL_TEST_COST(literal, message) \
+    {                                            \
+        .text = literal,                         \
+        .length = sizeof(literal) - 1,           \
+        .error = message,                        \
+    }
     static const ParallelTestCosts cost_cases[] = {
-        { "30 a\nx b\n", "2: a cost that isn't SECONDS TITLE" },
-        { "5a b\n", "1: a cost that isn't SECONDS TITLE" },
-        { "5\n", "1: a cost that isn't SECONDS TITLE" },
-        { "5 \n", "1: a cost that isn't SECONDS TITLE" },
-        { "5. b\n", "1: a cost that isn't SECONDS TITLE" },
-        { "1.2345 b\n", "1: a cost that isn't SECONDS TITLE" },
-        { "-1 b\n", "1: a cost that isn't SECONDS TITLE" },
-        { "99999999999 b\n", "1: a cost that isn't SECONDS TITLE" },
-        { "1 b\n\n2 b\n", "3: a title that an earlier cost has" },
-        { "1 b\n2 \0b\n", "2: a NUL byte" },
+        BUSTER_PARALLEL_TEST_COST("30 a\nx b\n", "2: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5a b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5 \n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("5. b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("1.2345 b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("-1 b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("99999999999 b\n", "1: a cost that isn't SECONDS TITLE"),
+        BUSTER_PARALLEL_TEST_COST("1 b\n\n2 b\n", "3: a title that an earlier cost has"),
+        BUSTER_PARALLEL_TEST_COST("1 b\n2 \0b\n", "2: a NUL byte"),
     };
+#undef BUSTER_PARALLEL_TEST_COST
     for (uint64_t i = 0; i < sizeof(cost_cases) / sizeof(cost_cases[0]); i += 1)
     {
-        // The NUL's case is the one whose text goes past its first NUL.
-        const uint64_t length = i == 9 ? sizeof("1 b\n2 \0b\n") - 1 : strlen(cost_cases[i].text);
-        const bool written = ready && parallel_test_write(costs, (String8){ .pointer = (char*)cost_cases[i].text, .length = length });
+        const bool written = ready && parallel_test_write(costs, (String8){ .pointer = (char*)cost_cases[i].text, .length = cost_cases[i].length });
         char* arguments[] = { "compiler", "parallel", "--shard", "1/2", "--costs", costs, list, 0 };
         const int status = written ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
         char expected[1024];

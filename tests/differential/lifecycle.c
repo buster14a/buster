@@ -337,7 +337,7 @@ static int lifecycle_tests(int argc, char** argv)
     if (valid)
     {
         // The cases run at once, each in its own workspace: most of each one's time is the harness waiting out its
-        // fixtures' one-second watchdogs (differential_test.c), so in turn they took about 20 s and at once about 4.
+        // fixtures' one-second watchdogs (differential_test.c), so in turn they took about 20 s and at once about 5.
         // Their results are checked and printed in the cases' order.
         enum { LIFECYCLE_CASES = sizeof(lifecycle_cases) / sizeof(lifecycle_cases[0]) };
         static LifecycleRun runs[LIFECYCLE_CASES];

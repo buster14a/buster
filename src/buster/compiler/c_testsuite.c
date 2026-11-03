@@ -1027,7 +1027,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
     uint32_t failures = valid ? 0 : 1;
     // The scenarios run at once, each in a child process of its own, since each changes the process's directory,
     // environment and pidfd switch: most of each one's time is its programs' and compiles' one-second timeouts, so in
-    // turn they took about 7 s and at once about 1.3. A child's exit status is whether its scenario came out as expected;
+    // turn they took about 7 s and at once about 2. A child's exit status is whether its scenario came out as expected;
     // the parent waits for them in the scenarios' order.
     pid_t children[sizeof(scenarios) / sizeof(scenarios[0])];
     fflush(stdout);
