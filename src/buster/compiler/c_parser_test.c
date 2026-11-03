@@ -856,6 +856,37 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int a) { do ; while a; }\n", "1:28: expected '(' after 'do/while'", 0 },
     // A braced initializer in a list takes no postfix operator, which both paths took before.
     { "int a[2][1] = { {1}[0] };\n", "1:20: expected '}'", 0 },
+    // A `#pragma pack` may follow a tag's body, and the specifiers go on (clang's error is the checker's, "cannot combine
+    // with previous 'struct' declaration specifier"); another pragma there is a missing `;`.
+    { "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nint x;\n", "", 0, true },
+    { "struct P { char c; int i; }\n_Pragma(\"pack(pop)\") static int x;\n", "", 0, true },
+    { "struct P { char c; int i; }\n#pragma GCC diagnostic push\nint x;\n", "1:28: expected ';' after struct", 0 },
+    { "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nx y;\n", "2:28: expected ';' after struct", 0 },
+    // A string follows no subscript (K6 let it, for asm operands' `[name] "constraint"`, which go to the scalar parser).
+    { "void g(const char *, const char *); void f(char **a) { g(a[0] \"x\"); }\n", "1:63: expected ')'", 0 },
+    { "void f(int x) { asm volatile (\"\" : [r] \"=r\" (x) : [i] \"r\" (x)); }\n", "", 0 },
+    // A parameter's declarator without specifiers is an implicit int, at its name or where its name would be; a typeless
+    // abstract declarator's and an unnamed bit-field's are too.
+    { "int f(*p);\n", "1:8: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f(*);\n", "1:8: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f([3]);\n", "1:7: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f((void));\n", "1:8: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f(int a, (*b)(void));\n", "1:16: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "int f(* char p);\n", "1:9: invalid parameter name: 'char' is a keyword", 0 },
+    { "int f((__nonnull__ (1)));\n", "1:21: expected parameter declarator", 0 },
+    { "int x = (const)1;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    { "struct S { const : 3; };\n", "1:18: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
+    // A declarator ends at its attributes and asm label: no suffix after them, nor attributes after its name in its
+    // parentheses; a declaration's `(` there is clang's C++-style direct initializer, which the checker refuses.
+    { "int x __attribute__((unused)) [3];\n", "1:30: expected ';' after top level declarator", 0 },
+    { "struct S { int x __attribute__((unused)) [3]; };\n", "1:41: expected ';' at end of declaration list", 0 },
+    { "void g(int x __attribute__((unused)) [3]);\n", "1:38: expected ')'", 0 },
+    { "int (*p __attribute__((unused)))(void);\n", "1:9: expected ')'", 0 },
+    { "int x __attribute__((unused)) (3);\n", "", 0 },
+    { "int x __asm__(\"x\") (3), y;\n", "", 0 },
+    { "int x __attribute__((unused)) (3) = 4;\n", "1:34: expected ';' after top level declarator", 0 },
+    { "int x __attribute__((unused)) (int);\n", "1:32: expected expression", 0 },
+    { "struct S { int x __attribute__((unused)) (3); };\n", "1:41: expected ';' at end of declaration list", 0 },
 };
 
 // Writes `text` to `path`. Returns false if it can't.

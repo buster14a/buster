@@ -4871,6 +4871,9 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
         { "an integer constant's suffix", "int x = 1lul;\n" },
         { "a hexadecimal floating constant without an exponent", "double h = 0x1.5;\n" },
         { "an integer constant past 64 bits", "int big = 99999999999999999999999;\n" },
+        { "a struct, a #pragma pack, then another type", "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nint x;\n" },
+        { "a struct, a #pragma pack, then a typedef of a struct", "#pragma pack(push, 1)\nstruct P { char c; }\n#pragma pack(pop)\ntypedef struct node { int x; } node;\n" },
+        { "a struct, a _Pragma pack, then a storage class and a type", "struct P { char c; }\n_Pragma(\"pack(pop)\") static int x;\n" },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
