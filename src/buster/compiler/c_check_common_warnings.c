@@ -2387,7 +2387,10 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t body_end = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? check_common_parent(parser, body) : count;
         bool has_default = false;
         bool unknown_case = false;
-        uint32_t handled[64];
+        // A switch body holds at most one case name per token, so the body's span bounds the collection
+        // without a silent cap: every handled name joins the lookup.
+        const uint32_t case_bound = body_end > body ? body_end - body : 0;
+        uint32_t* handled = case_bound != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, case_bound) : NULL;
         uint32_t handled_count = 0;
         for (uint32_t at = body; at < body_end && at < count && !unknown_case; at += 1)
         {
@@ -2410,10 +2413,9 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                 }
                 if (colon == at + 2 && parser->tokens.kinds[at + 1] == PARSE_KIND_IDENTIFIER)
                 {
-                    const uint32_t name = parser->tokens.names[at + 1];
-                    if (handled_count < BUSTER_ARRAY_LENGTH(handled))
+                    if (handled != NULL)
                     {
-                        handled[handled_count++] = name;
+                        handled[handled_count++] = parser->tokens.names[at + 1];
                     }
                 }
                 else
@@ -2422,10 +2424,8 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                 }
             }
         }
-        if (!has_default && !unknown_case)
+        if (!has_default && !unknown_case && handled_count <= case_bound && (case_bound == 0 || handled != NULL))
         {
-            uint32_t source_names[64];
-            uint32_t source_count = 0;
             uint32_t enum_open = BUSTER_CHECK_NONE;
             uint32_t enum_close = BUSTER_CHECK_NONE;
             for (uint32_t i = 0; input->enum_definitions != NULL && i < input->enum_definition_count; i += 1)
@@ -2437,51 +2437,47 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                     break;
                 }
             }
-            if (enum_open != BUSTER_CHECK_NONE)
-            {
-                for (uint32_t at = enum_open + 1; at < enum_close && at < count && source_count < BUSTER_ARRAY_LENGTH(source_names); at += 1)
-                {
-                    const uint8_t previous = parser->tokens.kinds[at - 1];
-                    if (parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && (previous == PARSE_KIND_L_BRACE || previous == PARSE_KIND_COMMA))
-                    {
-                        source_names[source_count++] = parser->tokens.names[at];
-                    }
-                }
-            }
             bool values_known = enum_open != BUSTER_CHECK_NONE && enum_close != BUSTER_CHECK_NONE;
-            unsigned __int128 source_values[64];
-            unsigned __int128 handled_values[64];
+            unsigned __int128* handled_values = handled_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, unsigned __int128, handled_count) : NULL;
+            values_known = values_known && (handled_count == 0 || handled_values != NULL);
             for (uint32_t h = 0; values_known && h < handled_count; h += 1)
             {
                 values_known = check_common_enum_value(input, parser, enum_open, enum_close, handled[h], &handled_values[h]);
             }
-            for (uint32_t n = 0; values_known && n < source_count; n += 1)
-            {
-                values_known = check_common_enum_value(input, parser, enum_open, enum_close, source_names[n], &source_values[n]);
-            }
-            uint32_t missing[64];
+            // The enum's span likewise bounds its enumerators: every one not handled joins the report.
+            const uint32_t enum_bound = enum_close > enum_open ? enum_close - enum_open : 0;
+            uint32_t* missing = values_known && enum_bound != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, enum_bound) : NULL;
+            values_known = values_known && missing != NULL;
             uint32_t missing_count = 0;
-            for (uint32_t n = 0; values_known && n < source_count && missing_count < BUSTER_ARRAY_LENGTH(missing); n += 1)
+            for (uint32_t at = enum_open + 1; values_known && at < enum_close && at < count; at += 1)
             {
-                bool found = false;
-                for (uint32_t h = 0; h < handled_count && !found; h += 1)
+                if (input->declaration_kinds[at] == C_BINDING_ENUMERATOR)
                 {
-                    found = source_values[n] == handled_values[h];
-                }
-                if (!found)
-                {
-                    missing[missing_count++] = source_names[n];
+                    const uint32_t name = parser->tokens.names[at];
+                    unsigned __int128 value = 0;
+                    values_known = check_common_enum_value(input, parser, enum_open, enum_close, name, &value);
+                    bool found = false;
+                    for (uint32_t h = 0; values_known && h < handled_count && !found; h += 1)
+                    {
+                        found = value == handled_values[h];
+                    }
+                    if (values_known && !found)
+                    {
+                        missing[missing_count++] = name;
+                    }
                 }
             }
-            char* list = missing_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, 512) : NULL;
+            char* list = values_known && missing_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, 512) : NULL;
             if (list != NULL)
             {
                 uint64_t length = 0;
                 list[0] = 0;
-                for (uint32_t m = 0; m < missing_count && length < 480; m += 1)
+                // Three or fewer missing names list in full; more print the count and the first three.
+                const uint32_t shown = missing_count <= 3 ? missing_count : 3;
+                for (uint32_t m = 0; m < shown && length < 480; m += 1)
                 {
                     const String8 spelling = { .pointer = (char*)intern_bytes(pp->table, missing[m]), .length = intern_length(pp->table, missing[m]) };
-                    const char* separator = m == 0 ? "" : m + 1 == missing_count ? (missing_count == 2 ? " and " : ", and ") : ", ";
+                    const char* separator = m == 0 ? "" : m + 1 == shown && shown == missing_count ? (shown == 2 ? " and " : ", and ") : ", ";
                     const int written = snprintf(list + length, 512 - length, "%s'%.*s'", separator, (int)spelling.length, spelling.pointer);
                     if (written > 0 && (uint64_t)written < 512 - length)
                     {
@@ -2489,7 +2485,8 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                     }
                 }
                 const char* message = missing_count == 1 ? check_warning_text(scratch, "enumeration value %s not handled in switch", list) :
-                                      check_warning_text(scratch, "enumeration values %s not handled in switch", list);
+                                      missing_count <= 3 ? check_warning_text(scratch, "enumeration values %s not handled in switch", list) :
+                                      check_warning_text(scratch, "%u enumeration values not handled in switch: %s...", missing_count, list);
                 check_common_report(parser, pp, input, selector, CHECK_WARNING_ID_SWITCH, false, message, NULL, 0, scratch);
             }
         }
