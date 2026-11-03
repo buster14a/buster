@@ -46,3 +46,21 @@ requirements. [Command index](README.md).
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](../../docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
+- `measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR
+  --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep]
+  [--uncounted]` (`tier1_programs_measure.c`, #138 and #1189) builds the
+  programs Tier 1 is measured by against clang -O2: speedtest1 (DIR/sqlite3.c,
+  DIR/speedtest1.c, #136's flags and options) and Lua 5.4.8's interpreter (its
+  33 sources) running the five scripts of the `cc3387f` record. Each is built
+  by this compiler's Tier 0 and `--tier1 -fno-asynchronous-unwind-tables`, clang
+  -O0 and -O2, and tcc (left out without `--tcc`). It checks that speedtest1's
+  `--verify` gives one hash and each script prints clang -O0's output, then
+  runs every build of every program in `--runs` rounds (11) of a rotating order,
+  as whole processes (`profile.c`'s), each with its wall time and its user cycles
+  and instructions. It prints each pair's medians, then a table of speedtest1's
+  and Lua's (the sum of the scripts' medians) by build, with `--tier1` against
+  clang -O2 and -O0. Every run must exit 0 and be counted (`--uncounted`, for a
+  host without the counters, skips the latter). The caller pins it; the 9700X
+  job runs it under the `tier1_programs` gate (Tier 1's pipeline, its IR passes
+  and the measurement), on its daily and dispatched runs, with the scripts from
+  a pinned buster-performance commit and the other inputs by their hashes.

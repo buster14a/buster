@@ -369,6 +369,15 @@ static const ChangesModule changes_modules[] = {
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
                    "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
     },
+    // #138's and #1189's programs, speedtest1 and Lua's scripts, by both tiers, clang -O0 and -O2 and tcc
+    // (measure-tier1-programs): where Tier 1's pipeline changes what --tier1 compiles them to (the driver's Tier 1
+    // step, the IR's lowering, promotion and optimizer, and Tier 1's selection, allocation, frames and emission), or
+    // the measurement does. The daily run measures main.
+    {
+        .name = "tier1_programs",
+        .sources = "tier1_programs_measure|c_check_tier1[a-z0-9_]*|ir|ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|"
+                   "tier1_[a-z0-9_]*",
+    },
 };
 
 #define BUSTER_CHANGES_MODULE_COUNT (sizeof(changes_modules) / sizeof(changes_modules[0]))
