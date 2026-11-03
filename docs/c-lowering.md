@@ -479,12 +479,14 @@ stack. The command fails such a run, which proves nothing about the templates,
 and a file that neither lowering lowers (with `-march=native` on a host without
 AVX-512 VBMI, `main.c` is refused for its byte shuffles).
 
-It is still slower than the tasks. On this session's host (an Intel Xeon whose
-build is the scalar host path), `sqlite3.c`'s lowering took 54 to 58 ms by the
-tasks and 67 to 72 ms with the templates, 1.24 to 1.25 times (21 passes, 3
-runs, pinned). The first version of the pass, with its two passes and the
-general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
-(a baseline build) counts the pass's instructions:
+It is still slower than the tasks. On this session's host (an Intel Xeon),
+`test-lowering-templates --passes`, whose two lowerings both take the scalar
+path (`check_program_lower`'s and `check_program_lower_templates`'), timed
+`sqlite3.c`'s lowering at 54 to 58 ms by the tasks and 67 to 72 ms with the
+templates, 1.24 to 1.25 times (21 passes, 3 runs, pinned). The first version of
+the pass, with its two passes and the general rules for every node, took 1.30
+to 1.37 times. callgrind on Lua's units (a baseline build) counts the pass's
+instructions:
 
 | pass | instructions | per node of the ranges |
 | --- | ---: | ---: |
@@ -495,15 +497,50 @@ general rules for every node, took 1.30 to 1.37 times. callgrind on Lua's units
 The splices save about 12.4 M of the tasks' 111.8 M there. The pass's cost is
 spread over its steps (the scatter about a fifth, the fast twin a third, the
 classification step's bookkeeping a quarter) with no one line more than a few
-percent: the scalar steps can't pay by trimming. So no compile takes the
-templates (`CheckLowerShared.templates` is set only by
+percent: the scalar steps can't pay by trimming. Those numbers are the scalar
+path's, without #624's fragments, so #1197 had the vector path's compile take
+the templates (`check_lower_prepare`), for `--time-stages`' `lower.statements`
+and `lower.bodies` rows to weigh the splices against the pass there. Both paths'
+objects were the same, since the templates write what the tasks write:
+`sqlite3.c`, Lua's 34 units and c-testsuite's subset of 220 compiled to the same
+255 objects by both. On the 9700X, `measure-compile`'s medians of 11 runs on
+`sqlite3.c` ([run at `adfbe904`](https://github.com/buster14a/buster/actions/runs/41559073005/job/125670065912);
+the tasks' column is #1181's runs at `4216e4ec`, the next section's, and at
+`09f3c8ff`):
+
+| row | the tasks | with the templates |
+| --- | ---: | ---: |
+| `lower` | 12.485 to 12.684 ms | 18.306 ms (18.198 to 18.358) |
+| `lower.prepare` | 1.356 to 1.374 ms | 1.246 ms |
+| `lower.statements` | 8.339 to 8.490 ms | 5.281 ms |
+| `lower.bodies` | 1.563 to 1.573 ms | 10.453 ms |
+| `lower.validate` | 1.184 to 1.194 ms | 1.228 ms |
+
+The templates took 201,411 of the 266,773 evaluated nodes (75.5%) and 60.9% of
+the entries, most of the nodes #624's fragments took among them: those fell
+from 14,573 to 466. The splices saved about 3.1 ms of the statements, 37%, but
+the pass cost about 8.9 ms in the bodies' row: 44 ns for each node it took,
+against the 15 ns or so its splice saved. `check_lower_template_body` was 6.5% of
+the whole compile's perf samples, its third symbol. This session's Xeon (whose
+default build is the vector path too: it has AVX-512 VBMI) gave the same
+shape, `sqlite3.c` with `-c --time-stages --lanes 1`, pinned, 11 runs of each
+build alternating: `lower` 37.2 against 57.9 ms, the statements 25.8 against
+17.5 ms and the bodies 4.6 against 33.2 ms. A sampling profile there puts the
+pass's time in the fast twin (45%), the scatter (29%) and the classification
+step's bookkeeping and closure (26%).
+
+So no compile takes the templates (`CheckLowerShared.templates` is set only by
 `check_program_lower_templates`), and the default compile's objects are the
-same as before (`sqlite3.c`'s byte for byte). What remains is the issue's
-point: the three steps 64 nodes at a time. The scatter's table is by op
-alone. The fast twin's shapes read the stream's columns and #570's classes and
-facts. The closure can run over prefix sums of the slots' counts. The vector
-pass's results are to be checked against these scalar ones, and the lowering
-against the tasks, by the same command.
+same as before. A pass that pays costs less than a third of this one, below
+about 15 ns a node on the 9700X: what remains is the issue's point, the three
+steps 64 nodes at a time. The scatter's table is by op alone. The fast twin's
+shapes read the stream's columns and #570's classes and facts. The closure can
+run over prefix sums of the slots' counts. The vector pass's results are to be
+checked against these scalar ones, and the lowering against the tasks, by the
+same command. Even a free pass leaves the statements at 5.3 ms of a 9.4 ms
+stage, though, against Tier 0's 4.8: the tasks still expand the quarter of the
+nodes no template takes (calls, `&&`, `||`, `?:`, increments and compound
+assignments among them), so the templates' coverage has to grow as well.
 
 ## The preparation's node counts and the branches' targets (#1048)
 
