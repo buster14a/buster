@@ -3576,9 +3576,10 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
     {
         step->role = PARSE_ROLE_QUALIFIER_LEFT;
     }
-    else if (kind == PARSE_KIND_CALLING_CONVENTION)
+    else if (kind == PARSE_KIND_CALLING_CONVENTION && parser->kinds[(int64_t)i - 1] != PARSE_KIND_COMMA)
     {
-        // `void (__cdecl *f)(void)`: a calling convention before the declarator in its group.
+        // `void (__cdecl *f)(void)`: a calling convention before the declarator in its group. A later declarator doesn't
+        // start with one (`int a, __cdecl b;`), which clang's declarator parser rejects as it would any other token (#147).
         step->role = PARSE_ROLE_SPECIFIER;
     }
     else if (kind == PARSE_KIND_ATTRIBUTE)
@@ -3737,19 +3738,21 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     // decides what the name is.
     ParseFrame* declaration = parse_scalar_declaration_frame(parser, parser->frame_count - 1);
     const bool first = declaration->derivation == PARSE_DERIVATION_PENDING && declaration->name_frame == parser->frame_count - 1;
-    if ((kind == PARSE_KIND_L_PAREN || (kind == PARSE_KIND_L_SQUARE && !parse_scalar_standard_attribute(parser, i))) && parser->roles[(int64_t)i - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE &&
+    // After a GNU attribute (its `)`) the declarator has ended; after a C23 list (its `]`) it goes on, which C23's
+    // direct-declarator allows after the name and each suffix (#147).
+    const bool after_gnu = parser->roles[(int64_t)i - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE && parser->kinds[(int64_t)i - 1] == PARSE_KIND_R_PAREN;
+    if ((kind == PARSE_KIND_L_PAREN || (kind == PARSE_KIND_L_SQUARE && !parse_scalar_standard_attribute(parser, i))) && after_gnu &&
         parse_scalar_body_expected(parser, i, frame))
     {
         // The declarator ends at its attributes: clang asks for the body there (#1127).
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_FUNCTION_BODY, BUSTER_PARSE_AT_TOKEN);
     }
-    else if (kind == PARSE_KIND_L_SQUARE && !parse_scalar_standard_attribute(parser, i) && parser->roles[(int64_t)i - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE)
+    else if (kind == PARSE_KIND_L_SQUARE && after_gnu)
     {
-        // Nor does an array's suffix come after them: what may end the declaration is due there (#1127).
+        // Nor does an array's suffix come after them, nor a C23 list: what may end the declaration is due there (#1127).
         parse_scalar_unexpected(parser, i, frame);
     }
-    else if (kind == PARSE_KIND_L_PAREN && parser->roles[(int64_t)i - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE &&
-             (group == PARSE_ROLE_NONE || parse_frame_is_block(frame) || group == PARSE_ROLE_OPEN_FOR) && !kr)
+    else if (kind == PARSE_KIND_L_PAREN && after_gnu && (group == PARSE_ROLE_NONE || parse_frame_is_block(frame) || group == PARSE_ROLE_OPEN_FOR) && !kr)
     {
         // After its attributes or its asm label, a declaration's `(` is no function's parameters: clang reads it as
         // C++'s direct initializer, `( expression-list )`, in C too (its InitKind::CXXDirect), with the name in scope.
@@ -3758,7 +3761,7 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         parse_scalar_open(parser, i, PARSE_ROLE_OPEN_GROUP, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
         frame->statement = PARSE_ITEM_DIRECT_INITIALIZER;
     }
-    else if (kind == PARSE_KIND_L_PAREN && parser->roles[(int64_t)i - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE)
+    else if (kind == PARSE_KIND_L_PAREN && after_gnu)
     {
         // Elsewhere (a member's, a parameter's), what ends the declarator is due there.
         parse_scalar_unexpected(parser, i, frame);
@@ -3797,6 +3800,11 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     {
         // After a K&R identifier list, clang takes no C23 attribute list.
         parse_scalar_error(parser, i, PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (parse_scalar_standard_attribute(parser, i) && after_gnu)
+    {
+        // Nor a C23 list after a GNU attribute, which clang's declarator has ended at.
+        parse_scalar_unexpected(parser, i, frame);
     }
     else if (parse_scalar_standard_attribute(parser, i))
     {

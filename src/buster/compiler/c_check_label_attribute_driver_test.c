@@ -703,6 +703,60 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "union __attribute__((transparent_union)) N { int x; char c[]; };\nunion P { int a; long b; };\n"
         "typedef union P TP __attribute__((transparent_union));\nunion [[gnu::transparent_union]] Q { };\n"
         "typedef union { int *a; char b[8]; } U __attribute__((transparent_union));\nvoid take(U u);\nvoid give(int *p) { take(p); }\n",
+        // GNU attributes GCC doesn't take after a function definition's declarator (-Wgcc-compat); nonnull's indices and
+        // subjects (its pointer warnings, a variadic function's, a parameter's), and an index of no parameter, an error.
+        "void f(void) __attribute__((cold)) {}\nvoid g(void) __attribute__((noinline, used)) {}\nint h(int x) __attribute__((const)) { return x; }\n"
+        "__attribute__((cold)) void i(void) {}\nvoid k(void) __attribute__((__noinline__)) { }\nvoid m(void) [[gnu::cold]] {}\n"
+        "void n(void) __attribute__((invented)) {}\nstatic void q(void) __attribute__((unused, always_inline)) {}\n",
+        "int a(int x) __attribute__((nonnull));\nint b(int *x, int y) __attribute__((nonnull(2)));\nint c(int *x, int y) __attribute__((nonnull(1)));\n"
+        "int e(void) __attribute__((nonnull));\nint f(int x, ...) __attribute__((nonnull));\nint g(int x, ...) __attribute__((nonnull(2)));\n"
+        "int h(int (*fp)(void)) __attribute__((nonnull));\nvoid i(int *p __attribute__((nonnull)), int q __attribute__((nonnull)));\n"
+        "void i2(int *p __attribute__((nonnull(1))));\nint j(int x) __attribute__((nonnull(1, 1)));\nstruct S { int a; };\n"
+        "int k(struct S s) __attribute__((nonnull(1)));\nint l(char x[]) __attribute__((nonnull(1)));\n",
+        "int f(char *) __attribute__((nonnull(2)));\n",
+        "int m(void *p) __attribute__((nonnull(0)));\n",
+        // C23 attributes in a type's place (check_input_standard_place): a gnu:: declaration attribute after a declarator
+        // chunk, ignored with clang's warning (a list after another where that one is), and a type attribute there, which GCC
+        // doesn't take; noderef in this syntax, and vector_size after the specifiers, ignored.
+        "int * [[gnu::unused]] p1;\nint a1[2] [[gnu::unused]];\nvoid m1(void) [[gnu::cold]];\nint (*fp1)(void) [[gnu::unused]];\n"
+        "void f3(int * [[gnu::unused]] a);\nint * [[gnu::aligned(8)]] p2;\nint * [[gnu::invented]] p3;\nint x4 [[clang::noderef]];\n"
+        "int * [[clang::noderef]] p5;\n[[clang::noderef]] int x5;\nvoid f5(void) [[gnu::cold]] [[gnu::unused]];\n"
+        "int * [[gnu::unused]] [[gnu::cold]] p9;\nvoid f6(void) { int * [[gnu::unused]] q = 0; (void)q; }\nvoid m3(int) [[gnu::nonnull]];\n"
+        "int [[gnu::vector_size(16)]] v1;\nint * [[gnu::regparm(2)]] p10;\nvoid m4(void) [[gnu::ms_abi]];\nint * [[clang::invented]] p11;\n",
+        "int [[gnu::cold]] x2;\n",
+        "int * [[deprecated]] p1;\n",
+        "void f1(void) [[deprecated]];\n",
+        "struct S1 { int a; } [[gnu::unused]] s1;\n",
+        "void f2(int [[gnu::unused]] a);\n",
+        "int [[gnu::nocf_check]] x5;\n",
+        "int * const [[gnu::unused]] p6 = 0;\n",
+        "int * restrict [[gnu::unused]] p8 = 0;\n",
+        "int x4 __attribute__((unused)) [[gnu::unused]];\n",
+        "void f7(void) __attribute__((cold)) [[gnu::cold]];\n",
+        // C23 lists between a declarator's name and its suffixes, and between suffixes, which C23's direct-declarator allows.
+        "int x1 [[gnu::unused]] [2];\nint x2[2] [[gnu::unused]] [3];\nvoid (*fp1 [[gnu::unused]])(void);\nvoid f1 [[gnu::cold]] (void) {}\n"
+        "void f2(int a [[gnu::unused]] [2]);\nvoid f3 [[gnu::cold]] (void), f4 [[gnu::cold]] (int);\n"
+        "void f6(void) { int y [[gnu::unused]] [2]; (void)y; }\nstruct S { int m [[gnu::unused]] [2]; };\nint x5 [[gnu::unused]] [[gnu::unused]] [2];\n"
+        "int (*fp2 [[gnu::unused]]) [2];\nint main(void) { f1(); return x1[0] + x2[1][2] + x5[1]; }\n",
+        // Calling conventions x86-64 hasn't: clang's warning where one meets a function (once for a specifier's), and none on
+        // another type; two of them, or one with cdecl, are no conflict.
+        "void __stdcall k1(void);\nvoid __fastcall k2(void), k3(void);\nvoid __attribute__((thiscall)) g1(void);\n"
+        "void __attribute__((__stdcall__)) g4(void);\nvoid (__stdcall *fp1)(void);\nvoid (* __attribute__((stdcall)) fp2)(void);\n"
+        "typedef void __attribute__((stdcall)) T1(void);\nvoid g5(void) __attribute__((stdcall, regparm(1)));\nvoid __attribute__((stdcall)) g9(void) {}\n"
+        "void m4(void) [[gnu::stdcall]];\nvoid (* [[gnu::stdcall]] fp3)(void);\nint * [[gnu::stdcall]] p1;\nvoid f2(void (__stdcall *cb)(void));\n"
+        "void f4(void) { void (__stdcall *q)(void) = 0; (void)q; }\nint __cdecl __vectorcall x9;\nvoid __stdcall __stdcall f7(void);\n"
+        "void __stdcall __cdecl f8(void);\n[[gnu::stdcall]] void m2(void);\nvoid __pascal k4(void);\nint __attribute__((stdcall)) x1;\n"
+        "struct S1 { void (__stdcall *m)(void); };\nvoid __attribute__((stdcall)) __attribute__((stdcall)) f9(void);\n",
+        // Conflicting conventions on a function, by clang's names, the one x86-64 hasn't as cdecl.
+        "void __cdecl __vectorcall f1(void);\n",
+        "void __attribute__((stdcall)) __attribute__((ms_abi)) f2(void);\n",
+        "void __attribute__((ms_abi)) __attribute__((stdcall)) f3(void);\n",
+        "void __stdcall __vectorcall f6(void);\n",
+        "void __attribute__((ms_abi, vectorcall)) f(void);\n",
+        "void __vectorcall f3(void) __attribute__((ms_abi));\n",
+        "void __attribute__((preserve_most)) __attribute__((preserve_all)) f4(void);\n",
+        "typedef void __attribute__((ms_abi)) T(void);\nT __attribute__((sysv_abi)) f6;\n",
+        "void (__vectorcall __cdecl *fp)(void);\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

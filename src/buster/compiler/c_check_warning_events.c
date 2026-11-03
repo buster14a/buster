@@ -31,6 +31,7 @@ enum
     CHECK_WARNING_ID_LIBRARY_REDECLARATION = 39,
     CHECK_WARNING_ID_BUILTIN_HEADER = 40,
     CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE = 41,
+    CHECK_WARNING_ID_GCC_COMPAT = 42,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -73,6 +74,22 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
     CHECK_WARNING_EVENT_NONSTRING_TYPE,
     CHECK_WARNING_EVENT_TRANSPARENT_UNION,
+    // A GNU attribute GCC knows after a function definition's declarator (clang's parser's warning, #147): payload.name
+    // its name as written.
+    CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
+    // nonnull's warnings (clang's handleNonNullAttr, #147): an index of a parameter that is no pointer, a function of no
+    // pointer parameter, and arguments on a parameter's. payload.name the attribute's name, payload.data its scope's
+    // (0 for none) with BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE.
+    CHECK_WARNING_EVENT_NONNULL_POINTERS,
+    CHECK_WARNING_EVENT_NONNULL_NO_POINTERS,
+    CHECK_WARNING_EVENT_NONNULL_PARAMETER_ARGUMENTS,
+    // A C23 declaration attribute after a declarator chunk (#147, check_input_standard_place); a gnu:: type attribute
+    // there (-Wgcc-compat); a calling convention x86-64 hasn't on a function; an attribute clang ignores in that syntax
+    // or place (noderef, vector_size). Payload as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's.
+    CHECK_WARNING_EVENT_TYPE_POSITION,
+    CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE,
+    CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED,
+    CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

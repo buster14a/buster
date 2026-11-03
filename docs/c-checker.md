@@ -5202,13 +5202,126 @@ The table is regenerated from the installed clang's tag, in the directory of
 
 ```sh
 clang-tblgen --gen-clang-attr-parsed-attr-impl -I . clang/Basic/Attr.td -o parsed.inc
+clang-tblgen --gen-clang-attr-parsed-attr-kinds -I . clang/Basic/Attr.td -o kinds.inc
 cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_attribute_subjects.c -o build/generate_attribute_subjects
 build/generate_attribute_subjects --self-test
-build/generate_attribute_subjects parsed.inc "clang/include/clang/Basic/Attr.td at llvmorg-X (sha256 ...), by clang-tblgen VERSION" > src/buster/compiler/c_check_attribute_subjects.inc
+build/generate_attribute_subjects parsed.inc kinds.inc "clang/include/clang/Basic/Attr.td at llvmorg-X (sha256 ...), by clang-tblgen VERSION" > src/buster/compiler/c_check_attribute_subjects.inc
 ```
 
 Then update THIRD_PARTY_NOTICES.md's record and the counts `test-checker`
 checks.
+
+## Attributes' places, GCC's positions and their handlers' checks (#147)
+
+Clang reads an attribute's place before its subject: where a C23 list stands
+decides whether it is the declaration's or a type's, and its parser and Sema
+give their own diagnostics for some places. Several handlers also check their
+arguments against the function. The checker now gives these as clang does.
+
+- **The facts table.** `c_check_attribute_subjects.inc` also has a
+  `BUSTER_CHECK_FACT_*` row for each spelling clang has on x86-64 Linux, from
+  the same `ParsedAttrInfo` and from
+  `clang-tblgen --gen-clang-attr-parsed-attr-kinds`:
+  - whether GCC knows the attribute (`IsKnownToGCC`), and whether it isn't
+    C's (its `acceptsLangOpts`, of which C holds only `!CPlusPlus`);
+  - whether clang's generated handler applies it with nothing more
+    (`SimpleHandler`), whether it is a type's or a statement's, and whether
+    its arguments are parsed its own way;
+  - whether clang ignores it wherever it is (`IgnoredAttribute`: `bounded`,
+    `nv_weak` and two others);
+  - its least and most arguments, and whether its last is variadic.
+
+  The generator evaluates `existsInTarget` for x86-64 Linux, so a spelling of
+  another target's is none. There are 366 GNU spellings and 283 C23 ones, as
+  many as clang's vocabulary has (`check_input_fact_row`).
+- **GCC's positions.** On a function's definition, each GNU attribute after
+  the declarator that GCC knows gets clang's parser warning "GCC does not
+  allow 'X' attribute in this position on a function definition"
+  (`-Wgcc-compat`, `check_input_attribute_gcc_position`), at its name.
+- **nonnull's indices.** As `handleNonNullAttr` checks them
+  (`check_input_attribute_function`):
+  - an index of no parameter is the error "'nonnull' attribute parameter N is
+    out of bounds", N being the argument's place, at the attribute;
+  - an index of a parameter of no pointer type (a pointer, or a transparent
+    union with a pointer member) is the warning "'nonnull' attribute only applies to pointer
+    arguments", and the index is dropped;
+  - with no pointer index left, a function of no pointer parameter warns
+    "'nonnull' attribute applied to function with no pointer arguments",
+    unless it is variadic or a macro wrote the attribute;
+  - on a parameter, arguments are the warning "'nonnull' attribute when used
+    on parameters takes no arguments", unless the parameter is a function
+    pointer; without them, a parameter of no pointer type warns as above.
+
+  The warnings come before the error, in argument order: each is published
+  at the attribute's token and the error after it
+  (`check_input_report_argument`).
+- **A C23 list's place** (`check_input_standard_place`). A list after a
+  function declarator's `)`, an array's `]` or a pointer's `*` is the
+  declarator chunk's type's; one right after the specifiers (a type, a tag's
+  body, `_Atomic(T)`) is their type's; a list right after another stands where
+  that one does. There, as clang's `processTypeAttrs` and parser take them:
+  - a `gnu::` attribute of a declaration after a chunk, even one clang doesn't
+    know, is ignored with "attribute 'gnu::X' ignored, because it cannot be
+    applied to a type" (`-Wignored-attributes`);
+  - a `gnu::` attribute of a type there is applied, with "GCC does not allow
+    the 'gnu::X' attribute to be written on a type" (`-Wgcc-compat`);
+  - any other attribute of a declaration there, or any after the specifiers,
+    is the error "'X' attribute cannot be applied to types"; so is
+    `nocf_check` after the specifiers, as clang's parser has it;
+  - `clang::noderef` is ignored anywhere in this syntax, and `vector_size`
+    after the specifiers, with "'X' attribute ignored";
+  - a list after a pointer's qualifiers (`int * const [[gnu::unused]] p`) is
+    the parser's error "an attribute list cannot appear here".
+- **Lists before a declarator's suffixes.** C23's direct-declarator takes a
+  list after the name and after each suffix, before the next one:
+  `int x [[gnu::unused]] [2];` and `void f [[gnu::cold]] (void) {}`. The
+  parser used to reject these. After a GNU attribute, the declarator has
+  ended, so a suffix or a C23 list there is still an error
+  (`parse_scalar_after_declarator`).
+- **Calling conventions x86-64 hasn't.** `stdcall`, `fastcall`, `thiscall`
+  and `pascal`, in any spelling, get clang's warning "'X' calling convention
+  is not supported for this target" where they meet a function's type: a
+  declaration's, a pointer's, a typedef's or a parameter's
+  (`check_input_attribute_conventions`). A specifier's is warned of once for
+  its declaration (`CheckInputReader.convention_warned`). On another type
+  there is no such warning, as in clang.
+- **Conflicting conventions.** Two conventions meeting one function are
+  checked in source order, where they meet it, as clang's
+  `handleFunctionTypeAttr` does: the second that differs is the error "A and
+  B attributes are not compatible", by clang's names. Here `sysv_abi` and the
+  conventions x86-64 hasn't are `cdecl`. A typedef's convention counts as an
+  earlier one. On another type, conflicting conventions are no error; each
+  gets the function-types warning. They used to be the generic error, also
+  on other types, and a convention x86-64 hasn't conflicted with none.
+- **Calling conventions starting a declarator.** One may start a declarator
+  in parentheses (`void (__cdecl *f)(void)`), but not a later declarator of a
+  declaration (`int a, __cdecl b;`), which is clang's parser error.
+- **Differences left.**
+  - A C23 function type's attribute after the specifiers
+    (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
+    it to the specifiers' type and warns "'ms_abi' only applies to function
+    types; type here is 'void'".
+  - The checker stops at a declaration's first error. So clang's later errors
+    of the same declaration are missing: a second list's, and its parser's
+    recovery errors.
+  - GNU's `noderef` is refused by name, and so are `lifetimebound` and
+    `nocf_check` elsewhere (clang's subject error, and its warning without
+    `-fcf-protection`).
+  - `vector_size` of an invalid element type or size, and
+    `int * _Atomic [[gnu::unused]] p`, are the generic error where clang's
+    messages are its own.
+  - When a GNU attribute of a declaration and a calling convention keyword
+    on another type share the specifiers, the two warnings come in the
+    attributes' order. Clang gives the type's first.
+- **Tests.** `test-checker` checks the facts table's order and bounds, its
+  counts and five rows, and conflicting conventions on a function and on
+  another type (`c_check_attribute_test.c`). `test-checker-driver` compares
+  the whole output with clang's on both paths
+  (`check_test_driver_unknown_attributes`' statements) for:
+  - GCC's positions on definitions;
+  - nonnull's warnings, and its out-of-bounds error;
+  - C23 lists in each place, and lists before suffixes;
+  - the conventions x86-64 hasn't, and each kind of conflict.
 
 ## Ignorable and unsupported pragmas
 

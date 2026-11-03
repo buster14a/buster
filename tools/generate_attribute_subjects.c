@@ -119,6 +119,57 @@ static const Term terms[] = {
     { "isa<UnresolvedUsingValueDecl>(D)", 0 },
 };
 
+// A spelling's facts (BUSTER_CHECK_FACT_GNU and BUSTER_CHECK_FACT_C23 rows), from its ParsedAttrInfo: GCC knows the
+// attribute (IsKnownToGCC), it isn't C's (acceptsLangOpts false in C), clang's generated handler applies it with nothing
+// more (handleDeclAttribute, Attr.td's SimpleHandler), it is a type's or a statement's, its arguments are its own
+// parsing's, its last argument is variadic (OptArgs 15), or clang ignores it whatever it is on (an IgnoredAttribute).
+#define FACT_GCC 0x1u
+#define FACT_NOT_C 0x2u
+#define FACT_SIMPLE 0x4u
+#define FACT_TYPE 0x8u
+#define FACT_STATEMENT 0x10u
+#define FACT_CUSTOM_PARSING 0x20u
+#define FACT_VARIADIC 0x40u
+#define FACT_IGNORED 0x80u
+
+typedef struct Fact Fact;
+struct Fact
+{
+    char spelling[96];
+    bool standard;
+    uint32_t flags;
+    uint32_t minimum;
+    uint32_t maximum;
+};
+
+enum
+{
+    FACTS = 4096,
+};
+
+static Fact facts[FACTS];
+static uint32_t fact_count;
+
+// The target predicates an attribute's existsInTarget can ask, and their answers for x86-64 Linux.
+typedef struct Predicate Predicate;
+struct Predicate
+{
+    const char* text;
+    bool value;
+};
+
+static const Predicate predicates[] = {
+    { "true", true },
+    { "T.getArch() == llvm::Triple::x86_64", true },
+    { "Target.getTriple().hasDLLImportExport()", false },
+    { "Target.hasMicrosoftRecordLayout()", false },
+    { "Target.getCXXABI().isMicrosoft()", false },
+    { "T.getOS() == llvm::Triple::Win32", false },
+    { "Target.supportsIFunc()", true },
+    { "Target.hasMustTail()", true },
+    { "Target.getTriple().isWindowsArm64EC()", false },
+};
+
 typedef struct Row Row;
 struct Row
 {
@@ -303,13 +354,248 @@ static bool read_attributes(const char* text, uint32_t minimum)
     return valid;
 }
 
+// The value of one atom of an existsInTarget condition (`length` bytes, without spaces around it): a predicate of the
+// table, another architecture's comparison false; false in *known where it is none of those.
+static bool target_atom(const char* atom, size_t length, bool* known)
+{
+    static const char arch[] = "T.getArch() == llvm::Triple::";
+    bool value = false;
+    bool found = false;
+    for (size_t p = 0; !found && p < sizeof(predicates) / sizeof(predicates[0]); p += 1)
+    {
+        found = strlen(predicates[p].text) == length && memcmp(predicates[p].text, atom, length) == 0;
+        value = found ? predicates[p].value : value;
+    }
+    found = found || (length > sizeof(arch) - 1 && memcmp(atom, arch, sizeof(arch) - 1) == 0);
+    *known &= found;
+    return value;
+}
+
+// existsInTarget's `return CONDITION;` for x86-64 Linux: conjuncts (`&&` at the top level) of disjunctions (`||`) of
+// atoms, each conjunct in a pair of parentheses or not. False in *known where an atom is unknown.
+static bool target_condition(const char* begin, const char* end, bool* known)
+{
+    bool all = true;
+    const char* at = begin;
+    while (at < end)
+    {
+        // One conjunct: to the next `&&` at the top level.
+        uint32_t depth = 0;
+        const char* stop = at;
+        while (stop < end && !(depth == 0 && stop + 1 < end && stop[0] == '&' && stop[1] == '&'))
+        {
+            depth += *stop == '(' ? 1u : 0u;
+            depth -= *stop == ')' && depth != 0 ? 1u : 0u;
+            stop += 1;
+        }
+        const char* first = at;
+        const char* last = stop;
+        while (first < last && *first == ' ')
+        {
+            first += 1;
+        }
+        while (last > first && last[-1] == ' ')
+        {
+            last -= 1;
+        }
+        // Its outer parentheses, where the first closes at its end.
+        uint32_t level = 0;
+        const char* closing = NULL;
+        for (const char* c = first; closing == NULL && c < last; c += 1)
+        {
+            level += *c == '(' ? 1u : 0u;
+            level -= *c == ')' ? 1u : 0u;
+            closing = level == 0 && *c == ')' ? c : NULL;
+        }
+        const bool outer = first < last && *first == '(' && closing == last - 1;
+        first += outer ? 1 : 0;
+        last -= outer ? 1 : 0;
+        bool any = false;
+        const char* atom = first;
+        while (atom < last)
+        {
+            const char* bar = atom;
+            while (bar < last && !(bar + 1 < last && bar[0] == '|' && bar[1] == '|'))
+            {
+                bar += 1;
+            }
+            const char* a = atom;
+            const char* b = bar;
+            while (a < b && *a == ' ')
+            {
+                a += 1;
+            }
+            while (b > a && b[-1] == ' ')
+            {
+                b -= 1;
+            }
+            any |= target_atom(a, (size_t)(b - a), known);
+            atom = bar < last ? bar + 2 : last;
+        }
+        all &= any;
+        at = stop < end ? stop + 2 : end;
+    }
+    return all;
+}
+
+// Whether the attribute of ParsedAttrInfo text [info, next) exists for x86-64 Linux: every one without existsInTarget, and
+// one whose condition holds. False in *known where its condition is of no known shape.
+static bool target_exists(const char* info, const char* next, bool* known)
+{
+    static const char method[] = "bool existsInTarget(const TargetInfo &Target) const override {";
+    const char* body = strstr(info, method);
+    bool exists = true;
+    if (body != NULL && (next == NULL || body < next))
+    {
+        const char* ret = strstr(body, "return ");
+        const char* semicolon = ret != NULL ? strchr(ret, ';') : NULL;
+        *known &= semicolon != NULL;
+        exists = semicolon != NULL && target_condition(ret + strlen("return "), semicolon, known);
+    }
+    return exists;
+}
+
+// The decimal field `/*NAME=*/N` of [info, next), or UINT32_MAX where there is none.
+static uint32_t info_field(const char* info, const char* next, const char* name)
+{
+    char key[64];
+    snprintf(key, sizeof(key), "/*%s=*/", name);
+    const char* field = strstr(info, key);
+    return field != NULL && (next == NULL || field < next) ? (uint32_t)strtoul(field + strlen(key), NULL, 10) : UINT32_MAX;
+}
+
+static int fact_order(const void* a, const void* b)
+{
+    const Fact* left = a;
+    const Fact* right = b;
+    const int standard = (int)left->standard - (int)right->standard;
+    return standard != 0 ? standard : strcmp(left->spelling, right->spelling);
+}
+
+// The facts of one spelling (GNU's or C23's) of the array `spellings` of `text`.
+static bool add_facts(const char* text, const char* spellings, size_t spellings_length, uint32_t flags, uint32_t minimum, uint32_t maximum)
+{
+    const bool none = spellings_length == 2 && spellings[0] == '{' && spellings[1] == '}';
+    char header[160];
+    snprintf(header, sizeof(header), "static constexpr ParsedAttrInfo::Spelling %.*s[] = {", (int)spellings_length, spellings);
+    const char* array = none ? NULL : strstr(text, header);
+    const char* close = array != NULL ? strstr(array, "};") : NULL;
+    bool valid = none || close != NULL;
+    for (const char* entry = array != NULL ? strstr(array, "{AttributeCommonInfo::AS_") : NULL; valid && entry != NULL && entry < close;
+         entry = strstr(entry + 1, "{AttributeCommonInfo::AS_"))
+    {
+        const char* syntax = entry + strlen("{AttributeCommonInfo::AS_");
+        const bool gnu = strncmp(syntax, "GNU,", 4) == 0;
+        const bool standard = strncmp(syntax, "C23,", 4) == 0;
+        const char* quote = strchr(syntax, '"');
+        const char* end = quote != NULL ? strchr(quote + 1, '"') : NULL;
+        valid = end != NULL && (size_t)(end - quote - 1) < sizeof(facts[0].spelling) && fact_count < FACTS;
+        if (valid && (gnu || standard))
+        {
+            Fact* fact = &facts[fact_count++];
+            snprintf(fact->spelling, sizeof(fact->spelling), "%.*s", (int)(end - quote - 1), quote + 1);
+            fact->standard = standard;
+            fact->flags = flags;
+            fact->minimum = minimum;
+            fact->maximum = maximum;
+        }
+    }
+    return valid;
+}
+
+// Every ParsedAttrInfo of `text` that exists for x86-64 Linux, at least `minimum` of them: its spellings' facts, and the
+// GNU spellings `kinds` (clang-tblgen --gen-clang-attr-parsed-attr-kinds) makes an IgnoredAttribute. False where a field,
+// a language condition or a target condition is of no known shape, or a spelling is two attributes'.
+static bool read_facts(const char* text, const char* kinds, uint32_t minimum)
+{
+    static const char langs[] = "bool acceptsLangOpts(const LangOptions &LangOpts) const override {";
+    bool valid = true;
+    uint32_t attributes = 0;
+    fact_count = 0;
+    for (const char* info = strstr(text, "\nstruct ParsedAttrInfo"); valid && info != NULL; info = strstr(info + 1, "\nstruct ParsedAttrInfo"))
+    {
+        const char* next = strstr(info + 1, "\nstruct ParsedAttrInfo");
+        const char* spelling_field = strstr(info, "/*Spellings=*/");
+        bool known = true;
+        const bool exists = target_exists(info, next, &known);
+        const uint32_t arguments = info_field(info, next, "NumArgs");
+        const uint32_t optional = info_field(info, next, "OptArgs");
+        const uint32_t custom = info_field(info, next, "HasCustomParsing");
+        const uint32_t type = info_field(info, next, "IsType");
+        const uint32_t statement = info_field(info, next, "IsStmt");
+        const uint32_t gcc = info_field(info, next, "IsKnownToGCC");
+        const char* lang = strstr(info, langs);
+        lang = lang != NULL && (next == NULL || lang < next) ? lang : NULL;
+        const char* ret = lang != NULL ? strstr(lang, "return ") : NULL;
+        const char* semicolon = ret != NULL ? strchr(ret, ';') : NULL;
+        // In C, of clang's language conditions, `(!LangOpts.CPlusPlus)` alone holds; any other names a language C isn't.
+        const bool c = lang == NULL || (semicolon != NULL && strncmp(ret, "return (!LangOpts.CPlusPlus);", 30) == 0);
+        const bool other = lang != NULL && semicolon != NULL && (strncmp(ret + strlen("return "), "LangOpts.", 9) == 0 || ret[7] == '(');
+        const char* handler = strstr(info, "AttrHandling handleDeclAttribute(");
+        const bool simple = handler != NULL && (next == NULL || handler < next);
+        valid = known && spelling_field != NULL && (next == NULL || spelling_field < next) && arguments != UINT32_MAX && optional != UINT32_MAX &&
+                custom != UINT32_MAX && type != UINT32_MAX && statement != UINT32_MAX && gcc != UINT32_MAX && (c || other);
+        if (!valid)
+        {
+            fprintf(stderr, "generate_attribute_subjects: an attribute's facts of no known shape: %.40s\n", info + 1);
+        }
+        if (valid && exists)
+        {
+            const char* spellings = spelling_field + strlen("/*Spellings=*/");
+            size_t spellings_length = 0;
+            while (spellings[spellings_length] != ',' && spellings[spellings_length] != 0)
+            {
+                spellings_length += 1;
+            }
+            const uint32_t flags = (gcc != 0 ? FACT_GCC : 0) | (c ? 0 : FACT_NOT_C) | (simple ? FACT_SIMPLE : 0) | (type != 0 ? FACT_TYPE : 0) |
+                                   (statement != 0 ? FACT_STATEMENT : 0) | (custom != 0 ? FACT_CUSTOM_PARSING : 0) | (optional == 15 ? FACT_VARIADIC : 0);
+            valid = add_facts(text, spellings, spellings_length, flags, arguments, optional == 15 ? UINT32_MAX : arguments + optional);
+            attributes += 1;
+        }
+    }
+    // The GNU section of the kinds' matcher, to its first other syntax's: each `IgnoredAttribute;\t // "name"`.
+    const char* gnu = kinds != NULL ? strstr(kinds, "if (AttributeCommonInfo::AS_GNU == Syntax) {") : NULL;
+    const char* gnu_end = gnu != NULL ? strstr(gnu + 1, "if (AttributeCommonInfo::AS_") : NULL;
+    for (const char* ignored = gnu != NULL ? strstr(gnu, "AttributeCommonInfo::IgnoredAttribute;") : NULL; valid && ignored != NULL && (gnu_end == NULL || ignored < gnu_end);
+         ignored = strstr(ignored + 1, "AttributeCommonInfo::IgnoredAttribute;"))
+    {
+        const char* quote = strchr(ignored, '"');
+        const char* end = quote != NULL ? strchr(quote + 1, '"') : NULL;
+        valid = end != NULL && (size_t)(end - quote - 1) < sizeof(facts[0].spelling) && fact_count < FACTS;
+        if (valid)
+        {
+            Fact* fact = &facts[fact_count++];
+            snprintf(fact->spelling, sizeof(fact->spelling), "%.*s", (int)(end - quote - 1), quote + 1);
+            fact->standard = false;
+            fact->flags = FACT_IGNORED;
+            fact->minimum = 0;
+            fact->maximum = UINT32_MAX;
+        }
+    }
+    valid = valid && attributes >= minimum && (kinds == NULL || gnu != NULL);
+    if (valid)
+    {
+        qsort(facts, fact_count, sizeof(facts[0]), fact_order);
+    }
+    for (uint32_t f = 1; valid && f < fact_count; f += 1)
+    {
+        valid = facts[f].standard != facts[f - 1].standard || strcmp(facts[f].spelling, facts[f - 1].spelling) != 0;
+        if (!valid)
+        {
+            fprintf(stderr, "generate_attribute_subjects: '%s' is two attributes' spelling for x86-64\n", facts[f].spelling);
+        }
+    }
+    return valid;
+}
+
 static bool write_table(FILE* output, const char* source)
 {
     bool valid = fprintf(output,
                          "// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception\n"
                          "// Generated by tools/generate_attribute_subjects.c; do not edit. Derived LLVM data, part of the LLVM Project, under the\n"
                          "// Apache License v2.0 with LLVM Exceptions (LICENSES/LLVM.txt): the subjects of clang's attributes in C, from\n"
-                         "// clang-tblgen --gen-clang-attr-parsed-attr-impl of %s; see THIRD_PARTY_NOTICES.md.\n"
+                         "// clang-tblgen --gen-clang-attr-parsed-attr-impl (and --gen-clang-attr-parsed-attr-kinds for its ignored spellings) of\n"
+                         "// %s; see THIRD_PARTY_NOTICES.md.\n"
                          "// BUSTER_CHECK_SUBJECT_GNU and BUSTER_CHECK_SUBJECT_C23 rows: a spelling, the C declarations it applies to\n"
                          "// (BUSTER_CHECK_SUBJECT_*, c_check_attribute.c), whether another is clang's error rather than its warning, and the\n"
                          "// subjects clang's message names. Each list in its spellings' byte order.\n",
@@ -318,6 +604,16 @@ static bool write_table(FILE* output, const char* source)
     {
         valid = fprintf(output, "BUSTER_CHECK_SUBJECT_%s(\"%s\", 0x%xu, %s, \"%s\")\n", rows[r].standard ? "C23" : "GNU", rows[r].spelling, rows[r].subjects,
                         rows[r].error ? "true" : "false", rows[r].message) > 0;
+    }
+    valid = valid && (fact_count == 0 || fprintf(output,
+                                                 "// BUSTER_CHECK_FACT_GNU and BUSTER_CHECK_FACT_C23 rows: each spelling of an attribute clang has for x86-64 Linux,\n"
+                                                 "// its facts (BUSTER_CHECK_FACT_*, c_check_attribute.c: GCC knows it, it isn't C's, clang's generated handler\n"
+                                                 "// applies it, it is a type's or a statement's, its arguments are its parsing's, its last one is variadic, clang\n"
+                                                 "// ignores it everywhere) and its least and most arguments (UINT32_MAX for any). Each list in byte order.\n") > 0);
+    for (uint32_t f = 0; valid && f < fact_count; f += 1)
+    {
+        valid = fprintf(output, "BUSTER_CHECK_FACT_%s(\"%s\", 0x%xu, %uu, %uu)\n", facts[f].standard ? "C23" : "GNU", facts[f].spelling, facts[f].flags,
+                        facts[f].minimum, facts[f].maximum) > 0;
     }
     valid = valid && fflush(output) == 0 && !ferror(output);
     return valid;
@@ -390,21 +686,25 @@ int main(int argc, char** argv)
         fprintf(stderr, "generate_attribute_subjects: self-test %s\n", passed ? "passed" : "failed");
         status = passed ? 0 : 1;
     }
-    else if (argc == 3)
+    else if (argc == 4)
     {
         size_t length = 0;
+        size_t kinds_length = 0;
         char* text = read_all(argv[1], &length);
-        const bool valid = text != NULL && length != 0 && read_attributes(text, 100) && write_table(stdout, argv[2]);
+        char* kinds = read_all(argv[2], &kinds_length);
+        const bool valid = text != NULL && length != 0 && kinds != NULL && kinds_length != 0 && read_attributes(text, 100) && read_facts(text, kinds, 300) &&
+                           write_table(stdout, argv[3]);
         if (!valid)
         {
             fprintf(stderr, "generate_attribute_subjects: %s: failed\n", argv[1]);
         }
         free(text);
+        free(kinds);
         status = valid ? 0 : 1;
     }
     else
     {
-        fprintf(stderr, "usage: %s --self-test | %s PARSED_ATTR_IMPL.inc \"SOURCE DESCRIPTION\"\n", argv[0], argv[0]);
+        fprintf(stderr, "usage: %s --self-test | %s PARSED_ATTR_IMPL.inc PARSED_ATTR_KINDS.inc \"SOURCE DESCRIPTION\"\n", argv[0], argv[0]);
     }
     return status;
 }

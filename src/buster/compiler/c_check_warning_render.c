@@ -505,6 +505,43 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             }
             break;
         }
+        case CHECK_WARNING_EVENT_NONNULL_POINTERS:
+        case CHECK_WARNING_EVENT_NONNULL_NO_POINTERS:
+        case CHECK_WARNING_EVENT_NONNULL_PARAMETER_ARGUMENTS:
+        {
+            // Named as the subject warning names an attribute (CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT's).
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const char* ending = event->kind == CHECK_WARNING_EVENT_NONNULL_POINTERS ? "attribute only applies to pointer arguments" :
+                                 event->kind == CHECK_WARNING_EVENT_NONNULL_NO_POINTERS ? "attribute applied to function with no pointer arguments" :
+                                 "attribute when used on parameters takes no arguments";
+            result = check_warning_text(scratch, "'%.*s%s%.*s' %s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length,
+                                        attribute.pointer, ending);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TYPE_POSITION:
+        case CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE:
+        case CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED:
+        case CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED:
+        {
+            // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch,
+                                        event->kind == CHECK_WARNING_EVENT_TYPE_POSITION ? "attribute '%.*s%s%.*s' ignored, because it cannot be applied to a type" :
+                                        event->kind == CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE ? "GCC does not allow the '%.*s%s%.*s' attribute to be written on a type" :
+                                        event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ? "'%.*s%s%.*s' calling convention is not supported for this target" :
+                                        "'%.*s%s%.*s' attribute ignored",
+                                        (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION:
+            result = check_warning_text(scratch, "GCC does not allow '%.*s' attribute in this position on a function definition", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE:
             result = "'__clang__' is a predefined macro name, not an attribute scope specifier; did you mean '_Clang' instead?";
             break;

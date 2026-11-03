@@ -126,6 +126,10 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_INVOKE_ARGUMENTS: result = "too few arguments to function call, expected at least 1, have 0"; break;
         case CHECK_INPUT_BUILTIN_NOT_CALLED: result = "builtin functions must be directly called"; break;
+        case CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS: result = "attribute parameter is out of bounds"; break;
+        case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
+        case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
+        case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
@@ -1239,7 +1243,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
                         }
                         else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ||
-                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT) && named)
+                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT || kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_TYPES) && named)
                         {
                             // An attribute on a label or a statement that clang refuses there (#147), from its first token
                             // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
@@ -1268,12 +1272,25 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const CheckInputSubjectRow* row = kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? check_input_subject_row(scope_text, bare, scope != 0, standard) : NULL;
                             char subjects[224];
                             snprintf(subjects, sizeof(subjects), "only applies to %s", row != NULL ? row->message : "other declarations");
+                            // An index of a function's parameters past them (#147, clang's checkFunctionOrMethodParameterIndex),
+                            // by its place among the attribute's arguments.
+                            char bounds[64];
+                            snprintf(bounds, sizeof(bounds), "parameter %u is out of bounds", input->reports[index].detail);
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS ? bounds :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_TYPES ? "cannot be applied to types" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
                                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? subjects :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
                                                  scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
+                        {
+                            // Two calling conventions on one function, by clang's names (check_input_attribute_conflict).
+                            const uint32_t detail = input->reports[index].detail;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s and %s attributes are not compatible", check_input_convention_name(detail & 0xffu),
+                                                 check_input_convention_name(detail >> 8 & 0xffu));
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
                         {

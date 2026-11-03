@@ -66,8 +66,9 @@ static void check_test_attribute_storage(CheckTest* test)
                       merged.calling_convention == CHECK_CALL_MICROSOFT && common.count == 65 && merged.records != common.records,
                       "common and postfix attribute merge retains layout and calling ABI");
     common.calling_convention = CHECK_CALL_SYSV;
-    check_test_expect(test, !check_input_attribute_merge(&reader, &common, &suffix, &merged) && merged.error == CHECK_ATTRIBUTE_ERROR_CONFLICT &&
-                      merged.error_first == 70 && merged.error_end == 71, "cross-position ABI conflicts retain the suffix's exact range");
+    check_test_expect(test, check_input_attribute_merge(&reader, &common, &suffix, &merged) && merged.error == CHECK_ATTRIBUTE_ERROR_NONE &&
+                      merged.calling_convention == CHECK_CALL_SYSV && merged.count == 66 && merged.records[65].first == 70,
+                      "a cross-position convention merges after the common one's, for the function they meet to check (#147)");
     Arena exhausted = { 0 };
     reader.arena = &exhausted;
     CheckInputAttributes unavailable = { 0 };
@@ -139,7 +140,10 @@ static void check_test_attribute_arguments(CheckTest* test)
                 check_test_expect(test, check_input_attribute_copy(&reader, &attributes, &copied) && copied.records != &attribute &&
                                   copied.records[0].argument_ends == attribute.argument_ends,
                                   "attribute copies share immutable arena-owned boundaries");
-                check_test_expect(test, !check_input_attribute_argument_value(&reader, &attributes, 0, count - 1, 0) &&
+                // (Any integer is a nonnull index here, which the function's check bounds: a negative one of another
+                // integer list's attribute fails.)
+                attribute.kind = CHECK_ATTRIBUTE_SENTINEL;
+                check_test_expect(test, !check_input_attribute_argument_value(&reader, &attributes, 0, count - 1, -1) &&
                                   attributes.error == CHECK_ATTRIBUTE_ERROR_INTEGER && attributes.error_first == (count - 1) * TOKENS_PER_ARGUMENT &&
                                   attributes.error_end == count * TOKENS_PER_ARGUMENT - 1,
                                   "late invalid numeric argument preserves its exact full grouped range");
@@ -222,6 +226,20 @@ static void check_test_attribute_abis(CheckTest* test)
                                   "spelling ABI provenance distinguishes explicit SysV from implicit default without changing canonical types");
             }
         }
+        CheckInputAttribute pair[2] =
+        {
+            { .first = 60, .end = 61, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_SYSV },
+            { .first = 70, .end = 74, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_MICROSOFT },
+        };
+        CheckInputAttributes conflicting = { .records = pair, .count = 2, .calling_convention = CHECK_CALL_SYSV };
+        input.report_count = 0;
+        check_test_expect(test, check_input_attribute_abi(&reader, &conflicting, integer) == integer && conflicting.error == CHECK_ATTRIBUTE_ERROR_NONE &&
+                               input.report_count == 0,
+                          "conflicting conventions on no function are no error, as clang's (#147)");
+        check_test_expect(test, check_input_attribute_abi(&reader, &conflicting, wrapped) == 0 && conflicting.error == CHECK_ATTRIBUTE_ERROR_CONFLICT &&
+                               conflicting.error_first == 70 && conflicting.error_end == 74 && input.report_count == 1 && reports[0].token == 70 &&
+                               reports[0].detail == (CHECK_CALL_MICROSOFT | CHECK_CALL_SYSV << 8),
+                          "the second of conflicting conventions on a function is clang's error, naming both (#147)");
         CheckInputAttribute record = { .first = 80, .end = 84, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_MICROSOFT };
         CheckInputAttributes attributes = { .records = &record, .count = 1, .calling_convention = CHECK_CALL_MICROSOFT };
         const uint64_t capacity = scratch.capacity;
@@ -356,6 +374,9 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
         {
             result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef, false);
             valid = result != 0 && check_input_attribute_function(&reader, &attributes, result);
+            // Calling conventions meet the function, which checks that they agree (#147).
+            result = valid ? check_input_attribute_abi(&reader, &attributes, result) : 0;
+            valid = result != 0;
         }
         snprintf(description, sizeof(description), "%s: exact attribute diagnosis", fixture->name);
         check_test_expect(test, ready && attributes.error == fixture->error && valid == (fixture->error == CHECK_ATTRIBUTE_ERROR_NONE), description);
@@ -451,6 +472,34 @@ static void check_test_attribute_vocabulary(CheckTest* test)
     }
     check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_subject_gnu) == 304 && BUSTER_ARRAY_LENGTH(check_input_subject_c23) == 225,
                       "attribute subjects: clang 23.1.5's 304 GNU spellings and 225 C23 ones with subjects");
+    // The facts rows (#147): each spelling clang has for x86-64 Linux, as its vocabulary has them, in byte order.
+    for (uint32_t standard = 0; standard < 2; standard += 1)
+    {
+        const CheckInputFactRow* list = standard != 0 ? check_input_fact_c23 : check_input_fact_gnu;
+        const uint32_t count = standard != 0 ? BUSTER_ARRAY_LENGTH(check_input_fact_c23) : BUSTER_ARRAY_LENGTH(check_input_fact_gnu);
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t shorter = i != 0 && list[i - 1].length < list[i].length ? list[i - 1].length : list[i].length;
+            const int order = i != 0 ? memcmp(list[i - 1].spelling, list[i].spelling, shorter) : -1;
+            unordered += order > 0 || (order == 0 && list[i - 1].length >= list[i].length) || list[i].minimum > list[i].maximum ? 1u : 0u;
+            found += check_input_fact_find(list, count, (String8){ (char*)list[i].spelling, list[i].length }) == list + i ? 1u : 0u;
+        }
+        check_test_expect(test, unordered == 0 && found == count, "attribute facts: rows ordered, bounded and each found");
+    }
+    const CheckInputFactRow* cold_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "cold", 4 }, false, false);
+    const CheckInputFactRow* nonnull_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "nonnull", 7 }, false, false);
+    const CheckInputFactRow* noderef_fact = check_input_fact_row((String8){ "_Clang", 6 }, (String8){ "noderef", 7 }, true, true);
+    const CheckInputFactRow* vector_fact = check_input_fact_row((String8){ "__gnu__", 7 }, (String8){ "vector_size", 11 }, true, true);
+    const CheckInputFactRow* bounded_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "bounded", 7 }, false, false);
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_fact_gnu) == 366 && BUSTER_ARRAY_LENGTH(check_input_fact_c23) == 283 && cold_fact != NULL &&
+                          cold_fact->flags == (BUSTER_CHECK_FACT_GCC | BUSTER_CHECK_FACT_SIMPLE) && nonnull_fact != NULL &&
+                          (nonnull_fact->flags & BUSTER_CHECK_FACT_VARIADIC) != 0 && nonnull_fact->maximum == UINT32_MAX && noderef_fact != NULL &&
+                          noderef_fact->flags == BUSTER_CHECK_FACT_TYPE && vector_fact != NULL && (vector_fact->flags & BUSTER_CHECK_FACT_TYPE) != 0 &&
+                          vector_fact->minimum == 1 && vector_fact->maximum == 1 && bounded_fact != NULL && (bounded_fact->flags & BUSTER_CHECK_FACT_IGNORED) != 0 &&
+                          check_input_fact_row((String8){ "clang", 5 }, (String8){ "cold", 4 }, true, true) == NULL,
+                      "attribute facts: clang 23.1.5's 366 GNU and 283 C23 spellings; cold's, nonnull's, clang::noderef's, gnu::vector_size's and bounded's");
     const CheckInputSubjectRow* cold = check_input_subject_row((String8){ "", 0 }, (String8){ "cold", 4 }, false, false);
     const CheckInputSubjectRow* scoped = check_input_subject_row((String8){ "_Clang", 6 }, (String8){ "nomerge", 7 }, true, true);
     check_test_expect(test, cold != NULL && cold->subjects == BUSTER_CHECK_SUBJECT_FUNCTION && !cold->error && scoped != NULL && scoped->error &&
@@ -960,7 +1009,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .name = "nonnull parameter index rejected",
             .source = "int f(char*) __attribute__((nonnull(2)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
-            .error_word = "2",
+            // clang's "parameter 1 is out of bounds" is at the attribute's name.
+            .error_word = "nonnull",
             .rejected = true,
             .values = { 2 },
             .function_result = BUSTER_TYPE_INT,
@@ -1155,6 +1205,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .error = CHECK_ATTRIBUTE_ERROR_CONFLICT,
             .error_word = "sysv_abi",
             .rejected = true,
+            .function_result = BUSTER_TYPE_VOID,
+            .nonvariadic = true,
         },
         {
             .name = "invalid regparm count",

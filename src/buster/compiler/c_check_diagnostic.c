@@ -78,6 +78,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wincompatible-library-redeclaration", NULL, "incompatible redeclaration of library function" },
     { "-Wbuiltin-requires-header", NULL, "declaration of built-in function requires inclusion of its header" },
     { "-Wunknown-attributes", "-Wattributes", "unknown attribute ignored" },
+    { "-Wgcc-compat", NULL, "GCC does not allow attribute in this position on a function definition" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

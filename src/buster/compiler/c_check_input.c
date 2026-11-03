@@ -125,6 +125,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_UNKNOWN_BUILTIN,
     CHECK_INPUT_INVOKE_ARGUMENTS,
     CHECK_INPUT_BUILTIN_NOT_CALLED,
+    CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS,
+    CHECK_INPUT_ATTRIBUTE_TYPES,
+    CHECK_INPUT_ATTRIBUTE_LIST_PLACE,
+    CHECK_INPUT_ATTRIBUTE_CONVENTIONS,
     // GNU's function multiversioning: a function attribute clang refuses beside target("default"), target_clones or
     // cpu_specific/cpu_dispatch, at the function's name, naming the attribute; and a target attribute incompatible with
     // another multiversioning attribute, at the later attribute, with a note at the earlier one.
@@ -267,6 +271,9 @@ struct CheckInputReport
     uint32_t subject;
     // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.
     uint32_t attribute;
+    // An attribute's argument a message names, from 1 (CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS's); two calling conventions
+    // (CHECK_INPUT_ATTRIBUTE_CONVENTIONS's, the one asked for in the low byte); or 0.
+    uint32_t detail;
     // The note's token and kind (CheckInputNoteKind), or BUSTER_CHECK_NONE and CHECK_INPUT_NOTE_NONE.
     uint32_t note_token;
     uint8_t note_kind;
@@ -1309,6 +1316,9 @@ struct CheckInputReader
     // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
     // columns take memory only where they're written (#628, #529). Lanes share it, as they do the columns.
     uint64_t* sparse_marks;
+    // A bit a token, allocated at the first: whether an attribute starting there was warned of as a calling convention
+    // x86-64 hasn't (check_input_attribute_unsupported).
+    uint64_t* convention_warned;
     CheckSparseColumn parameters;
     CheckSparseColumn parameter_next;
     uint32_t* parameter_seen;
@@ -1855,6 +1865,19 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
     }
 }
 
+// check_input_report of a message that reads `detail` (CheckInputReport.detail), at an attribute's first token. It is
+// published after the token, past the warnings an attribute's handler gives before it there (#147).
+static void check_input_report_argument(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t detail)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_report(reader, token, message);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].detail = detail;
+        reader->output->reports[before].completion = reader->parser != NULL && token + 1 < reader->parser->tokens.count ? token + 1 : 0;
+    }
+}
+
 // check_input_report of a message that names `subject`, a declaration's token, at another token (an attribute's).
 static void check_input_report_subject(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t subject)
 {
@@ -2199,6 +2222,12 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(C
     {
         function = reader->types->types.base[type_index(function)];
         kind = type_kind(reader->types, function);
+    }
+    // The declaration's conventions in source order first (#147): one the declarator applied already conflicts with an
+    // earlier specifier's at its own attribute, as clang's.
+    if (kind == BUSTER_TYPE_KIND_FUNCTION && attributes != 0 && attributes->count != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        check_input_attribute_conventions(reader, attributes, type);
     }
     if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -4261,6 +4290,11 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 check_input_attribute_subjects(reader, frame->attributes, subjects, adjusted, begin, frame->name);
                         if (valid)
                         {
+                            check_input_attribute_nonnull_parameter(reader, frame->common_attributes, adjusted);
+                            check_input_attribute_nonnull_parameter(reader, frame->attributes, adjusted);
+                        }
+                        if (valid)
+                        {
                             parameters[parameter_count] = (CheckDeclaratorParameter)
                             {
                                 .type = adjusted,
@@ -5875,6 +5909,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                                       (is_typedef ? BUSTER_CHECK_SUBJECT_TYPEDEF :
                                        function   ? BUSTER_CHECK_SUBJECT_FUNCTION | (is_inline ? BUSTER_CHECK_SUBJECT_INLINE : 0) :
                                                     variable_subjects);
+            if (function && !is_typedef && kind == PARSE_KIND_L_BRACE)
+            {
+                check_input_attribute_gcc_position(reader, reader->declarator_attributes);
+            }
             valid = valid && check_input_attribute_subjects(reader, attributes, subjects, type, check_input_attribute_begin(parser, declaration_group, count), name);
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
             if (attributes_valid && function && !is_typedef)
