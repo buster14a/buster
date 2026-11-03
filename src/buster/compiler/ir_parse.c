@@ -751,6 +751,11 @@ static void ir_parse_instruction(IrParseState* state)
                         first = false;
                     }
                 }
+                // A compare-exchange's desired value (#1059), its optional third operand.
+                if (row.op == IR_ATOMIC_RMW && ir_parse_take(state, ','))
+                {
+                    row.c = ir_parse_id(state, '%');
+                }
                 if (row.op == IR_ICMP || row.op == IR_FCMP || row.op == IR_VCMP)
                 {
                     static const char* const names[IR_PREDICATE_COUNT] = {
@@ -782,14 +787,16 @@ static void ir_parse_instruction(IrParseState* state)
                 }
                 if (row.op == IR_ATOMIC_RMW)
                 {
-                    // An atomic read/modify/write's operation and its order (#1059), after its alignment.
-                    static const char* const operations[2] = {
+                    // An atomic read/modify/write's operation and its order (#1059), after its alignment, as its flags.
+                    static const char* const operations[3] = {
                         "xchg",
                         "add",
+                        "cas",
                     };
-                    row.c = ir_parse_named(state, operations, 2);
+                    const uint32_t operation = ir_parse_named(state, operations, 3);
                     const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
-                    row.flags = (uint8_t)(BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
+                    row.flags = (uint8_t)(BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0) |
+                                          (operation < 3 ? operation << 5 : 0));
                 }
                 if (row.op == IR_LOAD || row.op == IR_STORE)
                 {

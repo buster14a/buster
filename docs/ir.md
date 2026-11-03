@@ -480,33 +480,49 @@ clang, its `long`'s accesses printed `align=8`.
 ### Atomic read/modify/writes (#1059)
 
 `rmw` (an integer of 1, 2, 4 or 8 bytes, a pointer's as `i64`; `a` the object's
-address, `b` the operand, of the result's type, `c` its operation,
-`BUSTER_IR_RMW_EXCHANGE` or `BUSTER_IR_RMW_ADD`; its flags `BUSTER_IR_ATOMIC` and
-a C memory order, any of the six, since the locked access is a full barrier;
-printed `rmw.iN %p, %v align=N xchg|add ORDER`) returns the object's old value
-and leaves the operand (an exchange) or the sum (an addition) in it, as one
-atomic access of its type's bytes: the typed stream's `ATOMIC_RMW`, which the C
-producer gives an exchange, an addition or a subtraction of a constant order
+address, `b` the operand, of the result's type; its flags `BUSTER_IR_ATOMIC`, a C
+memory order, any of the six, since the locked access is a full barrier, and its
+operation (`BUSTER_IR_RMW_OPERATION`'s bits): `BUSTER_IR_RMW_EXCHANGE`,
+`BUSTER_IR_RMW_ADD` or `BUSTER_IR_RMW_COMPARE`, whose `b` is the expected value
+and `c` the desired one, of the result's type, an optional value the others
+have none of (`ir_optional_table`), since the IR's 64 operations leave no room
+for another; printed `rmw.iN %p, %v align=N xchg|add ORDER` and
+`rmw.iN %p, %e, %d align=N cas ORDER`) returns the object's old value and leaves
+the operand (an exchange), the sum (an addition), or the desired value where the
+old one is the expected one and the old one where it isn't (a compare-exchange,
+as `cmpxchg` writes it) in it, as one atomic access of its type's bytes: the
+typed stream's `ATOMIC_RMW`, which the C producer gives an exchange, an addition
+or a subtraction of a constant order, and its `ATOMIC_CAS`, whose address is a
+local's (`ir_lower` reads it), which it gives a compare-exchange
 ([the builtin integration guide](c-builtins-integration.md)'s "Direct
 read/modify/writes"). Its alignment is its size at least, as an atomic load's
 is, and `ir_lower` gives it its class's natural one. No pass moves an access or a
 call across it, merges it or drops it: it is an optimizer root, neither value
 numbering nor loop-invariant motion takes it, and its address counts as taken,
 so promotion and private-field replacement leave its object in memory; dataflow
-reads its address and its operand, as a store's. Both verifiers check its flags
+reads its address and its operand, as a store's, and a compare-exchange's
+desired value, which inlining, rebuilding and every pass's operand mask
+(`ir_value_mask`) map as a call's optional destination is. Both verifiers check its flags
 (`ir_rmw_flags_valid`) and its type and alignment (`ir_atomic_access`, its own
 rule's, `IR_RULE_ATOMIC_RMW`); both interpreters run it as one thread does, a
 byte at a time through volatile accesses, refusing an address misaligned for its
 declared alignment and checking its object as a load's (undefined bytes are
-reported) before a store's. Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
+reported) before a store's (a compare-exchange's desired value is a use, even
+where it isn't stored). Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
 the operand copied to the scratch register, `xchg` or `lock xadd` of the object's
 width (never the narrow value's 32-bit register's), and the old value
-zero-extended as a load's is, a barrier no load folds past. `tests/ir/atomics.ir`
-reads every width, operation and order back, `test-ir`'s verifier cases refuse
-an operation past an addition, a non-atomic or a volatile one, an order past
-`seq_cst` and an 8-byte one aligned to 4 (and `test-ir-parse` one written as text
-aligned below its size), `test-tier1-select` runs each width's exchange and
-addition on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
+zero-extended as a load's is; a compare-exchange saves rax in the scratch
+register (reading an operand that was in rax from there), moves the expected
+value into rax, `lock cmpxchg` of the object's width, and the old value
+zero-extended from rax, rax restored unless it is the result's; a barrier no load
+folds past. `tests/ir/atomics.ir` reads every width, operation and order back,
+`test-ir`'s verifier cases refuse an operation past a compare-exchange, a
+compare-exchange without a desired value of its type and another operation with
+one, a non-atomic or a volatile one, an order past `seq_cst` and an 8-byte one
+aligned to 4 (and `test-ir-parse` one written as text aligned below its size, and
+the desired value's misuses), `test-tier1-select` runs each width's exchange,
+addition and compare-exchange (that succeeds and fails, each operand in rax in
+turn) on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
 through both lowerings, promotion, the text's round trip and the IR's three forms
 against clang.
 

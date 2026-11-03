@@ -184,9 +184,13 @@ typedef enum Tier1SelectRule
     // TIER1_RULE_PHI's. Only the CFG consumer takes it.
     TIER1_RULE_VECTOR,
     // An atomic read/modify/write (IR_ATOMIC_RMW, #1059) of the object at the address in values[0], of values[1], by
-    // the operation `immediate` (BUSTER_IR_RMW_EXCHANGE or BUSTER_IR_RMW_ADD): the operand copied to the scratch
-    // register, xchg or lock xadd of it with the object, a full barrier every order takes, and its old value zero-extended
-    // into the destination, as a load's is. Never folded into a consumer, and a barrier no load folds past.
+    // the operation `immediate` (BUSTER_IR_RMW_OPERATION's: an exchange, an addition or a compare-exchange): the operand
+    // copied to the scratch register, xchg or lock xadd of it with the object, a full barrier every order takes, and its
+    // old value zero-extended into the destination, as a load's is; a compare-exchange's, with values[1] the expected
+    // value and values[2] the desired one, rax saved in the scratch register (and an operand in rax read from there),
+    // the expected value moved into rax, lock cmpxchg of the desired one with the object, the old value zero-extended
+    // from rax into the destination, and rax restored where the destination isn't it. Never folded into a consumer, and
+    // a barrier no load folds past.
     TIER1_RULE_ATOMIC_RMW,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
@@ -1025,16 +1029,34 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         break;
     case TIER1_RULE_ATOMIC_RMW:
-    {
-        const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
-        tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
-        const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
-                                  : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
-        tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
-        const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
-        tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        if (holes->immediate == BUSTER_IR_RMW_COMPARE)
+        {
+            const uint8_t scratch = BUSTER_TIER1_SELECT_SCRATCH;
+            const uint8_t address = holes->left == X86_REGISTER_RAX ? scratch : holes->left;
+            const uint8_t expected = holes->right == X86_REGISTER_RAX ? scratch : holes->right;
+            const uint8_t desired = holes->third == X86_REGISTER_RAX ? scratch : holes->third;
+            tier1_select_append(&result, tier1_select_move(8, scratch, X86_REGISTER_RAX));
+            tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RAX, expected));
+            const uint32_t form = width == 1 ? X86_FORM_LOCK_CMPXCHG_M8_R8 : width == 2 ? X86_FORM_LOCK_CMPXCHG_M16_R16 : width == 8 ? X86_FORM_LOCK_CMPXCHG_M64_R64 : X86_FORM_LOCK_CMPXCHG_M32_R32;
+            tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = desired, .rm = address, .mode = BUSTER_X86_MEMORY_BASE });
+            const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+            tier1_select_append(&result, tier1_select_register_record(extension, destination, X86_REGISTER_RAX));
+            if (destination != X86_REGISTER_RAX)
+            {
+                tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RAX, scratch));
+            }
+        }
+        else
+        {
+            const bool add = holes->immediate == BUSTER_IR_RMW_ADD;
+            tier1_select_append(&result, tier1_select_move(8, BUSTER_TIER1_SELECT_SCRATCH, holes->right));
+            const uint32_t form = add ? width == 1 ? X86_FORM_LOCK_XADD_M8_R8 : width == 2 ? X86_FORM_LOCK_XADD_M16_R16 : width == 8 ? X86_FORM_LOCK_XADD_M64_R64 : X86_FORM_LOCK_XADD_M32_R32
+                                      : width == 1 ? X86_FORM_XCHG_RM8_R8 : width == 2 ? X86_FORM_XCHG_RM16_R16 : width == 8 ? X86_FORM_XCHG_RM64_R64 : X86_FORM_XCHG_RM32_R32;
+            tier1_select_append(&result, (X86Instruction){ .form = (uint16_t)form, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = holes->left, .mode = BUSTER_X86_MEMORY_BASE });
+            const uint32_t extension = width == 1 ? X86_FORM_MOVZX_R32_RM8 : width == 2 ? X86_FORM_MOVZX_R32_RM16 : width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32;
+            tier1_select_append(&result, tier1_select_register_record(extension, destination, BUSTER_TIER1_SELECT_SCRATCH));
+        }
         break;
-    }
     case TIER1_RULE_PHI:
         break;
     case TIER1_RULE_ALLOCA:
@@ -3588,7 +3610,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.width = (uint8_t)tier1_select_memory_width(type);
         base.values[0] = a;
         base.values[1] = b;
-        base.immediate = c;
+        base.immediate = function->flags[node] & BUSTER_IR_RMW_OPERATION;
+        base.values[2] = base.immediate == BUSTER_IR_RMW_COMPARE ? c : BUSTER_IR_NONE;
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }

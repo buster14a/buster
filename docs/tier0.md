@@ -185,6 +185,21 @@ table. The kinds are:
   gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
   `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
   guide](c-builtins-integration.md)'s "Direct read/modify/writes").
+- `ATOMIC_CAS` (#1059), an atomic compare-exchange, pops the expected value and the desired one, both of an integer
+  `class`, and pushes the object's old value of `class`: `value` a C memory order and, from
+  `BUSTER_TYPED_CAS_LOCAL_SHIFT`, the local (of U64) that holds the object's address, since three operands and a scratch
+  register would take a fourth depth. Tier 0 defers it: the expected value swapped into rax where it isn't there (rax's
+  own value, a deeper one's, kept in its register), the address loaded from the local's home into the stack's first
+  free register (which the entry so claims, as a copy's scratch), `lock cmpxchg` of the desired value's register with
+  the object, the class's bytes, a full barrier on x86-64 that every order takes, which leaves the old value in rax, the
+  swap undone, and the old value extended as the class's load extends it. The producer compares it with the expected
+  value for the success (in `I32` for a narrow class, which Tier 0's compares take). Its local counts as a use of it
+  where Tier 0 gives locals their homes (`tier0_count_references` and its vector twin), so that a pointer parameter
+  whose only use is a compare-exchange's address keeps its incoming value (`test-ir-lowering` runs such functions
+  natively against both interpreters). No consumer moves an access across it or drops it; `ir_lower` makes it a load of the local and the IR's `rmw ... cas`. The typed interpreter runs it as
+  one thread does, as an `ATOMIC_RMW`. The C producer gives a compare-exchange of a constant order one
+  (`check_program_direct_cas`) and so does every plan's (an implicit `_Atomic` update's loop, a generic form's: [the
+  builtin integration guide](c-builtins-integration.md)'s "Direct compare-exchanges").
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
