@@ -7,7 +7,7 @@
 // (BUSTER_TYPED_ACCESS_ATOMIC and the order), with no helper's call, and a seq_cst store the FENCE of seq_cst after it;
 // Tier 0's code has the access, and an mfence after a seq_cst store alone, in its place among the function's accesses to
 // memory, as x86_semantics.c reads them (check_test_fences_summary's trace). A dynamic order, an order its kind doesn't
-// take, a scoped family's and a floating object's keep their helper, and the plan counts both. Natively against clang:
+// take, a scoped family's and a floating object's keep their helper, the plan's use of it. Natively against clang:
 // every width and order, the C11 forms, a pointer's, an implicit _Atomic object's loads, stores and updates (whose loop
 // keeps its compare-exchange's leaf). Include after c_check_program_fence_test.c, whose summary of a function's accesses
 // this test takes.
@@ -117,12 +117,23 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
         char description[224];
         snprintf(description, sizeof(description), "atomic accesses: the functions lower by the %s path", way);
         check_test_expect(test, ready && code.lowered.count == count, description);
-        // The plan: nine builtins direct (the implicit object's accesses have no builtin node, and no leaf), three by
-        // their helper (the dynamic order's, the scoped one's and the floating one's).
+        // The lowered code: eleven marked accesses, nine builtins' and the implicit object's two (which have no builtin
+        // node, and no leaf); the plan: three builtins by their helper (the dynamic order's, the scoped one's and the
+        // floating one's).
         const CheckProgramHelpers* helpers = &code.lowered.helpers;
-        snprintf(description, sizeof(description), "atomic accesses (%s path): the plan takes %u builtins directly and %u by their helper", way,
-                 ready ? helpers->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] : 0, ready ? helpers->helper[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] : 0);
-        check_test_expect(test, ready && helpers->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] == 9 && helpers->helper[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] == 3, description);
+        uint32_t uses = 0;
+        uint32_t direct = 0;
+        for (uint32_t u = 0; ready && u < helpers->use_count; u += 1)
+        {
+            uses += check_program_helper_family(&helpers->items[helpers->uses[u].helper]) == CHECK_PROGRAM_HELPER_ATOMIC_ACCESS;
+        }
+        for (uint32_t f = 0; ready && f < code.lowered.count; f += 1)
+        {
+            direct += check_test_accesses_summary(&code.lowered.functions[f]).count;
+        }
+        snprintf(description, sizeof(description), "atomic accesses (%s path): the code takes %u accesses directly and the plan %u builtins by their helper", way,
+                 direct, uses);
+        check_test_expect(test, ready && direct == 11 && uses == 3, description);
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];

@@ -767,14 +767,15 @@ forms, an atomic access's marked `LOAD`, `STORE` or `SET` and a fence's `FENCE`
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
 asm statement's alike, and `planned`: helpers emitted) and a line per family
 (`helpers.fence`, `direct=`, `helper=`, `planned=`). A family without a direct
-form counts no direct use, which the fence test checks of every family.
+form counts none: the report reads only the entries of the families that have
+one. The planner keeps no count of its own: its helper uses are its `uses`.
 
 **Tests.** `test-checker`'s fence section (`c_check_program_fence_test.c`)
 lowers fences of every order and scope and the helper's cases by both paths,
 checks each function's `FENCE` entries and values, its calls, and Tier 0's
 records by both twins as `x86_semantics.c` reads them (an `mfence` between a
 store and a load where the source has a `seq_cst` fence there, none for the
-other orders), and the plan's counts, then runs them natively against clang -O0's
+other orders), the lowered code's direct fences and the plan's helper uses, then runs them natively against clang -O0's
 build. A function with a statement expression has fences over a live value: its
 lowering tracks its stack (`check_lower_track`, as every function of a program
 with a terminal helper does), where a `FENCE` neither pops nor pushes; the
@@ -800,7 +801,7 @@ none. On the same container, the relaxed control showed both loads reading 0 in
 `test-checker`'s atomic-access section (`c_check_program_atomic_access_test.c`)
 lowers loads and stores of each width and order, C11's, a pointer's and an
 implicit object's by both paths, checks each function's marked entries, its
-fences, its calls and Tier 0's records by both twins, and the plan's counts,
+fences, its calls and Tier 0's records by both twins, the lowered code's marked accesses and the plan's helper uses,
 then runs every width and order, the implicit object's loads, stores and
 updates and the helpers' cases natively against clang. `test-checker-driver`'s
 report unit pins `--helper-report`'s direct forms and calls of a unit with

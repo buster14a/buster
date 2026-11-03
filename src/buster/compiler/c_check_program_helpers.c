@@ -25,7 +25,7 @@
 // never a list of this file's. A fence of a constant order lowers to the typed stream's FENCE
 // (check_program_direct_fence), and an aligned atomic load or store of an integer or a pointer, of a constant order, to
 // its LOAD or SET with an atomic marker (check_program_direct_access); neither plans a helper. Every other use keeps its
-// helper, and the plan counts each family's direct and helper uses (CheckProgramHelpers.direct and .helper).
+// helper (CheckProgramHelpers.uses); --helper-report counts both in the lowered code (check_helper_report_add).
 #ifndef BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 
@@ -220,11 +220,6 @@ struct CheckProgramHelpers
     uint32_t count;
     CheckProgramHelperUse* uses;
     uint32_t use_count;
-    // Each family's builtin uses that lower directly, planning no helper (#1059: check_program_direct_fence's), and those
-    // the plan gives their helper (`uses`). An implicit _Atomic access's and a generic form's leaves, and an asm statement's
-    // helper, have no builtin use here: --helper-report counts the lowered code's calls of every helper instead.
-    uint32_t direct[CHECK_PROGRAM_HELPER_FAMILIES];
-    uint32_t helper[CHECK_PROGRAM_HELPER_FAMILIES];
     CheckProgramStatus status;
     uint32_t token;
     // What an UNSUPPORTED status lacks, or NULL.
@@ -944,13 +939,11 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         {
                             // The typed stream's FENCE, which the lowering writes in the call's place: no helper.
                             folded = true;
-                            result->direct[CHECK_PROGRAM_HELPER_FENCE] += 1;
                         }
                         else if (check_program_direct_access(program, node, stream->atomics + atomic) != UINT32_MAX)
                         {
                             // The typed stream's LOAD or SET with its atomic marker: no helper.
                             folded = true;
-                            result->direct[CHECK_PROGRAM_HELPER_ATOMIC_ACCESS] += 1;
                         }
                         else if (base == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || base == CBUILTIN_ATOMIC_IS_LOCK_FREE || check_builtin_atomic_generic(base))
                         {
@@ -1016,7 +1009,6 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                             .node = node,
                             .helper = keys[key] - 1,
                         };
-                        result->helper[check_program_helper_family(planned + keys[key] - 1)] += 1;
                     }
                 }
             }
