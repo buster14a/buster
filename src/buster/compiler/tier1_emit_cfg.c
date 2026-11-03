@@ -768,6 +768,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                     {
                         const uint32_t source = predecessors[e] - added;
                         uint32_t incoming = BUSTER_IR_NONE;
+                        // The last pair from `source`. Under MSan the scan stays scalar: clang's vector form (znver5's,
+                        // 16 pairs a step) gathers the matching pairs' values into a vector whose other lanes are
+                        // undefined, and MSan checks that whole vector where it takes the last matching lane, so it
+                        // reports lanes the scan never reads (tier1_cfg_ir.c's scan has the same pragma). Release
+                        // builds keep the vector form.
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
                         for (uint32_t pair = 0; pair < function->b[node]; pair += 1)
                         {
                             const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
@@ -2087,7 +2095,15 @@ static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const 
     for (uint32_t node = ir_edge ? function->block_offsets[target] : 0; error == TIER1_EMIT_OK && ir_edge && node < function->block_offsets[target + 1] && function->op[node] == IR_PHI; node += 1)
     {
         uint32_t incoming = BUSTER_IR_NONE;
-        for (uint32_t pair = 0; function->type[node] == IR_F80 && pair < function->b[node]; pair += 1)
+        // Scalar under MSan, as tier1_emit_cfg_problem's scan of a phi's pairs: MSan reports the undefined lanes of
+        // clang's vector form (main's native MSan job on #1204's merge, through test-tier1-wide's join of 200
+        // predecessors). Whether the phi is a long double's is the trip count's, not the loop condition's: clang
+        // unswitches a loop on an invariant condition, and the copy it vectorizes doesn't keep the pragma.
+        const uint32_t pairs = function->type[node] == IR_F80 ? function->b[node] : 0;
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
+        for (uint32_t pair = 0; pair < pairs; pair += 1)
         {
             const uint32_t* entry = function->extra + function->a[node] + (uint64_t)pair * 2;
             incoming = entry[0] == source ? entry[1] : incoming;
