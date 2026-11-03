@@ -11,9 +11,9 @@
 //
 // Before the time, each function is planned by the vector path and emitted as --tier1 --verify emits it (every form
 // allowed): a function the CFG consumer doesn't take, or whose code's certificate the decoding doesn't cover yet, is
-// left out and counted, by reason; a refusal fails the benchmark, which then reports no time. The variants, each a run
-// over the functions kept, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes whose order rotates (--only times
-// one alone, back to back):
+// left out and counted, by reason; a refusal, or a step out of memory or past a limit, fails the benchmark, which then
+// reports no time (tier1_code_cert_bench_disposition). The variants, each a run over the functions kept, after a
+// warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes whose order rotates (--only times one alone, back to back):
 //
 // - emit: tier1_emit_function without the certificates, the code the certificate is of;
 // - decode: tier1_certificate_emitted, the program decoded from the records;
@@ -38,6 +38,15 @@ static const char* const tier1_code_cert_bench_names[BUSTER_TIER1_CODE_CERT_VARI
 
 // The functions kept: each one's plan and emission, its decoded program, and the scratch the largest check needs; and
 // the certificates' sizes, summed.
+// Why the preparation failed, if it did: a function's code certificate refused it, or a step ran out of room. Either
+// leaves no report: the time would be of a smaller corpus than the file's.
+typedef enum Tier1CodeCertBenchFailure
+{
+    TIER1_CODE_CERT_BENCH_PREPARED,
+    TIER1_CODE_CERT_BENCH_REFUSED,
+    TIER1_CODE_CERT_BENCH_EXHAUSTED,
+} Tier1CodeCertBenchFailure;
+
 typedef struct Tier1CodeCertBench Tier1CodeCertBench;
 struct Tier1CodeCertBench
 {
@@ -66,7 +75,17 @@ struct Tier1CodeCertBench
     uint64_t straight;
     uint64_t unemitted;
     uint64_t uncertified[TIER1_CERT_EMITTED_REASON_COUNT];
+    Tier1CodeCertBenchFailure failure;
 };
+
+// A function's planning and emission as the preparation takes them: a refusal of its code, or a selection or emission
+// out of memory or past a limit (the code certificate's capacity is TIER1_EMIT_MEMORY), fails the preparation; any other
+// failure (an unsupported function, or one the emitter doesn't take) leaves the function out, counted.
+static Tier1CodeCertBenchFailure tier1_code_cert_bench_disposition(Tier1SelectError selected, Tier1EmitError emitted)
+{
+    const bool exhausted = selected == TIER1_SELECT_ERROR_MEMORY || selected == TIER1_SELECT_ERROR_LIMIT || emitted == TIER1_EMIT_MEMORY || emitted == TIER1_EMIT_LIMIT;
+    return exhausted ? TIER1_CODE_CERT_BENCH_EXHAUSTED : emitted == TIER1_EMIT_CERTIFICATE ? TIER1_CODE_CERT_BENCH_REFUSED : TIER1_CODE_CERT_BENCH_PREPARED;
+}
 
 static Tier1EmitOptions tier1_code_cert_bench_options(bool certify)
 {
@@ -124,8 +143,8 @@ static Tier0BenchmarkReading tier1_code_cert_bench_run(uint32_t variant, const T
 }
 
 // Plans and emits each of the corpus's functions as --tier1 --verify does, and keeps those whose code is certified,
-// with their decoded programs and sizes. False where a code certificate refuses a function, or a step fails for want of
-// room.
+// with their decoded programs and sizes. It stops at the first failure (tier1_code_cert_bench_disposition, or the
+// decoding's refusal or capacity), which Tier1CodeCertBench.failure says.
 static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1SelectSourceCorpus* corpus, Arena* kept, Arena* programs, Arena* scratch)
 {
     const Tier1EmitOptions options = tier1_code_cert_bench_options(true);
@@ -135,13 +154,14 @@ static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1
         const uint64_t mark = kept->length;
         Tier1SelectPlan plan = { 0 };
         uint32_t node = BUSTER_IR_NONE;
-        bool ok = tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], kept, scratch, true, &plan, &node) == TIER1_SELECT_OK;
+        const Tier1SelectError selected = tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], kept, scratch, true, &plan, &node);
+        bool ok = selected == TIER1_SELECT_OK;
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, bench->allowed, kept, scratch, &emitted, &node) : TIER1_EMIT_INVALID;
         ok = ok && error == TIER1_EMIT_OK;
-        // A refusal of a function's code fails the benchmark: its code is wrong, or the decoding is.
-        valid = error != TIER1_EMIT_CERTIFICATE;
-        bench->unemitted += !ok;
+        bench->failure = tier1_code_cert_bench_disposition(selected, error);
+        valid = bench->failure == TIER1_CODE_CERT_BENCH_PREPARED;
+        bench->unemitted += !ok && valid;
         bench->straight += ok && !emitted.code_checked;
         const bool certified = ok && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
         bench->uncertified[emitted.code_reason < TIER1_CERT_EMITTED_REASON_COUNT ? emitted.code_reason : 0] += ok && emitted.code_checked && !certified;
@@ -150,7 +170,9 @@ static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1
         const uint64_t program_mark = programs->length;
         if (certified && valid)
         {
-            valid = tier1_certificate_emitted(&plan, &emitted, programs, scratch, &program, &stats) == TIER1_CERT_EMITTED_OK;
+            const Tier1CertEmittedReason decoded = tier1_certificate_emitted(&plan, &emitted, programs, scratch, &program, &stats);
+            bench->failure = decoded == TIER1_CERT_EMITTED_OK ? bench->failure : decoded == TIER1_CERT_EMITTED_CAPACITY ? TIER1_CODE_CERT_BENCH_EXHAUSTED : TIER1_CODE_CERT_BENCH_REFUSED;
+            valid = decoded == TIER1_CERT_EMITTED_OK;
             const size_t size = valid ? tier1_certificate_scratch_size(&program) : 0;
             bench->buffer_bytes = size > bench->buffer_bytes ? size : bench->buffer_bytes;
             bench->program_bytes_max = stats.bytes > bench->program_bytes_max ? stats.bytes : bench->program_bytes_max;
@@ -346,7 +368,7 @@ static __attribute__((unused)) int run_tier1_code_certificate_benchmark(int coun
         printf("benchmark-tier1-code-certificate: unit_reads=%" PRIu64 " unit_writes=%" PRIu64 "\n", bench.unit_reads, bench.unit_writes);
         if (!prepared)
         {
-            printf("benchmark-tier1-code-certificate: a function's code certificate refused it: no report\n");
+            printf("benchmark-tier1-code-certificate: %s: no report\n", bench.failure == TIER1_CODE_CERT_BENCH_EXHAUSTED ? "a function's preparation ran out of room" : "a function's code certificate refused it");
         }
     }
     else if (!valid)

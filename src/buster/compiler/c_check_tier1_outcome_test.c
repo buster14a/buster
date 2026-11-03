@@ -163,6 +163,42 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
                             "the speculative callee-saved preference ignores constraint and capacity", NULL);
 }
 
+// benchmark-tier1-code-certificate's preparation takes a function's planning and emission as the outcomes do: a refusal
+// of its code, or a step out of memory or past a limit (the code certificate's capacity among them), fails it, so that it
+// never times a smaller corpus than the file's; an unsupported function, or one the emitter doesn't take, is left out.
+typedef struct CheckTier1BenchCase CheckTier1BenchCase;
+struct CheckTier1BenchCase
+{
+    Tier1SelectError selected;
+    Tier1EmitError emitted;
+    Tier1CodeCertBenchFailure failure;
+};
+
+static const CheckTier1BenchCase check_tier1_bench_cases[] = {
+    { TIER1_SELECT_OK, TIER1_EMIT_OK, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_ERROR_UNSUPPORTED, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_ERROR_TARGET, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_ERROR_MEMORY, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_ERROR_LIMIT, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_OK, TIER1_EMIT_UNSUPPORTED, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_OK, TIER1_EMIT_INVALID, TIER1_CODE_CERT_BENCH_PREPARED },
+    { TIER1_SELECT_OK, TIER1_EMIT_MEMORY, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_OK, TIER1_EMIT_LIMIT, TIER1_CODE_CERT_BENCH_EXHAUSTED },
+    { TIER1_SELECT_OK, TIER1_EMIT_CERTIFICATE, TIER1_CODE_CERT_BENCH_REFUSED },
+};
+
+static void check_tier1_test_code_benchmark(CheckLanesTestTally* tally)
+{
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_tier1_bench_cases); i += 1)
+    {
+        const CheckTier1BenchCase* test = check_tier1_bench_cases + i;
+        char detail[96];
+        snprintf(detail, sizeof(detail), "selection %u, emission %u", (unsigned)test->selected, (unsigned)test->emitted);
+        check_lanes_test_expect(tally, tier1_code_cert_bench_disposition(test->selected, test->emitted) == test->failure,
+                                "the code certificate benchmark fails on a refusal or a capacity, and leaves an unsupported function out", detail);
+    }
+}
+
 static bool check_tier1_test_cause(CheckTier1Outcome outcome, const CheckTier1FailureCase* test)
 {
     const CheckTier1Fault* fault = &test->fault;
@@ -409,6 +445,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && x86_zen5_initialize();
     check_lanes_test_expect(tally, ready, "initialize Tier 1 outcome regression tables", NULL);
     check_tier1_test_classification(tally);
+    check_tier1_test_code_benchmark(tally);
     char source[PATH_MAX];
     char object[PATH_MAX];
     char errors[PATH_MAX];
