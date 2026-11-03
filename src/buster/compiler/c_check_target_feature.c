@@ -391,7 +391,7 @@ static bool check_target_feature_library_noreturn(const CheckProgram* program, c
     const uint32_t declaration = resolved != BUSTER_CHECK_NONE ? resolved :
                                  object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
     const bool function = declaration < parser->tokens.count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
-                          input->linkage[declaration] == 2;
+                          check_input_linkage(input->declaration_bits, declaration) == 2;
     const uint32_t name = function ? parser->tokens.names[declaration] : 0;
     const BuiltinIntrinsicInfo* info = name != 0 ? builtin_intrinsic_lookup((const char*)intern_bytes(program->identifiers, name),
                                                                           intern_length(program->identifiers, name)) :

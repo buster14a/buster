@@ -117,7 +117,7 @@ static uint32_t check_warning_undefined_find(const CheckWarningUndefinedFunction
 
 static bool check_warning_undefined_supplied(const CheckInput* input, uint32_t declaration)
 {
-    bool supplied = input->defined[declaration] != 0;
+    bool supplied = check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_DEFINED) != 0;
     const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, declaration) : NULL;
     for (uint32_t i = 0; !supplied && attributes != NULL && i < attributes->count; i += 1)
     {
@@ -147,7 +147,7 @@ static void check_warning_undefined_use(CheckInputReader* reader, CheckWarningUn
 static uint64_t check_warning_undefined_declaring(const CheckInput* input, uint32_t first, uint32_t count, bool scalar)
 {
     return scalar ? check_input_scan_all(first, count) :
-                    check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_equal(input->linkage, first, count, 1);
+                    check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_linkage(input->declaration_bits, first, count, 1);
 }
 
 static bool check_warning_undefined_internal(CheckWarningBuffer* output, const CheckInput* input, const Parser* parser,
@@ -165,14 +165,14 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         const uint64_t output_mark = arena->length;
         const uint64_t scratch_mark = scratch->length;
         const uint32_t count = parser->tokens.count;
-        valid = count == 0 || (input->declarations != NULL && input->declaration_kinds != NULL && input->linkage != NULL &&
-                              input->objects != NULL && input->defined != NULL && parser->tokens.kinds != NULL &&
+        valid = count == 0 || (input->declarations != NULL && input->declaration_kinds != NULL && input->declaration_bits != NULL &&
+                              input->objects != NULL && parser->tokens.kinds != NULL &&
                               parser->tokens.names != NULL && parser->tree.roles != NULL && parser->tree.parents != NULL);
         valid = valid && (input->vla_count == 0 || input->vlas != NULL) &&
                 (input->warning_events.count == 0 || input->warning_events.events != NULL);
         const uint32_t* declarations = input->declarations;
         const uint8_t* declaration_kinds = input->declaration_kinds;
-        const uint8_t* linkage = input->linkage;
+        const uint8_t* declaration_bits = input->declaration_bits;
         const uint32_t* objects = input->objects;
         const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
         uint32_t room = 0;
@@ -181,7 +181,7 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
             for (uint64_t bits = check_warning_undefined_declaring(input, first, count, scalar); bits != 0; bits &= bits - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
-                room += declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && linkage[token] == 1 &&
+                room += declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && check_input_linkage(declaration_bits, token) == 1 &&
                         objects[token] == token + 1 && !check_warning_undefined_supplied(input, token);
             }
         }
@@ -195,7 +195,7 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
             for (uint64_t bits = check_warning_undefined_declaring(input, first, count, scalar); valid && bits != 0; bits &= bits - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
-                if (declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && linkage[token] == 1)
+                if (declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && check_input_linkage(declaration_bits, token) == 1)
                 {
                     const uint32_t object = objects[token];
                     if (object == token + 1 && !check_warning_undefined_supplied(input, token))

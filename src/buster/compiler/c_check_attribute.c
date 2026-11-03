@@ -1850,7 +1850,7 @@ static bool check_input_attribute_alias_definition(const CheckInputAttributes* a
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
     const CheckInputAttributes* attributes = reader->late_attributes ? check_input_attributes_at(reader->output, token) : 0;
-    const bool after = attributes != 0 && reader->definition_origins[previous] && !reader->defined[token];
+    const bool after = attributes != 0 && reader->definition_origins[previous] && !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
     {

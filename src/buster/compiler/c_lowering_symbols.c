@@ -338,12 +338,12 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     bool compound = false;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? check_input_attributes_at(input, token) : 0;
+        const CheckInputAttributes* attributes = input->declarations[token] == token && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
         for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
         {
             labels += attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
         }
-        compound |= input->compound_objects[token] != 0;
+        compound |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != 0;
     }
     // Each object's label, by its identity (its canonical declaration's token + 1).
     String8* object_labels = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)count + 2);
@@ -356,7 +356,7 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     }
     for (uint32_t token = 0; valid && token < count; token += 1)
     {
-        const CheckInputAttributes* attributes = input->declarations[token] == token && !input->registers[token] ? check_input_attributes_at(input, token) : 0;
+        const CheckInputAttributes* attributes = input->declarations[token] == token && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
         for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + i;
@@ -371,8 +371,8 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     {
         const uint32_t opening = check_sparse_get(input->declaration_bodies, token);
         const uint32_t object = input->objects[token] <= count + 1 ? input->objects[token] : 0;
-        const bool block_static = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT && input->static_objects[token] &&
-                                  input->linkage[token] == 0 && !input->compound_objects[token] && opening < count && object != 0 &&
+        const bool block_static = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) &&
+                                  check_input_linkage(input->declaration_bits, token) == 0 && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) && opening < count && object != 0 &&
                                   object_labels[object].length == 0;
         const uint32_t function = block_static ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
         if (function < count)

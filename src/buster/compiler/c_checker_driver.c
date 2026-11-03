@@ -1492,7 +1492,7 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .types = program->types,
                 .output = output,
                 .scalar = parser->options.scalar,
-                .internal = program->input->linkage[candidate->declaration] == 1,
+                .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
             };
             Scratch work = scratch_begin(output);
             check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);

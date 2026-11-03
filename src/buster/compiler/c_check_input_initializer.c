@@ -263,7 +263,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             reader->declared_types[declaration] = result;
             reader->query_types[assignment] = result;
             reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
-            if (reader->linkage[declaration] != 0)
+            if (check_input_linkage(reader->declaration_bits, declaration) != 0)
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 reader->linked_types[name] = result;
@@ -356,7 +356,7 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
 {
     const Parser* parser = reader->parser;
     TypeTable* types = reader->types;
-    const uint32_t assignment = reader->output->compound_objects[declaration] ? declaration : begin - 1;
+    const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
     TypeId qualified = check_input_type_result(reader, type_qualify(types, *type, BUSTER_TYPE_CONST));
     bool valid = qualified != 0;
     if (valid)
@@ -364,7 +364,7 @@ static __attribute__((noinline)) bool check_input_constexpr_finish(CheckInputRea
         *type = qualified;
         reader->declared_types[declaration] = qualified;
         reader->query_types[assignment] = qualified;
-        if (reader->linkage[declaration] != 0)
+        if (check_input_linkage(reader->declaration_bits, declaration) != 0)
         {
             const uint32_t name = parser->tokens.names[declaration];
             reader->linked_types[name] = qualified;
@@ -487,7 +487,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     const Parser* parser = reader->parser;
     const uint32_t begin = check_sparse_get(reader->output->initializer_begins, declaration);
     const uint32_t end = check_sparse_get(reader->output->initializer_ends, declaration);
-    const uint32_t assignment = reader->output->compound_objects[declaration] ? declaration : begin - 1;
+    const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
     if (valid && (check_input_auto_type(type) || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
@@ -532,7 +532,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             reader->declared_types[declaration] = type;
             reader->query_types[assignment] = type;
             const uint32_t name = parser->tokens.names[declaration];
-            if (reader->linkage[declaration] != 0)
+            if (check_input_linkage(reader->declaration_bits, declaration) != 0)
             {
                 reader->linked_types[name] = type;
                 if (reader->deferred != 0)

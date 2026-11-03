@@ -179,14 +179,14 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                 for (uint32_t a = 0; symbol != 0 && attributes != 0 && a < attributes->count; a += 1)
                 {
                     const CheckInputAttribute* attribute = attributes->records + a;
-                    if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && !input.registers[token])
+                    if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && !check_input_bit(input.declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
                     {
                         const NameId renamed = code.link.symbols.name[symbol];
                         check_test_expect(test, code.link.names.length[renamed] == attribute->text.length &&
                                                memcmp(code.link.names.bytes[renamed], attribute->text.pointer, attribute->text.length) == 0,
                                           "decoded asm label survives canonical redeclarations into the actual object symbol");
                     }
-                    else if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && !input.registers[token])
+                    else if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && !check_input_bit(input.declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
                     {
                         bool explicit_name = false;
                         for (uint32_t other = 0; other < input.token_count; other += 1)
@@ -194,7 +194,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                             const CheckInputAttributes* retained = check_input_attributes_at(&input, other);
                             for (uint32_t j = 0; input.objects[other] == object && retained != 0 && j < retained->count; j += 1)
                             {
-                                explicit_name |= retained->records[j].kind == CHECK_ATTRIBUTE_ASM_LABEL && !retained->records[j].ignored && !input.registers[other];
+                                explicit_name |= retained->records[j].kind == CHECK_ATTRIBUTE_ASM_LABEL && !retained->records[j].ignored && !check_input_bit(input.declaration_bits, other, BUSTER_CHECK_BITS_REGISTER);
                             }
                         }
                         if (!explicit_name)

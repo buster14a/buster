@@ -102,7 +102,7 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
 {
     const CheckInput* input = program->input;
     const uint8_t definition = input->function_flags != 0 ? input->function_flags[body->declaration] : 0;
-    const bool external = input->linkage[body->declaration] == 2;
+    const bool external = check_input_linkage(input->declaration_bits, body->declaration) == 2;
     bool eager = external && (definition & CHECK_INPUT_FUNCTION_INLINE) == 0;
     if (!eager)
     {
@@ -442,7 +442,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             bool gnu_inline = false;
             // A block-scope static that no emitted code declares is no root, `used` as it may be: clang emits it only
             // where it emits its declaration's statement (#1108).
-            const bool dropped = !function && input->linkage[token] == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
+            const bool dropped = !function && check_input_linkage(input->declaration_bits, token) == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
                                  !check_program_token_emitted(full, token);
             const uint32_t attribute_roots = check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
             roots[group] |= dropped ? 0 : attribute_roots;
@@ -481,7 +481,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 const uint32_t declared = check_data_declared_index(data, object);
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
                 const uint32_t declaration = full->object_declarations[object];
-                if (declaration != BUSTER_CHECK_NONE && input->linkage[declaration] == 2)
+                if (declaration != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2)
                 {
                     bool inline_only = false;
                     if (function)
@@ -585,7 +585,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
             const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
-                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] && check_program_token_emitted(full, declaration) ?
+                                  check_input_linkage(input->declaration_bits, declaration) == 0 &&
+                                  !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && check_program_token_emitted(full, declaration) ?
                                   check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {

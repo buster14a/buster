@@ -1097,9 +1097,7 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
         HEADS,
         OBJECTS,
         KINDS,
-        STATICS,
-        LOCALS,
-        REGISTERS,
+        BITS,
         FLAGS,
         TYPE_KINDS,
         TOKENS,
@@ -1132,7 +1130,9 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
         table.types.kind = check_test_scan_column(mappings[TYPE_KINDS] + page, type_count, 1);
         CheckInput input = { 0 };
         input.declarations = check_test_scan_column(mappings[DECLARATIONS] + page, count, 4);
-        input.thread_local = check_test_scan_column(mappings[LOCALS] + page, count, 1);
+        // The declarations' bits, of which the identifiers read the static, thread-local and register ones.
+        input.declaration_bits = check_test_scan_column(mappings[BITS] + page, count, 1);
+        memset(input.declaration_bits, 0, count);
         input.overload_heads = (round & 3) == 0 ? NULL : check_test_scan_column(mappings[HEADS] + page, count, 4);
         input.kr_parameter_count = (round % 7) == 3;
         CheckInputReader reader = { 0 };
@@ -1142,8 +1142,7 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
         reader.declared_types = check_test_scan_column(mappings[TYPES] + page, count, 4);
         reader.objects = check_test_scan_column(mappings[OBJECTS] + page, count, 4);
         reader.declaration_kinds = check_test_scan_column(mappings[KINDS] + page, count, 1);
-        reader.static_objects = check_test_scan_column(mappings[STATICS] + page, count, 1);
-        reader.registers = check_test_scan_column(mappings[REGISTERS] + page, count, 1);
+        reader.declaration_bits = input.declaration_bits;
         reader.declaration_flags = check_test_scan_column(mappings[FLAGS] + page, count, 1);
         for (uint32_t t = 0; t < type_count; t += 1)
         {
@@ -1156,9 +1155,9 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
             input.declarations[i] = check_test_random(test) % count;
             reader.objects[i] = check_test_random(test);
             reader.declaration_kinds[i] = binding_kinds[check_test_random(test) % BUSTER_ARRAY_LENGTH(binding_kinds)];
-            reader.static_objects[i] = (uint8_t)(check_test_random(test) % 2);
-            input.thread_local[i] = (uint8_t)(check_test_random(test) % 2);
-            reader.registers[i] = (uint8_t)(check_test_random(test) % 2);
+            check_input_set_bit(reader.declaration_bits, i, BUSTER_CHECK_BITS_STATIC, (uint8_t)(check_test_random(test) % 2));
+            check_input_set_bit(input.declaration_bits, i, BUSTER_CHECK_BITS_THREAD_LOCAL, (uint8_t)(check_test_random(test) % 2));
+            check_input_set_bit(reader.declaration_bits, i, BUSTER_CHECK_BITS_REGISTER, (uint8_t)(check_test_random(test) % 2));
             reader.declaration_flags[i] = (uint8_t)check_test_random(test);
             if (input.overload_heads != NULL)
             {

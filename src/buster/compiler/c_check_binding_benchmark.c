@@ -298,7 +298,7 @@ static bool check_binding_benchmark_equal(const CheckInput* left, const CheckInp
     {
         equal = left->declarations[token] == right->declarations[token] && left->declared_types[token] == right->declared_types[token] &&
                 left->declaration_kinds[token] == right->declaration_kinds[token] && left->objects[token] == right->objects[token] &&
-                left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
+                check_input_linkage(left->declaration_bits, token) == check_input_linkage(right->declaration_bits, token) && check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) &&
                 left->token_nodes[token] == right->token_nodes[token] && check_sparse_get(left->evaluation_nodes, token) == check_sparse_get(right->evaluation_nodes, token);
     }
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)

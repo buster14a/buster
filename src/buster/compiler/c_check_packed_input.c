@@ -354,7 +354,7 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
     }
     valid &= depth != 0 && first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = valid ? reader->output->declarations[first] : BUSTER_CHECK_NONE;
-    valid &= declaration < parser->tokens.count && !reader->output->compound_objects[declaration];
+    valid &= declaration < parser->tokens.count && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
     TypeId type = valid ? reader->declared_types[first] : 0;
     uint32_t packed_member = 0;
     uint32_t packed_record = 0;

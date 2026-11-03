@@ -226,12 +226,10 @@ static bool check_test_fresh_columns_equal(const CheckInput* input, const CheckI
                  memcmp(input->declaration_kinds, other->declaration_kinds, slots) == 0 &&
                  memcmp(input->constant_warnings, other->constant_warnings, slots) == 0 &&
                  memcmp(input->constant_warning_ignored, other->constant_warning_ignored, slots) == 0 &&
-                 memcmp(input->defined, other->defined, slots) == 0 && memcmp(input->tentative, other->tentative, slots) == 0 &&
-                 memcmp(input->static_objects, other->static_objects, slots) == 0 && memcmp(input->registers, other->registers, slots) == 0 &&
-                 memcmp(input->thread_local, other->thread_local, slots) == 0 && memcmp(input->compound_objects, other->compound_objects, slots) == 0 &&
+                 memcmp(input->declaration_bits, other->declaration_bits, slots) == 0 &&
                  memcmp(input->function_flags, other->function_flags, slots) == 0 && memcmp(input->explicit_abis, other->explicit_abis, slots) == 0 &&
                  memcmp(input->expression_regions, other->expression_regions, slots * sizeof(uint32_t)) == 0 &&
-                 memcmp(input->linkage, other->linkage, slots) == 0 && memcmp(input->objects, other->objects, slots * sizeof(uint32_t)) == 0 &&
+                 memcmp(input->objects, other->objects, slots * sizeof(uint32_t)) == 0 &&
                  (input->asm_ids == NULL) == (other->asm_ids == NULL) &&
                  (input->asm_ids == NULL || memcmp(input->asm_ids, other->asm_ids, slots * sizeof(uint32_t)) == 0) &&
                  input->graph.capacity == other->graph.capacity &&

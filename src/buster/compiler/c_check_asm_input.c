@@ -841,7 +841,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     for (uint32_t a = 0; !present && a < attributed_count; a += 1)
     {
         const uint32_t token = attributed[a];
-        const CheckInputAttributes* attributes = !input->registers[token] ? check_input_attributes_at(input, token) : NULL;
+        const CheckInputAttributes* attributes = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
         for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
         {
             present |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && attributes->records[i].end <= limit;
@@ -861,7 +861,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
         for (uint32_t a = 0; a < attributed_count; a += 1)
         {
             const uint32_t token = attributed[a];
-            const CheckInputAttributes* attributes = !input->registers[token] ? check_input_attributes_at(input, token) : NULL;
+            const CheckInputAttributes* attributes = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
             const uint32_t object = input->objects[token];
             for (uint32_t i = 0; object != 0 && object < slots && attributes != NULL && i < attributes->count; i += 1)
             {
@@ -891,7 +891,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
                     const uint32_t object = input->objects[declaration];
                     if (declaration == token)
                     {
-                        CheckInputAttributes* attributes = !input->registers[token] ? check_input_attributes_at(input, token) : NULL;
+                        CheckInputAttributes* attributes = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
                         for (uint32_t i = 0; attributes != NULL && i < attributes->count && !input->resource; i += 1)
                         {
                             CheckInputAttribute* attribute = attributes->records + i;
@@ -922,7 +922,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 }
                             }
                         }
-                        states[object] |= input->defined[token] ? 4 : 0;
+                        states[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? 4 : 0;
                     }
                     else if (reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && check_input_asm_label_use(reader, token))
                     {
@@ -936,7 +936,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     for (uint32_t a = 0; a < attributed_count && !input->resource; a += 1)
     {
         const uint32_t token = attributed[a];
-        const CheckInputAttributes* attributes = input->registers[token] ? check_input_attributes_at(input, token) : NULL;
+        const CheckInputAttributes* attributes = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : NULL;
         for (uint32_t i = 0; attributes != NULL && token < reader->expression_limit && i < attributes->count; i += 1)
         {
             const CheckInputAttribute* attribute = attributes->records + i;

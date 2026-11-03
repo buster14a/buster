@@ -89,7 +89,7 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
             // builtin, without the first-use warning. A later use after that block closes still gets the catalogue
             // prototype, not the closed block's type; only the warning decision borrows this earlier linked identity.
             const bool declared_library = library && linked != 0 && linked - 1 < token &&
-                reader->declaration_kinds[linked - 1] == C_BINDING_FUNCTION && reader->linkage[linked - 1] == 2 &&
+                reader->declaration_kinds[linked - 1] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, linked - 1) == 2 &&
                 (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT) == 0;
             const bool diagnosed = declared_library ||
                 (library && linked != 0 && (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0);
@@ -136,8 +136,8 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT | (library ? CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY : 0);
                 check_input_set_attributes_at(input, token, attributes);
                 reader->objects[token] = token + 1;
-                reader->static_objects[token] = true;
-                reader->linkage[token] = 2;
+                check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_STATIC, true);
+                check_input_set_linkage(reader->declaration_bits, token, 2);
                 check_sparse_set(input->sparse_pool, input->declaration_bodies, token, reader->function_body);
                 check_input_bind(reader, token, token);
                 if (library && reader->library_declarations != NULL)

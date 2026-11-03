@@ -426,10 +426,8 @@ struct CheckInput
     bool fatal_errors;
     uint8_t* explicit_abis;
     uint32_t* objects;
-    uint8_t* static_objects;
-    uint8_t* registers;
-    uint8_t* thread_local;
-    uint8_t* compound_objects;
+    // A declaring token's flags and linkage, a byte a token (BUSTER_CHECK_BITS_*, #1167).
+    uint8_t* declaration_bits;
     // The attributes of the few tokens that have any: a wide column of the sparse pool's (CheckSparseWide, #1167), which
     // keeps each pointer complemented, so that a null pointer is its NONE (check_input_attributes_at,
     // check_input_set_attributes_at).
@@ -437,9 +435,6 @@ struct CheckInput
     // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
     uint32_t ignored_asm_count;
     bool asm_warnings_prepared;
-    uint8_t* linkage;
-    uint8_t* defined;
-    uint8_t* tentative;
     // The pool of the sparse columns below (c_check_sparse.c, #628): initializer_nodes, initializer_begins,
     // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next,
     // control_owners, label_targets, case_ranges and string_ids, which few tokens have an entry in, and of the wide
@@ -545,6 +540,42 @@ struct CheckInput
     bool rare_columns_shared;
     bool resource;
 };
+
+// A declaring token's bits in CheckInput.declaration_bits (#1167), which were a byte column each: whether it defines its
+// entity, whether it is a tentative definition, whether its entity has static storage (an object's, or a function), a
+// register variable, a thread-local one, a compound literal's object; and its linkage, 0 none, 1 internal, 2 external,
+// in the top two bits.
+#define BUSTER_CHECK_BITS_DEFINED 0x01u
+#define BUSTER_CHECK_BITS_TENTATIVE 0x02u
+#define BUSTER_CHECK_BITS_STATIC 0x04u
+#define BUSTER_CHECK_BITS_REGISTER 0x08u
+#define BUSTER_CHECK_BITS_THREAD_LOCAL 0x10u
+#define BUSTER_CHECK_BITS_COMPOUND 0x20u
+#define BUSTER_CHECK_BITS_LINKAGE_SHIFT 6u
+
+// Whether `bit` of `bits` (CheckInput.declaration_bits) is set at `token`.
+static __attribute__((unused)) bool check_input_bit(const uint8_t* bits, uint32_t token, uint32_t bit)
+{
+    return (bits[token] & bit) != 0;
+}
+
+// Sets `bit` of `bits` at `token` to `value`.
+static __attribute__((unused)) void check_input_set_bit(uint8_t* bits, uint32_t token, uint32_t bit, bool value)
+{
+    bits[token] = (uint8_t)((bits[token] & ~bit) | (value ? bit : 0));
+}
+
+// The linkage in `bits` at `token`: 0 none, 1 internal, 2 external.
+static __attribute__((unused)) uint32_t check_input_linkage(const uint8_t* bits, uint32_t token)
+{
+    return (uint32_t)bits[token] >> BUSTER_CHECK_BITS_LINKAGE_SHIFT;
+}
+
+// Sets the linkage in `bits` at `token`.
+static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint32_t token, uint32_t linkage)
+{
+    bits[token] = (uint8_t)((bits[token] & ((1u << BUSTER_CHECK_BITS_LINKAGE_SHIFT) - 1)) | linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
+}
 
 // The attributes at `token` (CheckInput.attributes), null for none; `token` is at most the unit's count.
 static __attribute__((unused)) CheckInputAttributes* check_input_attributes_at(const CheckInput* input, uint32_t token)
@@ -1016,12 +1047,10 @@ struct CheckInputReader
     uint32_t function_name_body;
     TypeId* return_types;
     uint8_t* declaration_kinds;
-    uint8_t* defined;
+    // CheckInput.declaration_bits.
+    uint8_t* declaration_bits;
     // Defining token plus one, inherited through prototypes; zero means no definition history.
     uint32_t* definition_origins;
-    uint8_t* static_objects;
-    uint8_t* registers;
-    uint8_t* linkage;
     uint32_t* objects;
     uint8_t* ignored;
     // Assignment modes 1 (scalar) and 2 (list); 3 marks a complete compact #embed list item.
@@ -1570,7 +1599,7 @@ static bool check_input_warning_bound_unevaluated(CheckInputReader* reader, uint
 static void check_input_internal_bound_use(CheckInputReader* reader, uint32_t token, uint32_t declaration)
 {
     if (reader->warning_bound_open != BUSTER_CHECK_NONE && declaration < reader->parser->tokens.count &&
-        reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && reader->linkage[declaration] == 1 && reader->objects[declaration] != 0)
+        reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, declaration) == 1 && reader->objects[declaration] != 0)
     {
         const uint32_t bound = check_input_warning_bound(reader, token);
         const CheckWarningEvent event = {
@@ -1878,6 +1907,21 @@ static uint64_t check_input_scan_equal(const uint8_t* column, uint32_t first, ui
 {
     const __mmask64 lanes = check_input_scan_all(first, count);
     return _mm512_mask_cmpeq_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, column + first), _mm512_set1_epi8((char)value));
+}
+
+// Of the next 64, the tokens whose byte in `bits` has `bit` (CheckInput.declaration_bits).
+static uint64_t check_input_scan_bit(const uint8_t* bits, uint32_t first, uint32_t count, uint8_t bit)
+{
+    const __mmask64 lanes = check_input_scan_all(first, count);
+    return _mm512_mask_test_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, bits + first), _mm512_set1_epi8((char)bit));
+}
+
+// Of the next 64, the tokens whose linkage in `bits` is `linkage` (check_input_linkage).
+static uint64_t check_input_scan_linkage(const uint8_t* bits, uint32_t first, uint32_t count, uint32_t linkage)
+{
+    const __mmask64 lanes = check_input_scan_all(first, count);
+    const __m512i values = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, bits + first), _mm512_set1_epi8((char)(3u << BUSTER_CHECK_BITS_LINKAGE_SHIFT)));
+    return _mm512_mask_cmpeq_epi8_mask(lanes, values, _mm512_set1_epi8((char)(linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT)));
 }
 
 // The tokens whose byte in `column` isn't 0.
@@ -3602,7 +3646,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 check_input_rare_claim(reader, &reader->parameter_shapes[token]);
                 reader->parameter_shapes[token] = 0;
                 reader->declaration_kinds[token] = C_BINDING_OBJECT;
-                reader->registers[token] = false;
+                check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, false);
                 reader->objects[token] = token + 1;
                 reader->output->declarations[token] = token;
                 reader->output->explicit_abis[token] = 0;
@@ -3906,7 +3950,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 reader->parameter_shapes[token] = (type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0) |
                                                                   (frame->star_array ? 2 : 0);
                                 reader->declaration_kinds[token] = C_BINDING_OBJECT;
-                                reader->registers[token] = frame->storage == C_NAME_REGISTER;
+                                check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, frame->storage == C_NAME_REGISTER);
                                 reader->objects[token] = token + 1;
                                 reader->output->declarations[token] = token;
                                 reader->output->explicit_abis[token] = abi_origin;
@@ -4590,7 +4634,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 reader->declared_types[listed] = valid ? type_qualify(reader->types, adjusted, type_kind_is_array(kind) ? 0 : type_qualifiers(type)) : 0;
                 check_input_rare_claim(reader, &reader->parameter_shapes[listed]);
                 reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
-                reader->registers[listed] = storage == C_NAME_REGISTER;
+                check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 check_input_set_attributes_at(reader->output, listed, attributes);
                 // A typed parameter is visible to the remainder of this header, including enumerator conflicts
                 // and type queries. Its canonical declaration remains the earlier identifier-list token.
@@ -4850,7 +4894,7 @@ static void check_input_static_local_warning(CheckInputReader* reader, uint32_t 
         element = reader->types->types.base[type_index(element)];
         constant = (type_qualifiers(element) & BUSTER_TYPE_CONST) != 0;
     }
-    if (!constant && function < input->token_count && input->function_flags != NULL && input->linkage[function] == 2 &&
+    if (!constant && function < input->token_count && input->function_flags != NULL && check_input_linkage(input->declaration_bits, function) == 2 &&
         (input->function_flags[function] & CHECK_INPUT_FUNCTION_INLINE) != 0)
     {
         bool gnu = reader->pp->options.language.standard < 1999;
@@ -5339,19 +5383,20 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 const bool gnu_inline_definition = function && !is_typedef && kind == PARSE_KIND_L_BRACE && is_inline && storage == C_NAME_EXTERN && !prior_definition &&
                                                    (predefines_gnu_inline(&reader->pp->options.predefines, reader->pp->options.language) ||
                                                     check_input_attribute_gnu_inline(attributes) || check_input_attribute_gnu_inline(previous_attributes));
-                reader->defined[name] = (kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition;
-                reader->defined[name] |= !is_typedef && !function && !file && is_static;
+                const bool defines = ((kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition) ||
+                                     (!is_typedef && !function && !file && is_static);
+                check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED, defines);
                 // A function's or variable's alias, ifunc or weakref target defines it (#147).
                 const bool alias_definition = !is_typedef && check_input_attribute_alias_definition(attributes);
                 // A block-scope alias changes the linked entity's definition history outside this body. A deferred
                 // lane cannot publish that change in source order, so let the serial reader handle the unit.
                 check_input_lane_refuse(reader, reader->lane && alias_definition, "a body's alias changes its linked entity's definition history");
-                reader->definition_origins[name] = reader->defined[name] || alias_definition ? name + 1 : 0;
+                reader->definition_origins[name] = check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED) || alias_definition ? name + 1 : 0;
                 // A static variable's alias or weakref is its definition, not a tentative one: it has no storage of its own.
-                reader->output->tentative[name] = !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL && !alias_definition;
-                reader->static_objects[name] = !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0);
-                reader->registers[name] = storage == C_NAME_REGISTER;
-                reader->output->thread_local[name] = thread_local;
+                check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_TENTATIVE, !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL && !alias_definition);
+                check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_STATIC, !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0));
+                check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
+                check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_THREAD_LOCAL, thread_local);
                 check_input_set_attributes_at(reader->output, name, attributes);
                 if (reader->output->function_flags != NULL)
                 {
@@ -5366,14 +5411,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     }
                 }
                 // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793).
-                reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2;
-                if ((storage == C_NAME_EXTERN || (function && storage == 0)) && reader->linkage[name] != 0)
+                check_input_set_linkage(reader->declaration_bits, name, is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2);
+                if ((storage == C_NAME_EXTERN || (function && storage == 0)) && check_input_linkage(reader->declaration_bits, name) != 0)
                 {
                     const uint32_t previous = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
                     if (previous != 0)
                     {
                         const uint32_t declaration = reader->bindings.declaration[previous - 1];
-                        reader->linkage[name] = reader->linkage[declaration] != 0 ? reader->linkage[declaration] : reader->linkage[name];
+                        check_input_set_linkage(reader->declaration_bits, name, check_input_linkage(reader->declaration_bits, declaration) != 0 ? check_input_linkage(reader->declaration_bits, declaration) : check_input_linkage(reader->declaration_bits, name));
                     }
                 }
                 // GNU's weak attribute needs external linkage (#147). A redeclaration of an already defined linked
@@ -5385,7 +5430,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 {
                     CheckInputAttribute* attribute = attributes->records + a;
                     attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
-                    if (valid && attribute->kind == CHECK_ATTRIBUTE_WEAKREF && !attribute->ignored && reader->linkage[name] != 1)
+                    if (valid && attribute->kind == CHECK_ATTRIBUTE_WEAKREF && !attribute->ignored && check_input_linkage(reader->declaration_bits, name) != 1)
                     {
                         const uint32_t reports = reader->output->report_count;
                         check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAKREF_LINKAGE);
@@ -5396,12 +5441,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         }
                         valid = false;
                     }
-                    if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
+                    if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && check_input_linkage(reader->declaration_bits, name) != 2)
                     {
                         const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
                         const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
-                        const bool late = previous != BUSTER_CHECK_NONE && !reader->defined[name] && reader->linkage[name] != 0 &&
-                            reader->linkage[previous] == reader->linkage[name] && reader->definition_origins[previous] &&
+                        const bool late = previous != BUSTER_CHECK_NONE && !check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED) && check_input_linkage(reader->declaration_bits, name) != 0 &&
+                            check_input_linkage(reader->declaration_bits, previous) == check_input_linkage(reader->declaration_bits, name) && reader->definition_origins[previous] &&
                             reader->declaration_kinds[previous] == (function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
                         if (!late)
                         {
@@ -5463,7 +5508,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 if (valid && !is_typedef && i >= reader->section_record_from)
                 {
                     check_input_section_declaration(reader, name, i, attributes, function, function && kind == PARSE_KIND_L_BRACE,
-                                                    !function && reader->static_objects[name], type);
+                                                    !function && check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_STATIC), type);
                 }
                 more = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
                 if (more)
@@ -5566,10 +5611,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t old = check_input_library_binding(reader, name, point);
     const CBindingKind kind = (CBindingKind)reader->declaration_kinds[token];
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
-    const bool linked_visible = old != 0 && reader->linkage[old_declaration] != 0 && reader->linkage[token] != 0;
+    const bool linked_visible = old != 0 && check_input_linkage(reader->declaration_bits, old_declaration) != 0 && check_input_linkage(reader->declaration_bits, token) != 0;
     const bool overload = check_input_overload_active(reader, token);
-    const uint32_t linked_library = kind == C_BINDING_FUNCTION && reader->linkage[token] == 2 && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
-    const bool library_redeclaration = kind == C_BINDING_FUNCTION && reader->linkage[token] == 2 && linked_library != 0 && reader->output->function_flags != NULL &&
+    const uint32_t linked_library = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
+    const bool library_redeclaration = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && linked_library != 0 && reader->output->function_flags != NULL &&
         (reader->output->function_flags[linked_library - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 &&
         (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) == 0;
     check_input_inherit_abi(reader, token, old, overload);
@@ -5593,16 +5638,16 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                                       type_compatible(reader->types, reader->declared_types[previous], reader->declared_types[token]);
         reader->output->resource |= compatible == TYPE_ANSWER_FULL;
         const bool repeatable = kind == C_BINDING_TYPEDEF || kind == C_BINDING_FUNCTION || reader->scope_count == 0 ||
-                                (reader->linkage[token] != 0 && reader->linkage[previous] != 0);
+                                (check_input_linkage(reader->declaration_bits, token) != 0 && check_input_linkage(reader->declaration_bits, previous) != 0);
         bool parameter_conflict = false;
-        if (kind == C_BINDING_FUNCTION && reader->bindings.kind[old - 1] == kind && reader->defined[token])
+        if (kind == C_BINDING_FUNCTION && reader->bindings.kind[old - 1] == kind && check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED))
         {
             uint32_t previous_count = 0;
             type_parameters(reader->types, reader->declared_types[previous], &previous_count);
             parameter_conflict = previous_count != 0 && (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
         }
-        if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || reader->linkage[token] != reader->linkage[previous] ||
-            reader->output->thread_local[token] != reader->output->thread_local[previous] || parameter_conflict)
+        if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) ||
+            check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
         {
             check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
         }
@@ -5626,7 +5671,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    if (!overload && reader->linkage[token] != 0 && reader->output->report_count == 0)
+    if (!overload && check_input_linkage(reader->declaration_bits, token) != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
         // object identity for the translation unit, while only a visible declaration contributes to the source
@@ -5643,13 +5688,13 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             {
                 uint32_t previous_count = 0;
                 type_parameters(reader->types, reader->linked_types[name], &previous_count);
-                parameter_conflict = reader->defined[token] && previous_count != 0 &&
+                parameter_conflict = check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) && previous_count != 0 &&
                                      (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
             }
-            if (reader->declaration_kinds[previous] != kind || reader->linkage[previous] != reader->linkage[token] ||
+            if (reader->declaration_kinds[previous] != kind || check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token) ||
                 (compatible != TYPE_ANSWER_YES && !library_redeclaration) ||
                 (reader->definition_origins[token] && reader->definition_origins[previous]) ||
-                reader->output->thread_local[token] != reader->output->thread_local[previous] || parameter_conflict)
+                check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
             {
                 check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
             }
@@ -5688,7 +5733,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 }
             }
         }
-        if (linked == 0 || !reader->defined[linked - 1])
+        if (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED))
         {
             reader->linked_declarations[name] = token + 1;
         }
@@ -5784,7 +5829,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     const bool masked = ((reader->library_names_mask >> (spelled & 63)) & 1) != 0 && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = masked ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
     const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
-    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && reader->linkage[declaration] == 2 &&
+    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
                            reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
     return candidate ? check_input_library_match(reader, declaration, name) : 0;
 }
@@ -6420,9 +6465,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         reader->declared_types[i] = type;
                         reader->declaration_kinds[i] = C_BINDING_OBJECT;
                         reader->objects[i] = i + 1;
-                        reader->static_objects[i] = reader->function_result == 0;
-                        reader->defined[i] = true;
-                        reader->output->compound_objects[i] = true;
+                        check_input_set_bit(reader->declaration_bits, i, BUSTER_CHECK_BITS_STATIC, reader->function_result == 0);
+                        check_input_set_bit(reader->declaration_bits, i, BUSTER_CHECK_BITS_DEFINED, true);
+                        check_input_set_bit(reader->output->declaration_bits, i, BUSTER_CHECK_BITS_COMPOUND, true);
                         check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, i, reader->function_body);
                         check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, i, body);
                         check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, i, body_end + 1);
@@ -7174,7 +7219,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     {
                         .type = type,
                         .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
-                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (reader->static_objects[declaration] && !reader->output->thread_local[declaration] ? BUSTER_CHECK_STATIC_OBJECT : 0) | (reader->registers[declaration] ? BUSTER_CHECK_REGISTER : 0),
+                        .flags = (enumeration ? BUSTER_CHECK_ICE : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && !check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_CHECK_STATIC_OBJECT : 0) | (check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0),
                         .constant_kind = enumeration ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS,
                         .integer = enumeration ? reader->enum_values[declaration] : 0,
                         .object = reader->objects[declaration],
@@ -7422,7 +7467,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
     {
         const uint32_t declaration = reader->initializer_declarations[token];
-        supported = declaration != BUSTER_CHECK_NONE && reader->output->compound_objects[declaration];
+        supported = declaration != BUSTER_CHECK_NONE && check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         if (supported)
         {
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
@@ -7432,14 +7477,14 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 {
                     .type = reader->declared_types[declaration],
                     .category = CHECK_LVALUE,
-                    .flags = reader->static_objects[declaration] ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .flags = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = reader->objects[declaration],
                 };
             }
             // A file-scope compound literal's elements are constant expressions, like a static
             // initializer's: their constant evaluation supplies no context report of its own.
-            for (uint32_t value = reader->static_objects[declaration] ? first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE;
+            for (uint32_t value = check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) ? first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE;
                  value = reader->value_next[value])
             {
                 graph->contexts[value] |= BUSTER_CHECK_CONTEXT_VALUE;
@@ -7831,7 +7876,7 @@ static void check_input_expressions(CheckInputReader* reader)
 // using the retained source-position history, so a pointer to an opaque type is itself a valid complete object.
 static void check_input_complete_use(CheckInputReader* reader, uint32_t token)
 {
-    if (reader->output->tentative[token] && !type_is_complete(reader->types, reader->declared_types[token]) &&
+    if (check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) && !type_is_complete(reader->types, reader->declared_types[token]) &&
         type_kind(reader->types, reader->declared_types[token]) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
         token < check_input_expression_limit(reader, token))
     {
@@ -7852,7 +7897,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_nonzero(reader->output->tentative, first, count);
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_bit(reader->output->declaration_bits, first, count, BUSTER_CHECK_BITS_TENTATIVE);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_complete_use(reader, first + (uint32_t)__builtin_ctzll(selected));
@@ -7957,7 +8002,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
     const uint32_t count = parser->tokens.count;
     const uint32_t begin = check_sparse_get(input->initializer_begins, token);
     const uint32_t end = check_sparse_get(input->initializer_ends, token);
-    if (input->static_objects[token] && begin < end && end <= count)
+    if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && begin < end && end <= count)
     {
         memset(reader->constant_contexts + begin, 1, end - begin);
     }
@@ -7996,7 +8041,7 @@ static void check_input_constant_contexts(CheckInputReader* reader)
     for (uint32_t first = 0; first < count; first += 64)
     {
         uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) :
-                            check_input_scan_nonzero(reader->output->static_objects, first, count) |
+                            check_input_scan_bit(reader->output->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC) |
                             check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_STATIC_ASSERT) |
                             check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_CASE);
         for (; selected != 0; selected &= selected - 1)
@@ -8428,15 +8473,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->objects = input->declaration_kinds != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
     valid &= input->objects != 0;
 #define BUSTER_CHECK_OUTPUT_ARRAY(field, type) input->field = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(type), 8) : 0; valid &= input->field != 0
-    BUSTER_CHECK_OUTPUT_ARRAY(static_objects, uint8_t);
+    BUSTER_CHECK_OUTPUT_ARRAY(declaration_bits, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(function_flags, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(explicit_abis, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(registers, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(thread_local, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(compound_objects, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(linkage, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(defined, uint8_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(tentative, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(token_nodes, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(constant_warnings, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(constant_warning_ignored, uint8_t);
@@ -8480,10 +8519,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.declared_types = input->declared_types;
     reader.declaration_kinds = input->declaration_kinds;
     reader.objects = input->objects;
-    reader.static_objects = input->static_objects;
-    reader.registers = input->registers;
-    reader.linkage = input->linkage;
-    reader.defined = input->defined;
+    reader.declaration_bits = input->declaration_bits;
     reader.parameters = input->parameters;
     reader.parameter_next = input->parameter_next;
     // The graph's byte columns before the others, which start huge pages of their own (check_graph_column): here they
@@ -8697,12 +8733,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
-        memset(reader.defined, 0, (uint64_t)count + 1);
-        memset(input->tentative, 0, (uint64_t)count + 1);
-        memset(reader.static_objects, 0, (uint64_t)count + 1);
-        memset(reader.registers, 0, (uint64_t)count + 1);
-        memset(input->thread_local, 0, (uint64_t)count + 1);
-        memset(input->compound_objects, 0, (uint64_t)count + 1);
+        memset(reader.declaration_bits, 0, (uint64_t)count + 1);
         memset(input->function_flags, 0, (uint64_t)count + 1);
         memset(input->explicit_abis, 0, (uint64_t)count + 1);
         memset(input->expression_regions, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -8710,7 +8741,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         }
-        memset(reader.linkage, 0, (uint64_t)count + 1);
         memset(reader.objects, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
     }
     if (valid)
