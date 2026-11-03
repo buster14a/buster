@@ -8,25 +8,31 @@ requirements. [Command index](README.md).
 
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
-  reads the LLVM IR of the translation units `build.sh` compiles, builds their
+  reads the LLVM IR of the translation units the build compiles, builds their
   call graph and reports every cycle (Tarjan's algorithm, iterative) that isn't
-  in its allowlist, `call_graph_allowed`. `./build.sh check-call-graph` writes
-  that IR to a temporary directory and runs it. `call_graph_test.c` holds its
+  in its allowlist, `call_graph_allowed`. `./build.sh check-call-graph` captures
+  that IR in the build's tree and runs it. `call_graph_test.c` holds its
   tests (`main.c` includes both; `./build/compiler test-call-graph` runs them),
   and `call_graph_capture/` the C fixture that checks the IR capture itself.
 ## Call graph check
 
 The coding style forbids recursion over input-dependent structures, and
 `./build.sh check-call-graph` checks it on every function of the compiler. It
-writes the LLVM IR of `build.sh`'s translation units, with the same flags and
-optimization level, `-O3`, but `-Xclang -disable-llvm-passes` (no pass, not
+captures the LLVM IR of the build's translation units, with the Release
+configuration's flags and optimization level, `-O3` (or the sanitizers'),
+whatever the configuration, but `-Xclang -disable-llvm-passes` (no pass, not
 even the always-inliner, so a call in the IR is a call in the source, while
-the IR holds every body the build may inline: at `-O0`, clang doesn't emit an
-`extern inline` body at all) into a temporary directory, and runs
-`./build/compiler check-call-graph FILE.ll...` on them (so it needs a build).
+the IR holds every body the build may inline: at `-O0`, Debug's level, clang
+doesn't emit an `extern inline` body at all) and without debug information,
+`BUSTER_BUILD_DEFINES` or sanitizer instrumentation, into the tree's
+`call-graph/` (the `call-graph-ir` target, which recaptures only the units
+whose inputs changed), and runs `check-call-graph FILE.ll...` on them with
+`BUSTER_COMPILER`, which the parallel runner sets, or else the configuration's
+built executable (so it needs a build; `cmake/BusterCallGraph.cmake`).
 First it captures `src/buster/compiler/call_graph_capture` the same way, a
 cycle through an `extern inline` body beside a strong definition in another
-unit, and fails unless the check reports it.
+unit, and fails unless the check reports it. CMake's `check-call-graph` target
+does the same with the configuration's executable.
 The command reads each `define` and the direct `call`, `invoke` and `callbr`
 instructions in its body; a callee is its translation unit's function or alias
 of that name first (static functions are per unit: the benchmarks' copies of

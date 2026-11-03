@@ -39,7 +39,7 @@ The noise sets which comparison to use.
   `benchmark-lexer` then checks each against the tree's `c_tokenize` on every file and times them all in 21 passes,
   in an order that rotates by pass. Each variant's line ends with its change from `c_tokenize`, of the median cycles and
   as the median of the passes' ratios (positive is faster). A variant that tokenizes any file differently fails the
-  command. Keep the copies outside `build/`, which `build.sh` deletes:
+  command. Keep the copies outside `build/`, which is disposable:
 
   ```sh
   cp src/buster/compiler/c_lexer.c ../variants/k1.c   # then edit k1.c
@@ -92,8 +92,8 @@ The noise sets which comparison to use.
   to, and wild 0.10, the 9700X's, even one that `-u` names) and the unit's alignment (wild places `.text` sections by
   alignment, the largest first), so that it moves exactly the unit and what wild puts after it, code and data, but not
   `.rodata`. A shift must be a multiple of that alignment, which it prints (16 for the checker's unit), and it fails
-  if the linker drops the padding. Build another tree with this tree's `build.sh` if its own has no `shifts` (the
-  source lists must be the same), each build under the lock as any other. Spread the shifts over a page: two trees' code starts an arbitrary distance apart,
+  if the linker drops the padding. Build each tree with its own `build.sh` (an older tree's has `shifts` too), each
+  build under the lock as any other. Spread the shifts over a page: two trees' code starts an arbitrary distance apart,
   and a few shifts near 0 sample a few offsets of each. Then `time-runs` takes each placement of a build as
   `--build NAME PATH`, the first build the reference, and `--copies N` runs each executable from N copies made fresh
   in a directory of their own (`--directory`, by default `$TMPDIR` or `/tmp`, tmpfs on the 9700X, so that nothing is
@@ -104,7 +104,7 @@ The noise sets which comparison to use.
 
   ```sh
   shifts="0 688 1376 2064 2752 3440"
-  (cd ../main && ../mine/build.sh shifts ../shifts/main main_unit_checker.c $shifts)
+  (cd ../main && ./build.sh shifts ../shifts/main main_unit_checker.c $shifts)
   ./build.sh shifts ../shifts/mine main_unit_checker.c $shifts
   builds=()
   for b in main:main mine:mine main-again:main; do
