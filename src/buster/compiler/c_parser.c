@@ -2654,7 +2654,10 @@ static uint8_t parse_keyword_argument(IdentId keyword, uint8_t kind, uint32_t ar
                 *least = 0;
                 break;
             case C_NAME_BUILTIN_VECTORELEMENTS:
-                result = BUSTER_PARSE_ARGUMENT_EITHER;
+                // clang reads its parentheses as sizeof's: a type, or an expression, a comma expression too
+                // (`__builtin_vectorelements(a, b)`, #1126's review), whose operands after the first are expressions.
+                *most = UINT32_MAX;
+                result = argument == 0 ? BUSTER_PARSE_ARGUMENT_EITHER : BUSTER_PARSE_ARGUMENT_EXPRESSION;
                 break;
             case C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN:
             case C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR:

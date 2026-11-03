@@ -135,6 +135,9 @@ typedef enum IrOp
     // fence). It reads and writes no value, but no pass moves a load, a store or a call across it, eliminates one past it
     // or drops it: an effect as an unknown call's on memory, without a call's registers. The typed stream's FENCE.
     IR_FENCE,
+    // The high 64 bits of an I64's unsigned product, a times b as 128 bits (#141): the high half of a 128-bit integer's
+    // product, which Tier 1's split of the 128-bit integers into halves makes (ir_wide.c), and x86's mul gives in rdx.
+    IR_MULHU,
     IR_OP_COUNT,
 } IrOp;
 
@@ -476,6 +479,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "vselect",
     "lifetime",
     "fence",
+    "mulhu",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -690,7 +694,8 @@ typedef enum IrRule
     X(IR_VCMP,          3, 7, BUSTER_IR_MASKS, IR_RULE_VECTOR_COMPARE, 0) \
     X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0) \
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
-    X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0)
+    X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
+    X(IR_MULHU,         3, 3, 1u << IR_I64, IR_RULE_SAME, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -736,6 +741,19 @@ static IrSimdShape ir_simd_shape(uint32_t type)
     return result;
 }
 
+// How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
+// took the vector path: test-tier1-masks and test-ir-simd read it to check that a scalar run takes each scan's scalar
+// twin, as --scalar promises (#141's review). main.c's units share it, as lane.c's arena_small_floor, so that a command
+// whose scans run in a home's copy of the code (ir_source's, the checker's) counts them in the same variable
+// (./build.sh check-call-graph's split state).
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern _Thread_local uint64_t ir_scan_vector_paths;
+#elif defined(BUSTER_UNIT)
+_Thread_local uint64_t ir_scan_vector_paths;
+#else
+static _Thread_local uint64_t ir_scan_vector_paths;
+#endif
+
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
 // scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
 // instructions' types and operations, the scan's bulk, go 64 at a time on the vector path and one at a time on its scalar
@@ -747,6 +765,7 @@ static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
     bool found = function->vector_constant_count != 0 || function->result_type >= IR_V4I32;
     if (BUSTER_VECTOR_PATH(vector))
     {
+        ir_scan_vector_paths += 1;
         for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
         {
             const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
@@ -795,6 +814,7 @@ static bool ir_function_has_vectors_path(const IrFunction* function, bool vector
     bool found = function->vector_constant_count != 0 || ir_vector_type(function->result_type);
     if (BUSTER_VECTOR_PATH(vector))
     {
+        ir_scan_vector_paths += 1;
         for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
         {
             const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;

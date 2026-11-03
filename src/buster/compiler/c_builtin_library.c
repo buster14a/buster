@@ -12,12 +12,17 @@
 // whose code calls libgcc's __powidf2, __powisf2 and __powixf2 (cbuiltin_library_libgcc).
 //
 // The table's F rows of custom checking that classify a value (__builtin_isnormal and its kin) and __builtin_signbitf and
-// signbitl, which clang tests inline, are the floating builtins' (c_check_builtin_float.c), not calls. Its other F rows
-// stay refused, and __has_builtin answers 0 for them: the __fp16 ones (their prototypes take and return __fp16, which no
-// C function can), the matrix builtins and C++'s __builtin_trivially_relocate, the alloca variants, the signaling NaNs'
-// and the _Float128 and _Float16 NaNs' (which clang folds and libc has no function for), and the FILE builtins (fprintf
-// and its kin, whose prototypes need the unit's FILE). Those that the checker can type are refused by name where they
-// are lowered (cbuiltin_library_refusal); the others' prototypes don't decode (c_builtin_intrinsic_types.c).
+// signbitl, which clang tests inline, are the floating builtins' (c_check_builtin_float.c), not calls. The __fp16 ones
+// (__builtin_sinf16 and its kin, #148) take and return __fp16, which no C function can: their function types take and
+// return _Float16, whose values pass alike, and the checker gives their calls' arguments and results __fp16
+// (cbuiltin_library_half, c_checker.c's check_x86_action). clang's -O0 code calls their own names (sinf16), but for those
+// it computes in float, which the lowering does too (check_lower_library_promoted): a call of ceilf, floorf, truncf,
+// rintf, roundevenf, roundf, fmaxf, fminf, fmaximum_numf, fminimum_numf or frexpf of the arguments converted to float, or
+// of fma of them converted to double, the result converted back to __fp16, and fabsf16's and copysignf16's bits. Its other
+// F rows stay refused, and __has_builtin answers 0 for them: the matrix builtins and C++'s __builtin_trivially_relocate,
+// whose prototypes don't decode (c_builtin_intrinsic_types.c). The FILE builtins (fprintf and its kin) are calls whose
+// prototypes take the unit's FILE (c_check_intrinsic_input.c's check_input_file_type). The alloca variants are the catalogue's miscellaneous builtins (c_check_builtin_misc.c),
+// which take them first.
 //
 // The rows with attribute f are the C library's functions by their own names (sin, strlen, printf), which clang makes
 // builtins of the unit unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise, and ALL_GNU_LANGUAGES'
@@ -25,7 +30,7 @@
 // library's function, which calls of it reach as of any function; undeclared, its call declares it implicitly with the
 // row's prototype, which C99 and later make an error and C89 a warning, each naming the prototype and the header
 // (c_check_input.c's implicit library functions). c_builtin_library_plain.inc lists the rows this compiler implements so:
-// all of clang's in C's modes but those that need the unit's FILE, jmp_buf or ucontext_t or have no prototype to check
+// all of clang's in C's modes but those that need the unit's jmp_buf or ucontext_t or have no prototype to check
 // (setjmp and its kin, vfork, umask, pthread_create), and stdarg.h's va_start, va_end and va_copy.
 // Names are bounded slices, which need no terminator or readable padding.
 #ifndef BUSTER_C_BUILTIN_LIBRARY_INCLUDED
@@ -105,6 +110,13 @@ static __attribute__((unused)) CBuiltinLibraryId cbuiltin_library_id(const char*
     return result;
 }
 
+// Whether a library builtin's prototype takes or returns __fp16 (its name's f16 forms, __builtin_sinf16's and the others).
+static __attribute__((unused)) bool cbuiltin_library_half(CBuiltinLibraryId id)
+{
+    const uint32_t length = id < CBUILTIN_LIBRARY_COUNT ? cbuiltin_library_lengths[id] : 0;
+    return length > 3 && memcmp(cbuiltin_library_names[id] + length - 3, "f16", 3) == 0;
+}
+
 // The constant folds of the library builtins that clang folds and this compiler does too (c_check_builtin_library.c,
 // which reads each: its header lists them), which __has_constexpr_builtin advertises.
 typedef enum CBuiltinLibraryFold
@@ -143,13 +155,17 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
         case CBUILTIN_LIBRARY_FMAXL:
         case CBUILTIN_LIBRARY_FMAXIMUM_NUM:
         case CBUILTIN_LIBRARY_FMAXIMUM_NUMF:
-        case CBUILTIN_LIBRARY_FMAXIMUM_NUML: result = CBUILTIN_LIBRARY_FOLD_MAXIMUM; break;
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUML:
+        case CBUILTIN_LIBRARY_FMAXF16:
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUMF16: result = CBUILTIN_LIBRARY_FOLD_MAXIMUM; break;
         case CBUILTIN_LIBRARY_FMIN:
         case CBUILTIN_LIBRARY_FMINF:
         case CBUILTIN_LIBRARY_FMINL:
         case CBUILTIN_LIBRARY_FMINIMUM_NUM:
         case CBUILTIN_LIBRARY_FMINIMUM_NUMF:
-        case CBUILTIN_LIBRARY_FMINIMUM_NUML: result = CBUILTIN_LIBRARY_FOLD_MINIMUM; break;
+        case CBUILTIN_LIBRARY_FMINIMUM_NUML:
+        case CBUILTIN_LIBRARY_FMINF16:
+        case CBUILTIN_LIBRARY_FMINIMUM_NUMF16: result = CBUILTIN_LIBRARY_FOLD_MINIMUM; break;
         case CBUILTIN_LIBRARY_COPYSIGNL: result = CBUILTIN_LIBRARY_FOLD_COPY_SIGN; break;
         default: break;
     }
@@ -211,28 +227,6 @@ static __attribute__((unused)) uint32_t cbuiltin_library_libgcc(const char* name
     return result;
 }
 
-// The library builtins whose prototypes the checker gives but which the lowering refuses, each with the reason its
-// refusal names: NULL for any other name.
-static __attribute__((unused)) const char* cbuiltin_library_refusal(const char* name, uint32_t length)
-{
-    static const struct
-    {
-        const char* name;
-        const char* reason;
-    } refusals[] =
-    {
-        { "__builtin_alloca_uninitialized", "__builtin_alloca_uninitialized" },
-        { "__builtin_alloca_with_align", "__builtin_alloca_with_align, whose alignment Tier 0's allocation doesn't take" },
-        { "__builtin_alloca_with_align_uninitialized", "__builtin_alloca_with_align_uninitialized, whose alignment Tier 0's allocation doesn't take" },
-    };
-    const char* result = NULL;
-    for (uint32_t i = 0; name != NULL && result == NULL && i < sizeof(refusals) / sizeof(refusals[0]); i += 1)
-    {
-        result = length == strlen(refusals[i].name) && memcmp(name, refusals[i].name, length) == 0 ? refusals[i].reason : NULL;
-    }
-    return result;
-}
-
 // The plain library builtins (c_builtin_library_plain.inc): each name, its length and whether it is a builtin of GNU's
 // modes alone, in the names' order.
 typedef struct CBuiltinLibraryPlain CBuiltinLibraryPlain;
@@ -284,8 +278,20 @@ static __attribute__((unused)) const CBuiltinLibraryPlain* cbuiltin_library_plai
     return result;
 }
 
-// A bounded text that a spelling appends to: its bytes so far, `length` of `capacity`, whether it ran out of room, and
-// restrict's spelling (C89's __restrict, where restrict is no keyword).
+// The unit's types that a prototype names by its typedefs, as clang's TypePrinter spells them (#148): FILE's (P) and
+// ucontext_t's (K), their typedefs' types, which a sugared spelling names by the typedef instead, and jmp_buf's (J) and
+// sigjmp_buf's (SJ) as a parameter decays them ("long *"), which keeps no typedef; NULL where the unit has none.
+typedef struct CBuiltinLibraryNamed CBuiltinLibraryNamed;
+struct CBuiltinLibraryNamed
+{
+    const char* file;
+    const char* jmp_buf;
+    const char* sigjmp_buf;
+    const char* ucontext;
+};
+
+// A bounded text that a spelling appends to: its bytes so far, `length` of `capacity`, whether it ran out of room,
+// restrict's spelling (C89's __restrict, where restrict is no keyword), and the unit's named types.
 typedef struct CBuiltinLibraryText CBuiltinLibraryText;
 struct CBuiltinLibraryText
 {
@@ -294,6 +300,7 @@ struct CBuiltinLibraryText
     uint32_t capacity;
     bool full;
     const char* restrict_spelling;
+    const CBuiltinLibraryNamed* named;
 };
 
 static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes)
@@ -310,28 +317,33 @@ static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes
 
 // One type of a plain library builtin's encoding, from *position, as clang's TypePrinter spells it in a function type:
 // "const char *restrict", "_Complex double", a va_list parameter's "struct __va_list_tag *", wchar_t's int, size_t's
-// __size_t where `sugared` says (clang's builtins' sugar for it, *sized set) and otherwise unsigned long. False for a
-// code the plain rows don't use.
+// __size_t where `sugared` says (clang's builtins' sugar for it, *sized set) and otherwise unsigned long, FILE and
+// ucontext_t likewise by their typedefs or their types (CBuiltinLibraryNamed), jmp_buf and sigjmp_buf decayed, and
+// pid_t as int, clang's process ID type on x86-64 Linux. False for a code the plain rows don't use, or a named type the
+// unit hasn't.
 static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, uint32_t* position, bool sugared, bool* sized, CBuiltinLibraryText* text)
 {
     uint32_t at = *position;
     uint32_t longs = 0;
     bool is_unsigned = false;
     bool complex = false;
-    while (at < length && (encoding[at] == 'L' || encoding[at] == 'U' || encoding[at] == 'X'))
+    bool is_signed = false;
+    while (at < length && (encoding[at] == 'L' || encoding[at] == 'U' || encoding[at] == 'X' || encoding[at] == 'S'))
     {
         longs += encoding[at] == 'L';
         is_unsigned |= encoding[at] == 'U';
         complex |= encoding[at] == 'X';
+        is_signed |= encoding[at] == 'S';
         at += 1;
     }
+    const CBuiltinLibraryNamed* named = text->named;
     const char code = at < length ? encoding[at] : 0;
     at += at < length;
     const char* base = NULL;
     switch (code)
     {
         case 'v': base = "void"; break;
-        case 'c': base = is_unsigned ? "unsigned char" : "char"; break;
+        case 'c': base = is_unsigned ? "unsigned char" : is_signed ? "signed char" : "char"; break;
         case 'i': base = longs == 2 ? (is_unsigned ? "unsigned long long" : "long long") : longs == 1 ? (is_unsigned ? "unsigned long" : "long") :
                          (is_unsigned ? "unsigned int" : "int"); break;
         case 'f': base = "float"; break;
@@ -339,9 +351,13 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
         case 'z': base = sugared ? "__size_t" : "unsigned long"; break;
         case 'w': base = "int"; break;
         case 'a': base = "struct __va_list_tag *"; break;
+        case 'P': base = named == NULL || named->file == NULL ? NULL : sugared ? "FILE" : named->file; break;
+        case 'K': base = named == NULL || named->ucontext == NULL ? NULL : sugared ? "ucontext_t" : named->ucontext; break;
+        case 'J': base = named == NULL ? NULL : is_signed ? named->sigjmp_buf : named->jmp_buf; break;
+        case 'p': base = "int"; break;
         default: break;
     }
-    *sized |= code == 'z';
+    *sized |= code == 'z' || code == 'P' || code == 'K';
     // The base's qualifiers come first ("const char"), then each pointer's star and its own ("char *const *").
     const bool constant = at < length && encoding[at] == 'C';
     at += constant;
@@ -369,11 +385,19 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
 // spell it: "double (double)", "void *(__size_t)", "int (const char *, ...)", "void (void) __attribute__((noreturn))",
 // with __size_t for size_t where `sugared` says and restrict as `c99` says (C89 spells it __restrict), into `buffer` of
 // `capacity` bytes, NUL-terminated; *sized says whether it has one (and clang adds the spelling without the sugar:
-// "(aka '...')"). False where it doesn't fit, or the encoding has a code the plain rows don't use.
+// "(aka '...')", as it does for FILE and ucontext_t, of the unit's types `named`, which may be NULL). False where it
+// doesn't fit, or the encoding has a code the plain rows don't use.
 static __attribute__((unused)) bool cbuiltin_library_spell(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length,
-                                                           bool sugared, bool c99, char* buffer, uint32_t capacity, bool* sized)
+                                                           bool sugared, bool c99, const CBuiltinLibraryNamed* named, char* buffer, uint32_t capacity,
+                                                           bool* sized)
 {
-    CBuiltinLibraryText text = { .bytes = buffer, .capacity = capacity, .full = capacity == 0, .restrict_spelling = c99 ? "restrict" : "__restrict" };
+    CBuiltinLibraryText text = {
+        .bytes = buffer,
+        .capacity = capacity,
+        .full = capacity == 0,
+        .restrict_spelling = c99 ? "restrict" : "__restrict",
+        .named = named,
+    };
     uint32_t position = 0;
     *sized = false;
     bool valid = cbuiltin_library_spell_type(encoding, length, &position, sugared, sized, &text);
@@ -410,6 +434,7 @@ static __attribute__((unused)) const char* cbuiltin_library_header(const char* t
         { "CTYPE_H", "ctype.h" },
         { "MALLOC_H", "malloc.h" },
         { "MATH_H", "math.h" },
+        { "SETJMP_H", "setjmp.h" },
         { "STDIO_H", "stdio.h" },
         { "STDLIB_H", "stdlib.h" },
         { "STRINGS_H", "strings.h" },
@@ -427,11 +452,21 @@ static __attribute__((unused)) const char* cbuiltin_library_header(const char* t
 
 // Whether __has_builtin advertises a name as a library builtin this compiler implements: the list's and powi's. A
 // refused one isn't. Overlong query slices fail before any byte past the bound is read.
+// The library function a builtin of no F row calls under its own prototype, as clang's code calls it (#148):
+// __builtin_char_memchr's memchr (CGBuiltin.cpp takes it as __builtin_memchr's), which returns char * rather than void *;
+// CBUILTIN_LIBRARY_COUNT for any other name.
+static __attribute__((unused)) CBuiltinLibraryId cbuiltin_library_alias(const char* name, uint32_t length)
+{
+    const bool memchr = name != NULL && length == 21 && memcmp(name, "__builtin_char_memchr", 21) == 0;
+    return memchr ? CBUILTIN_LIBRARY_MEMCHR : CBUILTIN_LIBRARY_COUNT;
+}
+
 static __attribute__((unused)) bool cbuiltin_library_source(const uint8_t* name, uint32_t length)
 {
     const bool bounded = name != NULL && length <= BUSTER_CBUILTIN_LIBRARY_MAX_NAME;
     const bool result = bounded && (cbuiltin_library_id((const char*)name, length) != CBUILTIN_LIBRARY_COUNT ||
-                                    cbuiltin_library_libgcc((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC);
+                                    cbuiltin_library_libgcc((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC ||
+                                    cbuiltin_library_alias((const char*)name, length) != CBUILTIN_LIBRARY_COUNT);
     return result;
 }
 

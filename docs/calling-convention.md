@@ -1531,7 +1531,13 @@ the producer lowers with AVX-512 (#717: GNU's of 4, 8, 16, 32 and 64 bytes of
 classes the record runs' worlds already drew: an INTEGER eightbyte for 4
 bytes, an SSE one for 8 and MEMORY for one `double`; and clang's extended ones
 of 16, 32 and 64 bytes in clang's runs,
-`AbiTestWorld.vectors`), in clang's runs `_Atomic`s of every type C makes
+`AbiTestWorld.vectors`), and at 16 bytes the same vectors (`-march=x86-64`,
+`AbiTestWorld.narrow_vectors`): those of 32 and 64 bytes are arguments in
+memory and results LLVM splits over two or four of SSE's registers, which
+Tier 0 returns and stores a register after another (`tier0_vector_result_parts`),
+and clang's extended vectors of three doubles and three longs, whose results
+LLVM returns an element a register, in xmm0, xmm1 and st0 and in rax, rdx and
+rcx (`tier0_element_parts`, an `fld` and an `fstp` of 8 bytes for st0's), in clang's runs `_Atomic`s of every type C makes
 atomic but a `_BitInt`, which clang refuses (#720's lowering of C11's atomics,
 `abi_test_compiled_atomic`: integers, `bool` and the 128-bit ones among them,
 enums, pointers, every floating type, `_Float16` and `__bf16` among them,
@@ -1541,11 +1547,13 @@ them and aligned typedefs of them, and the structs, unions, arrays and aligned
 typedefs made of them, aligned as the clang worlds' are (to 64: Tier 0
 realigns a frame for an object or a call's outgoing area aligned past 16, and
 a value aligned past 8 is an object), with flexible array members,
-bit-fields, packing and member alignments. They leave out what the producer
-refuses by name: a vector of 1 or 2 bytes (Tier 0's VECTOR has no such width)
-or of `bool` (whose elements pack a bit each, of which the lowering makes no
-value), and any vector at 16 bytes (its vector values need AVX-512F and
-AVX-512VL); a complex `_BitInt` past 128 bits of an odd number of limbs,
+bit-fields, packing and member alignments. Vectors of 1 and 2 bytes and of
+`bool`, which Tier 0's VECTOR has no width for, are among their types too: the
+producer passes, returns, copies and stores them by their bytes, as an
+aggregate's value (#137, `check_lower_transport_type`), at the locations the
+module gives them (`bool`'s eight to 64 as an integer or an SSE eightbyte; the
+signatures pass none the module refuses, which records hold). They leave out
+what the producer refuses by name: a complex `_BitInt` past 128 bits of an odd number of limbs,
 which clang lays out wrong (above); and the record
 runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
 of their own (above). C23's enums of a fixed underlying type, structs
@@ -1618,6 +1626,28 @@ complex types, enums, integers, half-precision types, 128-bit integers, floats
 and doubles, vectors, `__float128`, `bool` and long double); against GCC, 107
 and 13 `_Float16`s, 116 and 15 `__bf16`s, 129 and 18 `_Complex _Float16`s, 302
 and 45 vectors of 4 bytes and 662 and 65 of 8.
+
+On the 9700X (2026-11-02, clang 23.1.1 and GCC 16.2.1), once the compiled
+worlds at 16 bytes took every vector (`AbiTestWorld.narrow_vectors`, with
+Tier 0's results split over several vector registers) and the producer took
+an `_Atomic` `<1 x i128>` result in rax and rdx, which stopped the compiled
+clang run at 64 bytes at seed 8, every run passes at seeds 1 to 12. The
+compiled runs make, against clang at 16 bytes, 4,800 signatures of 28,253
+arguments and 88,733 checks; against GCC at 16, 4,800 of 28,849 and 90,863;
+against clang at 64, 4,800 of 29,242 and 91,609; and against GCC at 64, 4,800
+of 28,388 and 89,309.
+
+Again on the 9700X (2026-11-02, the same compilers), once the producer passed
+vectors of 1 and 2 bytes and of `bool` by their bytes (#137), and returned
+three doubles' and three longs' elements a register each at 16 bytes
+(`tier0_element_parts`), and the compiled worlds drew them all (clang's of
+`bool` too), every run passes at seeds 1 to 12. The compiled runs make,
+against clang at 16 bytes, 4,800 signatures of 28,900 arguments and 90,779
+checks; against GCC at 16, 4,800 of 28,792 and 90,415;
+against clang at 64, 4,800 of 28,820 and 90,623; and against GCC at 64, 4,800
+of 28,323 and 89,183. At seed 1 the compiled clang runs' callees take 23 and
+17 vectors of 1 or 2 bytes and 13 and 17 of `bool` themselves (at 16 and 64
+bytes), and more in records and aligned typedefs.
 
 With the defaults (seed 1), each run of random signatures has 400 of 2,100 to
 2,600 arguments, and the ten make about 55,000 checks, besides the two
@@ -1790,6 +1820,31 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   base's; alone, the vector paths are up to 4% faster (the batches of 4 and
   `assign`), and the twin as fast. The clock is 5.55 GHz throughout.
 
+## Other calling conventions
+
+The type table keeps a function type's calling convention from its attribute
+(`ms_abi`, `vectorcall`, `regcall`, `preserve_most`, `preserve_all`,
+`preserve_none`, or `sysv_abi`, which is System V's: `TypeFunctionABI`), and
+the module classifies and assigns System V's alone. clang 23 on x86-64 Linux
+compiles each of the six. `ms_abi`, `vectorcall`, `regcall` and
+`preserve_none` pass arguments in registers of their own. `preserve_most` and
+`preserve_all` pass System V's arguments in System V's registers, and their
+callee keeps more registers than System V's callee does.
+
+The producer refuses each convention by name
+(`check_lower_convention`):
+
+- a definition of any of the six;
+- a call through a function type of any of the first four, directly or
+  through a pointer.
+
+A call of a `preserve_most` or `preserve_all` function compiles as a System V
+call, since its callee keeps everything a System V caller expects.
+`test-checker-driver` checks each refusal against clang, which compiles every
+one of them. It also runs both paths' calls of clang's `preserve_most` and
+`preserve_all` callees against clang's build, with values live across the
+calls.
+
 ## Next steps
 
 - **#136's use:** call sequences, prologues and `va_arg` from these
@@ -1851,13 +1906,13 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   `i64`s to clang 23, and the module makes it a `PAIR` at every width.
   `abi_wide_alignment` could walk them as it walks large records, with the
   levels waiting for what it reads.
-- **The compiled worlds' other vectors.** The compiled runs leave out the
-  vectors the producer refuses by name: those of `bool` (an extended vector
-  packs a bit per element, of which the lowering makes no value: its transport
-  would be an aggregate's, with every operation, conversion, constant and
-  builtin on one refused, and the `SMALLER` copies LLVM makes of the longer
-  ones), those of 1 or 2 bytes (Tier 0's VECTOR has no such width), and every
-  vector without AVX-512F and AVX-512VL, so none in the runs at 16 bytes.
+- **What computes with the vectors passed by their bytes.** The producer
+  passes, returns, copies and stores vectors of 1 and 2 bytes, of `bool` and of
+  more than 64 bytes (#137), and reads and writes the elements of those whose
+  elements are bytes, but refuses by name their arithmetic, comparisons,
+  conversions and splats, constant expressions, a `bool` vector's elements and
+  the vector builtins of them. The compiled runs, whose C only moves values,
+  don't need them.
 - **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it, or
   as unsigned where the type table says so (`TypeTable.char_unsigned`, from
   `-funsigned-char`). The cross-check's worlds keep signed char; its extension

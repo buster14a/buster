@@ -96,7 +96,7 @@ requirements. [Command index](README.md).
 
 ## Object and linkage options (#1124)
 
-The C driver refuses an effective `-fcommon`, `-ffunction-sections`,
+The C driver refuses an effective `-ffunction-sections`,
 `-fdata-sections`, non-default `-fvisibility=hidden|protected|internal`, or
 `-fvisibility-ms-compat` when writing an object (`-c`, including `check -c`)
 or linking an executable. The diagnostic names the option:
@@ -105,15 +105,19 @@ unsupported boundary, not implementation of these features. The refusal
 precedes input processing and output creation, including multi-file commands,
 and preserves an existing destination in both Tier 0 and Tier 1.
 
-Each family has independent last-option-wins state. `-fno-common`,
+`-fcommon` is implemented (#147). When it comes after any `-fno-common`,
+every tentative definition of external linkage is an `SHN_COMMON` symbol,
+and a multi-unit link merges the units' commons as GNU ld does.
+
+Each family has independent last-option-wins state.
 `-fno-function-sections`, `-fno-data-sections` and `-fvisibility=default`
 retain the current output and cancel an earlier request in their own family.
 For visibility, the last of `-fvisibility=…` and `-fvisibility-ms-compat`
 decides, as clang's driver reads them: an earlier malformed value is ignored,
 a malformed last value keeps clang's `invalid value` diagnostic, and an
 effective `-fvisibility-ms-compat` (clang's hidden default) is refused by name.
-Option values consumed by another option (such as `-include -fcommon`) are
-filenames, not code-generation requests.
+Option values consumed by another option (such as `-include -fvisibility=hidden`)
+are filenames, not code-generation requests.
 
 Valid requests remain accepted for preprocessing, syntax checking, `check`,
 and typed/static dumps, which emit neither an object nor an executable.

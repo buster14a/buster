@@ -451,7 +451,7 @@ static bool ir_reduce_pure(uint32_t op)
     bool result = false;
     switch (op)
     {
-        case IR_CONST: case IR_UNDEF: case IR_PARAM: case IR_COPY: case IR_ADD: case IR_SUB: case IR_MUL:
+        case IR_CONST: case IR_UNDEF: case IR_PARAM: case IR_COPY: case IR_ADD: case IR_SUB: case IR_MUL: case IR_MULHU:
         case IR_AND: case IR_OR: case IR_XOR: case IR_NEG: case IR_NOT: case IR_ICMP: case IR_SELECT:
         case IR_TRUNC: case IR_ZEXT: case IR_SEXT: case IR_INTTOPTR: case IR_PTRTOINT: case IR_BITCAST:
         case IR_STACK_ADDR: case IR_SYMBOL_ADDR: case IR_ADDRESS: case IR_PHI: result = true; break;

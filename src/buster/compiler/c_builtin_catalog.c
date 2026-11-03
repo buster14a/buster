@@ -57,9 +57,13 @@
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
 // take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
 // stdc ones and the carry chains) 0x3a0 to 0x3c7, its floating builtins past the first ones (c_check_builtin_float.c:
-// isnormal to isfpclass, signbitf and signbitl, canonicalize) 0x3d0 to 0x3d9, and the alignment builtins and
+// isnormal to isfpclass, signbitf and signbitl, canonicalize and its __fp16 form) 0x3d0 to 0x3da, and the alignment builtins and
 // __builtin_expect_with_probability 0x3e0 to 0x3e3, the signaling NaNs and the _Float16 and __float128 constants 0x3e4 to
-// 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa and launder (c_check_builtin_misc.c's) 0x3f0 to 0x3f3. Those
+// 0x3ee, and classify_type, eh_return_data_regno, dwarf_cfa, launder, the alloca variants, allow_runtime_check,
+// allow_sanitize_check, annotation, addressof, function_start, complex, __arithmetic_fence and the xray events
+// (c_check_builtin_misc.c's) 0x3f0 to 0x3ff, and __warn_memset_zero_len, trivially_relocate,
+// operator_new and operator_delete, the pointer authentication builtins and cpu_init, cpu_is and cpu_supports (its too)
+// 0x440 to 0x451. Those
 // last families are the table's last rows: a lookup scans the table's names in order, so rows that few units call cost
 // least after the others.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
@@ -409,6 +413,7 @@
     X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
     X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
     X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEF16, 0x3dau, "__builtin_canonicalizef16", BUSTER_CBUILTIN_SOURCE) \
     X(ALIGN_UP, 0x3e0u, "__builtin_align_up", BUSTER_CBUILTIN_CONSTANT) \
     X(ALIGN_DOWN, 0x3e1u, "__builtin_align_down", BUSTER_CBUILTIN_CONSTANT) \
     X(IS_ALIGNED, 0x3e2u, "__builtin_is_aligned", BUSTER_CBUILTIN_CONSTANT) \
@@ -427,7 +432,36 @@
     X(CLASSIFY_TYPE, 0x3f0u, "__builtin_classify_type", BUSTER_CBUILTIN_CONSTANT) \
     X(EH_RETURN_DATA_REGNO, 0x3f1u, "__builtin_eh_return_data_regno", BUSTER_CBUILTIN_CONSTANT) \
     X(DWARF_CFA, 0x3f2u, "__builtin_dwarf_cfa", BUSTER_CBUILTIN_SOURCE) \
-    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_CONSTANT)
+    X(LAUNDER, 0x3f3u, "__builtin_launder", BUSTER_CBUILTIN_CONSTANT) \
+    X(ALLOCA_UNINITIALIZED, 0x3f4u, "__builtin_alloca_uninitialized", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOCA_WITH_ALIGN, 0x3f5u, "__builtin_alloca_with_align", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOCA_WITH_ALIGN_UNINITIALIZED, 0x3f6u, "__builtin_alloca_with_align_uninitialized", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOW_RUNTIME_CHECK, 0x3f7u, "__builtin_allow_runtime_check", BUSTER_CBUILTIN_SOURCE) \
+    X(ALLOW_SANITIZE_CHECK, 0x3f8u, "__builtin_allow_sanitize_check", BUSTER_CBUILTIN_SOURCE) \
+    X(ANNOTATION, 0x3f9u, "__builtin_annotation", BUSTER_CBUILTIN_SOURCE) \
+    X(ADDRESSOF, 0x3fau, "__builtin_addressof", BUSTER_CBUILTIN_CONSTANT) \
+    X(FUNCTION_START, 0x3fbu, "__builtin_function_start", BUSTER_CBUILTIN_CONSTANT) \
+    X(COMPLEX, 0x3fcu, "__builtin_complex", BUSTER_CBUILTIN_CONSTANT) \
+    X(ARITHMETIC_FENCE, 0x3fdu, "__arithmetic_fence", BUSTER_CBUILTIN_CONSTANT) \
+    X(XRAY_CUSTOMEVENT, 0x3feu, "__xray_customevent", BUSTER_CBUILTIN_SOURCE) \
+    X(XRAY_TYPEDEVENT, 0x3ffu, "__xray_typedevent", BUSTER_CBUILTIN_SOURCE) \
+    X(WARN_MEMSET_ZERO_LEN, 0x440u, "__warn_memset_zero_len", BUSTER_CBUILTIN_SOURCE) \
+    X(TRIVIALLY_RELOCATE, 0x442u, "__builtin_trivially_relocate", BUSTER_CBUILTIN_SOURCE) \
+    X(OPERATOR_NEW, 0x443u, "__builtin_operator_new", BUSTER_CBUILTIN_CONSTANT) \
+    X(OPERATOR_DELETE, 0x444u, "__builtin_operator_delete", BUSTER_CBUILTIN_CONSTANT) \
+    X(PTRAUTH_AUTH, 0x445u, "__builtin_ptrauth_auth", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_AUTH_AND_RESIGN, 0x446u, "__builtin_ptrauth_auth_and_resign", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_AUTH_LOAD_RELATIVE_AND_SIGN, 0x447u, "__builtin_ptrauth_auth_load_relative_and_sign", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_AUTH_WITH_PC_AND_RESIGN, 0x448u, "__builtin_ptrauth_auth_with_pc_and_resign", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_BLEND_DISCRIMINATOR, 0x449u, "__builtin_ptrauth_blend_discriminator", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_SIGN_CONSTANT, 0x44au, "__builtin_ptrauth_sign_constant", BUSTER_CBUILTIN_CONSTANT) \
+    X(PTRAUTH_SIGN_GENERIC_DATA, 0x44bu, "__builtin_ptrauth_sign_generic_data", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_SIGN_UNAUTHENTICATED, 0x44cu, "__builtin_ptrauth_sign_unauthenticated", BUSTER_CBUILTIN_SOURCE) \
+    X(PTRAUTH_STRING_DISCRIMINATOR, 0x44du, "__builtin_ptrauth_string_discriminator", BUSTER_CBUILTIN_CONSTANT) \
+    X(PTRAUTH_STRIP, 0x44eu, "__builtin_ptrauth_strip", BUSTER_CBUILTIN_SOURCE) \
+    X(CPU_INIT, 0x44fu, "__builtin_cpu_init", BUSTER_CBUILTIN_SOURCE) \
+    X(CPU_IS, 0x450u, "__builtin_cpu_is", BUSTER_CBUILTIN_SOURCE) \
+    X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -501,6 +535,15 @@ static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_entry(const 
     return result;
 }
 
+// clang's other names of a catalog builtin (#148): __builtin_stdarg_start, its old name of __builtin_va_start, which its
+// Sema checks as that (SemaBuiltinVAStart). The entry the name stands for, or null.
+static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_alias_entry(const char* name, uint32_t length)
+{
+    static const char stdarg_start[] = "__builtin_stdarg_start";
+    const bool alias = length == sizeof(stdarg_start) - 1 && memcmp(name, stdarg_start, length) == 0;
+    return alias ? cbuiltin_entry("__builtin_va_start", sizeof("__builtin_va_start") - 1) : NULL;
+}
+
 // clang's sized legacy builtins, __sync_fetch_and_add_4 and the others of 1, 2, 4, 8 and 16 bytes (#148): Sema rewrites a
 // call of one by its object's size alone, whatever the suffix says (BuiltinAtomicOverloaded: __sync_fetch_and_add_1 of a
 // long is an 8-byte addition), so each is its family's builtin, which the name less its suffix spells. The family's
@@ -528,6 +571,7 @@ static __attribute__((unused)) CBuiltinId cbuiltin_resolve(const char* name, uin
     {
         const CBuiltinCatalogEntry* entry = cbuiltin_entry(name, length);
         entry = entry != NULL ? entry : cbuiltin_sized_entry(name, length);
+        entry = entry != NULL ? entry : cbuiltin_alias_entry(name, length);
         result = entry != NULL ? entry->id : CBUILTIN_NONE;
     }
     return result;
@@ -552,6 +596,7 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
         // A sized legacy name has its family's capabilities (cbuiltin_sized_entry).
         const CBuiltinCatalogEntry* entry = cbuiltin_entry((const char*)name, length);
         entry = entry != NULL ? entry : cbuiltin_sized_entry((const char*)name, length);
+        entry = entry != NULL ? entry : cbuiltin_alias_entry((const char*)name, length);
         result = entry != NULL && (entry->capabilities & required) == required;
     }
     return result;
@@ -605,10 +650,11 @@ static __attribute__((unused)) bool cbuiltin_float_signbit(uint32_t id)
     return result;
 }
 
-// Whether an identity is one of clang's canonicalize builtins, x * 1.0 of their prototypes' types (0x3d7 to 0x3d9).
+// Whether an identity is one of clang's canonicalize builtins, x * 1.0 of their prototypes' types (0x3d7 to 0x3da: the
+// last, canonicalizef16, of __fp16, which clang's code computes in float, its argument converted and its result back).
 static __attribute__((unused)) bool cbuiltin_float_canonicalize(uint32_t id)
 {
-    const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEL;
+    const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEF16;
     return result;
 }
 
@@ -638,6 +684,13 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 
 // Whether an identity is one of clang's alignment builtins, which c_check_builtin_misc.c checks (align_up, align_down
 // and is_aligned).
+// The miscellaneous builtins past complex (c_check_builtin_misc.c's check_builtin_misc_last), in two blocks of codes
+// around the scoped atomics' (0x400 to 0x43c), which a range of ids from the first to the last would take in.
+static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
+{
+    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CPU_SUPPORTS);
+}
+
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 {
     const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_IS_ALIGNED;
@@ -645,10 +698,12 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 }
 
 // Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
-// fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's.
+// fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's, and the literal and
+// function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is and cpu_supports.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
-    const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY;
+    const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
+                        id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS;
     return result;
 }
 
