@@ -1735,6 +1735,8 @@ struct NightlyState
     uint64_t admit_run;
     int64_t admit_since;
     NightlyStatus status;
+    // This plan dispatched it: its nightly/SHA ref is in use now, whatever its status was before the plan.
+    bool dispatched;
 };
 
 typedef struct NightlyStates NightlyStates;
@@ -2040,12 +2042,13 @@ static bool nightly_pending_status(NightlyStatus status)
 
 // `dispatch PURPOSE admit|defer SHA REQUEST SNAPSHOT`: the run's state, its request token and the cycle's pinned
 // snapshot, which the worker checks the state's first-parent ancestry against and records (not main's head now, which
-// may have moved on since the pin).
-static void nightly_dispatch(FILE* output, const NightlyPlanInput* input, NightlyCycleState* cycle, uint32_t* sequence, NightlyPurpose purpose, bool admit, const char* sha)
+// may have moved on since the pin). The state is marked dispatched, so that the same plan never prunes its ref.
+static void nightly_dispatch(FILE* output, const NightlyPlanInput* input, NightlyCycleState* cycle, uint32_t* sequence, NightlyPurpose purpose, bool admit, NightlyState* state)
 {
     char date[9];
     snprintf(date, sizeof(date), "%.4s%.2s%.2s", cycle->date, cycle->date + 5, cycle->date + 8);
-    fprintf(output, "%s\t%s\t%s\t%s\t%s.%llu.%u.%s\t%s\n", input->run ? "dispatch" : "would-dispatch", nightly_purpose_names[purpose], admit ? "admit" : "defer", sha, date, (unsigned long long)input->coordinator, *sequence, admit ? "admit" : "defer", input->states->items[cycle->snapshot].sha);
+    fprintf(output, "%s\t%s\t%s\t%s\t%s.%llu.%u.%s\t%s\n", input->run ? "dispatch" : "would-dispatch", nightly_purpose_names[purpose], admit ? "admit" : "defer", state->sha, date, (unsigned long long)input->coordinator, *sequence, admit ? "admit" : "defer", input->states->items[cycle->snapshot].sha);
+    state->dispatched = true;
     *sequence += 1;
 }
 
@@ -2267,7 +2270,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             if (!cycle.snapshot_prepared)
             {
                 // The daily diagnostic run: every hosted row and the fuzz campaigns of the snapshot, before measuring.
-                nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, false, snapshot->sha);
+                nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, false, snapshot);
                 cycle.snapshot_prepared = true;
                 snapshot->defer_in_flight = true;
                 snapshot->status = snapshot->status == NIGHTLY_STATUS_NEEDS_PREPARATION ? NIGHTLY_STATUS_PREPARING : snapshot->status;
@@ -2277,7 +2280,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 NightlyState* state = &states->items[i];
                 if (state->status == NIGHTLY_STATUS_NEEDS_PREPARATION && cycle.preparations_in_flight < input->preparations && cycle.preparations_this_cycle < input->preparations_per_cycle)
                 {
-                    nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, false, state->sha);
+                    nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, false, state);
                     state->status = NIGHTLY_STATUS_PREPARING;
                     state->defer_in_flight = true;
                     cycle.preparations_in_flight += 1;
@@ -2327,7 +2330,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             }
             if (target >= 0 && nightly_fits(input, &cycle, now, input->snapshot_bound))
             {
-                nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, true, states->items[target].sha);
+                nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_SNAPSHOT, true, &states->items[target]);
                 cycle.selected += 1;
                 cycle.measured = target;
                 verdict = "the snapshot's comprehensive run is dispatched";
@@ -2353,7 +2356,7 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 }
                 if (next >= 0 && nightly_fits(input, &cycle, now, input->backlog_bound + reserve))
                 {
-                    nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, true, states->items[next].sha);
+                    nightly_dispatch(output, input, &cycle, &sequence, NIGHTLY_PURPOSE_BACKLOG, true, &states->items[next]);
                     cycle.selected += 1;
                     verdict = "the oldest ready state is dispatched";
                 }
@@ -2381,7 +2384,8 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
         {
             const int64_t index = nightly_state_index(states, input->refs[i]);
             const NightlyState* state = index >= 0 ? &states->items[index] : NULL;
-            const bool idle = state == NULL || (!state->admit_in_flight && !state->defer_in_flight);
+            // A state this plan dispatched (a completed earlier state as the snapshot's substitute, say) keeps its ref.
+            const bool idle = state == NULL || (!state->admit_in_flight && !state->defer_in_flight && !state->dispatched);
             const bool finished = state == NULL || index > cycle.snapshot || (nightly_terminal(state->status) && (index != cycle.snapshot || snapshot->full_this_cycle || cycle.snapshot_attempted));
             if (idle && finished)
             {
@@ -3437,6 +3441,25 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_plan(scenario, opening);
     snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[2].sha);
     nightly_expect(test, nightly_has(scenario, line) && strstr(scenario->report, "measures `") != NULL && strstr(scenario->report, "ineligible (its plain hosted rows failed)") != NULL, "an ineligible snapshot is replaced by the newest eligible state, reported");
+    nightly_scenario_free(scenario);
+    // The same with the substitute already complete (its targeted measurement done) and its nightly ref still there:
+    // the plan that dispatches it never prunes that ref too. A finished state the plan didn't dispatch is pruned.
+    scenario = nightly_scenario(4, committed);
+    nightly_scenario_pushes(scenario);
+    nightly_scenario_row(scenario, 150, 0, NIGHTLY_PURPOSE_BACKLOG, "20261103.900.10001.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_TARGETED, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_row(scenario, 152, 2, NIGHTLY_PURPOSE_BACKLOG, "20261103.900.10002.admit", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_ADMIT, NIGHTLY_COVERAGE_TARGETED, NIGHTLY_OUTCOME_COMPLETE);
+    nightly_scenario_cycle(scenario, "2026-11-04", 3);
+    nightly_scenario_row(scenario, 200, 3, NIGHTLY_PURPOSE_SNAPSHOT, "20261104.900.1.defer", NIGHTLY_PLAIN_FAILED, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_FULL, NIGHTLY_OUTCOME_BLOCKED_HOSTED);
+    nightly_copy(scenario->refs[0], 41, scenario->states.items[2].sha);
+    nightly_copy(scenario->refs[1], 41, scenario->states.items[0].sha);
+    scenario->ref_count = 2;
+    nightly_scenario_plan(scenario, opening);
+    snprintf(line, sizeof(line), "dispatch\tsnapshot\tadmit\t%s\t", scenario->states.items[2].sha);
+    char pruned[64];
+    snprintf(pruned, sizeof(pruned), "prune\t%s\n", scenario->states.items[2].sha);
+    nightly_expect(test, nightly_has(scenario, line) && !nightly_has(scenario, pruned), "the substitute dispatched keeps its existing ref in the same plan");
+    snprintf(pruned, sizeof(pruned), "prune\t%s\n", scenario->states.items[0].sha);
+    nightly_expect(test, nightly_has(scenario, pruned) && nightly_count(scenario, "prune\t") == 1, "and a finished state's ref is still pruned");
     nightly_scenario_free(scenario);
 
     // Documentation-only states are not required; the snapshot's hosted run in flight keeps its room.
