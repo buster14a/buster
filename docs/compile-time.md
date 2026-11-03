@@ -604,6 +604,17 @@ which agree within 40 KB; the reader's end is the high-water mark when
   above it. Here the twin's reads of the four columns are 2,600 faults on the
   zero page, which the vector path doesn't make.
 
+A column that `check_program` pushes before the discard keeps the scratch's
+earlier pages under it, whatever it writes. #1154's dropped ranges, room of
+8 bytes a token for a prefix of a few kilobytes, kept 5.7 MB of them on
+`sqlite3.c`, and the lowering and the emission's setup set the peak past the
+checker's again, 4 MB higher on main `703ae9f5` than on `b70deb47`. They are
+pushed past the discard now (#628): on the 9700X, main `9a74fc37`'s peak is
+295,084 KiB and the change's 291,288, with every object the same bytes and the
+times flat ([the
+record](https://github.com/buster14a/buster-performance/tree/cfb3faec63e81977de79432fe72727f524b5f17d/docs/measurements/dropped-ranges-628-2026-11-03),
+with the bisect).
+
 **On the 9700X.** The `changes` job now selects the compile-time attribution
 when the checker's reader, graph, parser, program or arena sources change, so
 this PR's job ran the step's own `measure-compile --runs 11` on the frozen
