@@ -116,6 +116,17 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "fallthrough before a label on a block that begins with a case", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: { case 2: return 1; }\n}\nreturn 0;\n}\n" },
         { "fallthrough before a label on a call", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: g(); case 2: return 1;\n}\nreturn 0;\n}\n" },
         { "fallthrough before a label on a null statement and a call", "void g(void);\nint f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); here: ; g(); case 2: return 1;\n}\nreturn 0;\n}\n" },
+        // Declarations that declare no variable, which clang's CFG doesn't add (#1126's review): a typedef, a static
+        // assertion, a tag's, a function's with a parameter, an enumerator's; but a variable's, an extern one's, a
+        // function pointer's whose type names a parameter, and a typedef of a variably modified type are statements.
+        { "fallthrough before a block of a typedef", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { typedef int T; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a static assertion and a tag", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); _Static_assert(1, \"\"); struct S; case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a function's declaration", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { int g(int p); } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before an enumeration and a struct", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { enum { Q = 3 }; struct T { int a; }; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a function pointer type", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { typedef int (*F)(int q); } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a variable", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { extern int z; } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a function pointer variable", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { int (*h)(int r); } case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "fallthrough before a variably modified typedef", "int f(int x, int y) {\nswitch (x) {\ncase 1: __attribute__((fallthrough)); { typedef int V[x]; } case 2: return 1;\n}\nreturn 0;\n}\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/label-attributes.c", directory);

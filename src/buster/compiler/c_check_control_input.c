@@ -673,19 +673,20 @@ static bool check_input_fallthrough_within(const Parser* parser, uint32_t token,
 #define BUSTER_CHECK_FALLTHROUGH_PLACED 1u
 #define BUSTER_CHECK_FALLTHROUGH_EMPTY 2u
 
-// Classifies statement `item` (its top token) for check_input_fallthrough_placed, as clang's CFG check
+// What one statement (`item`, its top token) is on its own for check_input_fallthrough_item, as clang's CFG check
 // (FallthroughMapper::checkFallThroughIntoBlock) looks back from a case's block: a block without executable statements is
-// looked through to the ones before it (#1126's review), so a null statement, a compound of empty statements and a plain
-// label on an empty statement are EMPTY; a compound is its first statement that isn't; a case or default label is
-// PLACED; and a plain label directly on a case label is not (clang takes such a label's block as the case's own and
-// doesn't look through it), nor is any other statement. `depth` bounds the nesting it follows, as clang's bracket depth
-// does.
-static uint32_t check_input_fallthrough_item(const CheckInputReader* reader, uint32_t item, uint32_t depth)
+// looked through to the ones before it (#1126's review). A null statement is EMPTY, and so is a declaration that adds
+// nothing to clang's CFG; a case or default label is PLACED; a compound or a plain label is BUSTER_CHECK_FALLTHROUGH_DESCEND,
+// its items or its statement deciding (`*inner`, the first to look at), but a plain label directly on a case label isn't
+// placed (clang takes such a label's block as the case's own and doesn't look through it); any other statement is OTHER.
+#define BUSTER_CHECK_FALLTHROUGH_DESCEND 3u
+static uint32_t check_input_fallthrough_statement(const CheckInputReader* reader, uint32_t item, uint32_t* inner)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const uint8_t role = item < count ? parser->tree.roles[item] : PARSE_ROLE_NONE;
     uint32_t result = BUSTER_CHECK_FALLTHROUGH_OTHER;
+    *inner = BUSTER_CHECK_NONE;
     if (item < count && parser->tokens.kinds[item] == PARSE_KIND_SEMI && (item == 0 || !check_input_fallthrough_within(parser, item - 1, item)))
     {
         result = BUSTER_CHECK_FALLTHROUGH_EMPTY;
@@ -694,17 +695,62 @@ static uint32_t check_input_fallthrough_item(const CheckInputReader* reader, uin
     {
         result = BUSTER_CHECK_FALLTHROUGH_PLACED;
     }
-    else if (role == PARSE_ROLE_CLOSE_BLOCK && depth < 256)
+    else if (role == PARSE_ROLE_OPEN_BLOCK)
     {
-        // The compound's items in order (its children but its opening brace), its first that isn't empty deciding; an
-        // all-empty one is empty.
+        // A compound's opening brace, its first child.
         result = BUSTER_CHECK_FALLTHROUGH_EMPTY;
-        for (uint32_t child = reader->first_child[item]; result == BUSTER_CHECK_FALLTHROUGH_EMPTY && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
-        {
-            result = parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK ? check_input_fallthrough_item(reader, child, depth + 1) : result;
-        }
     }
-    else if (role == PARSE_ROLE_LABEL && depth < 256)
+    else if (item < count && parser->tokens.kinds[item] == PARSE_KIND_SEMI)
+    {
+        // A declaration that declares no variable, which clang's CFG doesn't add (CFGBuilder::VisitDeclSubExpr, #1126's
+        // review): a typedef but of a variably modified type, a tag's, a function's, an enumerator's, a static assertion
+        // or a local label's (`__label__`). A variable's declaration, any statement's: other.
+        uint32_t first = item;
+        while (first > 0 && check_input_fallthrough_within(parser, first - 1, item))
+        {
+            first -= 1;
+        }
+        const uint8_t first_kind = parser->tokens.kinds[first];
+        bool declares = first_kind == PARSE_KIND_STATIC_ASSERT || first_kind == PARSE_KIND_LABEL;
+        bool runs = false;
+        for (uint32_t token = first; token < item; token += 1)
+        {
+            const bool declared = reader->output->declarations[token] == token;
+            const uint8_t binding = declared ? reader->declaration_kinds[token] : C_BINDING_KINDS;
+            const TypeId type = binding == C_BINDING_TYPEDEF ? reader->declared_types[token] : 0;
+            // A prototype's parameter is no variable of the block's: it is inside a function declarator's parentheses
+            // (which the two parsers mark as a call's or a function's), after their `(`, where the declared name, the
+            // declarator's callee, is before it.
+            bool parameter = false;
+            uint32_t below = token;
+            uint32_t at = declared ? parser->tree.parents[token] : item;
+            while (at < item && !parameter)
+            {
+                const uint8_t at_role = parser->tree.roles[at];
+                uint32_t open = BUSTER_CHECK_NONE;
+                for (uint32_t child = at_role == PARSE_ROLE_CLOSE_CALL || at_role == PARSE_ROLE_CLOSE_FUNCTION ? reader->first_child[at] : BUSTER_CHECK_NONE;
+                     child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+                {
+                    open = parser->tree.roles[child] == PARSE_ROLE_OPEN_CALL || parser->tree.roles[child] == PARSE_ROLE_OPEN_FUNCTION ? child : open;
+                }
+                parameter = open != BUSTER_CHECK_NONE && open < below;
+                below = at;
+                at = parser->tree.parents[at];
+            }
+            const bool variable = binding == C_BINDING_OBJECT && !parameter;
+            const bool variably = type != 0 && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0;
+            declares |= declared || parser->tree.roles[token] == PARSE_ROLE_TAG;
+            runs |= variable || variably;
+        }
+        result = declares && !runs ? BUSTER_CHECK_FALLTHROUGH_EMPTY : BUSTER_CHECK_FALLTHROUGH_OTHER;
+    }
+    else if (role == PARSE_ROLE_CLOSE_BLOCK)
+    {
+        // The compound's items in order, its first that isn't empty deciding; an empty one is empty.
+        *inner = reader->first_child[item];
+        result = *inner != BUSTER_CHECK_NONE ? BUSTER_CHECK_FALLTHROUGH_DESCEND : BUSTER_CHECK_FALLTHROUGH_EMPTY;
+    }
+    else if (role == PARSE_ROLE_LABEL)
     {
         // A plain label's statement: its child after it (the name is before it).
         uint32_t statement = BUSTER_CHECK_NONE;
@@ -713,7 +759,54 @@ static uint32_t check_input_fallthrough_item(const CheckInputReader* reader, uin
             statement = statement == BUSTER_CHECK_NONE && child > item ? child : statement;
         }
         const bool case_label = statement < count && parser->tree.roles[statement] == PARSE_ROLE_CLOSE_CASE;
-        result = statement < count && !case_label ? check_input_fallthrough_item(reader, statement, depth + 1) : BUSTER_CHECK_FALLTHROUGH_OTHER;
+        *inner = statement;
+        result = case_label ? BUSTER_CHECK_FALLTHROUGH_OTHER : statement != BUSTER_CHECK_NONE ? BUSTER_CHECK_FALLTHROUGH_DESCEND : BUSTER_CHECK_FALLTHROUGH_EMPTY;
+    }
+    return result;
+}
+
+// Classifies statement `item` for check_input_fallthrough_placed: its first statement in source order that isn't EMPTY
+// (check_input_fallthrough_statement), compounds' items and labels' statements looked into, decides; EMPTY if none
+// is. The walk goes down to a statement's inner one, and from an empty one on to its next sibling, or up to its
+// parent's, never above `item`: no recursion (the call graph's rule).
+static uint32_t check_input_fallthrough_item(const CheckInputReader* reader, uint32_t item)
+{
+    const Parser* parser = reader->parser;
+    uint32_t node = item;
+    uint32_t result = BUSTER_CHECK_NONE;
+    while (result == BUSTER_CHECK_NONE)
+    {
+        uint32_t inner = BUSTER_CHECK_NONE;
+        const uint32_t kind = check_input_fallthrough_statement(reader, node, &inner);
+        if (kind == BUSTER_CHECK_FALLTHROUGH_DESCEND)
+        {
+            node = inner;
+        }
+        else if (kind != BUSTER_CHECK_FALLTHROUGH_EMPTY)
+        {
+            result = kind;
+        }
+        else
+        {
+            // The next statement after an empty one: its next sibling, else its parent's, until `item` is done.
+            bool climbing = true;
+            while (result == BUSTER_CHECK_NONE && climbing)
+            {
+                if (node == item)
+                {
+                    result = BUSTER_CHECK_FALLTHROUGH_EMPTY;
+                }
+                else if (reader->next_child[node] != BUSTER_CHECK_NONE)
+                {
+                    node = reader->next_child[node];
+                    climbing = false;
+                }
+                else
+                {
+                    node = parser->tree.parents[node];
+                }
+            }
+        }
     }
     return result;
 }
@@ -745,7 +838,7 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
             uint32_t kind_of = BUSTER_CHECK_FALLTHROUGH_EMPTY;
             while (kind_of == BUSTER_CHECK_FALLTHROUGH_EMPTY && next < parent)
             {
-                kind_of = parser->tree.parents[next] == parent ? check_input_fallthrough_item(reader, next, 0) : BUSTER_CHECK_FALLTHROUGH_EMPTY;
+                kind_of = parser->tree.parents[next] == parent ? check_input_fallthrough_item(reader, next) : BUSTER_CHECK_FALLTHROUGH_EMPTY;
                 next += kind_of == BUSTER_CHECK_FALLTHROUGH_EMPTY;
             }
             if (kind_of != BUSTER_CHECK_FALLTHROUGH_EMPTY)
