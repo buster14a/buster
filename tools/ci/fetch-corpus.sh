@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# Frozen test inputs, independent of the physical benchmark host.
+# Frozen test inputs, independent of the physical benchmark host. With BUSTER_CI_CACHE (the 9700X's private cache) the
+# verified archive is reused from there (tools/ci/cached-download.sh); every file is verified after extraction either way.
 set -euo pipefail
 root=${1:?usage: fetch-corpus.sh DESTINATION}
 archive=$(mktemp)
 trap 'rm -f "$archive"' EXIT
-curl --fail --location --retry 3 \
+bash "$(dirname "$0")/cached-download.sh" \
     https://github.com/buster14a/buster-performance/releases/download/ci-corpora-preprocessor-391e729af658/preprocessor-391e729af658-ci.tar.zst \
-    --output "$archive"
+    ceb39bf938cd7a7469bbb53646c3318d0cbfdac4d37b6d05b183c4fd0b9898c2 "$archive"
 printf '%s  %s\n' ceb39bf938cd7a7469bbb53646c3318d0cbfdac4d37b6d05b183c4fd0b9898c2 "$archive" | sha256sum --check --status
 mkdir -p "$root"
 tar --zstd --extract --file "$archive" --directory "$root" --no-same-owner
