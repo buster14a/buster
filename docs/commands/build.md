@@ -44,7 +44,8 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
   tests for the configuration (below) without holding the tree's lock.
 - **clean** removes this environment's tree; with `--config`, that
   configuration's objects and outputs in it, not those both share (the call
-  graph's IR); with `--all`, every tree and the published files. Nothing else under `build/` (fixtures, `predefines.h`) is touched, and
+  graph's IR); with `--all`, every tree and the published files, once no
+  build or clean is using a tree. Nothing else under `build/` (fixtures, `predefines.h`) is touched, and
   no ordinary build deletes anything.
 - **configure** configures this environment's tree and builds nothing.
 - **print-sources**, **print-compile-flags** and **print-sanitizer-flags** print
@@ -152,9 +153,13 @@ names.
 the file system has none): the same file, so a benchmark through it starts
 exactly as through the tree's path, renamed into place only after the build
 succeeded, and only when it is another file. Publications wait for each other
-(`build/.publish.lock`), as do builds of one tree (`build/cmake/VARIANT.lock`);
-an interrupted, failed or partial build publishes nothing, and an unchanged one
-nothing again. CI runs the configuration's own path (`print-output`, exported
+(`build/.publish.lock`), as do builds and cleans of one tree
+(`build/cmake/VARIANT.lock`); every command on a tree holds
+`build/.trees.lock` shared while it holds the tree's, and `clean --all` waits
+for it exclusively, so it removes no tree a build is using. Each command takes
+these locks in that order, the trees', the tree's, then the publication's, so
+none waits for another that waits for it. An interrupted, failed or partial
+build publishes nothing, and an unchanged one nothing again. CI runs the configuration's own path (`print-output`, exported
 as `BUSTER_COMPILER`) and checks that `build/compiler` is that file. Ninja
 Multi-Config's `compile_commands.json` has every unit once per configuration;
 `build/compile_commands.json` has the published configuration's alone, which
@@ -292,8 +297,10 @@ it.
 `tools/ci/build_regression.c` (the `Build` workflow, on GitHub's runners)
 checks a fresh, an unchanged, an edited, a failed, an interrupted, a
 terminated and a switched build, an invalid setting, a configuration's clean,
+a clean and a `clean --all` during a build,
 the settings that change one step, the presets, the print commands, shifts and
 a lexer variant: what runs, what is published and what is left behind, not how
-long it takes. The build's clean, unchanged and edited timings come from the
+long it takes. Its `clean --all` check removes every tree under `build/cmake`
+first. The build's clean, unchanged and edited timings come from the
 9700X under its lock, with their raw records in
 [buster-performance](https://github.com/buster14a/buster-performance).

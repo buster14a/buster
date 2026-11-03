@@ -6,7 +6,8 @@
 //
 //   cc -std=c17 -O2 -Wall -Wextra -Werror -o build-regression tools/ci/build_regression.c && ./build-regression
 //
-// It removes this environment's tree and checks that
+// It removes every tree under build/cmake (clean --all) and checks that
+//   - a clean --all during a build waits for it, and then removes every tree and the published files;
 //   - a fresh ./build.sh builds and publishes the Release executable and its configuration's compile commands, and
 //     leaves no temporary file behind;
 //   - an unchanged build configures, compiles, links, bakes and publishes nothing;
@@ -15,7 +16,8 @@
 //   - Debug and Release share the tree, and switching back builds nothing and publishes that configuration's file;
 //   - BUSTER_BAKE reruns the post-link step alone, both ways, and BUSTER_LINKER the link;
 //   - a failed post-link step, a failed compile, an interrupt of the build's process group and a termination of
-//     build.sh alone publish nothing and leave nothing running, and an invalid setting configures nothing;
+//     build.sh alone publish nothing and leave nothing running, a clean of the tree during its build waits for the
+//     build, which publishes, and an invalid setting configures nothing;
 //   - clean --config removes that configuration's outputs alone, and check-call-graph fails at once without them;
 //   - the presets configure, build and test the same tree, and the print commands print NUL-delimited arguments;
 //   - shifts link the padded executables, each shift once, and lexer-variant builds a tree of its own.
@@ -674,6 +676,53 @@ static int finish_within(pid_t child, unsigned seconds)
     return status;
 }
 
+// A build, `build`'s ./build.sh in a session of its own, and 3 s into it, as it configures or compiles, a clean,
+// `clean`'s: both must end, the clean after saying it waits for `waits_for`. Lock waits that go round would leave both
+// waiting for good, which is reported after 600 s, once both are stopped.
+static void overlap(char* const* build, char* const* clean, const char* waits_for, const char* what)
+{
+    char build_log[PATH_MAX];
+    char clean_log[PATH_MAX];
+    snprintf(build_log, sizeof(build_log), "%s/overlapping-build.log", work);
+    snprintf(clean_log, sizeof(clean_log), "%s/overlapping-clean.log", work);
+    const pid_t builder = start(build_log, 0, build, true);
+    sleep_seconds(3);
+    const pid_t cleaner = start(clean_log, 0, clean, true);
+    const int built = finish_within(builder, 600);
+    const int cleaned = finish_within(cleaner, 60);
+    if (built < 0 || cleaned < 0)
+    {
+        kill(-builder, SIGTERM);
+        kill(-cleaner, SIGTERM);
+        finish_within(builder, 30);
+        finish_within(cleaner, 30);
+        fail("%s: the build and the clean still ran after 600 s, each waiting for the other", what);
+    }
+    Text said = read_file(clean_log);
+    const bool waited = strstr(said.data, waits_for) != 0;
+    free(said.data);
+    if (built != 0 || cleaned != 0 || !waited)
+    {
+        fputs(read_file(build_log).data, stderr);
+        fputs(read_file(clean_log).data, stderr);
+        fail("%s: the build exited with %d and the clean with %d, %s waiting", what, built, cleaned, waited ? "after" : "without");
+    }
+}
+
+// A clean --all while a Debug build configures and compiles the tree afresh: it waits for the build, which publishes,
+// and then removes every tree and the published files.
+static void check_clean_all(void)
+{
+    char* build[] = { "./build.sh", "--config", "Debug", 0 };
+    char* clean[] = { "./build.sh", "clean", "--all", 0 };
+    overlap(build, clean, "waiting for the other builds and cleans to end", "clean --all during a build");
+    if (access("build/cmake", F_OK) == 0 || access("build/compiler", F_OK) == 0 || access("build/compile_commands.json", F_OK) == 0)
+    {
+        fail("clean --all left a tree or a published file");
+    }
+    pass("clean --all waits for a build of a tree, then removes every tree and the published files");
+}
+
 static void check_failures(void)
 {
     // A post-link step that fails, by an nm that does.
@@ -761,13 +810,23 @@ static void check_failures(void)
         fail("the build after an interrupt didn't publish");
     }
 
+    // A clean of the tree while a build compiles in it: the clean waits for the build, which publishes.
+    utimensat(AT_FDCWD, "src/buster/compiler/main_unit_types.c", 0, 0);
+    char* clean_debug[] = { "./build.sh", "clean", "--config", "Debug", 0 };
+    overlap(argv, clean_debug, "waiting for another build or clean", "a clean of a tree during its build");
+    if (!same_file("build/compiler", release) || access(debug, F_OK) == 0)
+    {
+        fail("a clean during a build of its tree didn't wait for its publication or didn't clean");
+    }
+
     // An invalid setting, which must configure nothing.
     const char* const invalid[] = { "BUSTER_SANITIZER=invalid", 0 };
     if (build_with(invalid, true, "configure", (char*)0) == 0 || access("build/cmake/CMakeCache.txt", F_OK) == 0)
     {
         fail("an invalid setting configured a tree");
     }
-    pass("a failed post-link step, a failed compile, an interrupt, a termination and an invalid setting publish nothing");
+    pass("a failed post-link step, a failed compile, an interrupt, a termination and an invalid setting publish nothing, "
+         "and a clean during a build waits for it");
 
     // A configuration's clean, which takes its outputs alone, after which check-call-graph fails before capturing.
     BUILD("--config", "Debug");
@@ -914,6 +973,7 @@ int main(void)
     *strrchr(tree, '/') = 0;
     *strrchr(tree, '/') = 0;
     snprintf(ninja_log, sizeof(ninja_log), "%s/.ninja_log", tree);
+    check_clean_all();
     check_incremental();
     check_configurations();
     check_failures();

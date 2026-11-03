@@ -296,7 +296,6 @@ if [ "${BUSTER_PGO:-0}" = 1 ]; then
     [ "$config" = Release ] || die "BUSTER_PGO builds the Release configuration alone"
     configurations=Release
 fi
-mkdir -p "$root/build/cmake"
 tree="$root/build/cmake/$variant"
 binary="$tree/$config/compiler"
 
@@ -305,17 +304,39 @@ if [ "$command" = print-output ]; then
     exit 0
 fi
 
+# Takes descriptor $1's lock with flock's option $2 (-s shared, -x exclusive), at once when it is free, or else after
+# saying it waits for $3, in the background, so that a signal stops the wait at once; the lock is the descriptor's.
+hold()
+{
+    if ! flock -n "$2" "$1"; then
+        echo "build.sh: waiting for $3" >&2
+        run flock "$2" "$1"
+    fi
+}
+
+# The locks, always taken in this order, so that no two commands wait for each other: build/.trees.lock, which every
+# command on one tree holds shared as long as it holds the tree's and clean --all exclusively; the tree's,
+# build/cmake/VARIANT.lock, which its builds and cleans hold in turn; and build/.publish.lock, around a publication or a
+# clean of the published files. So clean --all removes no tree a command is using, nor a lock file one has open.
+mkdir -p "$root/build"
+exec {trees}> "$root/build/.trees.lock"
+if [ "$command" = clean ] && [ "$clean_all" = 1 ]; then
+    # Every tree and the published files: nothing else can be publishing, since a publication needs a tree's lock.
+    hold "$trees" -x "the other builds and cleans to end"
+    rm -rf -- "$root/build/cmake" "$root/build/compiler" "$root/build/compile_commands.json"
+    echo "build.sh: removed every tree under build/cmake and the published build/compiler" >&2
+    exit 0
+fi
+hold "$trees" -s "a clean --all to end"
+mkdir -p "$root/build/cmake"
+exec {lock}> "$tree.lock"
+hold "$lock" -x "another build or clean of ${tree#"$root/"}"
+
 if [ "$command" = clean ]; then
-    # Explicit cleaning: --all removes every tree and the published files; --config, that configuration's outputs in
-    # this settings' tree; neither, this settings' tree.
-    exec {publication}> "$root/build/.publish.lock"
-    flock "$publication"
-    if [ "$clean_all" = 1 ]; then
-        rm -rf -- "$root/build/cmake" "$root/build/compiler" "$root/build/compile_commands.json"
-        echo "build.sh: removed every tree under build/cmake and the published build/compiler" >&2
-    elif [ -d "$tree" ]; then
-        exec {lock}> "$tree.lock"
-        flock "$lock"
+    # Explicit cleaning: --config removes that configuration's outputs in this settings' tree; else, the whole tree.
+    if [ -d "$tree" ]; then
+        exec {publication}> "$root/build/.publish.lock"
+        flock "$publication"
         for configuration in Debug Release; do
             if [ "$config_given" = 0 ] || [ "$config" = "$configuration" ]; then
                 if [ "$root/build/compiler" -ef "$tree/$configuration/compiler" ]; then
@@ -359,12 +380,6 @@ tools="$(command -v nm llvm-nm readelf llvm-readelf wild mold ld.lld ld.bfd | tr
 stamp="$tree/build.sh.configuration"
 wanted="$(printf '%s\n' "$toolchain" "cmake $cmake $cmake_version" "ninja $ninja $ninja_version" "tools $tools" "${configure_arguments[@]}")"
 
-exec {lock}> "$tree.lock"
-if ! flock -n "$lock"; then
-    echo "build.sh: waiting for another build of ${tree#"$root/"}" >&2
-    # In the background, as the build runs, so that a signal stops the wait at once; the lock is the descriptor's.
-    run flock "$lock"
-fi
 if [ -d "$tree" ]; then
     previous=""
     if [ -f "$stamp" ]; then
@@ -469,6 +484,7 @@ case "$command" in
         build
         publish
         flock -u "$lock"
+        flock -u "$trees"
         ctest="${cmake%/*}/ctest"
         [ -x "$ctest" ] || ctest="$(command -v ctest)" || die "ctest isn't beside cmake or on PATH"
         run "$ctest" --test-dir "$tree" -C "$config" --output-on-failure "${arguments[@]}"
@@ -481,6 +497,7 @@ case "$command" in
         [ -x "$checker" ] || die "check-call-graph: $checker is missing; run ./build.sh first"
         build call-graph-ir
         flock -u "$lock"
+        flock -u "$trees"
         run "$cmake" "-DCOMPILER=$checker" "-DIR=$tree/call-graph" -P "$root/cmake/BusterCallGraph.cmake"
         ;;
     lexer-variant)
