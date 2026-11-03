@@ -625,7 +625,7 @@ that poison every caller-saved register (`tier1_call_test.c`):
   float, stack-argument and mask tests check it too.
 
 Measured with #1116's 32-bit moves, after #1117, at `6e1e6121` against main `b70deb47`
-([the record](https://github.com/buster14a/buster-performance/tree/80215f302ac2486cd290fe92c83feb1d21bf5aba/docs/measurements/tier1-code-quality-1116-2026-11-03)):
+([the record](https://github.com/buster14a/buster-performance/tree/b3b04fb39b07a267e9d5e0aba0346b739148a7fb/docs/measurements/tier1-code-quality-1116-2026-11-03)):
 
 - **Lua 5.4.8 by `--tier1 -c`**, all 1,104 functions Tier 1's: `call_stores` go from 5,956 to 3,165, `call_loads` from
   5,956 to 5,207, and `.text` from 289,580 to 260,789 bytes, against clang -O0's 273,461.
@@ -634,8 +634,11 @@ Measured with #1116's 32-bit moves, after #1117, at `6e1e6121` against main `b70
   and 3.8% fewer instructions on its tables and strings scripts, and as many on the other three.
 - **Compile time:** `--tier1 -c` of `sqlite3.c`, at `3b195d57` against main `703ae9f5`, each built at six placements of
   the backend's code and timed over them and fresh copies, takes 0.10% more instructions and 0.33% more user cycles
-  (main against itself: −0.05%). The extra time is in the emitter, `tier1_emit_cfg_records` and the scan for owed
-  loads. Before the definition's interval was looked up once and the rows kept in a vector, it was 0.17% and 0.50%.
+  (main against itself: −0.05%). Before the definition's interval was looked up once and the rows kept in a vector,
+  it was 0.17% and 0.50%. Throwaway builds price the instructions: the scan for owed loads, run twice, adds 3.09 M
+  (0.053%), and `rbp` out of the callee-saved registers takes 3.72 M away, with 5,046 more records and 3,165 more
+  spills in `sqlite3.c`. A bound at each call, skipping the scan before the first node that can need a load back,
+  would spend a good part of the scan's cost on its own searches, so the scan stays.
 
 An owed register's owner never changes while the load is owed: whatever would
 change it takes the value back first. So the emitter's view of where each value
