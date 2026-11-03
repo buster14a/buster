@@ -1006,9 +1006,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             firsts[first_count] = UINT64_MAX;
         }
-        for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
+        const CheckSparseWide attributes = input->attributes;
+        const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
+        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
         {
-            const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
+            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -1697,7 +1699,7 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .types = program->types,
                 .output = output,
                 .scalar = parser->options.scalar,
-                .internal = program->input->linkage[candidate->declaration] == 1,
+                .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
             };
             Scratch work = scratch_begin(output);
             check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);

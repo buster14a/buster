@@ -369,6 +369,17 @@ static const ChangesModule changes_modules[] = {
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
                    "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
     },
+    // #138's and #1189's programs, speedtest1 and Lua's scripts, by both tiers, clang -O0 and -O2 and tcc
+    // (measure-tier1-programs): where Tier 1's input or pipeline changes what --tier1 compiles them to (the checker's
+    // lowering into typed functions, the emission's Tier 1 step, the IR's lowering, promotion and optimizer, and Tier
+    // 1's selection, allocation, frames and emission), or the measurement does (its harness, and profile.c's timed
+    // processes, counters and medians, and compile_measure.c's file helpers, which it calls). The daily run measures
+    // main, Tier 0's column among them.
+    {
+        .name = "tier1_programs",
+        .sources = "tier1_programs_measure|profile|compile_measure|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
+                   "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|tier1_[a-z0-9_]*",
+    },
 };
 
 #define BUSTER_CHANGES_MODULE_COUNT (sizeof(changes_modules) / sizeof(changes_modules[0]))
@@ -1535,6 +1546,28 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "tools/performance/core.c",
         .outputs_true = "code performance",
         .outputs_false = "checker",
+    },
+    {
+        .name = "Tier 1's program measurement: its harness, its timing and Tier 1's input and pipeline",
+        .files = "src/buster/compiler/tier1_programs_measure.c src/buster/compiler/profile.c src/buster/compiler/c_check_program_lower.c "
+                 "src/buster/compiler/tier1_select.c src/buster/compiler/ir_lower.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the timing alone runs Tier 1's program measurement",
+        .files = "src/buster/compiler/profile.c",
+        .outputs_true = "tier1_programs",
+    },
+    {
+        .name = "the checker's lowering alone feeds Tier 1's programs",
+        .files = "src/buster/compiler/c_check_program_lower.c",
+        .outputs_true = "tier1_programs",
+    },
+    {
+        .name = "Tier 1's tests alone, or a source Tier 1 doesn't read, start no program measurement",
+        .files = "src/buster/compiler/tier1_select_test.c src/buster/compiler/ir_lower_test.c src/buster/compiler/c_lexer.c",
+        .outputs_true = "code",
+        .outputs_false = "tier1_programs",
     },
     {
         .name = "a checker test alone starts no conditioned samples, but the plain runs that check the twins",

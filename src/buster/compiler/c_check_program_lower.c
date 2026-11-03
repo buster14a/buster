@@ -1631,7 +1631,7 @@ static __attribute__((noinline)) uint32_t check_lower_first_classification(Check
         {
             const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
             const __mmask16 initialized = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
-                                          _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128()) &
+                                          _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(input->declaration_bits + token)), _mm_set1_epi8((char)BUSTER_CHECK_BITS_STATIC)) &
                                           _mm512_cmplt_epu32_mask(check_sparse_vector(input->initializer_begins, token), check_sparse_vector(input->initializer_ends, token));
             for (uint32_t bits = initialized; bits != 0 && found == none; bits &= bits - 1)
             {
@@ -1641,7 +1641,7 @@ static __attribute__((noinline)) uint32_t check_lower_first_classification(Check
         }
         for (; found == none && token < limit; token += 1)
         {
-            if (input->declarations[token] == token && input->static_objects[token] && check_sparse_get(input->initializer_begins, token) < check_sparse_get(input->initializer_ends, token) &&
+            if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && check_sparse_get(input->initializer_begins, token) < check_sparse_get(input->initializer_ends, token) &&
                 check_lower_initializer_names_function(input, token))
             {
                 found = token;
@@ -7862,7 +7862,7 @@ static __attribute__((noinline)) void check_lower_bit_int_node(CheckLowerWriter*
     {
         const bool aggregate = check_lower_aggregate(writer, value.type);
         const bool compound = op == CHECK_OP_VALUE && !initialized && value.object != 0 && value.object < program->object_count &&
-                              program->input->compound_objects[value.object - 1] && !program->input->static_objects[value.object - 1];
+                              check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC);
         const bool loaded = op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ||
                             op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_CALL || op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_BIT_CAST;
         if (bit_int && loaded && !folded && !address && !discard && !aggregate && !compound)
@@ -8538,7 +8538,7 @@ static bool check_lower_constant_bytes(const CheckLowerWriter* writer, uint32_t 
     const CheckValue node_value = node < program->stream->count ? check_stream_value(program->stream, node) : (CheckValue){ 0 };
     const CheckValue* value = node < program->stream->count ? &node_value : NULL;
     bool result = value != NULL && !check_lower_copy_volatile(writer, value, 0) && program->input->graph.ops[node] == CHECK_OP_VALUE && value->object != 0 && value->object < program->object_count &&
-                  program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1] &&
+                  check_input_bit(program->input->declaration_bits, value->object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, value->object - 1, BUSTER_CHECK_BITS_STATIC) &&
                   program->initializers != 0 && size != 0 && size <= 64;
     const uint32_t selected = result ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
     const CheckInitializer* plan = selected != 0 ? program->initializers->plans + selected - 1 : NULL;
@@ -9443,7 +9443,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         check_lower_bit_int_node(writer, node, address, initialized, discard);
     }
     else if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
-             program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
+             check_input_bit(program->input->declaration_bits, value->object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, value->object - 1, BUSTER_CHECK_BITS_STATIC))
     {
         const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
         if (check_lower_local_of(writer, value->object) == BUSTER_CHECK_NONE && check_lower_classless_vector(writer, value->type))
@@ -10858,7 +10858,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint8_t role = control.target < input->token_count ? program->parser->tree.roles[control.target] : 0;
     const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
-    const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? input->attributes[declaration] : 0;
+    const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? check_input_attributes_at(input, declaration) : 0;
     // Its type's alignment, or its declaration's attribute's where larger (the log2 plus one, 0 for none).
     const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
     const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
@@ -11434,7 +11434,7 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
         for (uint32_t declaration = 0; declaration < input->token_count && lowered->status == CHECK_PROGRAM_OK; declaration += 1)
         {
             const uint32_t identifier = parser->tokens.names[declaration];
-            if (input->declarations[declaration] == declaration && input->linkage[declaration] != 0 && identifier < identifiers->count &&
+            if (input->declarations[declaration] == declaration && check_input_linkage(input->declaration_bits, declaration) != 0 && identifier < identifiers->count &&
                 intern_length(identifiers, identifier) == sizeof(name) - 1 && memcmp(intern_bytes(identifiers, identifier), name, sizeof(name) - 1) == 0)
             {
                 const TypeId type = type_strip_aligned(program->types, input->declared_types[declaration]);
@@ -11451,7 +11451,7 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
                     lowered->reason = "a declaration of __errno_location other than int *(void)";
                     lowered->token = declaration;
                 }
-                else if (input->linkage[declaration] == 2)
+                else if (check_input_linkage(input->declaration_bits, declaration) == 2)
                 {
                     const uint32_t object = input->objects[declaration];
                     if (object != 0 && object < program->object_count && program->object_symbols[object] != 0)
@@ -11613,7 +11613,7 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
     const uint32_t* declarations = input->declarations;
     const uint32_t* objects = input->objects;
     const IdentId* names = program->parser->tokens.names;
-    const uint8_t* linkage = input->linkage;
+    const uint8_t* declaration_bits = input->declaration_bits;
     const SymbolId* object_symbols = program->object_symbols;
     const uint32_t object_count = program->object_count;
     const uint32_t count = scalar ? input->token_count : declaring_count;
@@ -11622,7 +11622,7 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
         const uint32_t declaration = scalar ? d : declaring[d];
         const uint32_t object = objects[declaration];
         const IdentId name = names[declaration];
-        if (name != 0 && declarations[declaration] == declaration && linkage[declaration] == 2 && object != 0 && object < object_count)
+        if (name != 0 && declarations[declaration] == declaration && check_input_linkage(declaration_bits, declaration) == 2 && object != 0 && object < object_count)
         {
             // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
             bool any = false;
@@ -11650,7 +11650,7 @@ static bool check_lower_local_declaration(const CheckProgram* program, uint32_t 
     // A local that code the writer left out declares (CheckProgram.dropped_ranges, #1108) gets no place: nothing reads it,
     // and a variable-length array's allocation went with its declaration.
     return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count &&
-           input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token] &&
+           input->declaration_kinds[token] == C_BINDING_OBJECT && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) &&
            (program->dropped_range_count == 0 || !check_program_token_dropped(program, token));
 }
 
@@ -12484,7 +12484,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
             const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
             // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
-            const CheckInputAttributes* attributes = named && !promoted ? input->attributes[parameter] : NULL;
+            const CheckInputAttributes* attributes = named && !promoted ? check_input_attributes_at(input, parameter) : NULL;
             // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
             // realigned frame, or where they arrive).
             const bool aggregate = check_lower_aggregate(writer, parameter_type);
@@ -12531,7 +12531,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const TypeId incoming_type = check_input_kr_parameter_type(types, declared_type);
             if (incoming_type != type_unqualified(declared_type))
             {
-                const CheckInputAttributes* attributes = input->attributes[parameter];
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, parameter);
                 const uint32_t requested = attributes != NULL && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
                 const uint32_t natural = type_alignment_log2(types, declared_type);
                 const uint32_t alignment = requested > natural ? requested : natural;
@@ -12608,13 +12608,13 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 const TypeId local_type = input->declared_types[declaration];
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
-                const CheckInputAttributes* attributes = input->attributes[declaration];
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
                 // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
                 // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
                 // compound literal, which takes its type's.
                 const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
                 const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
-                                                    !input->compound_objects[input->objects[declaration] - 1] && type_large_array(types, local_type) ? 4 : 0;
+                                                    !check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && type_large_array(types, local_type) ? 4 : 0;
                 const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
                 uint32_t local = BUSTER_CHECK_NONE;
                 writer->token = declaration;
@@ -12643,7 +12643,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     // A memory class's value is a frame object too (check_lower_memory_class), aligned to 16.
                     local = check_lower_object(writer, type_size(types, local_type), alignment);
                 }
-                else if (input->compound_objects[input->objects[declaration] - 1] && check_lower_classless_vector(writer, local_type))
+                else if (check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && check_lower_classless_vector(writer, local_type))
                 {
                     // A compound literal of a vector Tier 0 has no class for (of 2, 4 or 8 bytes) has no local: a
                     // narrowing shuffle reads its constants at compile time (the intrinsics' (__v4qi){0, 0, 0, 0}:
