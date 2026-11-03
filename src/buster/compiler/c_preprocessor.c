@@ -14961,7 +14961,7 @@ static uint32_t pp_binary_operator(uint8_t kind)
     return result;
 }
 
-// Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix and digit separators, and the suffixes
+// Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
 // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
 static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
 {
@@ -14975,6 +14975,11 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
     else if (length >= 2 && spelling[0] == '0' && (spelling[1] == 'b' || spelling[1] == 'B'))
     {
         radix = 2;
+        i = 2;
+    }
+    else if (length >= 3 && spelling[0] == '0' && (spelling[1] | 0x20) == 'o' && spelling[2] >= '0' && spelling[2] <= '7')
+    {
+        radix = 8;
         i = 2;
     }
     else if (spelling[0] == '0')
