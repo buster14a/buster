@@ -67,7 +67,10 @@ requirements. [Command index](README.md).
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
-  `--program-selection` selects the emission-selection and constant-if regressions alone, including #1194's
+  `--program-selection` selects the emission-selection, constant-if and constant-switch regressions alone.
+  The switch fixtures (#1192, `c_check_program_switch_test.c`) cover matching/default/no-match dispatch,
+  fallthrough, converted values, range ordering, label/declaration/inner-break fallbacks, nonfoldable selectors,
+  nested scopes, cleanups, VLAs and dropped statics. The constant-if fixtures include #1194's
   statement-expression paths: scalar/vector and eager/lazy objects must agree byte for byte and match Clang's
   symbols and execution. These checks remain in the default suite too.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
