@@ -27,7 +27,9 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
 
 static bool ir_interpreter_simd_supported(const IrFunction* function)
 {
-    bool supported = !ir_vector_type(function->result_type);
+    // A machine row (#141, IrFunction.rows) is x86 records, which the interpreter has no model of: Tier 1's native code
+    // is their oracle, against Tier 0's of the same rows.
+    bool supported = !ir_vector_type(function->result_type) && function->row_count == 0;
     for (uint32_t p = 0; supported && p < function->parameter_count; p += 1)
     {
         supported = !ir_vector_type(function->parameter_types[p]);

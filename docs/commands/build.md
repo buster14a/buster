@@ -290,7 +290,10 @@ their code's placements (#509, "Comparing two versions" in
 9700X. The padding is a section of its own, `.text.buster_shift_padding`,
 with the source's `.text`'s alignment and `SHF_GNU_RETAIN`, which the linkers
 place right before the source's objects; the step fails when the linker dropped
-it.
+it. The padding moves units' `.text`, never the page-aligned `.text.buster_checker`
+that holds the checker's own code. To place that code, build with
+`BUSTER_BUILD_DEFINES=-DBUSTER_CHECKER_OFFSET=N` (`main.c`, a multiple of 16 below
+4,096), one full build per offset (#1233).
 
 ## Regressions and timings
 

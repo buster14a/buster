@@ -697,6 +697,8 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/atomics.ir",
                 "tests/ir/wide.ir",
                 "tests/ir/intrinsics.ir",
+                "tests/ir/rows.ir",
+                "tests/ir/carrier-rows.ir",
             };
             for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)
             {

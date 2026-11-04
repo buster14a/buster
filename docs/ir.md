@@ -37,7 +37,7 @@ no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
 with `IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c` checks actual C
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
 promotion of a function with vectors (#141) and of one whose only SIMD values
 are masks (#179), as ordinary corpus mode requires promotion of every
@@ -548,6 +548,96 @@ each against values a Zen 5's instructions give (an index, a start or a length
 at and past the width, of zero, and of the control's bytes alone), and
 `test-checker-driver`'s Tier 1 fixture of the builtins runs both units' code by
 `-march=x86-64-v3` against clang's.
+
+### Machine rows (#141)
+
+The typed stream compiles C's vector operators on elements other than 32-bit
+integers, and every vector builtin, as X86 rows (`Tier0Operation`, #717): records
+whose registers are Tier 0's roles. The IR has no operation per element type or
+per builtin (its type masks hold 32 types and its opcode tables 64 opcodes, and
+the builtins number in the hundreds), so such a row is the IR's machine row, which
+a row call runs: an `IR_CALL` whose descriptor names the row (`IrCall.row`, 1 plus
+its index in `IrFunction.rows`) in place of a callee, its symbol `a` 0. Its
+arguments are the row's operands in order and its result the row's, of the types
+`ir_row_type` gives their classes: an integer's of its bytes, whatever its
+signedness, a float's or a double's, a vector's container of its bytes (`v4i32`,
+`v8i32` or `v16i32`, whatever its elements: the row's records give its bits their
+meaning; an SSE carrier's `f32` or `f64`, below), a mask's of its bytes, and
+`void` for a row of no result (a masked store's). A row call is as opaque to the passes as a call of an unknown function,
+which reads and writes memory: SSA promotion and SCCP, dead code and CFG cleanup
+keep it where it is, and GVN and LICM refuse a function with a row, as they refuse
+every SIMD function (`ir_function_has_simd`), and so does SROA without #1282's
+`simd` option; the inliner clones a callee's rows with it, rebasing its row calls'
+`IrCall.row`, a row call staying a call ([the inlining guide](ir-inlining.md)'s
+"SIMD callees and by-value vectors"); the interpreter
+refuses one too, having no model of x86 records (Tier 1's native code is its
+oracle, against Tier 0's). The verifier checks each row call's descriptor against
+its row (`ir_row_call_valid`): no symbol, no ABI records and no variadic
+arguments, one fixed argument per operand of its operand's type, the result the
+row's, and the row within its columns; the records themselves are the producer's,
+trusted as `IrPassed`'s locations are, and Tier 1 checks them
+(`tier0_operation_valid`) before it places them ([the selection
+guide](tier1-selection.md)'s "Machine rows"). The lowering copies a row's used
+fields alone, its unused records and operands zero, so that equal rows are equal
+bytes.
+
+The text has a line per row before the slots, its operands' classes and its
+result's (the typed stream's names, a vector's and a mask's with their bytes:
+`vector64`, `mask8`) and each record as `[<form> reg vvvv rm index mode decorations
+immediate displacement]`, the form by its `X86Form` name without `X86_FORM_`, so
+that the text doesn't depend on the form table's order; a row call names its row
+as `row #k`:
+
+```
+  row #0 (vector64, vector64, mask8) -> vector64 [VPADDB_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]
+  %4 = call.v16i32 row #0(%0, %1, %2) fixed=(v16i32, v16i32, m64) variadic=0
+```
+
+#### SSE carriers (#1280)
+
+The typed stream's `VECTOR` class has values of 4 and 8 bytes too, the SSE
+carriers: the narrow vectors of the intrinsics' shuffles and conversions (the
+operand of `_mm256_cvtepu8_epi32`'s `vpmovzxbd`, the shuffle of `__m128i` to 8
+bytes that makes it) and MMX's `__m64`. Their IR type is `f64` for 8 bytes and
+`f32` for 4 (`ir_typed_stack_type`, `ir_row_type`), containers of their bits as
+`v4i32` is a 16-byte vector's. The lowering carries them as any vector:
+
+- a constant's first word becomes a `const` of its bits;
+- `LOCAL` and `STORE_LOCAL` objects, loads and stores move their bytes, at their
+  own alignment;
+- `DUP` and `DISCARD` keep or drop them;
+- the edge slots hold them by depth and type, as every value.
+
+These are bits, not floats, and the existing types keep them exact:
+
+- the lowering gives them no floating operation: only a row reads one, and the
+  IR's own vector decoders take 16, 32 and 64 bytes alone;
+- SCCP and dead code elimination have no floating arithmetic to fold them by;
+  their constants are bit patterns, a signaling NaN's among them, and GVN numbers
+  no floating operation but `fneg`, which they never have;
+- Tier 1's moves of `f32` and `f64` are bit moves ([the selection
+  guide](tier1-selection.md)'s "Machine rows"). Each row operand is zero-extended
+  into its role, as Tier 0's reloads leave it, which the rows rely on. The
+  verifier admits any `f32` or `f64` value as a carrier operand, a parameter's or
+  a call's among them, whose bytes past it the convention leaves undefined.
+
+Two new types would have needed their own moves, spills and constants in Tier 1,
+a place in the type masks and in the SIMD model's contiguous shapes, and the
+interpreter's and the parser's support, for no bit these two don't keep.
+An SSE carrier's row takes AVX512F and VL, as any vector narrower than 64 bytes
+does, for the moves that stage it.
+
+`tests/ir/rows.ir` reads rows of a vector, a mask and no result back, a row of two
+records among them, and `tests/ir/carrier-rows.ir` rows of SSE carriers' operands
+and results, their constants (a signaling NaN's bits and -0's), loads, stores and a
+phi across a loop. `test-ir`'s SIMD checks refuse a row call with a symbol, a row
+past the column, an argument or a result of another type (an SSE carrier's of a
+vector's type among them), an argument too few, a variadic or an indirect one, and
+a row of a 12-byte vector, and accept an SSE carrier's of an `f64` and of an
+`f32`. `test-ir-simd`'s machine row decoding takes carriers' operands and results,
+with VL's moves, and refuses vectors of 2 and 12 bytes. `test-ir-source --simd`
+runs `tests/ir/vector-rows.c`'s and `tests/ir/carrier-rows.c`'s functions through
+both lowerings, both promoters and the text's round trip.
 
 ### Effects through the consumers (#1059)
 

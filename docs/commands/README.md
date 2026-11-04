@@ -29,6 +29,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-checker-asm` | `c_check_program_asm.c` | [checker-asm](checker-asm.md) |
 | `test-checker-corpus` | `c_check_corpus.c` | [checker-corpus](checker-corpus.md) |
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |
+| benchpress (the 9700X) over the tailnet | `.claude/hooks/join-tailnet.sh` | [benchpress](benchpress.md) |
 | `correctness.tests / CI selection` | `tools/ci/correctness.tests` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite` | `c_testsuite.c` | [c-testsuite](c-testsuite.md) |
@@ -78,7 +79,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |
 | `test-streaming, benchmark-streaming` | `streaming.c` | [streaming](streaming.md) |
 | `test-tier0, benchmark-backend, benchmark-backend-source` | `tier0.c` | [tier0](tier0.md) |
-| `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs` | `tier1_select.c`, `tier1_programs_measure.c` | [tier1](tier1.md) |
+| `test-tier1-select, test-tier1-pipeline, test-tier1-masks, measure-tier1-programs, measure-tier1-rows` | `tier1_select.c`, `tier1_programs_measure.c`, `tier1_rows_measure.c` | [tier1](tier1.md) |
 | `test-tier1-allocation, benchmark-tier1-allocation` | `tier1_allocate.c` | [tier1-allocation](tier1-allocation.md) |
 | `benchmark-tier1-certificate`, `benchmark-tier1-code-certificate`, allocation and code certificate checks | `tier1_certificate.c` | [tier1-certificate](tier1-certificate.md) |
 | `test-tier1-cfg, test-tier1-cfg-source` | `tier1_cfg.c` | [tier1-cfg](tier1-cfg.md) |

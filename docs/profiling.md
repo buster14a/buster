@@ -146,6 +146,32 @@ The noise sets which comparison to use.
     placements −2.9% to +4.8%), main against itself −0.11% to −0.77%, at the same instructions in an unchanged unit.
     The old way read the head +1.0% to +1.6%, and +3.0% to +4.5% for its other commit. Code this sensitive needs
     more placements than six to resolve 1%.
+- **The checker's own code (#1233).** `shifts` pads a unit's `.text`, and the checker's code isn't there. It is in
+  `.text.buster_checker`, which every unit starts on a page and which wild places first, so no shift moves it, nor any
+  other page-aligned code at the start of `.text`. Shifts in multiples of 64 also leave every function they do move
+  at its offset in its line.
+
+  A change inside the checker's unit can still move that code. #1141's merge changed the order clang emits the unit's
+  functions in, which put the checker's hot functions 32 bytes later modulo 64. At that one placement it read +0.16%
+  in user cycles on Lua's 33 units by `--lanes 1 -c` and +0.34% on `sqlite3.c`'s `-c`, all of it front-end stalls and
+  with fewer instructions. Over eight offsets of the checker's code in each tree it read +0.06% and +0.04%, where each
+  tree's offsets spread its cycles by 0.2% to 0.8% ([the
+  record](https://github.com/buster14a/buster-performance/tree/84409e3f8681820d1dc73837f2d45694d2603416/docs/measurements/cycles-without-instructions-1233-2026-11-04)).
+
+  To sample the checker's placement, build each tree at several offsets with `BUSTER_CHECKER_OFFSET` (`main.c`: a
+  multiple of 16 below 4,096, the bytes the checker's code starts into its page). Each offset is a full build; copy
+  the executable out of `build/` after each, then give each offset to `time-runs` as a placement of its build:
+
+  ```sh
+  mkdir -p ../offsets/mine
+  for n in 0 16 32 48 1040 2080 3120 4032; do
+      BUSTER_BUILD_DEFINES="-DBUSTER_CHECKER_OFFSET=$n" ./build.sh && cp build/compiler "../offsets/mine/compiler-$n"
+  done
+  ```
+
+  Read the difference over several holds. Each hold's fresh copies carry their own physical pages: the same
+  executables moved by up to 0.6% between holds, more than one hold's error bars allow. `time-runs` also runs its
+  slots in one cyclic order, so each executable follows the same one in every run (#1311).
 - **Short runs on many lanes: the reference twice, and a balanced order.** A run of a few milliseconds on several cores
   varies with what ran before it: the other cores' idle states and clocks (only CPU 2 runs the performance governor),
   and its threads' waits and scheduling. `link-foreign`'s 2,000-worker dynamic PIE on eight lanes took 2.2 to 2.8 ms
@@ -310,7 +336,9 @@ has its own code, and a change to a later unit's strings moves `lea`s in unrelat
   that code by 0 to 1,024 bytes changed the driver by 0.24%; by #509's method ("Comparing two versions"), the
   section's build read −0.14%, −0.01% and −0.03% against main in user cycles ([the
   record](https://github.com/buster14a/buster-performance/tree/dd92b91a/docs/measurements/checker-placement-502-2026-10-27)).
-  A new source of the checker goes between those pragmas.
+  A new source of the checker goes between those pragmas. For the same reason `./build.sh shifts` doesn't move it,
+  while a change inside the checker's own code does: sample its placement with `BUSTER_CHECKER_OFFSET` ("Comparing two
+  versions", #1233).
   Two floors stay whatever the layout: a byte-identical copy of an executable ran 0.3% faster or slower than the
   original (the physical pages its code gets), and one executable drifted by up to 2% between `perf stat` sessions.
   Read a whole driver's difference against them, over copies and sessions.
