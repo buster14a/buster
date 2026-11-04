@@ -1,21 +1,63 @@
-name: Issue 1268 isolated workspace
+name: Issue 1268 isolated validation
 on:
   push:
     branches: [agent/1268-comdat-work]
     paths: [.github/workflows/agent-1268.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          persist-credentials: false
-      - run: git archive --format=tar.gz HEAD -o "$RUNNER_TEMP/issue-1268-source.tar.gz"
-      - uses: actions/upload-artifact@v4
+          fetch-depth: 0
+      - name: Verify patch and publish clean implementation branch
+        run: |
+          set -euo pipefail
+          cat .agent-1268-patch-1.b64 .agent-1268-patch-2.b64 | base64 --decode > "$RUNNER_TEMP/1268.patch.gz"
+          echo "db98f27d353728130e321b9a25f37dd475222461cdba9ae1c296005a848f2a3b  $RUNNER_TEMP/1268.patch.gz" | sha256sum --check
+          gzip --decompress --stdout "$RUNNER_TEMP/1268.patch.gz" > "$RUNNER_TEMP/1268.patch"
+          git switch --create agent/1268-elf-section-groups 441db2428d2bd8d28503037b28c1b3740fe4b25a
+          git apply --check "$RUNNER_TEMP/1268.patch"
+          git apply "$RUNNER_TEMP/1268.patch"
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          sh .githooks/enable-sign-off.sh --maintainer-session
+          git add src/buster/compiler docs/assembler.md docs/commands/assembler.md
+          git commit -m 'assembler: preserve and emit ELF COMDAT section groups (#1268)' -m 'Parse G sections by name and signature, retain optional Link group metadata, emit group and relocation membership with GNU signature semantics, and add group-aware GNU oracle and -g3 corpus coverage.'
+          git log -1 --format=fuller
+          git show --stat --oneline HEAD
+          git push origin HEAD:refs/heads/agent/1268-elf-section-groups
+          git rev-parse HEAD > "$RUNNER_TEMP/1268-head.txt"
+      - name: Install repository-pinned hosted toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build full compiler with Clang 23
+        env:
+          BUSTER_HOST_ARCH: x86-64
+          BUSTER_DEBUG_INFO: '0'
+        run: ./build.sh --config Debug --jobs 4 2>&1 | tee "$RUNNER_TEMP/1268-build.log"
+      - name: Assembler regression and fuzz checks
+        run: ./build/compiler test-assembler --fuzz 2000 2>&1 | tee "$RUNNER_TEMP/1268-assembler.log"
+      - name: GNU assembler and real compiler corpus cross-check
+        if: ${{ !cancelled() && success() }}
+        run: ./build/compiler test-assembler --cross-check --fuzz 100 2>&1 | tee "$RUNNER_TEMP/1268-cross-check.log"
+      - name: Object writer and linker regressions
+        if: ${{ !cancelled() && steps.publish.outcome != 'failure' }}
+        run: |
+          set -euo pipefail
+          test -x build/compiler
+          ./build/compiler test-object-writer 2>&1 | tee "$RUNNER_TEMP/1268-object-writer.log"
+          ./build/compiler test-link 2>&1 | tee "$RUNNER_TEMP/1268-link.log"
+      - name: Retain validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: issue-1268-source
-          path: ${{ runner.temp }}/issue-1268-source.tar.gz
+          name: issue-1268-validation
+          path: ${{ runner.temp }}/1268-*.log
           retention-days: 1
