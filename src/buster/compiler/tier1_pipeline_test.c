@@ -1498,7 +1498,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         tier1_pipeline_expect(test, emitted->reference_count == fixture.program.functions[f].call_count, "every original direct call survives optimization and reaches a symbolic native call");
                         if (emitted->reference_count != 0)
                         {
-                            tier1_pipeline_expect(test, !emitted->frame.red_zone && emitted->call_stores == emitted->call_loads, "callers use a real frame and balance caller-save stores and reloads");
+                            // A saved value's load waits until something reads it, and a row that holds its value isn't
+                            // stored again (#1116), so the totals needn't balance; each store is loaded back, which the
+                            // records show store by store.
+                            tier1_pipeline_expect(test, !emitted->frame.red_zone && tier1_emit_test_saves_loaded(emitted), "callers use a real frame and load back each value they save");
                         }
                         if (shape == 1 || (shape == 2 && !test->rematerialize))
                         {

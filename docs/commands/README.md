@@ -41,6 +41,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-dominators, benchmark-dominators` | `dominators.c` | [dominators](dominators.md) |
 | `test-emission-metadata` | `emission_metadata.c` | [emission-metadata](emission-metadata.md) |
 | `-E, parse, -fsyntax-only, -c` | `main.c` | [driver](driver.md) |
+| `test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
 | `test-executable, test-dynamic, test-static` | `executable.c` | [executable](executable.md) |
 | `test-files, benchmark-files` | `c_files.c` | [files](files.md) |
 | `benchmark-floors` | `link_benchmark.c` | [floors](floors.md) |
@@ -67,7 +68,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-lowering-templates` | `c_check_program_templates.c` | [lowering](lowering.md#node-templates-1048) |
 | `test-object-writer, benchmark-object-writer` | `object_writer.c` | [object-writer](object-writer.md) |
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
-| `parallel, test-parallel` | `parallel.c` | [parallel](parallel.md) |
+| `parallel, test-parallel, test-tool` | `parallel.c`, `test_tool.c` | [parallel](parallel.md) |
 | `test-parser, benchmark-parser` | `c_parser.c` | [parser](parser.md) |
 | `test-preprocessor, benchmark-preprocessor` | `c_preprocessor.c` | [preprocessor](preprocessor.md) |
 | `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` | `preprocessor_fuzz.c` | [preprocessor-fuzz](preprocessor-fuzz.md) |
@@ -105,6 +106,7 @@ The original section titles are retained in their owning guides.
 - [Lexer benchmarks](lexer.md#lexer-benchmarks).
 - [Profiling tools](profiling.md#profiling-tools).
 - [The parallel runner](parallel.md#the-parallel-runner).
+- [Test tool probing](parallel.md#test-tool-probing).
 - [The oracle cache](oracle-cache.md#the-oracle-cache).
 - [x86-64 disassembler](x86-disassembler.md#x86-64-disassembler).
 - [x86-64 encoder tests](x86-encoder.md#x86-64-encoder-tests).

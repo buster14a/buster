@@ -476,6 +476,37 @@ makes its own; with one, the units and lanes that share it read each file once
   token per byte, then trimmed to the tokens it has. Before this, the columns
   of every file shared one arena, and the unused room between them was cleared
   too wherever a huge page held a used byte: 9 bytes per input byte.
+- **Tables of a fixed size** (#652). The records' tables (ranges, files,
+  macros, items and the rest), the three stacks' token columns and a unit's
+  own file cache are pushed whole as the unit starts, as the tables of one
+  arena (`arena_reserve_tables`, #1128), all of it base pages: `pp_tokens_plan`
+  lays out a stack's columns as `pp_tokens_reserve` lays out the output's in an
+  arena of tables of its own. The stacks' columns and the file cache had four
+  arenas of their own. An arena costs 2 to 3.4 µs on the 9700X with its
+  teardown, in its mapping, its protection change and, once touched, its own
+  page tables, though a small unit touches a page of each or none (a benchmark
+  of 90 reservations in a forked process, each committing 64 KB and touching a
+  page: 3.35 µs each at 64 GB, 2.11 at 2 MB, 1.36 as ranges of one mapping,
+  0.49 for the page's fault alone; [the
+  record](https://github.com/buster14a/buster-performance/tree/d4352c81c89636292dff9b35be12a958b0e75223/docs/measurements/fewer-arenas-652-2026-11-03)).
+  Huge pages past each table's first pages took an advice call for each table
+  and split the mapping around them: an empty file's `-fsyntax-only` makes 12
+  `madvise` calls rather than 54, and 186 system calls rather than 237, on the
+  9700X. None of the tables grows large enough for base pages to cost the large
+  units much: on `sqlite3.c` the macros touch the most, 368 KB, and on this
+  compiler's `main.c` the items 1.9 MB and the macros 1.1 MB. The output's
+  columns keep an arena of tables of their own, whose huge pages pay on large
+  units, and a history table that outgrows its slice still moves to an arena of
+  its own. On the 9700X, `time-runs --copies 3` against main (with #1203's
+  arena of tables) in three rounds, with main again as the floor (within
+  1.3%): an empty file's `-fsyntax-only` took 6.4% to 7.1% less wall time, its
+  `-E -P` 8.0% to 8.3% less and a one-line `-c` 4.5% to 5.1% less, the
+  kernel's time (the empty file's kernel instructions went from 3.27 to 2.84
+  M, while its user cycles read 1% to 2% over their floor). This compiler's
+  `main.c` took 0.8% to 0.9% less for `-E -P`, `sqlite3.c`'s `-E -P` 0.2% to
+  2.1% less (the floor −0.9% to +0.5%), and its `-fsyntax-only` and `-c` were
+  within the floor's spread. Putting the stacks' columns and the cache among
+  the tables alone, each table with its huge pages, was no faster than main.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
@@ -1330,7 +1361,15 @@ decisions in #154 and on #117's configuration):
   `-fno-builtin-NAME`, `-ffreestanding` and `-fhosted` among them): its
   `__has_builtin` for every builtin buster implements, and 0 for the others,
   and its `__has_constexpr_builtin` wherever buster's answers 1; and the gates'
-  facts with clang's table.
+  facts with clang's table. The plain library names are pinned to Clang
+  23.1.4, CI's reference release, whose GNU library builtins include `strlcat`
+  and `strlcpy` (23.1.5's table drops them): the oracle compares
+  `clang --version` with it, prints `expected clang 23.1.4, found …` when the
+  release differs, and skips only the plain names the found release is known to
+  classify differently (`cbuiltin_library_table_differences`: 23.1.5's
+  `strlcat` and `strlcpy`), a difference no named release explains still
+  failing. A fixture reruns the check under a fake clang 23.1.5, so CI's
+  reference release exercises the skip path too.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.

@@ -77,6 +77,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wsource-uses-openmp", "-Wopenmp", "unexpected OpenMP directive; OpenMP is not enabled" },
     { "-Wincompatible-library-redeclaration", NULL, "incompatible redeclaration of library function" },
     { "-Wbuiltin-requires-header", NULL, "declaration of built-in function requires inclusion of its header" },
+    { "-Wunknown-attributes", "-Wattributes", "unknown attribute ignored" },
     { "-Wdivision-by-zero", NULL, "division by zero is undefined" },
     { "-Wconstant-conversion", NULL, "implicit conversion changes value" },
     { "-Warray-bounds", NULL, "array index is past the end of the array" },

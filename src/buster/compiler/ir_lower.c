@@ -674,6 +674,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     return value;
 }
 
+// A scalar BMI instruction's row (#141, ir_simd_typed_intrinsic) as its IR intrinsic of the operands its record places.
+static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+{
+    return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+}
+
 // A mask's bits as an integer of at least 32 bits, which Tier 1's arithmetic takes (an m8's or m16's zero-extended past
 // its bitcast), and back: the mask of `mask`'s width of that integer's low bits.
 static __attribute__((always_inline)) inline uint32_t ir_typed_mask_integer(IrTypedSink* sink, uint32_t value, IrType mask)
@@ -1189,10 +1195,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && input->unwind_init)
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice))
     {
-        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), is Tier 0's:
-        // ordinary Tier 1 falls back to it.
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init), and
+        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), are Tier 0's: ordinary Tier 1 falls
+        // back to them.
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)

@@ -10,7 +10,7 @@
 // - a constant, an undef, a copy, a select, and, or, xor and not: each half's own;
 // - an addition: the low halves' sum, and the high halves' plus its carry, the low sum's unsigned compare below an
 //   operand; a subtraction likewise with its borrow;
-// - a product, modulo 2^128 whatever the signedness: the low halves' product and its high half (IR_MULHU, x86's mul),
+// - a product, modulo 2^128 whatever the signedness: the low halves' product and its high half (IR_INTRINSIC's mulhu, x86's mul),
 //   plus each cross product of a low half by a high one that isn't known to be zero. A product of two zero extensions,
 //   C's (unsigned __int128)a * b, is mul's two halves alone;
 // - a negation: each half negated, the high one less 1 where the low one isn't zero;
@@ -470,7 +470,7 @@ static bool ir_wide_value(IrWideWork* work, uint32_t i)
         case IR_MUL:
         {
             const uint32_t low = ir_wide_emit(work, IR_MUL, IR_I64, ir_wide_low(work, a), ir_wide_low(work, b), none);
-            uint32_t high = ir_wide_emit(work, IR_MULHU, IR_I64, ir_wide_low(work, a), ir_wide_low(work, b), none);
+            uint32_t high = ir_wide_emit(work, IR_INTRINSIC, IR_I64, ir_wide_low(work, a), ir_wide_low(work, b), BUSTER_IR_INTRINSIC_MULHU);
             if (!ir_wide_zero_high(f, b))
             {
                 const uint32_t cross = ir_wide_emit(work, IR_MUL, IR_I64, ir_wide_low(work, a), ir_wide_high(work, b), none);

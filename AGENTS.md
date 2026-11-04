@@ -407,9 +407,8 @@ preprocessor's predefines give as clang's do for the same options
 ## Command and module index
 
 Source entry points below are relative to `src/buster/compiler/`, except
-`tools/` paths. Each guide contains the full test/benchmark commands, owning
-files, flags and acceptance boundaries; the entries here are compact starting
-points. [Detailed section index](docs/commands/README.md#detailed-sections).
+`tools/` paths; each guide has the commands, files, flags and acceptance
+boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 
 - `test-assembler, benchmark-assembler` — `assembler.c` — [guide](docs/commands/assembler.md).
 - `test-bind, benchmark-bind` — `bind.c` — [guide](docs/commands/bind.md).
@@ -434,6 +433,7 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-differential, test-differential-harness` — `differential.c` — [guide](docs/commands/differential.md).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
 - `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
+- `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
 - `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
@@ -456,11 +456,10 @@ points. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-lexer, benchmark-lexer` — `c_lexer.c` — [guide](docs/commands/lexer.md).
 - `test-link` — `link.c` — [guide](docs/commands/link.md).
 - `benchmark-link` — `link_benchmark.c` — [guide](docs/commands/link-benchmark.md).
-- `test-lowering, benchmark-lowering-source` — `c_lowering.c` — [guide](docs/commands/lowering.md).
-- `test-lowering-templates` (`c_check_program_templates.c`), `measure-lowering-templates` (`c_check_lower_inventory.c`) — [guide](docs/commands/lowering.md#node-templates-1048).
+- `test-lowering, benchmark-lowering-source, test-lowering-templates, measure-lowering-templates` — `c_lowering.c`, `c_check_program_templates.c`, `c_check_lower_inventory.c` — [guide](docs/commands/lowering.md#node-templates-1048).
 - `test-object-writer, benchmark-object-writer` — `object_writer.c` — [guide](docs/commands/object-writer.md).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
-- `parallel, test-parallel` — `parallel.c` — [guide](docs/commands/parallel.md).
+- `parallel, test-parallel, test-tool` — `parallel.c`, `test_tool.c` — [guide](docs/commands/parallel.md).
 - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
 - `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
 - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).

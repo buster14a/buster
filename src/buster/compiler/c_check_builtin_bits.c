@@ -57,6 +57,11 @@ static TypeId check_builtin_bits_parameter(CBuiltinId id)
         case CBUILTIN_CLRSBLL: result = BUSTER_TYPE_LLONG; break;
         default: break;
     }
+    if (cbuiltin_stdc_library(id))
+    {
+        static const TypeId stdc[BUSTER_CBUILTIN_STDC_LIBRARY_TYPES] = { BUSTER_TYPE_UCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_UINT, BUSTER_TYPE_ULONG, BUSTER_TYPE_ULLONG };
+        result = stdc[cbuiltin_stdc_library_type(id)];
+    }
     return result;
 }
 
@@ -232,8 +237,9 @@ static bool check_builtin_bits_fold(CBuiltinId id, unsigned __int128 bits, uint3
 
 static void check_builtin_bits(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
 {
-    const CBuiltinId id = input->id;
-    const TypeId parameter = check_builtin_bits_parameter(id);
+    // A stdc library builtin is its generic builtin's operation of its parameter's type.
+    const CBuiltinId id = cbuiltin_stdc_generic(input->id);
+    const TypeId parameter = check_builtin_bits_parameter(input->id);
     const bool carry = cbuiltin_carry(id);
     const bool rotate = id == CBUILTIN_STDC_ROTATE_LEFT || id == CBUILTIN_STDC_ROTATE_RIGHT;
     const bool stdc = id >= CBUILTIN_STDC_LEADING_ZEROS && id <= CBUILTIN_STDC_BIT_CEIL;
@@ -249,7 +255,10 @@ static void check_builtin_bits(TypeTable* table, const CheckBuiltinMiscAction* i
             check_builtin_bits_convert(table, input, output, values + i, i, carry && i == 3 ? type_pointer(table, parameter) : parameter);
         }
         check_action_integer_type(table, parameter, &width, &is_signed);
-        result = carry || id <= CBUILTIN_BITREVERSE64 ? parameter : BUSTER_TYPE_INT;
+        result = id == CBUILTIN_STDC_HAS_SINGLE_BIT                                                   ? BUSTER_TYPE_BOOL :
+                 carry || id <= CBUILTIN_BITREVERSE64 || id == CBUILTIN_STDC_BIT_FLOOR || id == CBUILTIN_STDC_BIT_CEIL ? parameter :
+                 stdc                                                                                 ? BUSTER_TYPE_UINT :
+                                                                                                        BUSTER_TYPE_INT;
     }
     else if (check_builtin_bits_integer(table, values[0].type, 0, &width, &is_signed, output))
     {

@@ -34,7 +34,11 @@ the same runs. Additional full ASan/UBSan suites run at `-O1`;
 See `docs/ci.md` for usage and the precise coverage boundaries.
 After all the hosted variants and fuzz jobs a run has pass on the same triggering revision, Benchpress
 requires the complete vector feature set and runs native correctness before
-benchmarks, reusing one build and the existing shared lock. All correctness builds run
+benchmarks, reusing one build and the existing shared lock. On a pull request
+it runs the benchmarks without the native correctness step (#1272): hosted
+correctness covers the pull request, and native correctness runs after the
+merge, on main's push of the landed commit and on the daily and nightly runs.
+The required aggregate's message then says native correctness was not run. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
@@ -146,7 +150,8 @@ there at a time, so everything takes one lock:
   benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
   job's `needs` (`[changes, evidence, test, fuzz]`), its `if:` (the `evidence`
   job's success and admission, hosted rows skipped only by evidenced reuse on a
-  dispatch, fuzzing only in the plain scope) and the oracle cache's modes, with
+  dispatch, fuzzing only in the plain scope), the native correctness step's
+  skip on pull requests alone and the oracle cache's modes, with
   counterexamples for each.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
@@ -157,14 +162,10 @@ there at a time, so everything takes one lock:
 Git glue, and [the CI guide](../../docs/ci.md#nightly-main-measurements) has
 the policy. In short:
 
-- Every `9700x.yml` run has an `evidence` job, which must succeed. For a push
-  it checks the merged pull request's newest run: the identical tree, its 9700X
-  job, aggregate and plain rows green, within a day, its coverage record
-  agreeing. In the nightly mode such a push skips its 9700X job once the
-  `host-identity` job finds the host identity that run recorded (kernel,
-  microcode, system GCC, glibc). Otherwise native correctness runs after all.
-  The required context passes, naming the source run. A nightly
-  dispatch's `evidence` job checks that the commit is a first-parent state of
+- Every `9700x.yml` run has an `evidence` job, which must succeed. A push to
+  main is admitted and runs its own native correctness: it reuses nothing
+  from its pull request, whose 9700X job skips native correctness (#1272).
+  A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows, and enforces
   04:00-07:00 Europe/Madrid. The 9700X job checks the window again after it
   takes the lock, right after the host's OS and CPU-model check. That is
@@ -189,7 +190,7 @@ the policy. In short:
   `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
   the `evidence` job before any hardware; `changes` runs
   `nightly --self-test`, which also fails if the build or the inventory ever
-  calls `git`, since tree-identity reuse depends on that.
+  calls `git`.
 
 ## Queue and execution timing
 
@@ -198,12 +199,16 @@ manual dispatch. It samples the latest 100 main CI workflow runs and reports the
 median and nearest-rank p95 separately for PR, main-push, nightly targeted and
 full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
 run name. Besides queue and execution, it reports the host's occupation, from
-the job's first step (after the runner hook took the lock) to its end. It keeps
+the job's first step (after the runner hook took the lock) to its end. It also
+reports the shared lock's wait and hold, which it reads from the runner hooks'
+lines in each job's log. It keeps
 the raw API responses and normalized observations as workflow artifacts. It
 does not run benchmarks, weaken the hardware gate, or change any schedule.
 
-Read `docs/ci.md` for metric definitions and limitations. In particular, runner
-hook duration includes overhead and is not an exact shared-lock wait; missing
-timestamps are unknown rather than zero. Run its network-free fixtures with
+Read `docs/ci.md` for metric definitions and limitations. In particular, the
+runner hook's step duration includes its overhead. The shared-lock wait and
+hold (`lock-wait`, `lock-hold`) come from the hooks' own log lines, which
+bracket the lock operations to within tens of milliseconds.
+Missing timestamps are unknown rather than zero. Run its network-free fixtures with
 `bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
 in this repository's retired `docs/measurements` path.

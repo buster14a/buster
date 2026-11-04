@@ -7,8 +7,6 @@
 //   nightly window --now EPOCH --bound SECONDS [--override REASON]   04:00-07:00 Europe/Madrid admission
 //   nightly window-times --now EPOCH                                  the cycle's date, window start and deadline
 //   nightly hosted --commit SHA [--exclude RUN] < FACTS               reusable plain-row hosted qualification
-//   nightly reuse --commit SHA --tree SHA --parent-tree SHA --now EPOCH --facts FILE [--record FILE]
-//                                                                     a push's reuse of its pull request's 9700X run
 //   nightly record --output FILE                                      a run's coverage record, from the environment
 //   nightly harvest --ledger FILE --facts FILE --states FILE (--records DIR | --list)
 //                                                                     completed runs' rows the ledger lacks (or which)
@@ -25,16 +23,17 @@
 //
 // Policy (docs/ci.md, "Nightly main measurements"): a main state's measurement needs the plain hosted rows (both host
 // architectures, every shard: the gate a pull request needs before the 9700X) of that exact commit, and native
-// correctness on the 9700X in the same job as its measurements. A state whose first-parent change is documentation alone
+// correctness on the 9700X in the same job as its measurements. A pull request's 9700X job measures without native
+// correctness (#1272), so main's pushes and the scheduled runs and their dispatched workers carry it all. A state whose first-parent change is documentation alone
 // needs none. Coverage is targeted (the selector's choice against the state's first parent), plain (every benchmark's
 // plain run: pushes before the nightly mode) or full (everything, with the isolated samples and the oracle audit);
 // targeted is what each state needs, full is the cycle's snapshot's, and plain satisfies neither. Reuse is by evidence
-// alone: hosted rows by job conclusions of the same commit, a push's native correctness and measurements by the record
-// of its pull request's newest run on the identical tree (and, for measurements, the identical first-parent tree).
+// alone: hosted rows by job conclusions of the same commit. Records from before #1272 may say that a push reused its
+// pull request's native correctness and measurements; the harvest still reads them, and nothing writes them now.
 //
 // Layout: limits and enumerations; text and numbers; Europe/Madrid (nightly_madrid, nightly_window); facts
 // (nightly_facts_parse, nightly_plain_verdict, nightly_hosted); records (nightly_record_keys, nightly_record_parse,
-// nightly_record_from_environment, nightly_record_outcome); reuse (nightly_reuse); the ledger (nightly_ledger_parse,
+// nightly_record_from_environment, nightly_record_outcome); the ledger (nightly_ledger_parse,
 // nightly_harvest); states and the plan (nightly_states_parse, nightly_fold, nightly_plan, nightly_report); the
 // self-test; main. Administrative tooling outside the compiler: it reads a few thousand short lines, so it is scalar.
 
@@ -71,15 +70,17 @@
 #define BUSTER_NIGHTLY_REPOSITORY 1421805693u
 #define BUSTER_NIGHTLY_WORKFLOW ".github/workflows/9700x.yml"
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
-#define BUSTER_NIGHTLY_AGGREGATE_JOB "Build and execute on Ryzen 7 9700X"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"
 // The window, in Europe/Madrid local time: hardware work starts at or after 04:00 and ends by 07:00.
 #define BUSTER_NIGHTLY_WINDOW_START_HOUR 4
 #define BUSTER_NIGHTLY_WINDOW_END_HOUR 7
+// A cycle's snapshot is pinned no earlier than this hour of the evening before its window, Europe/Madrid local time
+// whatever the clocks do that night, so that the coordinator's earlier schedules, there for GitHub's hours-late
+// scheduled starts, pin nothing hours ahead.
+#define BUSTER_NIGHTLY_PIN_HOUR 22
 // A pull request's run older than this at its push is stale evidence: the host's unpinned packages (GCC, glibc, the
 // kernel) could have changed since, and the nightly snapshot rechecks native correctness daily anyway.
-#define BUSTER_NIGHTLY_REUSE_AGE 86400
 // A record, pending dispatch or fact a step writes is never more than this long before the coordinator reads it.
 #define BUSTER_NIGHTLY_PENDING_AGE 600
 
@@ -160,7 +161,8 @@ enum NightlyOutcome
     NIGHTLY_OUTCOME_NOT_REQUIRED,
     // Hardware wasn't admitted (outside the window, or deferred to measure later): nothing ran, nothing failed.
     NIGHTLY_OUTCOME_DEFERRED,
-    // A push whose pull request's run qualified it but whose measurements it couldn't reuse: the backlog's.
+    // A push whose pull request's run qualified it but whose measurements it couldn't reuse: the backlog's. Only
+    // records from before #1272 have it: pull requests no longer run native correctness, so a push never reuses theirs.
     NIGHTLY_OUTCOME_PENDING,
     NIGHTLY_OUTCOME_BLOCKED_HOSTED,
     NIGHTLY_OUTCOME_BLOCKED_NATIVE,
@@ -446,6 +448,8 @@ struct NightlyWindow
     NightlyLocal local;
     // The cycle: the window that the instant prepares for (from noon) or is in or just ended (before noon).
     char cycle[11];
+    // 22:00 Europe/Madrid of the evening before: from then on, a step pins the cycle's snapshot.
+    int64_t pin;
     int64_t start;
     int64_t deadline;
     const char* reason;
@@ -462,6 +466,7 @@ static NightlyWindow nightly_window(int64_t now, int64_t bound)
         int64_t tomorrow = 0;
         window.valid = nightly_madrid_instant(window.local.year, window.local.month, window.local.day + 1, 12, &tomorrow) && nightly_madrid(tomorrow, &cycle);
     }
+    window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day - 1, BUSTER_NIGHTLY_PIN_HOUR, &window.pin);
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_START_HOUR, &window.start);
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_END_HOUR, &window.deadline);
     if (window.valid)
@@ -735,12 +740,6 @@ static const NightlyJob* nightly_find_job(const NightlyFacts* facts, uint64_t ru
         found = facts->jobs[i].run == run && strcmp(facts->jobs[i].name, name) == 0 ? &facts->jobs[i] : found;
     }
     return found;
-}
-
-static bool nightly_job_succeeded(const NightlyFacts* facts, uint64_t run, const char* name)
-{
-    const NightlyJob* job = nightly_find_job(facts, run, name);
-    return job != NULL && job->completed && job->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
 }
 
 // A hosted test row's job name, `Tests on ... (Clang V, ARCH, SANITIZER, OLEVEL[, shard K of N])`: its architecture (0
@@ -1256,148 +1255,6 @@ static void nightly_record_from_environment(NightlyRecord* record)
     const NightlyCoverage coverage = outcome == NIGHTLY_OUTCOME_NOT_REQUIRED ? NIGHTLY_COVERAGE_NONE : nightly_record_coverage(record);
     nightly_copy(record->values[NIGHTLY_FIELD_COVERAGE], BUSTER_NIGHTLY_VALUE, nightly_coverage_names[coverage]);
     nightly_copy(record->values[NIGHTLY_FIELD_OUTCOME], BUSTER_NIGHTLY_VALUE, nightly_outcome_names[outcome]);
-}
-
-// --- Reuse: a push's 9700X work, by its pull request's newest run ---
-
-// A host identity whose every component was read: `9700X/KERNEL/MICROCODE/gcc-VERSION/glibc_VERSION/sw-DIGEST`, none
-// empty and none a placeholder (`unknown`, `none`), so that two unread components can't match each other. DIGEST, 16
-// hexadecimal digits, covers the software the native inventory runs (9700x.yml's host steps): the package database and
-// the contents of the external tools and their libraries.
-static bool nightly_host_established(const char* host)
-{
-    char copy[BUSTER_NIGHTLY_HOST];
-    const size_t length = strlen(host);
-    bool valid = length < sizeof(copy) && strncmp(host, "9700X/", 6) == 0 && nightly_host_value(host);
-    uint32_t count = 0;
-    char* parts[7] = { NULL };
-    if (valid)
-    {
-        memcpy(copy, host, length + 1);
-        for (char* at = copy; at != NULL && count < 7;)
-        {
-            parts[count] = at;
-            count += 1;
-            char* slash = strchr(at, '/');
-            if (slash != NULL)
-            {
-                *slash = 0;
-            }
-            at = slash != NULL ? slash + 1 : NULL;
-        }
-        valid = count == 6;
-    }
-    for (uint32_t i = 1; valid && i < 6; i += 1)
-    {
-        const char* part = parts[i];
-        const size_t size = strlen(part);
-        const bool placeholder = strcmp(part, "unknown") == 0 || strcmp(part, "none") == 0 || (size >= 5 && strcmp(part + size - 5, "-none") == 0) || (size >= 8 && strcmp(part + size - 8, "-unknown") == 0);
-        valid = size != 0 && !placeholder;
-    }
-    valid = valid && strncmp(parts[3], "gcc-", 4) == 0 && parts[3][4] != 0 && strncmp(parts[4], "glibc_", 6) == 0 && parts[4][6] != 0;
-    valid = valid && strncmp(parts[5], "sw-", 3) == 0 && nightly_hex(parts[5] + 3, 16);
-    return valid;
-}
-
-typedef struct NightlyReuse NightlyReuse;
-struct NightlyReuse
-{
-    bool native;
-    bool measurement;
-    uint64_t source;
-    // The host identity the pull request's 9700X job recorded, which the push's own 9700X job must find unchanged
-    // before the reuse holds (9700x.yml's host-identity job): kernel, microcode, system GCC and glibc.
-    const char* host;
-    const char* reason;
-};
-
-// Whether the push of `commit` (tree `tree`, first parent's tree `parent_tree`) may reuse native correctness, and its
-// measurements too, from its pull request's newest run, given that run's record (NULL when it has none). The evidence:
-// the one merged same-repository pull request whose merge commit this is; its newest run of the workflow for its head,
-// completed within BUSTER_NIGHTLY_REUSE_AGE, with the 9700X job, the aggregate and every plain hosted row successful;
-// and that run's own record, naming its run and attempt, the head, a targeted measurement that completed, and the tree
-// it tested: the push's tree, byte for byte. Tree identity carries everything the repository pins (the workflow and its
-// steps, the inventory, the selector, the toolchain's and corpus's digests, the harnesses' commits); the build and the
-// inventory read no Git metadata (nightly_test_metadata checks that). Measurements need the same first-parent tree as
-// well, since the selection is the change against it. Anything else, or anything missing, runs the work again.
-static NightlyReuse nightly_reuse(const NightlyFacts* facts, const NightlyRecord* record, const char* commit, const char* tree, const char* parent_tree, int64_t now)
-{
-    NightlyReuse reuse = {
-        .reason = "no merged pull request of this repository has this merge commit",
-    };
-    const NightlyPull* pull = NULL;
-    uint32_t pulls = 0;
-    for (uint32_t i = 0; i < facts->pull_count; i += 1)
-    {
-        const NightlyPull* candidate = &facts->pulls[i];
-        if (candidate->merged && candidate->main_base && candidate->has_merge && strcmp(candidate->merge, commit) == 0 && candidate->repository == BUSTER_NIGHTLY_REPOSITORY)
-        {
-            pull = candidate;
-            pulls += 1;
-        }
-    }
-    const NightlyRun* newest = NULL;
-    if (pulls == 1)
-    {
-        reuse.reason = "the pull request has no run of the workflow for its head";
-        for (uint32_t i = 0; i < facts->run_count; i += 1)
-        {
-            const NightlyRun* run = &facts->runs[i];
-            const bool candidate = run->workflow && run->event == NIGHTLY_EVENT_PR && run->repository == BUSTER_NIGHTLY_REPOSITORY && strcmp(run->head, pull->head) == 0;
-            newest = candidate && (newest == NULL || run->id > newest->id) ? run : newest;
-        }
-    }
-    else if (pulls > 1)
-    {
-        reuse.reason = "more than one pull request has this merge commit";
-    }
-    if (newest != NULL)
-    {
-        const bool jobs = nightly_job_succeeded(facts, newest->id, BUSTER_NIGHTLY_HARDWARE_JOB) && nightly_job_succeeded(facts, newest->id, BUSTER_NIGHTLY_AGGREGATE_JOB) && nightly_plain_verdict(facts, newest->id) == NIGHTLY_PLAIN_OK;
-        char run_text[24];
-        char attempt_text[12];
-        snprintf(run_text, sizeof(run_text), "%llu", (unsigned long long)newest->id);
-        snprintf(attempt_text, sizeof(attempt_text), "%u", newest->attempt);
-        const bool recorded = record != NULL && nightly_is(record, NIGHTLY_FIELD_RUN, run_text) && nightly_is(record, NIGHTLY_FIELD_ATTEMPT, attempt_text) && nightly_is(record, NIGHTLY_FIELD_EVENT, "pull_request") && nightly_is(record, NIGHTLY_FIELD_PR_HEAD, pull->head);
-        const bool measured = recorded && nightly_is(record, NIGHTLY_FIELD_HARDWARE, "admit") && nightly_is(record, NIGHTLY_FIELD_BENCHMARK_RESULT, "success") && nightly_is(record, NIGHTLY_FIELD_COVERAGE, "targeted") && nightly_is(record, NIGHTLY_FIELD_OUTCOME, "complete");
-        if (!newest->completed || newest->conclusion != NIGHTLY_CONCLUSION_SUCCESS)
-        {
-            reuse.reason = "the pull request's newest run did not complete successfully";
-        }
-        else if (!jobs)
-        {
-            reuse.reason = "the pull request's newest run lacks a successful 9700X job, aggregate or plain hosted row";
-        }
-        else if (now < newest->updated || now - newest->updated > BUSTER_NIGHTLY_REUSE_AGE)
-        {
-            reuse.reason = "the pull request's newest run is older than a day";
-        }
-        else if (!recorded)
-        {
-            reuse.reason = "the pull request's newest run has no matching coverage record";
-        }
-        else if (!measured)
-        {
-            reuse.reason = "the pull request's record has no completed targeted measurement";
-        }
-        else if (!nightly_host_established(nightly_value(record, NIGHTLY_FIELD_HOST)))
-        {
-            reuse.reason = "the pull request's record has no complete host identity to confirm";
-        }
-        else if (!nightly_is(record, NIGHTLY_FIELD_TREE, tree))
-        {
-            reuse.reason = "the pull request's run tested another tree";
-        }
-        else
-        {
-            reuse.native = true;
-            reuse.source = newest->id;
-            reuse.host = nightly_value(record, NIGHTLY_FIELD_HOST);
-            reuse.measurement = nightly_is(record, NIGHTLY_FIELD_PARENT_TREE, parent_tree);
-            reuse.reason = reuse.measurement ? "identical tree and first-parent tree" : "identical tree; another first-parent tree, so the measurements run again";
-        }
-    }
-    return reuse;
 }
 
 // --- The ledger: one row per harvested run attempt, and one per cycle's pinned snapshot ---
@@ -2256,7 +2113,13 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 cycle.snapshot = cycle.snapshot < 0 ? -2 : cycle.snapshot;
             }
         }
-        if (cycle.snapshot == -1)
+        // Before the pin's lead, a step pins and plans nothing, unless a person's override admits work now.
+        const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
+        if (cycle.snapshot == -1 && input->now < cycle.window.pin && !overridden)
+        {
+            failure = "it is before 22:00 Europe/Madrid, the evening before the window: the cycle's snapshot isn't pinned yet";
+        }
+        else if (cycle.snapshot == -1)
         {
             cycle.snapshot = nightly_state_index(states, input->main);
             cycle.pinned_now = cycle.snapshot >= 0;
@@ -2509,6 +2372,15 @@ static void nightly_test_window(NightlyTest* test)
     nightly_expect(test, after.valid && strcmp(after.cycle, "2026-11-04") == 0 && !after.open && after.deadline < nightly_test_madrid(2026, 11, 4, 7, 17), "07:17 reports the morning's cycle");
     NightlyWindow year_end = nightly_window(nightly_test_madrid(2026, 12, 31, 23, 0), 0);
     nightly_expect(test, year_end.valid && strcmp(year_end.cycle, "2027-01-01") == 0, "the cycle rolls over the year");
+    // The pin is the evening before at 22:00 local time, whatever the clocks do that night: 6 hours before the window
+    // on an ordinary night, 5 when the clocks go forward, 7 when they go back.
+    nightly_expect(test, evening.pin == nightly_test_madrid(2026, 11, 3, 22, 0) && evening.start - evening.pin == 6 * 3600, "an ordinary night pins from 22:00, 6 hours ahead");
+    NightlyWindow spring = nightly_window(nightly_test_madrid(2027, 3, 27, 21, 30), 0);
+    nightly_expect(test, spring.valid && strcmp(spring.cycle, "2027-03-28") == 0 && spring.pin == nightly_test_madrid(2027, 3, 27, 22, 0) && spring.start - spring.pin == 5 * 3600, "2027-03-27 pins from 22:00 CET, 5 hours before 04:00 CEST");
+    NightlyWindow autumn = nightly_window(nightly_test_madrid(2026, 10, 24, 22, 7), 0);
+    nightly_expect(test, autumn.valid && strcmp(autumn.cycle, "2026-10-25") == 0 && autumn.pin == nightly_test_madrid(2026, 10, 24, 22, 0) && autumn.start - autumn.pin == 7 * 3600, "2026-10-24 pins from 22:00 CEST, 7 hours before 04:00 CET");
+    NightlyWindow month_start = nightly_window(nightly_test_madrid(2026, 11, 30, 23, 0), 0);
+    nightly_expect(test, month_start.valid && strcmp(month_start.cycle, "2026-12-01") == 0 && month_start.pin == nightly_test_madrid(2026, 11, 30, 22, 0), "a cycle on the first of a month pins from the last day's 22:00");
 }
 
 typedef struct NightlyBuffer NightlyBuffer;
@@ -2945,117 +2817,6 @@ static void nightly_test_records(NightlyTest* test)
     free(parsed);
 }
 
-typedef struct NightlyReuseCase NightlyReuseCase;
-struct NightlyReuseCase
-{
-    const char* what;
-    bool native;
-    bool measurement;
-    // Mutations of the evidence.
-    bool second_pull;
-    bool fork;
-    bool unmerged;
-    bool newer_failed_run;
-    bool hardware_skipped;
-    bool aggregate_failed;
-    bool plain_cancelled;
-    bool stale;
-    bool no_record;
-    bool record_other_run;
-    bool record_other_head;
-    bool record_other_tree;
-    bool record_other_parent_tree;
-    bool record_incomplete;
-    bool record_plain_coverage;
-    bool record_no_host;
-    const char* record_host;
-};
-
-static void nightly_test_reuse(NightlyTest* test)
-{
-    static const NightlyReuseCase cases[] = {
-        { .what = "identical trees reuse native correctness and measurements", .native = true, .measurement = true },
-        { .what = "another first-parent tree reuses native correctness alone", .native = true, .record_other_parent_tree = true },
-        { .what = "another tree reuses nothing", .record_other_tree = true },
-        { .what = "two pull requests with the merge commit reuse nothing", .second_pull = true },
-        { .what = "a fork's pull request reuses nothing", .fork = true },
-        { .what = "an unmerged pull request reuses nothing", .unmerged = true },
-        { .what = "a newer failed run of the head reuses nothing", .newer_failed_run = true },
-        { .what = "a skipped 9700X job (a draft) reuses nothing", .hardware_skipped = true },
-        { .what = "a failed aggregate reuses nothing", .aggregate_failed = true },
-        { .what = "a cancelled plain row reuses nothing", .plain_cancelled = true },
-        { .what = "a run older than a day reuses nothing", .stale = true },
-        { .what = "a run without a record reuses nothing", .no_record = true },
-        { .what = "a record of another run reuses nothing", .record_other_run = true },
-        { .what = "a record of another head reuses nothing", .record_other_head = true },
-        { .what = "a record without a completed measurement reuses nothing", .record_incomplete = true },
-        { .what = "a record of plain coverage reuses nothing", .record_plain_coverage = true },
-        { .what = "a record without a host identity reuses nothing", .record_no_host = true },
-        { .what = "a placeholder microcode reuses nothing", .record_host = "9700X/6.17.1-arch1/unknown/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef" },
-        { .what = "an unread GCC reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-none/glibc_2.42/sw-0123456789abcdef" },
-        { .what = "an unread glibc reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/none/sw-0123456789abcdef" },
-        { .what = "an identity without its software digest reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42" },
-        { .what = "an unread software digest reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-none" },
-        { .what = "an identity of the older shape reuses nothing", .record_host = "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1" },
-        { .what = "an empty kernel reuses nothing", .record_host = "9700X//0xb404023/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef" },
-    };
-    char merge[41];
-    char head[41];
-    char tree[41];
-    char parent_tree[41];
-    char other[41];
-    nightly_test_sha(10, merge);
-    nightly_test_sha(11, head);
-    nightly_test_sha(12, tree);
-    nightly_test_sha(13, parent_tree);
-    nightly_test_sha(14, other);
-    const int64_t now = 1800000000;
-    NightlyBuffer* buffer = nightly_allocate(1, sizeof(NightlyBuffer));
-    NightlyRecord* record = nightly_allocate(1, sizeof(NightlyRecord));
-    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(cases); i += 1)
-    {
-        const NightlyReuseCase* c = &cases[i];
-        buffer->length = 0;
-        nightly_append(buffer, "pr\t100\t%d\tmain\t%s\t%s\t%u\n", c->unmerged ? 0 : 1, merge, head, c->fork ? 2u : BUSTER_NIGHTLY_REPOSITORY);
-        if (c->second_pull)
-        {
-            nightly_append(buffer, "pr\t101\t1\tmain\t%s\t%s\t%u\n", merge, other, BUSTER_NIGHTLY_REPOSITORY);
-        }
-        nightly_test_run(buffer, 500, "pull_request", "completed", "success", head, now - 3600, c->stale ? now - 2 * 86400 : now - 600, "x");
-        nightly_test_plain(buffer, 500, 4, c->plain_cancelled ? 3 : 0, "cancelled", false);
-        nightly_append(buffer, "job\t500\tcompleted\t%s\t%s\n", c->hardware_skipped ? "skipped" : "success", BUSTER_NIGHTLY_HARDWARE_JOB);
-        nightly_append(buffer, "job\t500\tcompleted\t%s\t%s\n", c->aggregate_failed ? "failure" : "success", BUSTER_NIGHTLY_AGGREGATE_JOB);
-        if (c->newer_failed_run)
-        {
-            nightly_test_run(buffer, 501, "pull_request", "completed", "failure", head, now - 300, now - 100, "x");
-        }
-        nightly_test_record(record, c->record_other_run ? 499 : 500, "pull_request", "pr", merge, c->record_other_tree ? other : tree, c->record_other_parent_tree ? other : parent_tree, c->record_other_head ? other : head);
-        if (c->record_incomplete)
-        {
-            nightly_copy(record->values[NIGHTLY_FIELD_OUTCOME], BUSTER_NIGHTLY_VALUE, "failed");
-        }
-        if (c->record_plain_coverage)
-        {
-            nightly_copy(record->values[NIGHTLY_FIELD_COVERAGE], BUSTER_NIGHTLY_VALUE, "plain");
-        }
-        if (c->record_no_host)
-        {
-            nightly_copy(record->values[NIGHTLY_FIELD_HOST], BUSTER_NIGHTLY_VALUE, "-");
-        }
-        if (c->record_host != NULL)
-        {
-            nightly_copy(record->values[NIGHTLY_FIELD_HOST], BUSTER_NIGHTLY_VALUE, c->record_host);
-        }
-        NightlyFacts facts = nightly_facts_new();
-        const bool parsed = nightly_facts_parse(&facts, nightly_buffer_text(buffer));
-        const NightlyReuse reuse = nightly_reuse(&facts, c->no_record ? NULL : record, merge, tree, parent_tree, now);
-        nightly_expect(test, parsed && reuse.native == c->native && reuse.measurement == c->measurement && (!reuse.native || (reuse.source == 500 && strcmp(reuse.host, "9700X/6.17.1-arch1/0xb404023/gcc-15.2.1/glibc_2.42/sw-0123456789abcdef") == 0)), c->what);
-        nightly_facts_free(&facts);
-    }
-    free(buffer);
-    free(record);
-}
-
 static void nightly_test_ledger(NightlyTest* test)
 {
     char a[41];
@@ -3344,6 +3105,37 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 04:00");
     nightly_scenario_free(scenario);
 
+    // The earlier schedules' steps, there for hours-late scheduled starts: before 22:00 the cycle pins and dispatches
+    // nothing; from 22:00, the evening before the window, it pins and prepares; an override pins at any hour.
+    scenario = nightly_scenario(6, committed);
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 21, 59));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0 && nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tit is before 22:00 Europe/Madrid") && strstr(scenario->report, "No plan: it is before 22:00") != NULL, "a step before 22:00 pins nothing and plans nothing");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0 && nightly_count(scenario, "dispatch\t") == 0, "nor at 16:07, the earliest schedule");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 22, 0));
+    snprintf(line, sizeof(line), "pin\tcycle\t2026-11-04\t%s\t900\t", scenario->states.items[5].sha);
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 1, "from 22:00 the cycle pins and prepares");
+    scenario->override = "validating the coordinator";
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 1, "an override pins at any hour, and prepares (the snapshot has no hosted rows yet)");
+    scenario->dry_run = true;
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "a dry run's override pins nothing early either");
+    nightly_scenario_free(scenario);
+    // The clock-change nights: 22:00 local either way. When the clocks go forward (2027-03-28), 21:30 CET, 5.5
+    // elapsed hours before the window, doesn't pin yet; when they go back (2026-10-25), 22:07 CEST, 6.9 hours before,
+    // does.
+    scenario = nightly_scenario(6, nightly_test_madrid(2026, 10, 20, 9, 0));
+    nightly_scenario_plan(scenario, nightly_test_madrid(2027, 3, 27, 21, 30));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "21:30 CET on the spring-forward evening pins nothing");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2027, 3, 27, 22, 0));
+    nightly_expect(test, nightly_count(scenario, "pin\tcycle\t2027-03-28\t") == 1, "22:00 CET on the spring-forward evening pins");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 10, 24, 21, 59));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "21:59 CEST on the fall-back evening pins nothing");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 10, 24, 22, 7));
+    nightly_expect(test, nightly_count(scenario, "pin\tcycle\t2026-10-25\t") == 1, "22:07 CEST on the fall-back evening pins");
+    nightly_scenario_free(scenario);
+
     // Inside the window, the hosted rows qualified and the snapshot prepared: its comprehensive run first.
     scenario = nightly_scenario(6, committed);
     nightly_scenario_pushes(scenario);
@@ -3612,16 +3404,9 @@ static const char* nightly_step(const char* job, const char* name, const char** 
     return *end != NULL ? step : NULL;
 }
 
-// Whether two steps are the same, byte for byte.
-static bool nightly_same_step(const char* a, const char* a_end, const char* b, const char* b_end)
-{
-    return a != NULL && b != NULL && a_end - a == b_end - b && memcmp(a, b, (size_t)(a_end - a)) == 0;
-}
-
 // The 9700X job's window step must come right after the host's own check (the operating system and the CPU model,
 // nothing more) and before the host identity's package queries and hashing and any setup (the checkout, the
-// toolchain's staging), so that a job that took the lock too late does nothing but refuse; and the host identity that
-// the push's host-identity job compares must be computed exactly as the 9700X job's is.
+// toolchain's staging), so that a job that took the lock too late does nothing but refuse.
 static void nightly_test_workflow(NightlyTest* test, const char* root)
 {
     char path[4096];
@@ -3662,14 +3447,9 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
         reads_checkout = at != window && at < window_end;
     }
     nightly_expect(test, !reads_checkout, "the window step needs nothing checked out");
-    // The host-identity job's two steps, each the 9700X job's byte for byte, and in the same order.
-    const char* confirm = found ? strstr(text.data, "\n  host-identity:\n") : NULL;
-    const char* confirm_verify_end = NULL;
-    const char* confirm_verify = nightly_step(confirm, "      - name: Verify benchmark host\n", &confirm_verify_end);
-    const char* confirm_identity_end = NULL;
-    const char* confirm_identity = nightly_step(confirm, "      - name: Record the host identity\n", &confirm_identity_end);
-    nightly_expect(test, confirm != NULL && job != NULL && confirm < job && confirm_identity != NULL && confirm_identity < job && nightly_same_step(confirm_verify, confirm_verify_end, verify, verify_end), "the host-identity job checks the host as the 9700X job does");
-    nightly_expect(test, confirm_verify != NULL && confirm_verify < confirm_identity && nightly_same_step(confirm_identity, confirm_identity_end, identity, identity_end), "the host-identity job computes the host identity as the 9700X job does");
+    // Pull requests run no native correctness (#1272), so no push reuses a pull request's native run: no job but the
+    // 9700X job itself takes the host.
+    nightly_expect(test, found && strstr(text.data, "\n  host-identity:\n") == NULL, "no host-identity job confirms a pull request's host for a push");
     free(text.data);
 }
 
@@ -3680,7 +3460,6 @@ static int nightly_self_test(const char* root)
     nightly_test_window(&test);
     nightly_test_facts(&test);
     nightly_test_records(&test);
-    nightly_test_reuse(&test);
     nightly_test_ledger(&test);
     nightly_test_states(&test);
     nightly_test_plan(&test);
@@ -3873,36 +3652,6 @@ static int nightly_command_plan(int argc, char** argv)
     return 0;
 }
 
-static int nightly_command_reuse(int argc, char** argv)
-{
-    const char* commit = nightly_required(argc, argv, "--commit");
-    const char* tree = nightly_required(argc, argv, "--tree");
-    const char* parent_tree = nightly_required(argc, argv, "--parent-tree");
-    if (!nightly_sha(commit) || !nightly_sha(tree) || !nightly_sha(parent_tree))
-    {
-        nightly_fatal("reuse needs object names", NULL);
-    }
-    NightlyFacts facts = nightly_load_facts(nightly_required(argc, argv, "--facts"));
-    const char* record_path = nightly_option(argc, argv, "--record");
-    NightlyRecord* record = nightly_allocate(1, sizeof(NightlyRecord));
-    bool recorded = false;
-    FILE* file = record_path != NULL ? fopen(record_path, "rb") : NULL;
-    if (file != NULL)
-    {
-        fclose(file);
-        NightlyText text = nightly_read(record_path);
-        recorded = nightly_record_parse(text, record);
-        free(text.data);
-    }
-    const NightlyReuse reuse = nightly_reuse(&facts, recorded ? record : NULL, commit, tree, parent_tree, nightly_option_epoch(argc, argv, "--now"));
-    printf("native\t%s\t%llu\t%s\n", reuse.native ? "reused" : "run", (unsigned long long)reuse.source, reuse.reason);
-    printf("host\t%s\n", reuse.native ? reuse.host : "-");
-    printf("measurement\t%s\t%llu\t%s\n", reuse.measurement ? "reused" : "run", (unsigned long long)(reuse.measurement ? reuse.source : 0), reuse.reason);
-    free(record);
-    nightly_facts_free(&facts);
-    return 0;
-}
-
 int main(int argc, char** argv)
 {
     nightly_use_madrid();
@@ -3944,10 +3693,6 @@ int main(int argc, char** argv)
         printf("hosted\t%s\t%llu\n", hosted.verdict == NIGHTLY_PLAIN_OK ? "reused" : hosted.verdict == NIGHTLY_PLAIN_FAILED ? "failed" : "none", (unsigned long long)hosted.run);
         nightly_facts_free(&facts);
         status = 0;
-    }
-    else if (strcmp(command, "reuse") == 0)
-    {
-        status = nightly_command_reuse(argc, argv);
     }
     else if (strcmp(command, "record") == 0)
     {
@@ -3993,7 +3738,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        fputs("usage: nightly --self-test [--root DIR] | window | window-times | hosted | reuse | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
+        fputs("usage: nightly --self-test [--root DIR] | window | window-times | hosted | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
     }
     return status;
 }

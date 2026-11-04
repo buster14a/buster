@@ -68,7 +68,10 @@ Failure restores the publication arena, clears code/count outputs, and
 rewinds the lane's intermediate arenas. An incomplete reservation is released.
 The lane can then compile another function. Publication/frame-adapter
 inconsistency is internal; it is not reported as an unsupported emitter.
-The existing frame representation and production probe policy are unchanged.
+The published frame is the frame emitter's own events (#1056, `EmittedCode`):
+a frame whose epilogue brackets aren't its exits' is that internal publication
+failure (`BUSTER_CHECK_TIER1_FRAME_PUBLICATION`). The production probe policy
+is unchanged.
 
 ## Reports and ordering
 
@@ -86,7 +89,31 @@ body never contributes success counters. The source-order failure selection
 and lane-completion protocol remain the emission's existing ones.
 
 `--tier1-refusals` gives each permitted fallback's category, cause, original
-error/location, operation and disposition. Multi-unit refusals use each unit's
+error/location, operation and disposition. Where selection refused a call, a
+last field, `call=`, lists the call's kinds (#1116). Apart from `indirect` and
+`variadic`, which the selector takes, they are its shapes that the selector's
+call boundary doesn't take, by the selector's own predicates
+(`check_tier1_call_kinds`), so the report follows the boundary as it grows:
+
+- `indirect` and `variadic`;
+- `abi-record`: an ABI record the boundary refuses, the call's (its result,
+  its outgoing area) or an argument's, or aggregates' parts in registers past
+  the red zone's 14 staging slots (a 64-byte part waits in zmm16 and on and
+  takes none);
+- `stack-arguments`: arguments past the boundary's limit
+  (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`), not every argument the ABI passes on
+  the stack, which Tier 1 takes below it;
+- `narrow-` and `other-argument`: any argument's, one past the limit too;
+- `other-result`;
+- `argument-count`: arguments that don't match the parameters.
+
+Floating and `long double` arguments and results are the boundary's (#141),
+with a record or without, so no kind names them: one whose record the
+boundary refuses is an `abi-record`.
+
+`--tier1-report` counts the refused calls by kind as `selection.call.KIND`. A
+call counts under every kind it has, so the kinds' counts can sum past
+`selection.call`. They say which shape to take first. Multi-unit refusals use each unit's
 buffered diagnostic stream, so concurrent units cannot interleave them.
 Fatal failures go through the normal source diagnostic. Histogram bounds
 never truncate the complete per-body outcome or alias unknown errors modulo

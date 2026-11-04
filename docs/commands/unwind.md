@@ -18,11 +18,19 @@ requirements. [Command index](README.md).
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
   batch, and for Tier 1's open frames (`UnwindFunction.open`, #177) no epilogue
-  at the end, each return a tail. `check_program_emit` writes the C driver's
-  unwind tables so, one EH_FRAME atom of them after the last function. `test-unwind --cross-check`
+  at the end, each return a tail, and row programs (#1056: resolved frame rows,
+  `unwind_rows_scalar`, the fixed writer's bytes for a fixed shape's rows).
+  `check_program_emit` writes the C driver's unwind tables from each function's
+  frame events (`emitted_code.c`, the [emission guide](emission.md)), one
+  EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
   frame against the analyzer and actual Tier 0 code, a frame pointer's and
-  realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges
+  realigned frames' among it, with native GDB/perf consumers. A missing perf,
+  or one whose `perf --version` fails,
+  is probed once before the fixtures and each sampled section prints
+  `skipped: needs perf, not found on PATH` (or
+  `--version exited with status N`); a present perf's wrong samples
+  still fail. `benchmark-unwind` charges
   analysis/emission to the existing Tier 0, sizing and encoding chain,
   including per-function arena cleanup, and the driver's published frame
   (`--only published`). [The unwind guide](../../docs/unwind.md) records the trusted

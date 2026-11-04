@@ -109,6 +109,10 @@
 // The tests' normalized temporary directory, for the test files and benchmarks that build their trees from it.
 #include "buster/compiler/test_paths.h"
 
+// The external tools the cross-checks spawn, probed once per command (#1129), and their tests, for the test-tool command.
+// Every test file after this point sees its types and functions.
+#include "buster/compiler/test_tool.c"
+
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
 
@@ -407,6 +411,10 @@ int run_builtin_benchmark(int argc, char** argv);
 #include "buster/compiler/calling_convention_test.c"
 int run_calling_convention_benchmark(int argc, char** argv);
 
+// The tier-neutral source and frame events and their resolution against a final layout (#1056), which the frame
+// emitters below publish and the emission consumes.
+#include "buster/compiler/emission_metadata.c"
+
 // Frame storage, explicit prologue/epilogue planning and its native instruction consumer.
 #include "buster/compiler/tier1_frame.c"
 #include "buster/compiler/tier1_frame_test.c"
@@ -420,6 +428,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/tier0.c"
 #include "buster/compiler/unwind.c"
 #include "buster/compiler/unwind_tier0.c"
+// The tier-neutral emitted function (#1056): Tier 0's adapter, the frame events' resolution and their verifier.
+#include "buster/compiler/emitted_code.c"
 #include "buster/compiler/tier0_generate.c"
 #include "buster/compiler/tier0_test.c"
 #include "buster/compiler/c_builtin_lower.c"
@@ -627,6 +637,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_tier1_outcome_test.c"
 #pragma clang optimize on
 #pragma clang section text = ""
+// #1056: the tier-neutral emitted function's tests (row programs, Tier 0's and Tier 1's frame events, the verifier).
+#include "buster/compiler/emitted_code_test.c"
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
@@ -1421,6 +1433,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_builtin_lower_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-emitted-code") == 0)
+    {
+        result = run_emitted_code_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-unwind") == 0)
     {
         result = run_unwind_tests(argc - 2, argv + 2);
@@ -1603,6 +1619,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_parallel_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-tool") == 0)
+    {
+        result = test_tool_command(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
     {
         result = run_oracle_cache_tests(argc - 2, argv + 2);
@@ -1635,6 +1655,8 @@ extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const ui
 #endif
 static int main_driver(int argc, char** argv)
 {
+    // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
+    arena_page_policy(getenv("BUSTER_HUGE_PAGES"));
 #if BUSTER_SANITIZER_RESOURCES
     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
     lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;

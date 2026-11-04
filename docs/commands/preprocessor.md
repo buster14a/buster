@@ -245,6 +245,19 @@ features:
   `-std=` alone, or no options), and each taken one must give clang's tokens;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers, including 45 sanitizer option sets and target queries;
+- each of clang's 3,775 builtin names in 17 target, language and `-f` option
+  configurations must give clang's `__has_builtin`, and `__has_constexpr_builtin`
+  wherever its constant evaluator folds, and buster's table's gates must match
+  clang's (the builtin targets check). Its plain library names are pinned to
+  Clang 23.1.4, CI's reference: a different release prints
+  `expected clang 23.1.4, found …`, and only the plain names that release's
+  table is known to classify differently (the named list
+  `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`) are
+  skipped, so every version-independent answer and every difference no named
+  release explains is still checked, and a fixture reruns the check under a
+  fake clang 23.1.5 so the skip path is exercised under the reference too,
+  reaching the real clang through a path with a space, quotes and `$;*`
+  (`clang_release_wrapper`);
 - buster's own headers (`src/buster/include`) against clang's, for each header,
   8 modes, hosted and freestanding (176 sets): with each set, clang's run must
   define the same macros (but the guards and helpers each names its own way),

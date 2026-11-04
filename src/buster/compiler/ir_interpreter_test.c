@@ -130,6 +130,22 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
         { IR_BITCAST, IR_I64, IR_F64, { 0x8000000000000000ull, 0 }, { 0, 0 }, 0, { 0x8000000000000000ull, 0 }, INTERPRETER_OK, "bitcast preserves negative zero" },
         { IR_INTTOPTR, IR_PTR, IR_I128, { 0x1234, 8 }, { 0, 0 }, 0, { 0x1234, 0 }, INTERPRETER_OK, "integer to pointer truncates to target width" },
         { IR_PTRTOINT, IR_I128, IR_PTR, { 0x1234, 0 }, { 0, 0 }, 0, { 0x1234, 0 }, INTERPRETER_OK, "pointer to integer zero extends" },
+        // The intrinsics (#141), their operation in `predicate`, as BMI's instructions give them on a Zen 5.
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { UINT64_MAX, 0 }, BUSTER_IR_INTRINSIC_MULHU, { UINT64_MAX - 1, 0 }, INTERPRETER_OK, "mulhu's high product" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0xb, 0 }, { 0xf0f0, 0 }, BUSTER_IR_INTRINSIC_PDEP, { 0xb0, 0 }, INTERPRETER_OK, "pdep deposits the low bits at the mask's" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { UINT64_C(0x8000000000000001), 0 }, BUSTER_IR_INTRINSIC_PDEP, { UINT64_C(0x8000000000000001), 0 }, INTERPRETER_OK, "pdep reaches bit 63" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0x80000001, 0 }, BUSTER_IR_INTRINSIC_PEXT, { 3, 0 }, INTERPRETER_OK, "pext packs bit 31" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0x123456789abcdef0), 0 }, { UINT64_C(0xff00ff00ff00ff00), 0 }, BUSTER_IR_INTRINSIC_PEXT, { 0x12569ade, 0 }, INTERPRETER_OK, "pext extracts the mask's bytes" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0x105, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0x1f, 0 }, INTERPRETER_OK, "bzhi's index is its low byte" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0x20, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0x80000001, 0 }, INTERPRETER_OK, "bzhi at the width keeps every bit" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x80000001, 0 }, { 0xff, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0x80000001, 0 }, INTERPRETER_OK, "bzhi past the width keeps every bit" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 63, 0 }, BUSTER_IR_INTRINSIC_BZHI, { UINT64_MAX >> 1, 0 }, INTERPRETER_OK, "bzhi clears bit 63" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 0x100, 0 }, BUSTER_IR_INTRINSIC_BZHI, { 0, 0 }, INTERPRETER_OK, "bzhi of index 0 is zero" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { 0x12345678, 0 }, { 0xc08, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0x456, 0 }, INTERPRETER_OK, "bextr's start and length its control's bytes" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0x820, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0, 0 }, INTERPRETER_OK, "bextr from past the width is zero" },
+        { IR_INTRINSIC, IR_I32, IR_I32, { UINT32_MAX, 0 }, { 0xff1c, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0xf, 0 }, INTERPRETER_OK, "bextr's field past the width has zeros" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_C(0xf000000000000000), 0 }, { 0xa3c, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0xf, 0 }, INTERPRETER_OK, "bextr reaches bit 63" },
+        { IR_INTRINSIC, IR_I64, IR_I64, { UINT64_MAX, 0 }, { 4, 0 }, BUSTER_IR_INTRINSIC_BEXTR, { 0, 0 }, INTERPRETER_OK, "bextr of length 0 is zero" },
     };
     for (uint32_t t = 0; t < sizeof(cases) / sizeof(cases[0]); t += 1)
     {
@@ -153,7 +169,7 @@ static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* me
             ir_interpreter_test_instruction(&function, 1, IR_CONST, test.source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const uint8_t operands = ir_operand_table[test.op];
             const uint32_t b = (operands & 2) != 0 ? 1 : BUSTER_IR_NONE;
-            const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP ? test.predicate : BUSTER_IR_NONE;
+            const uint32_t c = test.op == IR_ICMP || test.op == IR_FCMP || test.op == IR_INTRINSIC ? test.predicate : BUSTER_IR_NONE;
             ir_interpreter_test_instruction(&function, 2, test.op, test.type, 0, b, c);
             ir_interpreter_test_instruction(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const IrInterpreterFunction binding = { .symbol = 91, .function = &function };

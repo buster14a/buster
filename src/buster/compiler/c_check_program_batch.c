@@ -108,7 +108,7 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const bool plain = (wrapper || truth) && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE;
     if (plain)
     {
-        writer->token = graph->tokens[node];
+        writer->token = node | BUSTER_CHECK_LOWER_TOKEN_NODE;
         if (wrapper)
         {
             check_lower_operand(writer, node, 0, op == CHECK_OP_SELECT && address, op == CHECK_OP_SELECT ? 0 : check_stream_type(stream, node));
