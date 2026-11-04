@@ -84,6 +84,8 @@ struct IrParseState
     IrParseArray labels;
     IrParseArray abi_calls;
     IrParseArray passed;
+    // The machine rows (#141, IrFunction.rows), Tier0Operation each.
+    IrParseArray machine_rows;
     uint32_t symbol_count;
     uint8_t result_type;
     // The header's own lines: a variadic definition's incoming frame, and the function's ABI records.
@@ -491,10 +493,133 @@ static void ir_parse_abi(IrParseState* state)
     ir_parse_append(state, &state->abi_calls, &abi);
 }
 
-// `variadic call(...)` and `result size=<bytes> ret(...) passed=#<first>`, each once.
+// A machine row's class (#141): its name (ir_row_class_names), a vector's and a mask's bytes after it, into `class` and
+// `bytes`.
+static void ir_parse_row_class(IrParseState* state, uint8_t* class, uint8_t* bytes)
+{
+    ir_parse_space(state);
+    const uint64_t first = state->cursor;
+    while (state->cursor < state->end && ((state->source.pointer[state->cursor] >= 'a' && state->source.pointer[state->cursor] <= 'z') || (state->source.pointer[state->cursor] >= '0' && state->source.pointer[state->cursor] <= '9')))
+    {
+        state->cursor += 1;
+    }
+    const uint64_t length = state->cursor - first;
+    const char* token = state->source.pointer + first;
+    uint32_t found = BUSTER_TYPED_CLASS_LIMIT;
+    uint64_t name_length = 0;
+    for (uint32_t k = 0; k < BUSTER_TYPED_CLASS_LIMIT; k += 1)
+    {
+        const uint64_t n = strlen(ir_row_class_names[k]);
+        const bool sized = k == BUSTER_TYPED_CLASS_VECTOR || k == BUSTER_TYPED_CLASS_MASK;
+        if ((sized ? n < length : n == length) && memcmp(token, ir_row_class_names[k], n) == 0)
+        {
+            found = k;
+            name_length = n;
+        }
+    }
+    uint64_t value = 0;
+    for (uint64_t k = name_length; found != BUSTER_TYPED_CLASS_LIMIT && k < length; k += 1)
+    {
+        const uint8_t digit = (uint8_t)(token[k] - '0');
+        found = digit <= 9 && value <= 25 ? found : BUSTER_TYPED_CLASS_LIMIT;
+        value = value * 10 + digit;
+    }
+    if (found == BUSTER_TYPED_CLASS_LIMIT || value > UINT8_MAX)
+    {
+        state->cursor = first;
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
+    *class = (uint8_t)(found < BUSTER_TYPED_CLASS_LIMIT ? found : 0);
+    *bytes = (uint8_t)(found < BUSTER_TYPED_CLASS_LIMIT ? value : 0);
+}
+
+// A machine row's record's signed field, in decimal.
+static int32_t ir_parse_signed(IrParseState* state)
+{
+    const bool negative = ir_parse_take(state, '-');
+    const uint64_t magnitude = ir_parse_unsigned(state, negative ? (uint64_t)INT32_MAX + 1 : INT32_MAX, false);
+    return negative ? (int32_t)(UINT32_C(0) - (uint32_t)magnitude) : (int32_t)magnitude;
+}
+
+// `row #k (<operand classes>) -> <result class> [<form> reg vvvv rm index mode decorations immediate displacement]...`,
+// in their order (#141, ir_print's): a form by its name (ir_form_names), the bytes in hexadecimal and the immediate and
+// the displacement in decimal.
+static void ir_parse_machine_row(IrParseState* state)
+{
+    const uint32_t id = ir_parse_id(state, '#');
+    if (state->result.error == IR_PARSE_OK && id != state->machine_rows.count)
+    {
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    ir_parse_expect(state, '(');
+    if (state->result.error == IR_PARSE_OK && !ir_parse_take(state, ')'))
+    {
+        bool more = true;
+        while (state->result.error == IR_PARSE_OK && more)
+        {
+            if (row.operand_count == BUSTER_TIER0_OPERATION_OPERANDS)
+            {
+                ir_parse_fail(state, IR_PARSE_LIMIT);
+            }
+            else
+            {
+                ir_parse_row_class(state, &row.operand_classes[row.operand_count], &row.operand_bytes[row.operand_count]);
+                row.operand_count += 1;
+            }
+            more = ir_parse_take(state, ',');
+        }
+        ir_parse_expect(state, ')');
+    }
+    ir_parse_keyword(state, "->");
+    ir_parse_row_class(state, &row.result_class, &row.result_bytes);
+    while (state->result.error == IR_PARSE_OK && ir_parse_take(state, '['))
+    {
+        ir_parse_space(state);
+        const uint64_t first = state->cursor;
+        while (state->cursor < state->end && ((state->source.pointer[state->cursor] >= 'A' && state->source.pointer[state->cursor] <= 'Z') || (state->source.pointer[state->cursor] >= '0' && state->source.pointer[state->cursor] <= '9') ||
+                                              state->source.pointer[state->cursor] == '_'))
+        {
+            state->cursor += 1;
+        }
+        const uint64_t length = state->cursor - first;
+        uint32_t form = X86_FORM_COUNT;
+        for (uint32_t k = 0; form == X86_FORM_COUNT && k < X86_FORM_COUNT; k += 1)
+        {
+            form = strlen(ir_form_names[k]) == length && memcmp(state->source.pointer + first, ir_form_names[k], length) == 0 ? k : form;
+        }
+        X86Instruction record = { .form = (uint16_t)form };
+        record.reg = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
+        record.vvvv = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
+        record.rm = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
+        record.index = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
+        record.mode = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
+        record.decorations = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
+        record.immediate = ir_parse_signed(state);
+        record.displacement = ir_parse_signed(state);
+        ir_parse_expect(state, ']');
+        if (state->result.error == IR_PARSE_OK && (form == X86_FORM_COUNT || row.record_count == BUSTER_TIER0_OPERATION_RECORDS))
+        {
+            ir_parse_fail(state, form == X86_FORM_COUNT ? IR_PARSE_SYNTAX : IR_PARSE_LIMIT);
+        }
+        else if (state->result.error == IR_PARSE_OK)
+        {
+            row.records[row.record_count] = record;
+            row.record_count += 1;
+        }
+    }
+    ir_parse_append(state, &state->machine_rows, &row);
+}
+
+// `variadic call(...)`, `result size=<bytes> ret(...) passed=#<first>`, each once, and the machine rows (#141).
 static void ir_parse_frame(IrParseState* state)
 {
-    if (ir_parse_word(state, "variadic"))
+    if (ir_parse_word(state, "row"))
+    {
+        ir_parse_machine_row(state);
+    }
+    else if (ir_parse_word(state, "variadic"))
     {
         if (state->result.error == IR_PARSE_OK && state->variadic)
         {
@@ -544,8 +669,15 @@ static void ir_parse_address(IrParseState* state, IrParseRow* row)
 
 static void ir_parse_call(IrParseState* state, IrParseRow* row)
 {
-    row->a = ir_parse_id(state, row->op == IR_CALL ? '@' : '%');
-    if (row->op == IR_CALL)
+    // A row call (#141): `row #k(...)`, of no symbol.
+    const bool machine = row->op == IR_CALL && ir_parse_word(state, "row");
+    const uint32_t machine_row = machine ? ir_parse_id(state, '#') : 0;
+    if (state->result.error == IR_PARSE_OK && machine_row == UINT32_MAX)
+    {
+        ir_parse_fail(state, IR_PARSE_LIMIT);
+    }
+    row->a = machine ? 0 : ir_parse_id(state, row->op == IR_CALL ? '@' : '%');
+    if (row->op == IR_CALL && !machine)
     {
         ir_parse_symbol(state, row->a);
     }
@@ -553,6 +685,7 @@ static void ir_parse_call(IrParseState* state, IrParseRow* row)
         .argument_first = state->extra.count,
         .type_first = state->call_types.count,
         .result_type = row->type,
+        .row = machine ? machine_row + 1 : 0,
     };
     ir_parse_expect(state, '(');
     if (state->result.error == IR_PARSE_OK && !ir_parse_take(state, ')'))
@@ -891,6 +1024,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
         .label_count = state->labels.count,
         .abi_call_count = state->abi_calls.count,
         .passed_count = state->passed.count,
+        .row_count = state->machine_rows.count,
     };
     IrFunction function = { 0 };
     const IrError created = ir_create(output, &sizes, &function);
@@ -915,6 +1049,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
         ir_parse_copy(state->labels, function.labels);
         ir_parse_copy(state->abi_calls, function.abi_calls);
         ir_parse_copy(state->passed, function.passed);
+        ir_parse_copy(state->machine_rows, function.rows);
         function.variadic = state->variadic;
         function.incoming = state->incoming;
         function.parameter_passed = state->parameter_passed;
@@ -978,6 +1113,7 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
         .labels.bytes = sizeof(uint32_t),
         .abi_calls.bytes = sizeof(IrAbiCall),
         .passed.bytes = sizeof(IrPassed),
+        .machine_rows.bytes = sizeof(Tier0Operation),
         .symbol_count = 1,
         .result.check.instruction = BUSTER_IR_NONE,
     };

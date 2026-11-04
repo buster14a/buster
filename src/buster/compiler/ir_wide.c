@@ -800,6 +800,7 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
                 .abi_call_count = function->abi_call_count,
                 .passed_count = function->passed_count,
                 .vector_constant_count = function->vector_constant_count,
+                .row_count = function->row_count,
             };
             check.error = ir_create(output, &sizes, &split);
         }
@@ -856,6 +857,10 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
             if (function->vector_constant_count != 0)
             {
                 memcpy(split.vector_constants, function->vector_constants, (uint64_t)function->vector_constant_count * sizeof(IrSimdValue));
+            }
+            if (function->row_count != 0)
+            {
+                memcpy(split.rows, function->rows, (uint64_t)function->row_count * sizeof(Tier0Operation));
             }
             const uint64_t instructions = work.instruction;
             work.output = &split;

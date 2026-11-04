@@ -1,0 +1,18 @@
+function (v16i32, v16i32, m64, i64) -> v16i32 {
+  row #0 (vector64, vector64, mask8) -> vector64 [VPADDB_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]
+  row #1 (u64, vector64, mask8) -> void [VMOVDQU8_ZM512_Z 0x81 0x00 0x80 0x00 0x0c 0x0a 0 64]
+  row #2 (vector64, vector64) -> mask8 [VPCMPB_K_Z_ZM512_IMM8 0x90 0x80 0x81 0x00 0x00 0x00 4 0]
+  row #3 (vector64, i32) -> vector64 [VMOVD_X_RM32_EVEX 0x81 0x00 0x81 0x00 0x00 0x00 0 0] [VPSRLW_Z_Z_XM128 0x80 0x80 0x81 0x00 0x00 0x00 0 0]
+b0:
+  %0 = param.v16i32 0
+  %1 = param.v16i32 1
+  %2 = param.m64 2
+  %3 = param.i64 3
+  %4 = call.v16i32 row #0(%0, %1, %2) fixed=(v16i32, v16i32, m64) variadic=0
+  %5 = call.void row #1(%3, %4, %2) fixed=(i64, v16i32, m64) variadic=0
+  %6 = call.m64 row #2(%4, %0) fixed=(v16i32, v16i32) variadic=0
+  %7 = trunc.i32 %3
+  %8 = call.v16i32 row #3(%4, %7) fixed=(v16i32, i32) variadic=0
+  %9 = call.void row #1(%3, %8, %6) fixed=(i64, v16i32, m64) variadic=0
+  %10 = ret.void %8
+}

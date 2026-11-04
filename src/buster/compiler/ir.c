@@ -251,6 +251,8 @@ struct IrAbiCall
 // Arguments in extra[argument_first..+argument_count), fixed parameter types in call_types[type_first..+parameter_count).
 // The result and argument types are semantic IR types. ABI locations/registers are absent but for a call that passes or
 // returns an aggregate by value: `abi` is then 1 + its records' index in IrFunction.abi_calls, and 0 for any other call.
+// `row` is 1 + the index in IrFunction.rows of the machine row an IR_CALL runs in place of a callee (#141, a row call:
+// its symbol, a, is then 0), and 0 for any other call.
 typedef struct IrCall IrCall;
 struct IrCall
 {
@@ -261,6 +263,7 @@ struct IrCall
     uint8_t result_type;
     bool variadic;
     uint32_t abi;
+    uint32_t row;
 };
 
 typedef struct IrSizes IrSizes;
@@ -279,6 +282,7 @@ struct IrSizes
     uint64_t abi_call_count;
     uint64_t passed_count;
     uint64_t vector_constant_count;
+    uint64_t row_count;
 };
 
 typedef struct IrFunction IrFunction;
@@ -310,6 +314,15 @@ struct IrFunction
     uint32_t parameter_count;
     IrSimdValue* vector_constants;
     uint32_t vector_constant_count;
+    // The machine rows its row calls run (#141, IrCall.row): the typed stream's X86 rows (Tier0Operation, #717) that the
+    // IR has no operation of its own for, the vector builtins' and the vector operators' on elements other than 32-bit
+    // integers. A row call is as opaque to the IR's passes as a call of an unknown function, which reads and writes
+    // memory: its arguments are the row's operands in order and its result the row's, of the types ir_row_type gives
+    // their classes. Its records are the producer's, trusted as IrPassed's locations are: the verifier checks the row's
+    // counts and classes against its calls, and Tier 1 the records themselves (tier0_operation_valid) before it places
+    // them.
+    Tier0Operation* rows;
+    uint32_t row_count;
     uint8_t result_type;
     // Exclusive symbol bound supplied by the translation unit. UINT32_MAX permits any non-sentinel SymbolId.
     uint32_t symbol_count;
@@ -521,6 +534,33 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "rmw",
 };
 
+// The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
+// followed by their bytes (vector64, mask8).
+static const char* const ir_row_class_names[BUSTER_TYPED_CLASS_LIMIT] = {
+    "void",
+    "i8",
+    "u8",
+    "i16",
+    "u16",
+    "i32",
+    "u32",
+    "i64",
+    "u64",
+    "f32",
+    "f64",
+    "f80",
+    "i128",
+    "u128",
+    "vector",
+    "mask",
+};
+
+// The x86 forms' names in a machine row's records (#141), X86Form's without X86_FORM_, so that the text names a form by
+// what it is rather than by its place in the table, which grows.
+#define BUSTER_IR_FORM_NAME(name, ...) #name,
+static const char* const ir_form_names[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUSTER_IR_FORM_NAME, BUSTER_IR_FORM_NAME) };
+#undef BUSTER_IR_FORM_NAME
+
 // An intrinsic's operations' names in the text form (BUSTER_IR_INTRINSIC_*), after its operands as a comparison's
 // predicate is.
 static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
@@ -601,7 +641,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
     const uint64_t mark = arena->length;
     IrError error = IR_OK;
     if (sizes->instruction_count > UINT32_MAX || sizes->block_count > UINT32_MAX || sizes->extra_count > UINT32_MAX || sizes->constant_count > UINT32_MAX || sizes->slot_count > UINT32_MAX || sizes->address_count > UINT32_MAX || sizes->call_count > UINT32_MAX || sizes->call_type_count > UINT32_MAX || sizes->parameter_count > UINT32_MAX ||
-        sizes->label_count > UINT32_MAX || sizes->abi_call_count > UINT32_MAX || sizes->passed_count > UINT32_MAX || sizes->vector_constant_count > UINT32_MAX)
+        sizes->label_count > UINT32_MAX || sizes->abi_call_count > UINT32_MAX || sizes->passed_count > UINT32_MAX || sizes->vector_constant_count > UINT32_MAX || sizes->row_count > UINT32_MAX)
     {
         error = IR_ERROR_LIMIT;
     }
@@ -619,6 +659,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
             .call_type_count = (uint32_t)sizes->call_type_count,
             .parameter_count = (uint32_t)sizes->parameter_count,
             .vector_constant_count = (uint32_t)sizes->vector_constant_count,
+            .row_count = (uint32_t)sizes->row_count,
             .symbol_count = UINT32_MAX,
             .label_count = (uint32_t)sizes->label_count,
             .abi_call_count = (uint32_t)sizes->abi_call_count,
@@ -635,6 +676,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
         candidate.extra = ir_allocate(arena, sizes->extra_count, 4, &ok);
         candidate.constants = ir_allocate(arena, sizes->constant_count, sizeof(IrConstant), &ok);
         candidate.vector_constants = ir_allocate(arena, sizes->vector_constant_count, sizeof(IrSimdValue), &ok);
+        candidate.rows = ir_allocate(arena, sizes->row_count, sizeof(Tier0Operation), &ok);
         candidate.slots = ir_allocate(arena, sizes->slot_count, sizeof(IrSlot), &ok);
         candidate.addresses = ir_allocate(arena, sizes->address_count, sizeof(IrAddress), &ok);
         candidate.calls = ir_allocate(arena, sizes->call_count, sizeof(IrCall), &ok);
@@ -841,7 +883,8 @@ static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
 {
     (void)vector;
 
-    bool found = function->vector_constant_count != 0 || function->result_type >= IR_V4I32;
+    // A machine row (#141) is the IR's vectors' and masks' too, as opaque to the passes that take no SIMD value.
+    bool found = function->vector_constant_count != 0 || function->row_count != 0 || function->result_type >= IR_V4I32;
     if (BUSTER_VECTOR_PATH(vector))
     {
         ir_scan_vector_paths += 1;
@@ -890,7 +933,7 @@ static bool ir_function_has_vectors_path(const IrFunction* function, bool vector
 {
     (void)vector;
 
-    bool found = function->vector_constant_count != 0 || ir_vector_type(function->result_type);
+    bool found = function->vector_constant_count != 0 || function->row_count != 0 || ir_vector_type(function->result_type);
     if (BUSTER_VECTOR_PATH(vector))
     {
         ir_scan_vector_paths += 1;
@@ -989,6 +1032,50 @@ static inline __attribute__((always_inline)) bool ir_constant_fits(IrConstant va
     return result;
 }
 
+// The IR type of a machine row's operand or result (#141, IrFunction.rows) of the typed stream's class `class` and, a
+// vector's or a mask's, `bytes`: an integer's of its bytes, whatever its signedness, a float's or a double's, a vector's
+// container of its bytes (v4i32, v8i32 or v16i32, whatever its elements: the row's records give its bits their meaning),
+// a mask's of its bytes, and void for a void result; IR_TYPE_COUNT for a class a row call doesn't take: a long double, a
+// 128-bit integer, and a vector of 4 or 8 bytes.
+static uint32_t ir_row_type(uint32_t class, uint32_t bytes)
+{
+    uint32_t type = IR_TYPE_COUNT;
+    switch (class)
+    {
+        case BUSTER_TYPED_CLASS_VOID: type = IR_VOID; break;
+        case BUSTER_TYPED_CLASS_I8:
+        case BUSTER_TYPED_CLASS_U8: type = IR_I8; break;
+        case BUSTER_TYPED_CLASS_I16:
+        case BUSTER_TYPED_CLASS_U16: type = IR_I16; break;
+        case BUSTER_TYPED_CLASS_I32:
+        case BUSTER_TYPED_CLASS_U32: type = IR_I32; break;
+        case BUSTER_TYPED_CLASS_I64:
+        case BUSTER_TYPED_CLASS_U64: type = IR_I64; break;
+        case BUSTER_TYPED_CLASS_F32: type = IR_F32; break;
+        case BUSTER_TYPED_CLASS_F64: type = IR_F64; break;
+        case BUSTER_TYPED_CLASS_VECTOR: type = bytes == 16 ? IR_V4I32 : bytes == 32 ? IR_V8I32 : bytes == 64 ? IR_V16I32 : IR_TYPE_COUNT; break;
+        case BUSTER_TYPED_CLASS_MASK: type = bytes == 1 ? IR_M8 : bytes == 2 ? IR_M16 : bytes == 4 ? IR_M32 : bytes == 8 ? IR_M64 : IR_TYPE_COUNT; break;
+        default: break;
+    }
+    return type;
+}
+
+// Whether a row call's descriptor fits its row (#141): within the row's columns, no ABI records and no variadic
+// arguments, one fixed argument per operand, each of its operand's type, and the call's result the row's.
+static bool ir_row_call_valid(const IrFunction* f, const IrCall* call)
+{
+    const Tier0Operation* row = call->row <= f->row_count ? &f->rows[call->row - 1] : 0;
+    bool valid = row != 0 && row->record_count <= BUSTER_TIER0_OPERATION_RECORDS && row->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS && call->abi == 0 && !call->variadic &&
+                 call->argument_count == row->operand_count && call->parameter_count == row->operand_count &&
+                 ir_row_type(row->result_class, row->result_bytes) == call->result_type;
+    for (uint32_t j = 0; valid && j < row->operand_count; j += 1)
+    {
+        const uint32_t type = ir_row_type(row->operand_classes[j], row->operand_bytes[j]);
+        valid = type != IR_VOID && type == f->call_types[call->type_first + j];
+    }
+    return valid;
+}
+
 // Check shape before any instruction-indexed access. Metadata tables are checked even when no instruction uses them.
 static IrCheck ir_check_shape(const IrFunction* f)
 {
@@ -998,7 +1085,7 @@ static IrCheck ir_check_shape(const IrFunction* f)
     {
         check.error = IR_ERROR_STRUCTURE;
     }
-    if (check.error == IR_OK && f->vector_constant_count != 0 && f->vector_constants == NULL)
+    if (check.error == IR_OK && ((f->vector_constant_count != 0 && f->vector_constants == NULL) || (f->row_count != 0 && f->rows == NULL)))
     {
         check.error = IR_ERROR_STRUCTURE;
     }
@@ -1075,7 +1162,8 @@ static IrCheck ir_check_shape(const IrFunction* f)
         const IrCall call = f->calls[c];
         const IrAbiCall* abi = call.abi != 0 && call.abi <= f->abi_call_count ? &f->abi_calls[call.abi - 1] : 0;
         if (call.result_type >= IR_TYPE_COUNT || call.argument_count > UINT32_MAX - 3 || !ir_slice(call.argument_first, call.argument_count, f->extra_count) || !ir_slice(call.type_first, call.parameter_count, f->call_type_count) || call.argument_count < call.parameter_count || (!call.variadic && call.argument_count != call.parameter_count) ||
-            (call.abi != 0 && (abi == 0 || !ir_slice(abi->passed, call.argument_count, f->passed_count) || (abi->result_size != 0 && call.result_type != IR_VOID))))
+            (call.abi != 0 && (abi == 0 || !ir_slice(abi->passed, call.argument_count, f->passed_count) || (abi->result_size != 0 && call.result_type != IR_VOID))) ||
+            (call.row != 0 && !ir_row_call_valid(f, &call)))
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, c);
         }
@@ -1182,7 +1270,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_STORE: valid = ta == IR_PTR && ((f->flags[i] & BUSTER_IR_ATOMIC) == 0 || ir_atomic_access(op == IR_LOAD ? type : tb, f->alignment_log2[i])); break;
             case IR_RULE_CALL:
             {
-                valid = b < f->call_count && (op == IR_CALL ? a != 0 && a < f->symbol_count : ta == IR_PTR);
+                // A row call (#141, IrCall.row) is a direct call's, of no symbol.
+                valid = b < f->call_count && (op == IR_CALL ? (f->calls[b].row != 0 ? a == 0 : a != 0 && a < f->symbol_count) : ta == IR_PTR && f->calls[b].row == 0);
                 if (valid)
                 {
                     const IrCall call = f->calls[b];
@@ -2035,6 +2124,16 @@ static void ir_print_abi_call(FILE* output, AbiCall call)
     fputc(')', output);
 }
 
+// A machine row's class (#141): its name, a vector's and a mask's bytes after it, after `separator`.
+static void ir_print_row_class(FILE* output, const char* separator, uint32_t class, uint32_t bytes)
+{
+    fprintf(output, "%s%s", separator, class < BUSTER_TYPED_CLASS_LIMIT ? ir_row_class_names[class] : "invalid");
+    if (class == BUSTER_TYPED_CLASS_VECTOR || class == BUSTER_TYPED_CLASS_MASK)
+    {
+        fprintf(output, "%" PRIu32, bytes);
+    }
+}
+
 static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
 {
     IrCheck check = ir_verify(f, scratch, 0);
@@ -2073,6 +2172,26 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
             fprintf(output, "  abi #%" PRIu32 " ", c);
             ir_print_abi_call(output, f->abi_calls[c].call);
             fprintf(output, " passed=#%" PRIu32 " result=%" PRIu32 "\n", f->abi_calls[c].passed, f->abi_calls[c].result_size);
+        }
+        // The machine rows (#141): `row #k (<operand classes>) -> <result class>` and each record as
+        // [<form> reg vvvv rm index mode decorations immediate displacement].
+        for (uint32_t r = 0; r < f->row_count; r += 1)
+        {
+            const Tier0Operation* row = &f->rows[r];
+            fprintf(output, "  row #%" PRIu32 " (", r);
+            for (uint32_t j = 0; j < row->operand_count; j += 1)
+            {
+                ir_print_row_class(output, j == 0 ? "" : ", ", row->operand_classes[j], row->operand_bytes[j]);
+            }
+            fprintf(output, ") ->");
+            ir_print_row_class(output, " ", row->result_class, row->result_bytes);
+            for (uint32_t k = 0; k < row->record_count; k += 1)
+            {
+                const X86Instruction* record = &row->records[k];
+                fprintf(output, " [%s 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x %" PRId32 " %" PRId32 "]", record->form < X86_FORM_COUNT ? ir_form_names[record->form] : "INVALID", record->reg,
+                        record->vvvv, record->rm, record->index, record->mode, record->decorations, record->immediate, record->displacement);
+            }
+            fputc('\n', output);
         }
         for (uint32_t s = 0; s < f->slot_count; s += 1)
         {
@@ -2133,7 +2252,14 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                     case IR_CALL_INDIRECT:
                     {
                         const IrCall call = f->calls[b];
-                        fprintf(output, " %c%" PRIu32 "(", op == IR_CALL ? '@' : '%', a);
+                        if (call.row != 0)
+                        {
+                            fprintf(output, " row #%" PRIu32 "(", call.row - 1);
+                        }
+                        else
+                        {
+                            fprintf(output, " %c%" PRIu32 "(", op == IR_CALL ? '@' : '%', a);
+                        }
                         for (uint32_t p = 0; p < call.argument_count; p += 1)
                         {
                             fprintf(output, "%s%%%" PRIu32, p == 0 ? "" : ", ", f->extra[call.argument_first + p]);

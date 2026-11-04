@@ -77,6 +77,9 @@ struct IrSimdTypedOperation
     // (BUSTER_IR_INTRINSIC_* + 1, 0 for any other row), and the operands its a and b are, the source and the other.
     uint8_t intrinsic;
     uint8_t intrinsic_operands[2];
+    // A row the IR has no operation of its own for (#141, ir_simd_typed_machine_row): the row itself, which a row call
+    // runs (IrFunction.rows).
+    bool machine;
 };
 
 typedef struct IrSimdTypedForm IrSimdTypedForm;
@@ -437,12 +440,58 @@ static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, u
 
 // A row's decoding: a mask result's by ir_simd_typed_mask_row, an int's of mask operands by ir_simd_typed_mask_test, an
 // unsigned int's or long's of integers by ir_simd_typed_intrinsic, any other's by ir_simd_typed_operation.
+// Any other X86 row (#141): one whose operands and result are of classes a row call takes (ir_row_type: integers of 1 to
+// 8 bytes, floats and doubles, vectors of 16, 32 or 64 bytes whatever their elements, masks and, for its result, void),
+// IR_SIMD_TYPED_UNSUPPORTED otherwise, and whose records' forms the target has, IR_SIMD_TYPED_TARGET otherwise. It becomes
+// the IR's machine row, which a row call runs as Tier 0 runs it: the vector builtins' rows and the vector operators' on
+// elements other than 32-bit integers, which Tier 0 makes rows of, as x86 records.
+static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_INVALID;
+    bool admitted = status == IR_SIMD_TYPED_OK && source->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS && source->record_count <= BUSTER_TIER0_OPERATION_RECORDS &&
+                    ir_row_type(source->result_class, source->result_bytes) != IR_TYPE_COUNT;
+    // Its vectors' and masks' own moves, Tier 1's: AVX512F's, and VL's below 64 bytes, as any vector value's; DQ's for a
+    // byte mask and BW's for a doubleword's or a quadword's, as any mask's.
+    uint64_t required = 0;
+    for (uint32_t j = 0; admitted && j <= source->operand_count; j += 1)
+    {
+        const uint32_t class = j < source->operand_count ? source->operand_classes[j] : source->result_class;
+        const uint32_t bytes = j < source->operand_count ? source->operand_bytes[j] : source->result_bytes;
+        const uint32_t type = ir_row_type(class, bytes);
+        admitted = type != IR_TYPE_COUNT && (type != IR_VOID || j == source->operand_count);
+        required |= ir_vector_type(type) ? BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) : 0;
+        required |= ir_mask_type(type) ? BUSTER_X86_FEATURE(AVX512F) | (bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0) : 0;
+    }
+    // Each form's features, x86_target_requirement's, whose classified rows carry BUSTER_X86_TARGET_KNOWN, which every
+    // target has (x86_target_forms).
+    for (uint32_t r = 0; admitted && r < source->record_count; r += 1)
+    {
+        required |= x86_target_requirement(source->records[r].form) & ~BUSTER_X86_TARGET_KNOWN;
+    }
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        status = !admitted ? IR_SIMD_TYPED_UNSUPPORTED : (target_features & required) == required ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_TARGET;
+    }
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT, .required_features = required, .machine = true };
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
     const bool scalar = source != NULL && (source->result_class == BUSTER_TYPED_CLASS_U32 || source->result_class == BUSTER_TYPED_CLASS_U64) && !masks;
-    return source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
-           masks                                                             ? ir_simd_typed_mask_test(source, target_features, result) :
-           scalar                                                            ? ir_simd_typed_intrinsic(source, target_features, result) :
-                                                                               ir_simd_typed_operation(source, target_features, result);
+    const IrSimdTypedStatus status = source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
+                                     masks                                                             ? ir_simd_typed_mask_test(source, target_features, result) :
+                                     scalar                                                            ? ir_simd_typed_intrinsic(source, target_features, result) :
+                                                                                                         ir_simd_typed_operation(source, target_features, result);
+    // A row the IR's own operations don't take is its machine row (#141); one they take but the target refuses stays
+    // refused.
+    return status == IR_SIMD_TYPED_UNSUPPORTED ? ir_simd_typed_machine_row(source, target_features, result) : status;
 }

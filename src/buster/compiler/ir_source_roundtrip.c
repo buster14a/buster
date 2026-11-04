@@ -77,7 +77,7 @@ static bool ir_source_text_call(const IrFunction* a, uint32_t x, const IrFunctio
     const IrCall* left = &a->calls[x];
     const IrCall* right = &b->calls[y];
     bool equal = left->argument_count == right->argument_count && left->parameter_count == right->parameter_count &&
-                 left->result_type == right->result_type && left->variadic == right->variadic && (left->abi != 0) == (right->abi != 0);
+                 left->result_type == right->result_type && left->variadic == right->variadic && (left->abi != 0) == (right->abi != 0) && (left->row != 0) == (right->row != 0);
     equal = equal && ir_source_text_range(a->extra, left->argument_first, b->extra, right->argument_first, left->argument_count, sizeof(uint32_t)) &&
             ir_source_text_range(a->call_types, left->type_first, b->call_types, right->type_first, left->parameter_count, sizeof(uint8_t));
     if (equal && left->abi != 0)
@@ -86,6 +86,15 @@ static bool ir_source_text_call(const IrFunction* a, uint32_t x, const IrFunctio
         const IrAbiCall* right_abi = &b->abi_calls[right->abi - 1];
         equal = left_abi->result_size == right_abi->result_size && ir_source_text_abi(&left_abi->call, &right_abi->call) &&
                 ir_source_text_passed(a, left_abi->passed, b, right_abi->passed, left->argument_count);
+    }
+    // A row call's machine row (#141): its counts, classes and bytes, and its records' every field.
+    if (equal && left->row != 0)
+    {
+        const Tier0Operation* x = &a->rows[left->row - 1];
+        const Tier0Operation* y = &b->rows[right->row - 1];
+        equal = x->record_count == y->record_count && x->operand_count == y->operand_count && x->result_class == y->result_class && x->result_bytes == y->result_bytes &&
+                ir_source_text_bytes(x->operand_classes, y->operand_classes, x->operand_count) && ir_source_text_bytes(x->operand_bytes, y->operand_bytes, x->operand_count) &&
+                ir_source_text_bytes(x->records, y->records, (uint64_t)x->record_count * sizeof(X86Instruction));
     }
     return equal;
 }
@@ -329,6 +338,19 @@ static void ir_source_text_mutations(IrSourceTextTests* tests, const IrFunction*
                 call->variadic = !call->variadic;
                 ir_source_text_expect(tests, !ir_source_text_equal(original, changed), "changed call signature was missed");
                 call->variadic = !call->variadic;
+                if (call->row != 0)
+                {
+                    Tier0Operation* row = &changed->rows[call->row - 1];
+                    for (uint32_t r = 0; r < row->record_count; r += 1)
+                    {
+                        row->records[r].immediate ^= 1;
+                        ir_source_text_expect(tests, !ir_source_text_equal(original, changed), "changed row record was missed");
+                        row->records[r].immediate ^= 1;
+                    }
+                    row->result_bytes ^= 1;
+                    ir_source_text_expect(tests, !ir_source_text_equal(original, changed), "changed row class was missed");
+                    row->result_bytes ^= 1;
+                }
                 if (call->argument_count != 0)
                 {
                     changed->extra[call->argument_first] ^= 1;

@@ -67,7 +67,8 @@ typedef enum Tier1CertEmittedReason
     TIER1_CERT_EMITTED_INDIRECT,
     TIER1_CERT_EMITTED_ENTRY_LOOP,
     TIER1_CERT_EMITTED_PROBE,
-    // A vector wider than 8 bytes (#141: its ymm and zmm moves aren't decoded), or a long double (its x87 stack).
+    // A vector wider than 8 bytes (#141: its ymm and zmm moves aren't decoded) or a machine row (#141: its records), or a
+    // long double (its x87 stack).
     TIER1_CERT_EMITTED_VECTOR,
     TIER1_CERT_EMITTED_X87,
     // The code doesn't decode to its own certificate: a refusal.
@@ -918,7 +919,9 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     {
         reason = TIER1_CERT_EMITTED_ENTRY_LOOP;
     }
-    // A vector's ymm or zmm moves aren't decoded.
+    // A vector's ymm or zmm moves aren't decoded, nor a machine row's records (#141, tier1_emit_cfg_row), whose zmm16 and
+    // on aren't the allocation's.
+    reason = reason == TIER1_CERT_EMITTED_OK && function->row_count != 0 ? TIER1_CERT_EMITTED_VECTOR : reason;
     for (uint32_t v = 0; reason == TIER1_CERT_EMITTED_OK && v < input->value_count; v += 1)
     {
         reason = input->classes[v] == BUSTER_TIER1_ALLOCATE_VECTOR && emitted->prepared.sizes[emitted->value_nodes[v]] > 8 ? TIER1_CERT_EMITTED_VECTOR : reason;

@@ -197,6 +197,15 @@ typedef enum Tier1SelectRule
     // from rax into the destination, and rax restored where the destination isn't it. Never folded into a consumer, and
     // a barrier no load folds past.
     TIER1_RULE_ATOMIC_RMW,
+    // A machine row (#141), an IR row call's (IrCall.row): the typed stream's X86 row, x86 records whose registers are Tier
+    // 0's roles, which the CFG consumer places (tier1_emit_cfg_row) as Tier 0 does (Tier0Placement): its vector roles in
+    // zmm16 and on, which no value takes, each vector operand moved there from its register and the result moved from
+    // there into the destination; its integer, mask and floating operands in their own registers where its records don't
+    // write them, else moved into free registers of their classes; its scratch roles and its integer or mask result in
+    // free registers, the result in its destination where no operand is. `immediate` is the row's index in
+    // IrFunction.rows; its operands are the call's arguments, the node's effective uses, each in a register
+    // (tier1_select_row_supported). Only the CFG consumer takes it.
+    TIER1_RULE_ROW,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -1967,9 +1976,12 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             case IR_FCMP:
             case IR_FPTOSI:
             case IR_FPTOUI:
-            case IR_CALL:
             case IR_CALL_INDIRECT:
                 canonical[node] = 1;
+                break;
+            // A row call's narrow result (#141) is its field's, whose bits past the class are the row's: not canonical.
+            case IR_CALL:
+                canonical[node] = function->calls[function->b[node]].row == 0;
                 break;
             // A mask's kmovb or kmovw into a 32-bit register (TIER1_RULE_MASK_TO_INTEGER, #179) zero-extends.
             case IR_BITCAST:
@@ -2412,12 +2424,124 @@ static uint32_t tier1_select_argument_slots(const IrPassed* record)
     return slots;
 }
 
+// Whether `node` calls a function (#141): an IR_CALL of a symbol or an IR_CALL_INDIRECT, which the consumers' calls take
+// (saves around it, argument moves, the outgoing area), not an IR row call (IrCall.row), which runs a machine row in
+// place of a callee (TIER1_RULE_ROW) and saves nothing around it.
+static bool tier1_select_function_call(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0);
+}
+
+// Which of a machine row's operands its records write (#141, a bit per operand), through a field that names the operand's
+// role (INTEGER(j), FLOATING(j) or MASK(j)), by its form's effects (x86_semantics.c's: a field's role written), or its
+// opmask decoration where its form writes the mask (a gather's or a scatter's, whose VSIB operand clears it). A form the
+// tables don't cover writes every field it names. The others stay in their own registers (tier1_emit_cfg_row).
+static uint32_t tier1_select_row_written(const Tier0Operation* row)
+{
+    uint32_t written = 0;
+    for (uint32_t r = 0; r < row->record_count; r += 1)
+    {
+        X86Instruction record = row->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        const X86Effects* effects = x86_effects(record.form);
+        const bool covered = effects->operation != X86_OPERATION_NONE;
+        const X86FormDescription* description = x86_form_description(record.form);
+        for (uint32_t k = 0; k < fields.count; k += 1)
+        {
+            const uint8_t role = *fields.bytes[k];
+            const uint32_t position = fields.bytes[k] == &record.reg ? BUSTER_X86_ROLE_REG : fields.bytes[k] == &record.vvvv ? BUSTER_X86_ROLE_VVVV : BUSTER_X86_ROLE_RM;
+            const bool address = record.mode != BUSTER_X86_REGISTER_DIRECT && (fields.bytes[k] == &record.rm || fields.bytes[k] == &record.index);
+            const bool writes = !covered || (!address && (x86_effects_role(effects, position) & BUSTER_X86_ROLE_WRITE) != 0);
+            // An operand's role, in a field of its class: VECTOR(j) and the scratch and result roles aren't operands'.
+            const bool vector_field = tier0_vector_register_class(fields.classes[k]);
+            const bool operand = role >= BUSTER_TIER0_ROLE && (vector_field ? role >= BUSTER_TIER0_ROLE_FLOATING(0) && role < BUSTER_TIER0_ROLE_FLOATING_RESULT : (role & 0x30) == 0);
+            written |= writes && operand ? 1u << (role & 7) : 0;
+        }
+        const bool vsib = record.mode != BUSTER_X86_REGISTER_DIRECT && (description->rm & BUSTER_X86_OPERAND_VSIB) != 0;
+        const uint32_t decoration = record.decorations;
+        const bool decorated_operand = (decoration & BUSTER_TIER0_DECORATION_ROLE) == BUSTER_TIER0_DECORATION_MASK(0);
+        written |= decorated_operand && (vsib || !covered) ? 1u << (decoration & 7) : 0;
+    }
+    return written;
+}
+
+// Whether a machine row names an opmask register pair (#141, VP2INTERSECT's k and k + 1), which its registers by number
+// can't be renamed around (tier1_emit_cfg_row).
+static bool tier1_select_row_pairs(const Tier0Operation* row)
+{
+    bool paired = false;
+    for (uint32_t r = 0; r < row->record_count; r += 1)
+    {
+        const X86FormDescription* description = x86_form_description(row->records[r].form);
+        paired |= description->reg == BUSTER_X86_OPERAND_KP || description->vvvv == BUSTER_X86_OPERAND_KP || description->rm == BUSTER_X86_OPERAND_KP;
+    }
+    return paired;
+}
+
+// A placed record of a machine row (#141) with the opmask registers its row names by number (`original`'s fields and
+// decoration that name k1 to k7, not a role) renamed by `renamed`, k's new register at k: the fields of the opmask
+// class, and the decoration's mask where it names no role. Tier 0's placement left them as they were.
+static X86Instruction tier1_select_row_rename(X86Instruction placed, X86Instruction original, const uint8_t* renamed)
+{
+    Tier0Fields fields = tier0_operation_fields(&original);
+    Tier0Fields placed_fields = tier0_operation_fields(&placed);
+    for (uint32_t k = 0; k < fields.count && k < placed_fields.count; k += 1)
+    {
+        const uint8_t role = *fields.bytes[k];
+        if (fields.classes[k] == BUSTER_X86_CLASS_OPMASK && role < 8)
+        {
+            *placed_fields.bytes[k] = renamed[role];
+        }
+    }
+    if ((original.decorations & BUSTER_TIER0_DECORATION_ROLE) == 0)
+    {
+        const uint32_t index = original.decorations & BUSTER_X86_DECORATION_MASK;
+        placed.decorations = (uint8_t)((placed.decorations & ~BUSTER_X86_DECORATION_MASK) | renamed[index]);
+    }
+    return placed;
+}
+
+// Whether the CFG consumer places a row call's machine row (#141, TIER1_RULE_ROW): a row Tier 0 places (tier0_operation_valid,
+// which needs x86_semantics.c's tables). Its vector roles are zmm16 and on, which no value takes, and its floating ones
+// past them, below 32, where every record that names a vector register is an EVEX form's; a row with a VEX or legacy
+// form's vector register (tier0_operation_reach's vex_vectors) takes a run of free xmm registers below 16 for its
+// vector roles where it runs (tier1_emit_cfg_row), and names no floating role in such a form.
+static bool tier1_select_row_supported(const IrFunction* function, uint32_t node)
+{
+    const IrCall* call = node < function->instruction_count && function->op[node] == IR_CALL ? &function->calls[function->b[node]] : 0;
+    const Tier0Operation* row = call != 0 && call->row != 0 && call->row <= function->row_count ? &function->rows[call->row - 1] : 0;
+    bool supported = row != 0 && (x86_semantics_initialized || x86_semantics_initialize()) && tier0_operation_valid(row);
+    uint32_t floating = 0;
+    for (uint32_t j = 0; supported && j <= row->operand_count; j += 1)
+    {
+        const uint32_t class = j < row->operand_count ? row->operand_classes[j] : row->result_class;
+        floating += tier0_class_floating(class) ? 1 : 0;
+    }
+    const Tier0Reach reach = supported ? tier0_operation_reach(row) : (Tier0Reach){ 0, 0, 0 };
+    supported = supported && (reach.vex_vectors != 0 ? reach.vectors <= 15 : 16 + reach.vectors + floating <= 32);
+    for (uint32_t r = 0; supported && r < row->record_count; r += 1)
+    {
+        // A floating role in a VEX or legacy form's XMM field would need a register below 16 of its own.
+        X86Instruction record = row->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        const bool evex = x86_form_description(record.form)->family == BUSTER_X86_FAMILY_EVEX;
+        for (uint32_t k = 0; supported && k < fields.count; k += 1)
+        {
+            const uint8_t role = *fields.bytes[k];
+            supported = evex || !tier0_vector_register_class(fields.classes[k]) || role < BUSTER_TIER0_ROLE_FLOATING(0);
+        }
+        supported = supported && (evex || !fields.is4 || reach.vex_vectors != 0);
+    }
+    return supported;
+}
+
 // This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers. The shared verifier
 // checks descriptor bounds and actual argument types before this helper runs.
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
 {
     // A direct call, or one through a pointer, whose callee value the CFG consumer moves with the arguments.
-    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT);
+    bool supported = node < function->instruction_count && (function->op[node] == IR_CALL || function->op[node] == IR_CALL_INDIRECT) && function->calls[function->b[node]].row == 0;
     if (supported)
     {
         const IrCall call = function->calls[function->b[node]];
@@ -3616,6 +3740,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
+    else if (op == IR_CALL && function->calls[b].row != 0 && tier1_select_row_supported(function, node))
+    {
+        // A machine row (#141): its records, its operands' moves and its result's.
+        base.rule = TIER1_RULE_ROW;
+        base.immediate = function->calls[b].row - 1;
+        base.intrinsic_cost = (uint8_t)(1 + function->rows[function->calls[b].row - 1].record_count);
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if ((op == IR_CALL || op == IR_CALL_INDIRECT) && tier1_select_call_supported(function, node))
     {
         base.rule = TIER1_RULE_CALL;
@@ -3849,7 +3981,8 @@ static uint32_t tier1_select_need(uint8_t* needed, uint32_t value, bool passed, 
 // earlier block reads, #789) goes on `pending`.
 static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1SelectPattern* pattern, uint32_t node, bool walked, uint8_t* needed, uint32_t* pending, uint32_t pending_count)
 {
-    if (pattern->rule == TIER1_RULE_CALL)
+    // A row call's (#141) are its arguments too.
+    if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW)
     {
         const IrCall call = function->calls[function->b[node]];
         for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
@@ -3862,7 +3995,7 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
             pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
         }
     }
-    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && operand < 3; operand += 1)
+    for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && operand < 3; operand += 1)
     {
         const uint32_t value = pattern->values[operand];
         if (value != BUSTER_IR_NONE)
@@ -3977,7 +4110,8 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)))
+        const bool row_call = op == IR_CALL && function->calls[function->b[node]].row != 0;
+        if (op == IR_SWITCH || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !(row_call ? tier1_select_row_supported(function, node) : tier1_select_call_supported(function, node))))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -4192,7 +4326,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             {
                 const Tier1SelectPattern* pattern = &plan.patterns[node];
                 plan.estimated_cost += pattern->intrinsic_cost;
-                if (pattern->rule == TIER1_RULE_CALL)
+                if (pattern->rule == TIER1_RULE_CALL || pattern->rule == TIER1_RULE_ROW)
                 {
                     const IrCall call = function->calls[function->b[node]];
                     for (uint32_t argument = 0; argument < call.argument_count; argument += 1)

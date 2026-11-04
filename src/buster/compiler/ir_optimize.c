@@ -1406,6 +1406,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     IrSizes sizes = {
         .constant_count = f->constant_count,
         .vector_constant_count = f->vector_constant_count,
+        .row_count = f->row_count,
         .slot_count = f->slot_count,
         .address_count = f->address_count,
         .call_type_count = f->call_type_count,
@@ -1476,6 +1477,11 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         if (f->vector_constant_count != 0)
         {
             memcpy(candidate.vector_constants, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+        }
+        // The machine rows (#141), which the row calls index as before.
+        if (f->row_count != 0)
+        {
+            memcpy(candidate.rows, f->rows, (uint64_t)f->row_count * sizeof(Tier0Operation));
         }
         if (f->slot_count != 0)
         {
