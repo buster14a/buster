@@ -1487,6 +1487,11 @@ struct ParseScalar
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
+    // The diagnostics' and the meanings' columns in the tokens' arena (parse_translation_unit), and the meanings it has
+    // room for.
+    ParseDiagnostic* diagnostic_column;
+    uint8_t* meaning_column;
+    uint32_t meaning_room;
     uint32_t errors;
     // Optional source-event recorder. Null for syntax-only parsing and the vector fallback.
     ParseBindingTrace* binding_trace;
@@ -12365,6 +12370,11 @@ struct Parser
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
+    // The diagnostics' and the meanings' columns in the tokens' arena (parse_translation_unit), and the meanings it has
+    // room for.
+    ParseDiagnostic* diagnostic_column;
+    uint8_t* meaning_column;
+    uint32_t meaning_room;
     uint32_t errors;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.
@@ -12584,7 +12594,8 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
         result = predeclared[i] != 0;
     }
     const uint32_t capacity = table->count;
-    parser->meanings.meanings = result ? parse_column(parser, 9, capacity, 1) : 0;
+    // In the tokens' arena where they fit, as they do unless the table grew by more than parse_translation_unit allowed.
+    parser->meanings.meanings = !result ? 0 : capacity <= parser->meaning_room ? parser->meaning_column : parse_column(parser, 9, capacity, 1);
     parser->meanings.capacity = capacity;
     parser->meanings.table = table;
     result = result && parser->meanings.meanings != 0;
@@ -12625,11 +12636,16 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         // The columns, all or none.
         ParseTokens* tokens = &parser->tokens;
         const uint64_t pragmas = (uint64_t)output->count + 1;
-        const uint64_t entries[] = { capacity, capacity, capacity, pragmas, pragmas, capacity };
-        const uint64_t sizes[] = { 1, 4, 4, 4, 4, 1 };
+        // With the diagnostics, at most one for each token and 16 more, and the names' meanings: one for each name the
+        // intern table has and those parse_clang_scope_numbers (`_Clang`) and parse_prepare_meanings may add. Two
+        // arenas fewer for each unit (#652).
+        const uint64_t room = (uint64_t)pp->table->count + BUSTER_PARSE_PREDECLARED_TYPEDEFS + 1;
+        const uint64_t entries[] = { capacity, capacity, capacity, pragmas, pragmas, capacity, capacity + 16, room };
+        const uint64_t sizes[] = { 1, 4, 4, 4, 4, 1, sizeof(ParseDiagnostic), 1 };
         void** columns[] = { (void**)&tokens->kinds, (void**)&tokens->names, (void**)&tokens->sources, (void**)&tokens->pragma_sources, (void**)&tokens->pragma_positions,
-                             (void**)&tokens->flags };
+                             (void**)&tokens->flags, (void**)&parser->diagnostic_column, (void**)&parser->meaning_column };
         result = parse_columns(parser, 0, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
+        parser->meaning_room = result ? (uint32_t)room : 0;
         tokens->capacity = (uint32_t)capacity;
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
@@ -12647,7 +12663,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         parse_clang_scope_numbers(parser, pp);
         const uint32_t count = parser->tokens.count;
         parser->diagnostic_capacity = count + 16;
-        parser->diagnostics = parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));
+        parser->diagnostics = parser->diagnostic_column;
         result = parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }

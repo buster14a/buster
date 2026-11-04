@@ -507,6 +507,13 @@ makes its own; with one, the units and lanes that share it read each file once
   2.1% less (the floor −0.9% to +0.5%), and its `-fsyntax-only` and `-c` were
   within the floor's spread. Putting the stacks' columns and the cache among
   the tables alone, each table with its huge pages, was no faster than main.
+  A unit's own file cache keeps its four arrays among the unit's tables too
+  (records, identity slots, paths and path slots, `file_cache_start`), as
+  zero as the cache itself, so a unit neither writes the cache's 120 KB
+  (`file_cache_initialize`'s `*cache = (FileCache){ 0 }`, 30 pages of it the
+  lanes' arenas) nor reserves an arena for each array. A cache that units
+  share (`PPOptions.files`) is still made with `file_cache_initialize`, its
+  arrays in arenas of their own.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps

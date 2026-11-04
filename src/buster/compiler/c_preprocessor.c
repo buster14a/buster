@@ -3826,34 +3826,68 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // them all (docs/c-preprocessor.md, "Files").
 #define BUSTER_FILE_CACHE_READ_LIMIT (16u << 10)
 
+// The capacity shift of a cache's arrays (arena_capacity_shift), for the larger of its records and paths.
+static uint32_t file_cache_shift(void)
+{
+    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
+    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
+    return arena_capacity_shift(records > paths ? records : paths);
+}
+
+// The entries and entry bytes of a cache's four arrays at capacity shift `shift`, in FileCache.arrays' order: the
+// records, their identity slots, the paths and their slots.
+static void file_cache_array_shape(uint32_t shift, uint64_t counts[4], uint64_t sizes[4])
+{
+    counts[0] = BUSTER_PP_MAX_FILES >> shift;
+    counts[1] = 2ull * (BUSTER_PP_MAX_FILES >> shift);
+    counts[2] = BUSTER_FILE_CACHE_MAX_PATHS >> shift;
+    counts[3] = 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> shift);
+    sizes[0] = sizeof(PPFileData);
+    sizes[1] = sizeof(uint32_t);
+    sizes[2] = sizeof(FileCachePath);
+    sizes[3] = sizeof(uint32_t);
+}
+
+// Starts a cache whose bytes are all zero, with its four arrays at `arrays` (file_cache_array_shape's, at `shift`, zero
+// too, or a null among them if they couldn't be reserved), and reserves its paths' bytes. The arrays are the caller's to
+// release: file_cache_initialize's own arenas, or a unit's tables (pp_initialize_once, #652), which hold the cache itself
+// too and so need neither its 120 KB written zero nor four arenas of their own.
+static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare prepare, uint32_t shift, void* const arrays[4])
+{
+    cache->prepare = prepare;
+    cache->table = table;
+    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
+    cache->capacity_shift = shift;
+    const bool reserved = arrays[0] != 0 && arrays[1] != 0 && arrays[2] != 0 && arrays[3] != 0;
+    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
+    cache->records = arrays[0];
+    cache->identity_slots = arrays[1];
+    cache->paths = arrays[2];
+    cache->path_slots = arrays[3];
+    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
+    return reserved && cache->path_arena.base != 0;
+}
+
 // Reserves a cache's memory, for files prepared as `prepare` says and refined with `table`. Returns false if it can't be
 // reserved (file_cache_release then releases what was).
 static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, InternTable* table, PPPrepare prepare)
 {
     *cache = (FileCache){ 0 };
-    cache->prepare = prepare;
-    cache->table = table;
-    cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
-    const uint64_t records = (uint64_t)BUSTER_PP_MAX_FILES * sizeof(PPFileData);
-    const uint64_t paths = (uint64_t)BUSTER_FILE_CACHE_MAX_PATHS * sizeof(FileCachePath);
-    cache->capacity_shift = arena_capacity_shift(records > paths ? records : paths);
+    const uint32_t shift = file_cache_shift();
+    uint64_t counts[4];
+    uint64_t sizes[4];
+    file_cache_array_shape(shift, counts, sizes);
     // Reserved in turn until one can't be (file_cache_release releases those that were).
-    const uint64_t sizes[] = { (uint64_t)(BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(PPFileData) + 64, 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift) * sizeof(uint32_t) + 64,
-                               (uint64_t)(BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(FileCachePath) + 64, 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift) * sizeof(uint32_t) + 64 };
+    void* arrays[4] = { 0 };
     bool reserved = true;
     for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->arrays); i += 1)
     {
-        cache->arrays[i] = arena_reserve(sizes[i]);
-        reserved = cache->arrays[i].base != 0;
+        cache->arrays[i] = arena_reserve(counts[i] * sizes[i] + 64);
+        arrays[i] = cache->arrays[i].base != 0 ? arena_push_array(&cache->arrays[i], counts[i], sizes[i], 64) : 0;
+        reserved = arrays[i] != 0;
     }
-    cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
-    cache->records = arena_push_array(&cache->arrays[0], (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(PPFileData), 64);
-    cache->identity_slots = arena_push_array(&cache->arrays[1], 2ull * (BUSTER_PP_MAX_FILES >> cache->capacity_shift), sizeof(uint32_t), 64);
-    cache->paths = arena_push_array(&cache->arrays[2], (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(FileCachePath), 64);
-    cache->path_slots = arena_push_array(&cache->arrays[3], 2ull * (BUSTER_FILE_CACHE_MAX_PATHS >> cache->capacity_shift), sizeof(uint32_t), 64);
-    cache->identity_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
-    cache->path_slot_mask = BUSTER_FILE_CACHE_INITIAL_SLOTS - 1;
-    return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
+    return file_cache_start(cache, table, prepare, shift, arrays);
 }
 
 // Unmaps the records' files, and the files of paths whose probe mapped one that no record took, and releases the
@@ -17998,8 +18032,18 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_tokens_plan(&plan, &pp->arguments, BUSTER_PP_MAX_STACK_TOKENS >> shift);
     pp_tokens_plan(&plan, &pp->captures, BUSTER_PP_MAX_STACK_TOKENS >> shift);
     pp_tokens_plan(&plan, &pp->expansions, BUSTER_PP_MAX_STACK_TOKENS >> shift);
-    // 131 KB, most of it the lanes' arenas, that file_cache_initialize writes whole.
+    // The unit's own file cache, 120 KB, most of it the lanes' arenas, and its four arrays (file_cache_start): zero as
+    // tables, so that a small unit neither writes 30 pages of it nor reserves four arenas for a page of each (#652).
     pp_table(&plan, (void**)&pp->cache, options->files == 0, sizeof(FileCache));
+    const uint32_t cache_shift = file_cache_shift();
+    uint64_t cache_counts[4];
+    uint64_t cache_sizes[4];
+    void* cache_arrays[4];
+    file_cache_array_shape(cache_shift, cache_counts, cache_sizes);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache_arrays); i += 1)
+    {
+        pp_table(&plan, &cache_arrays[i], options->files == 0 ? cache_counts[i] : 0, cache_sizes[i]);
+    }
     if (result && !plan.full)
     {
         pp->arrays[0] = arena_reserve_tables(plan.tables, plan.count);
@@ -18035,7 +18079,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     if (options->files == 0)
     {
         pp->owns_cache = result;
-        result = result && file_cache_initialize(pp->cache, table, pp_prepare_config(pp));
+        result = result && file_cache_start(pp->cache, table, pp_prepare_config(pp), cache_shift, cache_arrays);
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
              pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))

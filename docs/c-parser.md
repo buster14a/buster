@@ -865,7 +865,12 @@ Parser token columns allocate for up to twice the PP token count before
 conversion, plus **128 initialized entries before and after** the logical
 range. Kinds use END sentinels and other padding is zero. Token, parent and key
 limits are bounded by `BUSTER_PARSE_MAX_TOKENS` (1 << 30). Do not extend this
-padding guarantee to every unrelated scratch/side array. Parser-owned arenas
+padding guarantee to every unrelated scratch/side array. The diagnostics'
+column (a diagnostic for each token and 16 more) and the names' meanings (one
+for each name the intern table has, the predeclared typedef names and `_Clang`
+it may add) are tables of the tokens' arena, rather than arenas of their own
+(#652); meanings that outgrow that room take an arena of their own as before.
+Parser-owned arenas
 outlive checker adaptation; PP/intern/cache storage outlives spelling and
 error rendering. A parse with diagnostics/fatal status is not valid semantic
 input even if some tree columns were filled.
