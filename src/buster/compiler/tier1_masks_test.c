@@ -53,6 +53,8 @@ struct Tier1MasksTest
     uint8_t* v4;
     // x86-64-v3's forms (#1281): AVX2's and F16C's, no AVX-512, which the fixtures marked `v3` are emitted for.
     uint8_t* v3;
+    // x86-64-v2's with AVX, Sandy Bridge's (#1281's review): AVX's without AVX2, which the fixtures marked `avx` are emitted for.
+    uint8_t* avx;
     // x86-64-v4's features, which the typed programs' lowering takes as its output target (ir_lower_typed_target).
     uint64_t v4_features;
     bool native;
@@ -106,6 +108,8 @@ struct Tier1MasksFixture
     // Emitted for x86-64-v3 (#1281), a target without AVX-512: its vectors by VEX forms in xmm0 to xmm15 alone, its rows'
     // roles below 16, and every record one that target has.
     bool v3;
+    // Emitted for Sandy Bridge, a target with AVX but not AVX2 (#1281's review): its 32-byte vectors by AVX's forms alone.
+    bool avx;
     // The buffer after a run, from the input and the count, where the interpreter can't run the fixture: a machine row's
     // (#141), which it has no model of. Null for the interpreter's.
     void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
@@ -1299,6 +1303,53 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .v3 = true,
     },
     {
+        // #1281's review: 32-byte vectors at a target with AVX but not AVX2, whose ymm integer forms are AVX2's: their
+        // bitwise operations by vandps, vorps and vxorps, every bit by vcmpps's always-true predicate, a splat by vmovd,
+        // vpshufd and vinsertf128, zeros by vpxor of the xmm register, others loaded, and copies, loads and stores by
+        // vmovdqa and vmovdqu; and 16-byte vectors' AVX operations beside them.
+        .name = "vectors at a target with AVX but not AVX2",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v8i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=32\n"
+                "  %3 = load.v8i32 %2 align=1\n"
+                "  %4 = and.v8i32 %1, %3\n"
+                "  %5 = or.v8i32 %4, %1\n"
+                "  %6 = xor.v8i32 %5, %3\n"
+                "  %7 = copy.v8i32 %6\n"
+                "  %8 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
+                "  %9 = vconst.v8i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
+                "  %10 = vconst.v8i32 0x1234567a1234567a1234567a1234567a1234567a1234567a1234567a1234567a\n"
+                "  %11 = vconst.v8i32 0x53845410b54cda571715609e78dde6e5daa66d2c3c6ef3739e3779ba00000001\n"
+                "  %12 = xor.v8i32 %7, %10\n"
+                "  %13 = and.v8i32 %12, %11\n"
+                "  %14 = or.v8i32 %13, %8\n"
+                "  %15 = xor.v8i32 %14, %9\n"
+                "  %16 = address.ptr %0 offset=128\n"
+                "  %17 = store.void %16, %15 align=1\n"
+                "  %18 = address.ptr %0 offset=160\n"
+                "  %19 = store.void %18, %9 align=1\n"
+                "  %20 = address.ptr %0 offset=192\n"
+                "  %21 = store.void %20, %10 align=1\n"
+                "  %22 = address.ptr %0 offset=64\n"
+                "  %23 = load.v4i32 %22 align=1\n"
+                "  %24 = address.ptr %0 offset=80\n"
+                "  %25 = load.v4i32 %24 align=1\n"
+                "  %26 = mul.v4i32 %23, %25\n"
+                "  %27 = add.v4i32 %26, %23\n"
+                "  %28 = sub.v4i32 %27, %25\n"
+                "  %29 = vconst.v4i32 0x12345679123456791234567912345679\n"
+                "  %30 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
+                "  %31 = xor.v4i32 %28, %29\n"
+                "  %32 = and.v4i32 %31, %30\n"
+                "  %33 = address.ptr %0 offset=224\n"
+                "  %34 = store.void %33, %32 align=1\n"
+                "  %35 = ret.void\n"
+                "}\n",
+        .avx = true,
+    },
+    {
         .name = "vectors across calls at x86-64-v3",
         .text = "function (ptr, i64) -> void {\n"
                 "b0:\n"
@@ -1558,7 +1609,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     Tier1EmitResult emitted = { 0 };
     if (ok)
     {
-        const Tier1EmitError error = tier1_emit_function(&plan, &options, fixture->v3 ? test->v3 : test->v4, &test->output, &test->scratch, &emitted, &node);
+        const Tier1EmitError error = tier1_emit_function(&plan, &options, fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4, &test->output, &test->scratch, &emitted, &node);
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK && emitted.general, fixture->name);
         if (!ok)
         {
@@ -1661,7 +1712,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     {
         printf("test-tier1-masks: %s:\n", fixture->name);
     }
-    uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, fixture->v3 ? test->v3 : test->v4, &mapped) : MAP_FAILED;
+    uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4, &mapped) : MAP_FAILED;
     test->print = print;
     ok = machine != MAP_FAILED;
     uint8_t* buffers = ok && test->native ? mmap(0, BUSTER_TIER1_MASKS_TEST_BUFFER * BUSTER_TIER1_MASKS_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
@@ -2443,13 +2494,14 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             .print = print,
             .v4 = malloc(X86_FORM_COUNT),
             .v3 = malloc(X86_FORM_COUNT),
+            .avx = malloc(X86_FORM_COUNT),
             .output = arena_reserve(64u << 20),
             .scratch = arena_reserve(64u << 20),
             .execution = arena_reserve(64u << 20),
         };
         uint8_t* baseline = malloc(X86_FORM_COUNT);
         uint8_t* foundation = malloc(X86_FORM_COUNT);
-        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.v3 != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
+        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.v3 != 0 && test.avx != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
         if (tier1_masks_test_expect(&test, ready, "initialize the tables and arenas"))
         {
             X86Target v4 = { 0 };
@@ -2461,6 +2513,12 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             X86Target v3 = { 0 };
             x86_target_parse("x86-64-v3", 9, &v3);
             x86_target_forms(&v3, test.v3);
+            // x86-64-v2 with AVX, as Sandy Bridge is: AVX without AVX2.
+            X86Target v2 = { 0 };
+            x86_target_parse("x86-64-v2", 9, &v2);
+            const X86Target sandybridge = { .features = v2.features | BUSTER_X86_FEATURE(AVX), .architecture = X86_ARCH_OTHER };
+            tier1_masks_test_expect(&test, (sandybridge.features & BUSTER_X86_FEATURE(AVX2)) == 0, "x86-64-v2 with AVX has no AVX2");
+            x86_target_forms(&sandybridge, test.avx);
             const X86Target f = { .features = v3.features | BUSTER_X86_FEATURE(AVX512F), .architecture = X86_ARCH_OTHER };
             x86_target_forms(&f, foundation);
             // The native runs execute code checked against x86-64-v4's forms (the fixtures', the typed programs' and Tier
@@ -2505,6 +2563,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         free(baseline);
         free(test.v4);
         free(test.v3);
+        free(test.avx);
     }
     return result;
 }

@@ -165,6 +165,9 @@ struct Tier1EmitPrepared
     // (tier1_select_class_forms, Tier1SelectHoles.vex), and machine rows place their roles below xmm16
     // (tier1_emit_cfg_row).
     bool vex;
+    // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
+    // (Tier1SelectHoles.avx2).
+    bool avx2;
     uint32_t slot_columns;
     AbiCall call_abi;
     // The CFG consumer's long doubles (#141): each F80 node's rank among them, in node order (UINT32_MAX for any other

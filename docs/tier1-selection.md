@@ -867,6 +867,14 @@ are:
 | `COPY`, edge moves | `vmovdqa` of a ymm register (`movaps` for 16 bytes) |
 | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor` |
 
+At a target with AVX but not AVX2 (Sandy Bridge's, `Tier1EmitPrepared.avx2`
+from the allow-list's `vpcmpeqd` of a ymm register), a ymm register's integer
+forms are AVX2's, so a 32-byte vector's bitwise operations take the packed
+singles' `vandps`, `vorps` and `vxorps` (the same bits), its ones `vcmpps y, y,
+y, 15` (always true), and its splat `vmovd`, `vpshufd x, x, 0` and `vinsertf128
+y, y, x, 1`; its additions, subtractions and multiplications are AVX2's alone,
+which the decoder admits only where the target has them.
+
 VEX has no ternary logic, no compare into a mask and no blend under one: a target
 without AVX-512 has no masks (their types still refuse there), and the IR's
 `not`, `vcmp` and `vselect` come of EVEX rows alone, which it has none of. Its
@@ -892,7 +900,9 @@ and reloaded; and vectors of each width live across two calls of the helper. And
 four emitted for x86-64-v3 (#1281), every record one that target has: the
 operations and constants of every kind at 16 and 32 bytes; a loop whose 32-byte
 phis swap through xmm15; seventeen 32-byte vectors live at once, spilled and
-reloaded; and vectors of both widths live across two calls.
+reloaded; and vectors of both widths live across two calls. One more is emitted
+for x86-64-v2 with AVX, Sandy Bridge's target: 32-byte bitwise operations and
+constants of every kind by AVX's forms, beside 16-byte arithmetic.
 
 ## Machine rows (#141)
 
@@ -964,7 +974,9 @@ back edge and live across a call; and more vectors live at once than xmm0 to
 xmm14. A floating expression clang would contract into an FMA (its
 `-ffp-contract=on`, even at -O0) is split into statements. `_mm256_set1_epi8`'s
 32 stack arguments and `_mm_cvtph_ps`'s 8-byte vector (#1280) are refused at
-every target, so the fixture takes other builtins in their place.
+every target, so the fixture takes other builtins in their place. Its AVX fixture
+does the same at `-march=sandybridge` (AVX without AVX2): 32-byte bitwise
+operators and constants, 16-byte arithmetic and AVX's float builtins.
 
 `test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
 model of each (the interpreter has none of x86 records) by both paths, with and

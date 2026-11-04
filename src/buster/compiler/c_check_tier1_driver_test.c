@@ -3147,6 +3147,65 @@ static void check_test_driver_tier1_vex(CheckTest* test, const char* clang, cons
                                   "-march=x86-64-v3", host);
 }
 
+// The AVX fixture (#1281's review): Sandy Bridge's AVX without AVX2, whose ymm integer forms Tier 1 doesn't take: 32-byte
+// vectors' bitwise operators and constants of every kind (AVX's vandps, vorps, vxorps, vcmpps and vinsertf128), 16-byte
+// vectors' arithmetic, and AVX's float builtins, every function Tier 1's.
+static const char check_test_tier1_avx_header[] =
+    "#include <immintrin.h>\n"
+    "typedef int a8 __attribute__((vector_size(32)));\n"
+    "typedef int a4 __attribute__((vector_size(16)));\n"
+    "a8 x_bits(a8 a, a8 b, int n);\n"
+    "a4 x_small(a4 a, a4 b);\n"
+    "__m256 x_floats(__m256 a, __m256 b);\n";
+
+static const char check_test_tier1_avx_source[] =
+    "#include \"tier1-avx.h\"\n"
+    "a8 x_bits(a8 a, a8 b, int n)\n"
+    "{\n"
+    "    a8 ones = { -1, -1, -1, -1, -1, -1, -1, -1 };\n"
+    "    a8 seven = { 7, 7, 7, 7, 7, 7, 7, 7 };\n"
+    "    a8 zero = { 0, 0, 0, 0, 0, 0, 0, 0 };\n"
+    "    a8 other = { 1, 2, 3, 4, 5, 6, 7, 8 };\n"
+    "    a8 x = ((a & b) | (a ^ seven)) ^ (ones & b);\n"
+    "    for (int i = 0; i < n; i += 1) x = (x ^ other) | zero;\n"
+    "    return x;\n"
+    "}\n"
+    "a4 x_small(a4 a, a4 b) { return a * b + a - (a4){ 1, 2, 3, 4 }; }\n"
+    "__m256 x_floats(__m256 a, __m256 b) { return _mm256_add_ps(_mm256_and_ps(a, b), _mm256_set1_ps(1.5f)); }\n";
+
+static const char check_test_tier1_avx_other_source[] =
+    "#include <stdio.h>\n"
+    "#include \"tier1-avx.h\"\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long hash = 0xcbf29ce484222325ull;\n"
+    "    for (int round = 0; round < 4; round += 1)\n"
+    "    {\n"
+    "        a8 a = { round, 3, -5, 7 * round, 11, -13, 17, 19 };\n"
+    "        a8 b = { 23, round * 29, 31, -37, 41, 43, -47, round };\n"
+    "        a8 r = x_bits(a, b, round);\n"
+    "        a4 s = x_small((a4){ round, 5, -7, 9 }, (a4){ 2, -3, round, 4 });\n"
+    "        __m256 f = x_floats(_mm256_set1_ps(2.5f * round), _mm256_set1_ps(-3.25f));\n"
+    "        const unsigned char* bytes[3] = { (const unsigned char*)&r, (const unsigned char*)&s, (const unsigned char*)&f };\n"
+    "        const unsigned sizes[3] = { 32, 16, 32 };\n"
+    "        for (int k = 0; k < 3; k += 1) for (unsigned i = 0; i < sizes[k]; i += 1) hash = (hash ^ bytes[k][i]) * 0x100000001b3ull;\n"
+    "        printf(\"%016llx\\n\", hash);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by Sandy Bridge, run where the host has AVX.
+static void check_test_driver_tier1_avx(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    // x86-64-v2 with AVX, as Sandy Bridge is.
+    X86Target v2 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v2", 9, &v2);
+    const uint64_t features = v2.features | BUSTER_X86_FEATURE(AVX);
+    const bool host = parsed && (x86_target_native().features & features) == features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-avx", "AVX vectors'", check_test_tier1_avx_header, check_test_tier1_avx_source, check_test_tier1_avx_other_source,
+                                  "-march=sandybridge", host);
+}
+
 // A machine row with a floating role in a VEX form (#141, #1281): F16C's half-precision conversions at x86-64-v3, whose
 // rows name the float in an XMM field that only a register below 16 holds. Tier 1 places such a role below 16
 // (tier1_emit_cfg_row): by each path, the build by --tier1 compiles every function, _cvtsh_ss's among them, by Tier 1,

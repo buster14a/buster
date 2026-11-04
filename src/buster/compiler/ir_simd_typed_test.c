@@ -539,6 +539,24 @@ static void ir_simd_typed_test(IrTestTally* tally)
             }
         }
     }
+    // At Sandy Bridge, a target with AVX but not AVX2 (#1281's review), a 32-byte vector's bitwise operations are the
+    // packed singles' VEX forms, which decode into the IR's own operations with AVX alone; Tier 1 computes them by those
+    // forms there (Tier1SelectHoles.avx2).
+    X86Target v2 = { 0 };
+    const bool avx_parsed = x86_target_parse("x86-64-v2", 9, &v2);
+    const X86Target sandybridge = { .features = v2.features | BUSTER_X86_FEATURE(AVX), .architecture = X86_ARCH_OTHER };
+    ir_test_expect(tally, avx_parsed && (sandybridge.features & BUSTER_X86_FEATURE(AVX2)) == 0, "x86-64-v2 with AVX, as Sandy Bridge is, has no AVX2");
+    for (uint32_t operation = 3; ready && avx_parsed && operation < 6; operation += 1)
+    {
+        const TypeId type = type_vector(&table.table, BUSTER_TYPE_INT, 8, false);
+        Tier0Operation row = { 0 };
+        const char* reason = check_vector_lower_row(&table.table, &sandybridge, false, operations[operation], type, BUSTER_TYPED_CLASS_VOID, &row);
+        IrSimdTypedOperation decoded = { 0 };
+        const IrSimdTypedStatus admitted = ir_simd_typed_row(&row, sandybridge.features, &decoded);
+        ir_test_expect(tally, reason == NULL && admitted == IR_SIMD_TYPED_OK && !decoded.machine && decoded.operation == semantics[operation] && decoded.shape == IR_SIMD_V8I32 &&
+                              decoded.required_features == BUSTER_X86_FEATURE(AVX),
+                       "an AVX target's 32-byte bitwise rows decode into the IR's own operations, of AVX alone");
+    }
     // The typed row has no element type. Logical bit operations are identical for all integer element widths;
     // normalize those records as raw bits, while refusing arithmetic/comparison opcodes with different lanes.
     static const TypeId integer_elements[] = { BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT, BUSTER_TYPE_LLONG, BUSTER_TYPE_ULLONG };
