@@ -809,12 +809,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variant of the statements' prefetch (bit 0: none;
-    // bit 1: the graph's columns too, two statements ahead; bit 3: every node of a statement, the graph's columns too)
-    // and bit 2's sweep of loads over each statement's nodes before its tasks, which the bodies' row counts, and its sum.
-    uint32_t experiment;
-    uint64_t probe_sink;
-    uint64_t probe_nodes;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -12444,10 +12438,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
-    writer->probe_sink = 0;
-    writer->probe_nodes = 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -12472,35 +12462,17 @@ static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool so
 // tasks' loop expands.
 #define BUSTER_CHECK_LOWER_PREFETCH_NODES 64u
 
-// #1048's experiment, temporary (#1235): the first node of `node`'s subtree in the graph's postorder, its first operands'
-// down to a leaf (at most 4096 of them), which a body's first statement's sweep starts from.
-static uint32_t check_lower_subtree_first(const CheckGraph* graph, uint32_t node)
-{
-    uint32_t first = node;
-    uint32_t next = node;
-    for (uint32_t steps = 0; steps < 4096 && next != BUSTER_CHECK_NONE; steps += 1)
-    {
-        first = next;
-        const uint32_t left = graph->operand0[first];
-        const uint32_t right = graph->operand1[first];
-        next = left != BUSTER_CHECK_NONE && left < first ? left : right != BUSTER_CHECK_NONE && right < first ? right : BUSTER_CHECK_NONE;
-    }
-    return first;
-}
-
 // Prefetches the checked values and conversions of the nodes from `from` to `node`, a statement's root (the last
 // BUSTER_CHECK_LOWER_PREFETCH_NODES of them): a statement's nodes come before its root in the graph, and the tasks' loop
 // waited on its first touch of each node's checked value and 32 bytes of conversions (#531): the value's columns, and its
 // payload row's index (a row itself is wherever the run wrote it, #628). Returns the node after the last one prefetched, or
 // `from` for a root that isn't past it.
-static uint32_t check_lower_prefetch_experiment(const CheckProgram* program, uint32_t from, uint32_t node, uint32_t limit, bool graph)
+static uint32_t check_lower_prefetch(const CheckProgram* program, uint32_t from, uint32_t node)
 {
     uint32_t result = from;
     if (node != BUSTER_CHECK_NONE && node < program->stream->count && node >= from)
     {
-        const CheckGraph* nodes = &program->input->graph;
-        const uint32_t start = from == 0 && limit == UINT32_MAX ? check_lower_subtree_first(nodes, node) : from;
-        const uint32_t first = node - start >= limit ? node + 1 - limit : start;
+        const uint32_t first = node - from >= BUSTER_CHECK_LOWER_PREFETCH_NODES ? node + 1 - BUSTER_CHECK_LOWER_PREFETCH_NODES : from;
         const CheckStream* stream = program->stream;
         const bool dense = stream->dense_values != NULL;
         const uintptr_t ranges[][2] = {
@@ -12532,26 +12504,6 @@ static uint32_t check_lower_prefetch_experiment(const CheckProgram* program, uin
                 dense ? 0 : (uintptr_t)(stream->value_constants + first),
                 dense ? 0 : (uintptr_t)(stream->value_constants + node + 1),
             },
-            {
-                graph ? (uintptr_t)(nodes->ops + first) : 0,
-                graph ? (uintptr_t)(nodes->ops + node + 1) : 0,
-            },
-            {
-                graph ? (uintptr_t)(nodes->operand0 + first) : 0,
-                graph ? (uintptr_t)(nodes->operand0 + node + 1) : 0,
-            },
-            {
-                graph ? (uintptr_t)(nodes->operand1 + first) : 0,
-                graph ? (uintptr_t)(nodes->operand1 + node + 1) : 0,
-            },
-            {
-                graph ? (uintptr_t)(nodes->tokens + first) : 0,
-                graph ? (uintptr_t)(nodes->tokens + node + 1) : 0,
-            },
-            {
-                graph && stream->member_offsets != NULL ? (uintptr_t)(stream->member_offsets + first) : 0,
-                graph && stream->member_offsets != NULL ? (uintptr_t)(stream->member_offsets + node + 1) : 0,
-            },
         };
         for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(ranges); r += 1)
         {
@@ -12560,37 +12512,6 @@ static uint32_t check_lower_prefetch_experiment(const CheckProgram* program, uin
                 _mm_prefetch((const char*)line, _MM_HINT_T0);
             }
         }
-        result = node + 1;
-    }
-    return result;
-}
-
-// #1048's experiment, temporary (#1235): loads every column the expansion reads of each node from `from` to `node`, a
-// statement's root, and what they name (the type's facts and class, the object's local, the payload row's type), summed
-// into the writer's sink. Returns the node after the last one loaded, or `from` for a root that isn't past it.
-static uint32_t check_lower_probe(CheckLowerWriter* writer, uint32_t from, uint32_t node)
-{
-    const CheckProgram* program = writer->program;
-    const CheckStream* stream = program->stream;
-    uint32_t result = from;
-    if (node != BUSTER_CHECK_NONE && node < stream->count && node >= from && stream->dense_values == NULL)
-    {
-        const CheckGraph* graph = &program->input->graph;
-        uint64_t sum = 0;
-        for (uint32_t n = from == 0 ? check_lower_subtree_first(graph, node) : from; n <= node; n += 1)
-        {
-            const uint32_t index = type_index(stream->value_types[n]);
-            const uint32_t object = stream->value_objects[n];
-            const uint32_t row = stream->payload_rows[n];
-            sum += (uint64_t)graph->ops[n] + graph->operand0[n] + graph->operand1[n] + graph->tokens[n] + stream->value_flags[n] +
-                stream->value_categories[n] + stream->value_constants[n] + stream->conversions[n].operands[0].type +
-                stream->conversions[n].operands[1].type + (stream->member_offsets != NULL ? stream->member_offsets[n] : 0);
-            sum += index < writer->type_count ? (uint64_t)writer->type_facts[index] + writer->type_classes[index] : 0;
-            sum += object < program->object_count ? writer->local_map[object] : 0;
-            sum += row != 0 && row <= stream->payload_count ? stream->payloads[row - 1].type : 0;
-        }
-        writer->probe_sink += sum;
-        writer->probe_nodes += node + 1 - (from == 0 ? check_lower_subtree_first(graph, node) : from);
         result = node + 1;
     }
     return result;
@@ -12975,12 +12896,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // Each statement's nodes are prefetched a statement before the tasks' loop expands them, the first two's before the
         // first (check_lower_prefetch).
         uint32_t prefetched = 0;
-        uint32_t probed = 0;
-        uint64_t probe_ticks = 0;
-        const uint32_t experiment = writer->experiment;
-        const uint32_t reach = (experiment & 2) != 0 ? 2 : 1;
-        const uint32_t limit = (experiment & 8) != 0 ? UINT32_MAX : BUSTER_CHECK_LOWER_PREFETCH_NODES;
-        const bool graph = (experiment & 10) != 0;
         const uint64_t statements_start = timed ? __rdtsc() : 0;
         for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
@@ -12989,15 +12904,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 // A statement's entries are its token's (check_lower_task_source sets a nested one's).
                 check_lower_change_source(writer, program->controls[body.first + i].token);
             }
-            for (uint32_t ahead = i == 0 ? 0 : reach; (experiment & 1) == 0 && ahead < reach + 1 && i + ahead < body.entry_count; ahead += 1)
+            for (uint32_t ahead = i == 0 ? 0 : 1; ahead < 2 && i + ahead < body.entry_count; ahead += 1)
             {
-                prefetched = check_lower_prefetch_experiment(program, prefetched, program->controls[body.first + i + ahead].node, limit, graph);
-            }
-            if ((experiment & 4) != 0)
-            {
-                const uint64_t probe_start = timed ? __rdtsc() : 0;
-                probed = check_lower_probe(writer, probed, program->controls[body.first + i].node);
-                probe_ticks += timed ? __rdtsc() - probe_start : 0;
+                prefetched = check_lower_prefetch(program, prefetched, program->controls[body.first + i + ahead].node);
             }
             check_lower_control(writer, i);
             if (sources)
@@ -13017,11 +12926,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_drain(writer);
             }
         }
-        part->statement_ticks += timed ? __rdtsc() - statements_start - probe_ticks : 0;
-        if ((experiment & 16) != 0 && b + 1 == part->end)
-        {
-            fprintf(stderr, "probe: nodes=%llu sink=%llu\n", (unsigned long long)writer->probe_nodes, (unsigned long long)writer->probe_sink);
-        }
+        part->statement_ticks += timed ? __rdtsc() - statements_start : 0;
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
                                                                             writer->count == 0 || (writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN &&
