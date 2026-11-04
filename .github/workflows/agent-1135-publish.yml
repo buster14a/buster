@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Temporary publisher; neither this file nor the investigation history reaches the review branch.
+name: Issue 1135 publish candidate
+on:
+  push:
+    branches: [work/1135-semantic-pragmas]
+    paths: [.github/workflows/agent-1135-publish.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Publish only the original implementation on a new branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = buster14a/buster
+          branch=fix/1135-literal-symbol-pragmas
+          parent=441db2428d2bd8d28503037b28c1b3740fe4b25a
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          sed 's/qnSvqn7Svqn7prXy/qnSvqn7prXy/' .github/agent-1135.patch.gz.b64 | base64 -d | gzip -d > "$RUNNER_TEMP/1135.patch"
+          printf '%s  %s\n' '8c18785f7db7e4f8df0462766ff126b2cd2a14ccb4d0415f2e9e07da3ce77105' "$RUNNER_TEMP/1135.patch" | sha256sum --check
+          git fetch --no-tags --depth=1 origin "$parent"
+          git switch --create "$branch" "$parent"
+          git apply --check "$RUNNER_TEMP/1135.patch"
+          git apply "$RUNNER_TEMP/1135.patch"
+          sh .githooks/enable-sign-off.sh --maintainer-session
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add docs/c-checker.md src/buster/compiler
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 9
+          git commit -m 'checker: implement literal weak and external-name pragmas' -m 'Attach source-ordered symbol directives to canonical object metadata after binding. Preserve explicit refusal boundaries for aliases, macro operands and late changes. Match the pinned Clang unknown-pragma policy for GCC target and cover parser schedules, allocation rollback, ELF bindings, relocations and strong overrides. This is a bounded continuation of #1135, not its closure.'
+          test "$(git log -1 --format=%B | grep -c '^Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>$')" -eq 1
+          git diff --stat "$parent" HEAD
+          git log -1 --format=fuller
+          git push origin "HEAD:refs/heads/$branch"
