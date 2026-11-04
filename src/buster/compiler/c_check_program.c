@@ -19,6 +19,22 @@ typedef enum CheckProgramStatus
     CHECK_PROGRAM_BACKEND,
 } CheckProgramStatus;
 
+// Cold constraint facts survive a failed program's output rollback. No source or arena pointer is retained.
+typedef enum CheckProgramMessage
+{
+    CHECK_PROGRAM_MESSAGE_GENERIC,
+    CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE,
+    CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
+} CheckProgramMessage;
+
+typedef struct CheckProgramFailure CheckProgramFailure;
+struct CheckProgramFailure
+{
+    CheckProgramMessage message;
+    TypeId type;
+    unsigned __int128 value;
+};
+
 // A variable-length array's object (block scope, automatic, of a runtime size) is ALLOCATEd at its declaration (`token`;
 // `target` is its block's closing token), after its bounds' VLA entries; the first of its block is preceded by the
 // block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (after the
@@ -296,6 +312,7 @@ struct CheckProgram
     uint32_t symbol_count;
     uint32_t token;
     uint32_t diagnostic_position;
+    CheckProgramFailure failure;
     CheckProgramStatus status;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms and target.
@@ -3903,8 +3920,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const CheckProgramStatus status = program->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : program->status;
         const uint32_t token = status == CHECK_PROGRAM_INVALID ? check_program_diagnostic_location(parser, program->token) : program->token;
         const uint32_t position = program->diagnostic_position;
+        const CheckProgramFailure failure = program->failure;
         arena_pop_to(output, mark);
-        *program = (CheckProgram){ .status = status, .token = token, .diagnostic_position = position };
+        *program = (CheckProgram){ .status = status, .token = token, .diagnostic_position = position, .failure = failure };
         valid = false;
     }
     else

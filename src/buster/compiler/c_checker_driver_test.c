@@ -4053,8 +4053,12 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             {
                 const uint32_t index = (uint32_t)first[token];
                 const uint32_t phase = (uint32_t)(first[token] >> 32);
-                const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                     check_driver_input_report_message(input, input->reports + index);
+                // Share the text renderer, not the sparse walk's selection or ordering. The exact semantic
+                // catalogue separately compares this spelling and its caret against Clang (#1107).
+                uint32_t location = phase == 2 ? extra[index].token : token;
+                const char* message = phase == 2 ? extra[index].message :
+                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, scratch) :
+                                                   check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                 {
@@ -4068,7 +4072,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 }
                 else
                 {
-                    check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
+                    check_driver_diagnose(parser, pp, location, message);
                 }
             }
         }

@@ -6144,6 +6144,7 @@ static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 static void check_test_constraints(CheckTest* test, const char* clang);
+static void check_test_semantic_diagnostics(CheckTest* test, const char* clang);
 static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const char* clang);
 static void check_test_undeclared(CheckTest* test, const char* clang);
 
@@ -6171,6 +6172,7 @@ static int run_checker_tests(int argc, char** argv)
     bool requests = false;
     bool sizeof_only = false;
     bool transitions_only = false;
+    bool semantic_diagnostics = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6238,6 +6240,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             requests = true;
         }
+        else if (strcmp(argv[i], "--semantic-diagnostics") == 0)
+        {
+            semantic_diagnostics = true;
+        }
         else if (strcmp(argv[i], "--transitions") == 0)
         {
             transitions_only = true;
@@ -6267,16 +6273,20 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || semantic_diagnostics || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--semantic-diagnostics]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && transitions_only)
+        if (initialized && semantic_diagnostics)
+        {
+            check_test_semantic_diagnostics(&test, clang);
+        }
+        else if (initialized && transitions_only)
         {
             check_test_transitions(&test);
         }
