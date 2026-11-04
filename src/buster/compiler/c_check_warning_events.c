@@ -39,6 +39,8 @@ enum
     CHECK_WARNING_ID_AVAILABILITY = 47,
     CHECK_WARNING_ID_COUNTED_BY_ELEMENT = 48,
     CHECK_WARNING_ID_EXTERN_INITIALIZER = 49,
+    CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES = 50,
+    CHECK_WARNING_ID_UNKNOWN_SANITIZERS = 51,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -128,6 +130,27 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED,
     // A file-scope extern variable's initializer (clang's warn_extern_init), at the variable's name.
     CHECK_WARNING_EVENT_EXTERN_INITIALIZER,
+    // mode's vector mode (#147, check_input_attribute_mode: -Wdeprecated-attributes), at the attribute.
+    CHECK_WARNING_EVENT_VECTOR_MODE,
+    // alloc_size's and alloc_align's function that returns no pointer (#147, -Wignored-attributes), at the attribute, named
+    // as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_RETURN_POINTERS,
+    CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES,
+    // An argument clang's handler doesn't know (#147, -Wignored-attributes): visibility's string, at it, and format's kind,
+    // at the attribute; named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are, the argument's token in the payload's token
+    // (a string literal's, with those after it, or an identifier, without a keyword's underscores).
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED,
+    // format's first argument to check on a function that isn't variadic (#147, -Wgcc-compat), at the declaration's name,
+    // named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_GCC_VARIADIC,
+    // target's string clang's checkTargetAttr doesn't take (#147, check_input_target_warning), at the string: the string's
+    // first token in the payload's token, the warning's case and its piece of the string in its data.
+    CHECK_WARNING_EVENT_TARGET_UNSUPPORTED,
+    // no_sanitize's sanitizer clang doesn't know (-Wunknown-sanitizers), at its string, and one a variable of static
+    // storage can't take, at the variable's name (-Wignored-attributes): the string's first token in the payload's token,
+    // named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_UNKNOWN_SANITIZER,
+    CHECK_WARNING_EVENT_SANITIZER_GLOBAL,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

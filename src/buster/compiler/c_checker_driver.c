@@ -180,6 +180,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT: result = "expected string literal as argument of attribute"; break;
         case CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL: result = "attribute requires parameter 1 to be int or bool"; break;
         case CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS: result = "attribute parameter is out of bounds"; break;
+        case CHECK_INPUT_ATTRIBUTE_ARGUMENT: result = "invalid attribute argument"; break;
     }
     return result;
 }
@@ -207,6 +208,65 @@ static String8 check_driver_attribute_spelling(const Parser* parser, const Prepr
         }
     }
     return result;
+}
+
+static String8 check_warning_attribute_normalized(String8 name);
+
+// An attribute argument's error (#147, CHECK_INPUT_ATTRIBUTE_ARGUMENT: c_check_attribute.c's CheckAttributeArgumentError
+// in `detail`'s low byte, a parameter's place above it) as clang words it, the attribute named from its first token
+// (`first`) as each message names it: an applied attribute's normalized name (aligned's), the parsed attribute's (a GNU
+// one as written, a C23 one's scope and name normalized), or the parser's name as written, without its scope (a string
+// literal's). Into `text`, `capacity` bytes.
+static void check_driver_attribute_argument(const Parser* parser, const Preprocessor* pp, uint32_t first, uint32_t detail, char* text, uint32_t capacity)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool scoped = first + 2 < count && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON;
+    const uint32_t at = !scoped ? first : parser->tokens.kinds[first + 2] == PARSE_KIND_COLON && first + 3 < count ? first + 3 : first + 2;
+    uint32_t opener = first;
+    while (opener > 0 && parser->tree.depths[opener - 1] >= parser->tree.depths[first])
+    {
+        opener -= 1;
+    }
+    const bool standard = opener > 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_L_SQUARE;
+    const String8 written = check_driver_attribute_spelling(parser, pp, at, false);
+    const String8 bare = check_warning_attribute_normalized(written);
+    String8 scope = scoped ? check_warning_attribute_normalized(check_driver_attribute_spelling(parser, pp, first, false)) : (String8){ "", 0 };
+    scope = check_input_attribute_equal(scope, "_Clang") ? (String8){ "clang", 5 } : scope;
+    char parsed[160];
+    snprintf(parsed, sizeof(parsed), "%.*s%s%.*s", (int)scope.length, scope.pointer, scoped ? "::" : "", (int)(standard ? bare : written).length,
+             (standard ? bare : written).pointer);
+    const uint32_t number = detail >> 8;
+    // mode's name, as written, after the attribute's first token by `number`.
+    const String8 argument = first + number < count ? check_driver_attribute_spelling(parser, pp, first + number, false) : (String8){ "", 0 };
+    switch ((CheckAttributeArgumentError)(detail & 0xffu))
+    {
+        case CHECK_ARGUMENT_INTEGER_CONSTANT: snprintf(text, capacity, "'%.*s' attribute requires integer constant", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_AN_INTEGER_CONSTANT: snprintf(text, capacity, "'%s' attribute requires an integer constant", parsed); break;
+        case CHECK_ARGUMENT_PARAMETER_INTEGER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an integer constant", parsed, number); break;
+        case CHECK_ARGUMENT_EXT_VECTOR_INTEGER: snprintf(text, capacity, "ext_vector_type attribute requires an integer constant"); break;
+        case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "requested alignment is not a power of 2"); break;
+        case CHECK_ARGUMENT_ZERO_VECTOR: snprintf(text, capacity, "zero vector size"); break;
+        case CHECK_ARGUMENT_REGPARM_RANGE: snprintf(text, capacity, "'regparm' parameter must be between 0 and 6 inclusive"); break;
+        case CHECK_ARGUMENT_OUT_OF_BOUNDS: snprintf(text, capacity, "'%s' attribute parameter %u is out of bounds", parsed, number); break;
+        case CHECK_ARGUMENT_SENTINEL_NEGATIVE: snprintf(text, capacity, "'sentinel' parameter 1 less than zero"); break;
+        case CHECK_ARGUMENT_SENTINEL_NULL: snprintf(text, capacity, "'sentinel' parameter 2 not 0 or 1"); break;
+        case CHECK_ARGUMENT_PARAMETER_TYPE: snprintf(text, capacity, "'%s' attribute argument may only refer to a function parameter of integer type", parsed); break;
+        case CHECK_ARGUMENT_STRING_LITERAL: snprintf(text, capacity, "expected string literal as argument of '%.*s' attribute", (int)written.length, written.pointer); break;
+        case CHECK_ARGUMENT_STRING: snprintf(text, capacity, "'%s' attribute requires a string", parsed); break;
+        case CHECK_ARGUMENT_IDENTIFIER: snprintf(text, capacity, "'%s' attribute requires an identifier", parsed); break;
+        case CHECK_ARGUMENT_PARAMETER_IDENTIFIER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an identifier", parsed, number); break;
+        case CHECK_ARGUMENT_UNKNOWN_MODE: snprintf(text, capacity, "unknown machine mode '%.*s'", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_UNSUPPORTED_MODE: snprintf(text, capacity, "unsupported machine mode '%.*s'", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_MODE_ENUM_VECTOR: snprintf(text, capacity, "mode '%.*s' is not supported for enumeration types", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_MODE_PRIMITIVE: snprintf(text, capacity, "mode attribute only supported for integer and floating-point types"); break;
+        case CHECK_ARGUMENT_MODE_TYPE: snprintf(text, capacity, "type of machine mode does not match type of base type"); break;
+        case CHECK_ARGUMENT_MODE_COMPLEX_VECTOR: snprintf(text, capacity, "type of machine mode does not support base vector types"); break;
+        case CHECK_ARGUMENT_TLS_MODEL: snprintf(text, capacity, "tls_model must be \"global-dynamic\", \"local-dynamic\", \"initial-exec\" or \"local-exec\""); break;
+        case CHECK_ARGUMENT_FORMAT_STRING: snprintf(text, capacity, "format argument not a string type"); break;
+        case CHECK_ARGUMENT_FORMAT_RESULT: snprintf(text, capacity, "function does not return string type"); break;
+        case CHECK_ARGUMENT_STRFTIME: snprintf(text, capacity, "strftime format attribute requires 3rd parameter to be 0"); break;
+        default: snprintf(text, capacity, "invalid attribute argument"); break;
+    }
 }
 
 // clang's musttail attribute (#147) as clang's messages spell it, from its first token (`token`: GNU's name, or the
@@ -1687,6 +1747,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                         label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
                                                         label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && input->reports[index].attribute < count)
+                        {
+                            // An attribute argument's error (#147) as clang's handler words it.
+                            char text[192];
+                            const CheckInputReport* report = input->reports + index;
+                            check_driver_attribute_argument(parser, pp, report->attribute, report->detail, text, sizeof(text));
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", text);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)
                         {

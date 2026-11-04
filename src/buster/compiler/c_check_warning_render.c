@@ -602,14 +602,61 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE:
         case CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED:
         case CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED:
+        case CHECK_WARNING_EVENT_RETURN_POINTERS:
+        case CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES:
+        case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED:
+        case CHECK_WARNING_EVENT_GCC_VARIADIC:
+        case CHECK_WARNING_EVENT_TARGET_UNSUPPORTED:
+        case CHECK_WARNING_EVENT_UNKNOWN_SANITIZER:
+        case CHECK_WARNING_EVENT_SANITIZER_GLOBAL:
         {
-            // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
-            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
-            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
+            const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
+            const bool standard = !target && (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = target ? 0 : payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
             const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
             const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
-            result = check_warning_text(scratch,
+            // An unsupported argument's text (#147): a string literal's, with the literals after it, or an identifier's
+            // without a keyword's underscores.
+            char argument[256] = { 0 };
+            uint32_t length = 0;
+            const uint32_t count = parser->tokens.count;
+            const bool argued = event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ||
+                                event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER || event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL;
+            for (uint32_t token = payload->token; argued && token < count &&
+                 (parser->tokens.kinds[token] == PARSE_KIND_STRING || (token == payload->token && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER));
+                 token += 1)
+            {
+                const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING;
+                const String8 text = string ? check_warning_string_text(parser, pp, token, scratch) :
+                                              check_warning_attribute_normalized(check_driver_warning_name(pp, parser->tokens.names[token]));
+                const uint32_t copied = text.length < sizeof(argument) - 1 - length ? (uint32_t)text.length : (uint32_t)(sizeof(argument) - 1 - length);
+                memcpy(argument + length, text.pointer, copied);
+                length += copied;
+                token = string ? token : count;
+            }
+            // target's warning's piece of its string (check_input_target_warning's data).
+            const uint32_t offset = (payload->data >> 4) & 0x3fffu;
+            const uint32_t piece = offset <= length ? ((payload->data >> 18) & 0x3fffu) : 0u;
+            const uint32_t shown = offset <= length ? (piece < length - offset ? piece : length - offset) : 0u;
+            static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
+            static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
+            result = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ?
+                check_warning_text(scratch, "%s%s '%.*s' in the 'target' attribute string; 'target' attribute ignored", target_cases[payload->data & 3u],
+                                   target_places[(payload->data >> 2) & 3u], (int)shown, argument + (offset <= length ? offset : 0)) :
+                event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER ? check_warning_text(scratch, "unknown sanitizer '%s' ignored", argument) :
+                event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute argument '%s' not supported on a global variable", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute argument not supported: %s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                   (int)attribute.length, attribute.pointer, argument) :
+                check_warning_text(scratch,
                                         event->kind == CHECK_WARNING_EVENT_TYPE_POSITION ? "attribute '%.*s%s%.*s' ignored, because it cannot be applied to a type" :
+                                        event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS ? "'%.*s%s%.*s' attribute only applies to return values that are pointers" :
+                                        event->kind == CHECK_WARNING_EVENT_GCC_VARIADIC ? "GCC requires a function with the '%.*s%s%.*s' attribute to be variadic" :
+                                        event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES ?
+                                            "'%.*s%s%.*s' attribute only applies to return values that are pointers or references" :
                                         event->kind == CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE ? "GCC does not allow the '%.*s%s%.*s' attribute to be written on a type" :
                                         event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ? "'%.*s%s%.*s' calling convention is not supported for this target" :
                                         "'%.*s%s%.*s' attribute ignored",
@@ -639,6 +686,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_EXTERN_INITIALIZER:
             result = "'extern' variable has an initializer";
+            break;
+        case CHECK_WARNING_EVENT_VECTOR_MODE:
+            result = "specifying vector types with the 'mode' attribute is deprecated; use the 'vector_size' attribute instead";
             break;
         case CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION:
             result = check_warning_text(scratch, "GCC does not allow '%.*s' attribute in this position on a function definition", (int)name.length, name.pointer);

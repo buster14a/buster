@@ -205,6 +205,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT,
     CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL,
     CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS,
+    // An attribute's argument's error as clang's handler words it (#147, c_check_attribute.c's CheckAttributeArgumentError
+    // in `detail`'s low byte, a number above it), the attribute named by its first token (the report's attribute).
+    CHECK_INPUT_ATTRIBUTE_ARGUMENT,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -317,6 +320,7 @@ static const char* const check_input_messages[] =
     "expected string literal as argument of attribute",
     "attribute requires parameter 1 to be int or bool",
     "attribute parameter is out of bounds",
+    "invalid attribute argument",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -3868,6 +3872,10 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                                     check_input_evaluate(reader, attribute->argument_first, attribute->argument_end, &probe) &&
                                     check_input_const_rvalue(reader, attribute->argument_end, &probe);
             valid = unresolved || (evaluated && check_input_attribute_value(reader, &parsed, i, value));
+            if (!evaluated && !unresolved && !type_argument)
+            {
+                check_input_attribute_constant_error(reader, &parsed, attribute, 0, attribute->argument_first, attribute->argument_end);
+            }
         }
         else if (!attribute->resolved && (attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS))
         {
@@ -3876,8 +3884,13 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 uint32_t first;
                 uint32_t last;
                 int64_t value;
-                valid = check_input_attribute_argument(attribute, argument, &first, &last) &&
-                        check_input_constant_ice(reader, first, last, &value) && check_input_attribute_argument_value(reader, &parsed, i, argument, value);
+                const bool located = check_input_attribute_argument(attribute, argument, &first, &last);
+                const bool evaluated = located && check_input_constant_ice(reader, first, last, &value);
+                valid = evaluated && check_input_attribute_argument_value(reader, &parsed, i, argument, value);
+                if (located && !evaluated)
+                {
+                    check_input_attribute_constant_error(reader, &parsed, attribute, argument, first, last);
+                }
             }
         }
     }
@@ -4706,7 +4719,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 check_input_set_attributes_at(reader->output, token, check_input_merge_attributes(reader, frame->common_attributes, frame->attributes));
                                 if (check_input_attributes_at(reader->output, token) != 0)
                                 {
-                                    valid &= check_input_attribute_function(reader, check_input_attributes_at(reader->output, token), adjusted);
+                                    valid &= check_input_attribute_function(reader, check_input_attributes_at(reader->output, token), adjusted, token);
                                 }
                                 check_sparse_set(reader->output->sparse_pool, reader->parameters, token, function->parameter_count - 1);
                                 check_sparse_set(reader->output->sparse_pool, reader->parameter_next, token, BUSTER_CHECK_NONE);
@@ -6163,7 +6176,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
         if (valid && attributes != 0)
         {
-            valid = check_input_attribute_function(reader, attributes, type);
+            valid = check_input_attribute_function(reader, attributes, type, name);
             valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0 ||
                      (!is_typedef && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION);
             valid &= !attributes->has_alignas || (!is_typedef && storage != C_NAME_REGISTER);

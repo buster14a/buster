@@ -1292,6 +1292,11 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
                 // vector_size's size of no integer constant stays unresolved: its element type is checked first, then its
                 // size, with clang's error (check_input_vector_size, #147).
                 unresolved = valid && !integral && attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE;
+                // clang's errors of an argument that is no integer constant (#147), as the reader's evaluation gives them.
+                if (!integral && !unresolved)
+                {
+                    check_input_attribute_constant_error(reader, &job->parsed, attribute, scalar ? 0 : argument, first, end);
+                }
                 valid = integral || unresolved;
                 if (integral)
                 {

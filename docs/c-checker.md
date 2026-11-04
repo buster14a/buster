@@ -5478,6 +5478,74 @@ arguments against the function. The checker now gives these as clang does.
   is checked after its subject, as clang checks it; a supported one's as its
   arguments are read. `cleanup`'s is checked after its subject already, and an
   attribute whose arguments clang parses its own way isn't counted.
+- **Arguments' errors** (`CHECK_INPUT_ATTRIBUTE_ARGUMENT`, with
+  c_check_attribute.c's `CheckAttributeArgumentError` in its detail). An
+  argument a handler refuses is clang's error, in clang's words and at its
+  place, where it used to be the generic "invalid or unsupported
+  declaration":
+  - An argument that is no integer constant: "'aligned' attribute requires
+    integer constant" (aligned's and align_value's, at the argument), "'X'
+    attribute requires an integer constant" (regparm, constructor,
+    destructor, assume_aligned's alignment), "'X' attribute requires
+    parameter N to be an integer constant" (the parameter indices', format's,
+    assume_aligned's offset) and "ext_vector_type attribute requires an
+    integer constant", at the attribute; a name in it that names nothing is
+    clang's parser's "use of undeclared identifier"
+    (`check_input_attribute_constant_error`, from both evaluators: the
+    reader's and the constant path's).
+  - Values: "requested alignment is not a power of 2" (aligned's, 0
+    included, align_value's and assume_aligned's), "zero vector size",
+    "'regparm' parameter must be between 0 and 6 inclusive", "'X' attribute
+    parameter N is out of bounds" (alloc_align's and format_arg's index,
+    format's indices as clang's `checkUInt32Argument` reads a negative int),
+    "'sentinel' parameter 1 less than zero" and "'sentinel' parameter 2 not 0
+    or 1". assume_aligned's offset is any integer, as clang keeps it.
+  - Strings and identifiers: clang's parser reads a string argument as an
+    unevaluated string literal, so one that is none is "expected string
+    literal as argument of 'X' attribute" at it, wherever the attribute is
+    (before a C23 one's place is decided); visibility's identifier is its
+    handler's "'visibility' attribute requires a string"; "'mode' attribute
+    requires an identifier" and format's "requires parameter 1 to be an
+    identifier" at the attribute; tls_model's other string is its
+    "tls_model must be ..." at the argument.
+  - Parameters: alloc_size's and alloc_align's index of a parameter of no
+    integer type is "'X' attribute argument may only refer to a function
+    parameter of integer type" at the argument; format's and format_arg's of
+    no pointer to a character type (char, signed or unsigned) "format argument
+    not a string type", format_arg's function's result "function does not
+    return string type", and a strftime format's third argument other than 0
+    "strftime format attribute requires 3rd parameter to be 0".
+  - `mode` is clang's `AddModeAttr` (`check_input_attribute_mode`): the name
+    without a keyword's underscores; a vector mode (V, a power of two, a
+    mode) with -Wdeprecated-attributes' warning, for each declarator; the
+    width's integer type of the base's signedness, or its floating type
+    (HF `__fp16`, XF `long double`, TF and KF `__float128`, IF none), complex
+    for a C mode, a vector of it by the mode's count or the base vector's
+    bytes; the declaration's qualifiers dropped, as clang's `setType` drops
+    them; `word`, `byte`, `pointer` and `unwind_word`. Its errors, in clang's
+    order: "unknown machine mode 'M'", "mode 'M' is not supported for
+    enumeration types", "mode attribute only supported for integer and
+    floating-point types", "type of machine mode does not match type of base
+    type", "unsupported machine mode 'M'" and "type of machine mode does not
+    support base vector types".
+
+  And the handlers' warnings, each of which ignores its attribute
+  (-Wignored-attributes): "'X' attribute argument not supported: Y" (a
+  visibility clang doesn't know, at the string; a format kind it doesn't
+  know, at the attribute: its ignored `gcc_diag` kinds are silent), "'X'
+  attribute only applies to return values that are pointers" (alloc_size)
+  and "... pointers or references" (alloc_align), "'visibility' attribute
+  ignored" on a typedef, target's strings clang's `checkTargetAttr` doesn't
+  take ("unsupported 'F' in the 'target' attribute string; 'target'
+  attribute ignored", its unknown CPU and tune CPU, a duplicate `arch=` or
+  `tune=`, `fpmath=` and `branch-protection=`: `check_input_target_warning`),
+  and no_sanitize's "'no_sanitize' attribute argument 'S' not supported on a
+  global variable" (but address, hwaddress and memtag, at the variable's
+  name); with no_sanitize's "unknown sanitizer 'S' ignored"
+  (-Wunknown-sanitizers) and format's "GCC requires a function with the
+  'format' attribute to be variadic" (-Wgcc-compat) at the declaration's
+  name. A cleanup's name that names nothing is clang's parser's error alone:
+  the attribute is dropped, its subject unchecked.
 - **Mutual exclusions** (`check_input_attribute_excluding`). After an
   attribute's subject check, one that an attribute already on the declaration
   excludes is clang's error "'cold' and 'hot' attributes are not compatible",
@@ -5511,6 +5579,18 @@ arguments against the function. The checker now gives these as clang does.
     section here is writable.
   - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
     "an attribute list cannot appear here".
+  - An argument's undeclared name after a type's keyword or a `sizeof` stays
+    the generic error, which comes first, where clang's parser gives the
+    type's errors in turn and then the name's. A format kind's warning, and
+    alloc_size's and alloc_align's of a function that returns no pointer,
+    come after the arguments are evaluated: an argument that is no constant
+    is its error first, where clang's handler warns and stops. `mode`'s base
+    of the wrong type is one error, where clang goes on to "unsupported
+    machine mode" where both apply. A string argument with escapes names the
+    piece of target's string from its spelling.
+  - `int x _Alignas(3);` stops at clang's "expected ';' after top level
+    declarator", where clang's recovery also reads `_Alignas(3);` as a
+    declaration that declares nothing (-Wmissing-declarations).
   - When a GNU attribute of a declaration and a calling convention keyword
     on another type share the specifiers, the two warnings come in the
     attributes' order. Clang gives the type's first.

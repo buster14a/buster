@@ -141,8 +141,8 @@ static void check_test_attribute_arguments(CheckTest* test)
                                   copied.records[0].argument_ends == attribute.argument_ends,
                                   "attribute copies share immutable arena-owned boundaries");
                 // (Any integer is a nonnull index here, which the function's check bounds: a negative one of another
-                // integer list's attribute fails.)
-                attribute.kind = CHECK_ATTRIBUTE_SENTINEL;
+                // integer list's attribute fails, a malloc's index among them.)
+                attribute.kind = CHECK_ATTRIBUTE_MALLOC;
                 check_test_expect(test, !check_input_attribute_argument_value(&reader, &attributes, 0, count - 1, -1) &&
                                   attributes.error == CHECK_ATTRIBUTE_ERROR_INTEGER && attributes.error_first == (count - 1) * TOKENS_PER_ARGUMENT &&
                                   attributes.error_end == count * TOKENS_PER_ARGUMENT - 1,
@@ -373,7 +373,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
         if (valid && result != 0)
         {
             result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef, false);
-            valid = result != 0 && check_input_attribute_function(&reader, &attributes, result);
+            valid = result != 0 && check_input_attribute_function(&reader, &attributes, result, BUSTER_CHECK_NONE);
             // Calling conventions meet the function, which checks that they agree (#147).
             result = valid ? check_input_attribute_abi(&reader, &attributes, result) : 0;
             valid = result != 0;
@@ -728,8 +728,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "GNU zero alignment is invalid",
             .source = "int x __attribute__((aligned(0)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "0",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "aligned",
             .base = BUSTER_TYPE_INT,
             .rejected = true,
         },
@@ -857,7 +857,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "GNU vector machine mode requires power of two",
             .source = "typedef int V __attribute__((mode(V3SI)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_MODE,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
@@ -1025,8 +1025,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "format non-string parameter rejected",
             .source = "int f(int,...) __attribute__((format(printf,1,2)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
-            .error_word = "1",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "format",
             .rejected = true,
             .values = { 1, 2 },
             .function_result = BUSTER_TYPE_INT,
@@ -1083,7 +1083,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "allocation floating parameter rejected",
             .source = "void *f(float,...) __attribute__((alloc_size(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "1",
             .rejected = true,
             .values = { 1 },
@@ -1118,8 +1118,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "format_arg non-string return rejected",
             .source = "int f(char*,...) __attribute__((format_arg(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
-            .error_word = "1",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "format_arg",
             .rejected = true,
             .values = { 1 },
             .function_result = BUSTER_TYPE_INT,
@@ -1144,16 +1144,16 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid alignment value",
             .source = "int x __attribute__((aligned(3)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "3",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "aligned",
             .rejected = true,
             .values = { 3 },
         },
         {
             .name = "negative alignment value",
             .source = "int x __attribute__((aligned(-8)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "-",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "aligned",
             .rejected = true,
             .values = { -8 },
         },
@@ -1199,7 +1199,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid machine mode spelling",
             .source = "typedef int I __attribute__((mode(NO_SUCH_MODE)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_MODE,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
@@ -1208,7 +1208,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "wrong machine mode class",
             .source = "typedef float I __attribute__((mode(SI)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_MODE,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
             .base = BUSTER_TYPE_FLOAT,
             .is_typedef = true,
@@ -1217,15 +1217,15 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid string attribute",
             .source = "int x __attribute__((section(3)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_STRING,
-            .error_word = "section",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "3",
             .rejected = true,
         },
         {
             .name = "invalid TLS model",
             .source = "__thread int x __attribute__((tls_model(\"invented\")));\n",
             .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "tls_model",
+            .error_word = "\"invented\"",
             .rejected = true,
         },
         {
@@ -1240,8 +1240,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid regparm count",
             .source = "void f(void) __attribute__((regparm(7)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_INTEGER,
-            .error_word = "7",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "regparm",
             .rejected = true,
             .values = { 7 },
         },
@@ -1256,8 +1256,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "align_value of a value other than a power of two",
             .source = "void f(void *p __attribute__((align_value(48))));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "48",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "align_value",
             .rejected = true,
             .values = { 48 },
         },

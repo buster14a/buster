@@ -422,6 +422,285 @@ static void check_input_attribute_error(CheckInputReader* reader, CheckInputAttr
     reader->output->resource |= error == CHECK_ATTRIBUTE_ERROR_RESOURCE;
 }
 
+// clang's errors of an attribute's arguments (#147), CHECK_INPUT_ATTRIBUTE_ARGUMENT's in its detail's low byte (a parameter's
+// place from 1 above it), each its handler's, at the attribute's first token or at the argument as clang places it.
+typedef enum CheckAttributeArgumentError
+{
+    // "'X' attribute requires integer constant" (aligned's and align_value's), at the argument.
+    CHECK_ARGUMENT_INTEGER_CONSTANT,
+    // "'X' attribute requires an integer constant", at the attribute.
+    CHECK_ARGUMENT_AN_INTEGER_CONSTANT,
+    // "'X' attribute requires parameter N to be an integer constant", at the attribute.
+    CHECK_ARGUMENT_PARAMETER_INTEGER,
+    // "ext_vector_type attribute requires an integer constant", at the attribute.
+    CHECK_ARGUMENT_EXT_VECTOR_INTEGER,
+    // "requested alignment is not a power of 2", at the attribute.
+    CHECK_ARGUMENT_ALIGNMENT_POWER,
+    // "zero vector size", at the attribute.
+    CHECK_ARGUMENT_ZERO_VECTOR,
+    // "'regparm' parameter must be between 0 and 6 inclusive", at the attribute.
+    CHECK_ARGUMENT_REGPARM_RANGE,
+    // "'X' attribute parameter N is out of bounds", at the attribute.
+    CHECK_ARGUMENT_OUT_OF_BOUNDS,
+    // "'sentinel' parameter 1 less than zero" and "'sentinel' parameter 2 not 0 or 1", at the attribute.
+    CHECK_ARGUMENT_SENTINEL_NEGATIVE,
+    CHECK_ARGUMENT_SENTINEL_NULL,
+    // "'X' attribute argument may only refer to a function parameter of integer type", at the argument.
+    CHECK_ARGUMENT_PARAMETER_TYPE,
+    // "expected string literal as argument of 'X' attribute", at the argument.
+    CHECK_ARGUMENT_STRING_LITERAL,
+    // "'X' attribute requires a string", at the argument.
+    CHECK_ARGUMENT_STRING,
+    // "'X' attribute requires an identifier", at the argument.
+    CHECK_ARGUMENT_IDENTIFIER,
+    // "'X' attribute requires parameter N to be an identifier", at the attribute.
+    CHECK_ARGUMENT_PARAMETER_IDENTIFIER,
+    // mode's (check_input_attribute_mode), at the attribute, the mode's name after it (the number its offset): "unknown
+    // machine mode 'M'", "unsupported machine mode 'M'", "mode 'M' is not supported for enumeration types", "mode attribute
+    // only supported for integer and floating-point types", "type of machine mode does not match type of base type" and
+    // "type of machine mode does not support base vector types".
+    CHECK_ARGUMENT_UNKNOWN_MODE,
+    CHECK_ARGUMENT_UNSUPPORTED_MODE,
+    CHECK_ARGUMENT_MODE_ENUM_VECTOR,
+    CHECK_ARGUMENT_MODE_PRIMITIVE,
+    CHECK_ARGUMENT_MODE_TYPE,
+    CHECK_ARGUMENT_MODE_COMPLEX_VECTOR,
+    // tls_model's "tls_model must be ..." of another string, at the argument.
+    CHECK_ARGUMENT_TLS_MODEL,
+    // format's and format_arg's "format argument not a string type", format_arg's "function does not return string type"
+    // and a strftime format's "strftime format attribute requires 3rd parameter to be 0", at the attribute.
+    CHECK_ARGUMENT_FORMAT_STRING,
+    CHECK_ARGUMENT_FORMAT_RESULT,
+    CHECK_ARGUMENT_STRFTIME,
+    CHECK_ARGUMENT_COUNT,
+} CheckAttributeArgumentError;
+
+// An attribute's argument's error (above), the declaration's first attribute error: reported at `token`, the attribute
+// named by its first token (the error's span the attribute's, or the argument's token where it is reported there).
+static void check_input_attribute_argument_error(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t token,
+                                                 CheckAttributeArgumentError error, uint32_t number)
+{
+    if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = token;
+        attributes->error_end = token == attribute->first ? attribute->end : token + 1;
+        const uint32_t before = reader->output->report_count;
+        check_input_report_argument(reader, token, CHECK_INPUT_ATTRIBUTE_ARGUMENT, (uint32_t)error | number << 8);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].attribute = attribute->first;
+        }
+    }
+}
+
+// An integer argument (its `argument`'s place from 0, `first` to `end`) that is no integer constant, as clang's handlers
+// report it (#147): an identifier that names nothing is clang's parser's "use of undeclared identifier" at it (a member's
+// name after `.` or `->`, a tag's after its keyword and an argument that calls a builtin aside; one after a type's
+// keyword or a sizeof, whose errors clang's parser gives first, stays the generic error), else each handler's wording, at
+// the argument or at the attribute (assume_aligned's offset as a parameter's). Others stay the generic error. Whether it
+// reported.
+static bool check_input_attribute_constant_error(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t argument,
+                                                 uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t before = reader->output->report_count;
+    uint32_t undeclared = BUSTER_CHECK_NONE;
+    bool builtin = false;
+    bool typed = false;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        const uint8_t token_kind = parser->tokens.kinds[token];
+        typed |= undeclared == BUSTER_CHECK_NONE && (token_kind == PARSE_KIND_STRUCT || token_kind == PARSE_KIND_ENUM || token_kind == PARSE_KIND_SIZEOF ||
+                                                     token_kind == PARSE_KIND_TYPEOF);
+        const bool identifier = token_kind == PARSE_KIND_IDENTIFIER;
+        const String8 spelled = identifier ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
+        builtin |= spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0;
+        const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
+        const bool named = previous == PARSE_KIND_PERIOD || previous == PARSE_KIND_ARROW || previous == PARSE_KIND_STRUCT ||
+                           previous == PARSE_KIND_ENUM || c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) != 0;
+        undeclared = undeclared == BUSTER_CHECK_NONE && identifier && !named ? token : undeclared;
+    }
+    const CheckInputAttributeKind kind = attribute->kind;
+    if (attributes->error != CHECK_ATTRIBUTE_ERROR_NONE || reader->output->resource)
+    {
+    }
+    else if (undeclared != BUSTER_CHECK_NONE && (builtin || typed))
+    {
+    }
+    else if (undeclared != BUSTER_CHECK_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = first;
+        attributes->error_end = end;
+        check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+    }
+    else if (kind == CHECK_ATTRIBUTE_ALIGNED || kind == CHECK_ATTRIBUTE_ALIGN_VALUE)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_INTEGER_CONSTANT, 0);
+    }
+    else if (kind == CHECK_ATTRIBUTE_REGPARM || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
+             (kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 0))
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_AN_INTEGER_CONSTANT, 0);
+    }
+    else if (kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_EXT_VECTOR_INTEGER, 0);
+    }
+    else if (kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || kind == CHECK_ATTRIBUTE_FORMAT_ARG || kind == CHECK_ATTRIBUTE_NONNULL || kind == CHECK_ATTRIBUTE_SENTINEL ||
+             kind == CHECK_ATTRIBUTE_ALLOC_SIZE || kind == CHECK_ATTRIBUTE_FORMAT || kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, argument + 1);
+    }
+    return reader->output->report_count > before;
+}
+
+// The end of a target string's item from `cursor` (its next comma's, or the text's), and the item trimmed of the whitespace
+// clang's StringRef::trim takes off, from *first to *last.
+static uint32_t check_input_target_item(String8 text, uint32_t cursor, uint32_t* first, uint32_t* last)
+{
+    uint32_t end = cursor;
+    while (end < text.length && text.pointer[end] != ',')
+    {
+        end += 1;
+    }
+    uint32_t begin = cursor;
+    uint32_t stop = end;
+    while (begin < stop && (text.pointer[begin] == ' ' || (text.pointer[begin] >= '\t' && text.pointer[begin] <= '\r')))
+    {
+        begin += 1;
+    }
+    while (stop > begin && (text.pointer[stop - 1] == ' ' || (text.pointer[stop - 1] >= '\t' && text.pointer[stop - 1] <= '\r')))
+    {
+        stop -= 1;
+    }
+    *first = begin;
+    *last = stop;
+    return end;
+}
+
+// Whether a target string's item from `first` to `last` starts with `prefix`, and the rest trimmed after its first `=`.
+static bool check_input_target_value(String8 text, uint32_t first, uint32_t last, const char* prefix, uint32_t* value, uint32_t* value_end)
+{
+    const uint32_t length = (uint32_t)strlen(prefix);
+    const bool starts = last - first >= length && memcmp(text.pointer + first, prefix, length) == 0;
+    uint32_t begin = first;
+    while (starts && text.pointer[begin] != '=')
+    {
+        begin += 1;
+    }
+    begin += starts ? 1u : 0u;
+    uint32_t stop = last;
+    while (starts && begin < stop && (text.pointer[begin] == ' ' || (text.pointer[begin] >= '\t' && text.pointer[begin] <= '\r')))
+    {
+        begin += 1;
+    }
+    *value = begin;
+    *value_end = stop;
+    return starts;
+}
+
+// target's string as clang's checkTargetAttr takes it (#147, its parseTargetAttr's items: trimmed, between commas), and
+// its warning at the string where it doesn't, which ignores the attribute: fpmath= anywhere; an arch= or tune= of no
+// x86-64 CPU (the first of each); a second arch= or tune= (the last one's); a feature it hasn't (a no- one's without it);
+// a branch-protection= of anything. The warning's text is a piece of the string: its case and what it says in the data
+// (bits 0-1 unsupported, duplicate or unknown; 2-3 none, CPU or tune CPU; its offset from bit 4 and its length from bit
+// 18). Whether it warned.
+static bool check_input_target_warning(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 text = attribute->text;
+    uint32_t data = UINT32_MAX;
+    for (uint32_t i = 0; data == UINT32_MAX && i + 7 <= text.length; i += 1)
+    {
+        data = memcmp(text.pointer + i, "fpmath=", 7) == 0 ? (i << 4 | 7u << 18) : data;
+    }
+    uint32_t cpu = 0;
+    uint32_t cpu_end = 0;
+    uint32_t tune = 0;
+    uint32_t tune_end = 0;
+    uint32_t duplicate = UINT32_MAX;
+    uint32_t feature = UINT32_MAX;
+    uint32_t branch = UINT32_MAX;
+    for (uint32_t cursor = 0; data == UINT32_MAX && !check_input_attribute_equal(text, "default") && cursor <= text.length;)
+    {
+        uint32_t first = 0;
+        uint32_t last = 0;
+        const uint32_t end = check_input_target_item(text, cursor, &first, &last);
+        uint32_t value = 0;
+        uint32_t value_end = 0;
+        if (check_input_target_value(text, first, last, "fpmath=", &value, &value_end))
+        {
+        }
+        else if (check_input_target_value(text, first, last, "branch-protection=", &value, &value_end))
+        {
+            branch = value < value_end ? first : UINT32_MAX;
+        }
+        else if (check_input_target_value(text, first, last, "arch=", &value, &value_end) || check_input_target_value(text, first, last, "tune=", &value, &value_end))
+        {
+            const bool arch = text.pointer[first] == 'a';
+            const bool taken = arch ? cpu < cpu_end : tune < tune_end;
+            duplicate = taken ? first : duplicate;
+            cpu = arch && !taken ? value : cpu;
+            cpu_end = arch && !taken ? value_end : cpu_end;
+            tune = !arch && !taken ? value : tune;
+            tune_end = !arch && !taken ? value_end : tune_end;
+        }
+        else if (feature == UINT32_MAX)
+        {
+            const bool off = last - first >= 3 && memcmp(text.pointer + first, "no-", 3) == 0;
+            const uint32_t name = off ? first + 3 : first;
+            const int32_t index = predefines_feature_index(text.pointer + name, last - name);
+            feature = index < 0 || predefines_features[index].flag == PREDEFINES_FLAG_NONE ? (name << 4 | (last - name) << 18) : feature;
+        }
+        cursor = end + 1;
+    }
+    if (data == UINT32_MAX && cpu < cpu_end && predefines_cpu_index_of(text.pointer + cpu, cpu_end - cpu) < 0)
+    {
+        data = 2u | 1u << 2 | cpu << 4 | (cpu_end - cpu) << 18;
+    }
+    else if (data == UINT32_MAX && tune < tune_end && predefines_cpu_index_of(text.pointer + tune, tune_end - tune) < 0)
+    {
+        data = 2u | 2u << 2 | tune << 4 | (tune_end - tune) << 18;
+    }
+    else if (data == UINT32_MAX && duplicate != UINT32_MAX)
+    {
+        data = 1u | duplicate << 4 | 5u << 18;
+    }
+    else if (data == UINT32_MAX && feature != UINT32_MAX)
+    {
+        data = feature;
+    }
+    else if (data == UINT32_MAX && branch != UINT32_MAX)
+    {
+        data = branch << 4 | 17u << 18;
+    }
+    // A string too long for the data's fields keeps its warning out.
+    const bool warned = data != UINT32_MAX && text.length < (1u << 14);
+    if (warned)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_TARGET_UNSUPPORTED,
+            .token = attribute->argument_first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = attribute->argument_first,
+            .payload = { .name = attribute->name, .token = attribute->argument_first, .data = data },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+    return warned;
+}
+
+// Whether clang's visibility attribute knows a visibility (VisibilityAttr::ConvertStrToVisibilityType).
+static bool check_input_visibility_known(String8 text)
+{
+    return check_input_attribute_equal(text, "default") || check_input_attribute_equal(text, "hidden") || check_input_attribute_equal(text, "protected") ||
+           check_input_attribute_equal(text, "internal");
+}
+
 static bool check_input_attribute_append(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute attribute)
 {
     bool valid = true;
@@ -676,10 +955,30 @@ static bool check_input_attribute_value(CheckInputReader* reader, CheckInputAttr
         {
             valid = value >= 0 && value <= UINT32_MAX;
         }
+        // clang's errors of a value its handler refuses (#147), else the generic one.
+        const CheckInputAttributeKind kind = attribute->kind;
+        const bool power = (kind == CHECK_ATTRIBUTE_ALIGNED || kind == CHECK_ATTRIBUTE_ALIGNAS || kind == CHECK_ATTRIBUTE_ALIGN_VALUE) &&
+                           (value < 0 || (value == 0 && kind != CHECK_ATTRIBUTE_ALIGNAS) || ((uint64_t)value & ((uint64_t)value - 1)) != 0);
         if (valid)
         {
             attribute->value = value;
             attribute->resolved = true;
+        }
+        else if (power)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_ALIGNMENT_POWER, 0);
+        }
+        else if (kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && value == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_ZERO_VECTOR, 0);
+        }
+        else if (kind == CHECK_ATTRIBUTE_REGPARM)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_REGPARM_RANGE, 0);
+        }
+        else if ((kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || kind == CHECK_ATTRIBUTE_FORMAT_ARG) && value <= 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, 1);
         }
         else
         {
@@ -706,9 +1005,12 @@ static bool check_input_attribute_argument_value(CheckInputReader* reader, Check
         }
         else if (valid)
         {
-            // nonnull's and alloc_size's parameter indices are any integers here: the function's check refuses one of no
-            // parameter with clang's "parameter N is out of bounds" (check_input_attribute_function).
-            const bool index_kind = attribute->kind == CHECK_ATTRIBUTE_NONNULL || attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE;
+            // nonnull's, alloc_size's and format's parameter indices are any integers here: the function's check refuses one
+            // of no parameter with clang's "parameter N is out of bounds" (check_input_attribute_function; format's as
+            // clang's checkUInt32Argument reads a negative int, its 32 bits unsigned). assume_aligned's offset is any
+            // integer, as clang's AddAssumeAlignedAttr keeps it.
+            const bool index_kind = attribute->kind == CHECK_ATTRIBUTE_NONNULL || attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_FORMAT ||
+                                    (attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 1);
             valid = index_kind || (value >= 0 && value <= UINT32_MAX);
             if (valid && attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 0)
             {
@@ -734,6 +1036,14 @@ static bool check_input_attribute_argument_value(CheckInputReader* reader, Check
             attribute->argument_values[argument] = value;
             attribute->value = argument == 0 ? value : attribute->value;
             attribute->resolved |= argument + 1 == attribute->argument_count;
+        }
+        else if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && !reader->output->resource && attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED && argument == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_ALIGNMENT_POWER, 0);
+        }
+        else if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && !reader->output->resource && attribute->kind == CHECK_ATTRIBUTE_SENTINEL)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, argument == 0 ? CHECK_ARGUMENT_SENTINEL_NEGATIVE : CHECK_ARGUMENT_SENTINEL_NULL, 0);
         }
         else if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
         {
@@ -805,6 +1115,15 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         {
             valid = first + 1 == end && parser->tokens.names[first] != 0;
             error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
+            // clang's errors of an argument that is no identifier (#147): mode's at it, format's at the attribute.
+            if (!valid && attribute->kind == CHECK_ATTRIBUTE_MODE)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_IDENTIFIER, 0);
+            }
+            else if (!valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, argument + 1);
+            }
         }
         else if (valid && string)
         {
@@ -814,6 +1133,15 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             if (valid && argument == 0)
             {
                 attribute->text = text;
+            }
+            // clang's error of an argument that is no string literal, at it (#147): visibility's own wording, the others'
+            // checkStringLiteralArgumentAttr's.
+            // visibility's argument is an enumerator's, which clang's parser reads as an identifier: one is its own error.
+            if (!valid)
+            {
+                const bool named = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+                check_input_attribute_argument_error(reader, attributes, attribute, first,
+                                                     attribute->kind == CHECK_ATTRIBUTE_VISIBILITY && named ? CHECK_ARGUMENT_STRING : CHECK_ARGUMENT_STRING_LITERAL, 0);
             }
         }
         else if (valid)
@@ -840,7 +1168,10 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const bool literal = token == last && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
         const uint32_t name = named ? parser->tokens.names[token] : 0;
         const uint32_t handle = named ? check_input_library_binding(reader, name, token) : 0;
+        // A name that names nothing is clang's parser's error, which drops the attribute: no subject of it is checked.
+        const bool undeclared = named && handle == 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
         valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
+        attribute->ignored |= valid && undeclared;
         reader->output->resource |= named && !valid;
         error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
         attribute->cleanup_function = handle != 0 && token == attribute->argument_first ? reader->bindings.declaration[handle - 1] + 1u : 0;
@@ -857,16 +1188,20 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
     }
     if (valid && attribute->kind == CHECK_ATTRIBUTE_VISIBILITY)
     {
-        // Clang warns and gives an unknown visibility value no effect. Preserve that deliberate disposition so
-        // linkage consumers cannot accidentally interpret an arbitrary string as a supported visibility mode.
-        attribute->ignored = !check_input_attribute_equal(attribute->text, "default") && !check_input_attribute_equal(attribute->text, "hidden") &&
-                             !check_input_attribute_equal(attribute->text, "protected") && !check_input_attribute_equal(attribute->text, "internal");
+        // Clang warns and gives an unknown visibility value no effect (its warning: check_input_attribute_subjects).
+        // Preserve that deliberate disposition so linkage consumers cannot accidentally interpret an arbitrary string as a
+        // supported visibility mode.
+        attribute->ignored = !check_input_visibility_known(attribute->text);
     }
     if (valid && attribute->kind == CHECK_ATTRIBUTE_TLS_MODEL)
     {
         valid = check_input_attribute_equal(attribute->text, "global-dynamic") || check_input_attribute_equal(attribute->text, "local-dynamic") ||
                 check_input_attribute_equal(attribute->text, "initial-exec") || check_input_attribute_equal(attribute->text, "local-exec");
         error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        if (!valid)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->argument_first, CHECK_ARGUMENT_TLS_MODEL, 0);
+        }
     }
     if (!valid)
     {
@@ -1546,10 +1881,13 @@ static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
            specifiers && open > 0 ? BUSTER_CHECK_PLACE_SPECIFIERS : BUSTER_CHECK_PLACE_DECLARATION;
 }
 
-// A warning event at an attribute's first token (a C23 one's scope's) naming it: as written, or a C23 one's spelling
-// normalized with its scope (check_warning_attribute_name). It is published there, before an error of the same
-// attribute's (check_input_report_argument's), as clang's handlers give them in turn.
-static void check_input_attribute_named_event(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningId id, CheckWarningEventKind kind)
+// A warning event at `at` (an attribute's first token, a C23 one's scope's, or a token of it) naming it: as written, or a
+// C23 one's spelling normalized with its scope (check_warning_attribute_name), `token` its related token or none. It is
+// published there, or at a later related token (a warning at a declaration's name of an argument's, in its turn among the
+// arguments'), before an error of the same attribute's (check_input_report_argument's), as clang's handlers give them in
+// turn.
+static void check_input_attribute_named_event_at(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningId id, CheckWarningEventKind kind,
+                                                 uint32_t at, uint32_t token)
 {
     const Parser* parser = reader->parser;
     const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
@@ -1557,14 +1895,20 @@ static void check_input_attribute_named_event(CheckInputReader* reader, const Ch
     {
         .id = id,
         .kind = kind,
-        .token = attribute->first,
+        .token = at,
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = attribute->first,
-        .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion = token != BUSTER_CHECK_WARNING_NO_SOURCE && token > at ? token : at,
+        .payload = { .name = attribute->name, .token = token,
                      .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
     };
     check_input_warning_event(reader, &event, NULL, 0);
+}
+
+// check_input_attribute_named_event_at at the attribute's first token, with no related token.
+static void check_input_attribute_named_event(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningId id, CheckWarningEventKind kind)
+{
+    check_input_attribute_named_event_at(reader, attribute, id, kind, attribute->first, BUSTER_CHECK_WARNING_NO_SOURCE);
 }
 
 // check_input_attribute_named_event once an attribute (CheckInputReader.attribute_warned): its declaration specifiers'
@@ -1837,7 +2181,30 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool chunk_gnu = valid && chunk && gnu_scope;
         const bool ignored_type = known && ((clang_scope && check_input_attribute_equal(name, "noderef")) || (specifiers && check_input_attribute_equal(name, "vector_size")));
         const bool misplaced = known && place != BUSTER_CHECK_PLACE_DECLARATION && fact != NULL && !typed;
-        if (chunk_gnu && typed)
+        // clang's parser reads a string argument as an unevaluated string literal (#147): one that is none is its error at
+        // the argument, wherever the attribute is, before its place decides anything. visibility's identifier (an
+        // enumerator's argument) is its handler's.
+        const bool string_schema = valid && known && rule != 0 && (rule->schema == CHECK_ATTRIBUTE_STRING || rule->schema == CHECK_ATTRIBUTE_STRING_LIST);
+        uint32_t literal = BUSTER_CHECK_NONE;
+        for (uint32_t argument = attribute.argument_first; string_schema && literal == BUSTER_CHECK_NONE && argument < attribute.argument_end;)
+        {
+            uint32_t stop = argument;
+            bool strings = true;
+            while (stop < attribute.argument_end && parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+            {
+                strings &= parser->tokens.kinds[stop] == PARSE_KIND_STRING;
+                stop = check_input_attribute_after_group(parser, stop, attribute.argument_end);
+            }
+            const bool enumerator = rule->kind == CHECK_ATTRIBUTE_VISIBILITY && stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+            literal = stop > argument && !strings && !enumerator ? argument : BUSTER_CHECK_NONE;
+            argument = stop + 1;
+        }
+        if (literal != BUSTER_CHECK_NONE)
+        {
+            check_input_attribute_argument_error(reader, attributes, &attribute, literal, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            valid = false;
+        }
+        if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
             if (place == BUSTER_CHECK_PLACE_FUNCTION && rule != 0 && rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) == CHECK_CALL_IGNORED_X86_32)
@@ -1851,7 +2218,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // The facts of one this checker has no rule for (#147), which decide how clang takes it.
         const CheckInputFactRow* generic_fact = known && rule == 0 ? (standard ? fact : gnu_fact) : NULL;
         const bool type_name = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 && check_input_attribute_in_type_name(parser, attribute.first);
-        if (chunk_gnu && !typed)
+        if (valid && chunk_gnu && !typed)
         {
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_POSITION);
             unknown = true;
@@ -2130,61 +2497,153 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
     return valid;
 }
 
-static TypeId check_input_attribute_mode(CheckInputReader* reader, const CheckInputAttribute* attribute, TypeId base)
+// A mode's name without a keyword's underscores, and the count of its vector prefix (V, a power of two that fits in 64 bits,
+// and a mode of two letters or more), or 0 for none: *rest the name past it.
+static uint64_t check_input_mode_vector(CheckInputReader* reader, const CheckInputAttribute* attribute, String8* rest)
 {
     String8 mode = check_input_attribute_name(reader, reader->parser->tokens.names[attribute->argument_first]);
-    uint32_t vector_count = 0;
-    bool valid_mode = true;
-    if (mode.length != 0 && mode.pointer[0] == 'V')
+    const bool surrounded = mode.length >= 4 && mode.pointer[0] == '_' && mode.pointer[1] == '_' && mode.pointer[mode.length - 2] == '_' &&
+                            mode.pointer[mode.length - 1] == '_';
+    mode = surrounded ? (String8){ mode.pointer + 2, mode.length - 4 } : mode;
+    uint64_t result = 0;
+    *rest = mode;
+    if (mode.length >= 4 && mode.pointer[0] == 'V')
     {
         uint64_t position = 1;
+        bool overflow = false;
         uint64_t count = 0;
-        while (position < mode.length && mode.pointer[position] >= '0' && mode.pointer[position] <= '9')
+        while (position + 1 <= mode.length - 1 && mode.pointer[position] >= '0' && mode.pointer[position] <= '9')
         {
-            const uint32_t digit = (uint32_t)(mode.pointer[position++] - '0');
-            valid_mode &= count <= (UINT32_MAX - digit) / 10;
-            count = valid_mode ? count * 10 + digit : 0;
+            const uint32_t digit = (uint32_t)(mode.pointer[position] - '0');
+            overflow |= count > (UINT64_MAX - digit) / 10;
+            count = overflow ? 0 : count * 10 + digit;
+            position += 1;
         }
-        valid_mode &= count != 0 && (count & (count - 1)) == 0 && position > 1 && position < mode.length;
-        vector_count = valid_mode ? (uint32_t)count : 0;
-        mode.pointer += position;
-        mode.length -= position;
+        const bool vector = position > 1 && !overflow && count != 0 && (count & (count - 1)) == 0;
+        result = vector ? count : 0;
+        *rest = vector ? (String8){ mode.pointer + position, mode.length - position } : mode;
     }
-    const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, base));
-    const TypeId element_type = kind == BUSTER_TYPE_KIND_COMPLEX ? type_element(reader->types, base) : base;
-    const uint8_t element_kind = type_kind(reader->types, type_strip_aligned(reader->types, element_type));
-    // The base's signedness, which the mode keeps: an enum's underlying type's, and plain char's as the table says
-    // (TypeTable.char_unsigned). A builtin type's flags don't say it.
+    return result;
+}
+
+// A mode's name past its vector prefix (clang's parseModeAttrArg, #147): its width in bits (0 for none), whether it is an
+// integer's, a complex's, and its explicit floating type ('K': __float128, 'T': long double, 'I': __ibm128, else none).
+static uint32_t check_input_mode_width(String8 mode, bool* integer, bool* complex, char* explicit_type)
+{
     uint32_t width = 0;
-    bool is_signed = true;
-    const bool unsign = check_action_integer_type(reader->types, element_type, &width, &is_signed) && !is_signed;
+    *integer = true;
+    *complex = false;
+    *explicit_type = 0;
+    if (mode.length == 2)
+    {
+        const char first = mode.pointer[0];
+        const char second = mode.pointer[1];
+        width = first == 'Q' ? 8u : first == 'H' ? 16u : first == 'S' ? 32u : first == 'D' ? 64u : first == 'X' ? 96u : first == 'T' ? 128u :
+                (first == 'K' || first == 'I') && second != 'I' ? 128u : 0u;
+        *explicit_type = first == 'K' || first == 'T' || first == 'I' ? first : 0;
+        *integer = second != 'F' && second != 'C';
+        *complex = second == 'C';
+        width = second == 'F' || second == 'C' || second == 'I' ? width : 0u;
+    }
+    else
+    {
+        // word, byte, pointer and unwind_word: x86-64's register, char, pointer and unwind word widths.
+        width = check_input_attribute_equal(mode, "word") || check_input_attribute_equal(mode, "pointer") || check_input_attribute_equal(mode, "unwind_word") ? 64u :
+                check_input_attribute_equal(mode, "byte") ? 8u : 0u;
+    }
+    return width;
+}
+
+// mode's type of `base` (#147), as clang's AddModeAttr makes it: the name without a keyword's underscores; a vector mode
+// (V, a power of two, a mode) with -Wdeprecated-attributes' warning (here before an error, else each declarator's); the width's integer type of the base's signedness or
+// its floating type (getRealTypeForBitwidth: HF __fp16, XF long double, TF and KF __float128, IF none here), complex for
+// a C mode; a vector of it by the mode's count, or the base vector's bytes. The declaration's qualifiers are dropped, as
+// clang's setType drops them. clang's errors at the attribute, in its order, else 0: an unknown mode, a vector mode of an
+// enumeration, a base of no integer or floating type, a mode of the other kind, an unsupported width, and a complex mode
+// of a vector.
+static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, TypeId base)
+{
+    TypeTable* types = reader->types;
+    String8 rest = { 0 };
+    const uint64_t vector_count = check_input_mode_vector(reader, attribute, &rest);
+    bool integer_mode = true;
+    bool complex_mode = false;
+    char explicit_type = 0;
+    const uint32_t width = check_input_mode_width(rest, &integer_mode, &complex_mode, &explicit_type);
+    const TypeId old = type_strip_aligned(types, base);
+    const uint8_t old_kind = type_kind(types, old);
+    const bool vector_base = old_kind == BUSTER_TYPE_KIND_VECTOR || old_kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+    const TypeId element = vector_base ? type_strip_aligned(types, type_element(types, old)) : old;
+    const uint8_t kind = type_kind(types, element);
+    const bool enumeration = kind == BUSTER_TYPE_KIND_ENUM;
+    const bool integral = kind == BUSTER_TYPE_KIND_INTEGER || enumeration;
+    const bool builtin = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_VOID || kind == BUSTER_TYPE_KIND_NULLPTR;
+    const bool complex_floating = kind == BUSTER_TYPE_KIND_COMPLEX && type_kind(types, type_strip_aligned(types, type_element(types, element))) == BUSTER_TYPE_KIND_FLOATING;
+    const bool floating = kind == BUSTER_TYPE_KIND_FLOATING || complex_floating;
+    uint32_t integer_width = 0;
+    bool is_signed = false;
+    const bool signed_base = integral && check_action_integer_type(types, element, &integer_width, &is_signed) && is_signed;
     TypeId result = 0;
-    if (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_ENUM)
+    if (integer_mode)
     {
-        result = check_input_attribute_equal(mode, "QI") || check_input_attribute_equal(mode, "byte") ? (unsign ? BUSTER_TYPE_UCHAR : BUSTER_TYPE_SCHAR) :
-                 check_input_attribute_equal(mode, "HI") ? (unsign ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
-                 check_input_attribute_equal(mode, "SI") ? (unsign ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT) :
-                 check_input_attribute_equal(mode, "DI") || check_input_attribute_equal(mode, "word") || check_input_attribute_equal(mode, "pointer") ? (unsign ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
-                 check_input_attribute_equal(mode, "TI") ? (unsign ? BUSTER_TYPE_UINT128 : BUSTER_TYPE_INT128) : 0;
+        result = width == 8 ? (signed_base ? BUSTER_TYPE_SCHAR : BUSTER_TYPE_UCHAR) : width == 16 ? (signed_base ? BUSTER_TYPE_SHORT : BUSTER_TYPE_USHORT) :
+                 width == 32 ? (signed_base ? BUSTER_TYPE_INT : BUSTER_TYPE_UINT) : width == 64 ? (signed_base ? BUSTER_TYPE_LONG : BUSTER_TYPE_ULONG) :
+                 width == 128 ? (signed_base ? BUSTER_TYPE_INT128 : BUSTER_TYPE_UINT128) : 0;
     }
-    else if (element_kind == BUSTER_TYPE_KIND_FLOATING)
+    else
     {
-        result = check_input_attribute_equal(mode, "HF") ? BUSTER_TYPE_FLOAT16 : check_input_attribute_equal(mode, "SF") ? BUSTER_TYPE_FLOAT :
-                 check_input_attribute_equal(mode, "DF") ? BUSTER_TYPE_DOUBLE : check_input_attribute_equal(mode, "XF") ? BUSTER_TYPE_LONG_DOUBLE :
-                 check_input_attribute_equal(mode, "TF") ? BUSTER_TYPE_FLOAT128 : 0;
-        if (result == 0 && kind == BUSTER_TYPE_KIND_COMPLEX)
+        result = width == 16 ? BUSTER_TYPE_HALF : width == 32 ? BUSTER_TYPE_FLOAT : width == 64 ? BUSTER_TYPE_DOUBLE : width == 96 ? BUSTER_TYPE_LONG_DOUBLE :
+                 width == 128 && explicit_type != 'I' ? BUSTER_TYPE_FLOAT128 : 0;
+    }
+    CheckAttributeArgumentError error = CHECK_ARGUMENT_COUNT;
+    if (width == 0)
+    {
+        error = CHECK_ARGUMENT_UNKNOWN_MODE;
+    }
+    else if (enumeration && vector_count != 0)
+    {
+        error = CHECK_ARGUMENT_MODE_ENUM_VECTOR;
+    }
+    else if (!builtin && !complex_floating && !integral)
+    {
+        error = CHECK_ARGUMENT_MODE_PRIMITIVE;
+    }
+    else if (integer_mode ? !integral : complex_mode ? !complex_floating : !floating)
+    {
+        error = CHECK_ARGUMENT_MODE_TYPE;
+    }
+    else if (result == 0)
+    {
+        error = CHECK_ARGUMENT_UNSUPPORTED_MODE;
+    }
+    else if (complex_mode && vector_base && vector_count == 0)
+    {
+        error = CHECK_ARGUMENT_MODE_COMPLEX_VECTOR;
+    }
+    if (error == CHECK_ARGUMENT_COUNT)
+    {
+        result = complex_mode ? check_input_type_result(reader, type_complex(types, result)) : result;
+        // The base vector's elements' bytes, not its rounded storage's, in as many of the new elements.
+        const uint64_t count = vector_count != 0 ? vector_count :
+                               vector_base && result != 0 ? type_size(types, element) * types->types.extent[type_index(old)] / type_size(types, result) : 0;
+        if (result != 0 && (vector_count != 0 || vector_base))
         {
-            const TypeId element = check_input_attribute_equal(mode, "HC") ? BUSTER_TYPE_FLOAT16 : check_input_attribute_equal(mode, "SC") ? BUSTER_TYPE_FLOAT :
-                                   check_input_attribute_equal(mode, "DC") ? BUSTER_TYPE_DOUBLE : check_input_attribute_equal(mode, "XC") ? BUSTER_TYPE_LONG_DOUBLE :
-                                   check_input_attribute_equal(mode, "TC") ? BUSTER_TYPE_FLOAT128 : 0;
-            result = element != 0 ? check_input_type_result(reader, type_complex(reader->types, element)) : 0;
+            result = count != 0 && count <= UINT32_MAX ? check_input_type_result(reader, type_vector(types, result, (uint32_t)count, false)) : 0;
         }
+        error = result == 0 && !reader->output->resource ? CHECK_ARGUMENT_MODE_TYPE : error;
     }
-    if (result != 0 && vector_count != 0)
+    if (error != CHECK_ARGUMENT_COUNT)
     {
-        result = check_input_type_result(reader, type_vector(reader->types, result, vector_count, false));
+        // A vector mode's warning comes first; a declarator's that has its type has it with its subjects
+        // (check_input_attribute_subjects), as clang's handler gives it for each.
+        if (vector_count != 0)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_VECTOR_MODE);
+        }
+        result = 0;
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, error, attribute->argument_first - attribute->first);
     }
-    return valid_mode && result != 0 ? type_qualify(reader->types, result, type_qualifiers(base)) : 0;
+    return result;
 }
 
 // vector_size's checks of its element type `element` and its size, as clang's BuildVectorType makes them, in its order
@@ -2247,7 +2706,7 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_MODE)
         {
-            result = check_input_attribute_mode(reader, attribute, result);
+            result = check_input_attribute_mode(reader, attributes, attribute, result);
             valid = result != 0;
             error = CHECK_ATTRIBUTE_ERROR_MODE;
         }
@@ -2319,8 +2778,9 @@ static bool check_input_attribute_string_type(TypeTable* types, TypeId type)
     bool result = type_kind(types, type) == BUSTER_TYPE_KIND_POINTER;
     if (result)
     {
-        const TypeId element = type_strip_aligned(types, types->types.base[type_index(type)]);
-        result = type_unqualified(element) == BUSTER_TYPE_CHAR;
+        // clang's isCharType: char, signed char or unsigned char.
+        const TypeId element = type_unqualified(type_strip_aligned(types, types->types.base[type_index(type)]));
+        result = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
     }
     return result;
 }
@@ -3062,6 +3522,57 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             attribute->ignored = true;
             attribute->subject_ignored = true;
         }
+        // mode's vector mode, the declarator's warning (#147, check_input_attribute_mode).
+        String8 mode_rest = { 0 };
+        if (valid && attribute->kind == CHECK_ATTRIBUTE_MODE && !attribute->ignored && attribute->argument_first < attribute->argument_end &&
+            check_input_mode_vector(reader, attribute, &mode_rest) != 0)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_VECTOR_MODE);
+        }
+        // target's handler (#147, check_input_target_warning): a string clang's checkTargetAttr doesn't take, its warning,
+        // which ignores the attribute.
+        if (valid && attribute->kind == CHECK_ATTRIBUTE_TARGET && !attribute->subject_ignored && check_input_target_warning(reader, attribute))
+        {
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        // no_sanitize's (#147): each sanitizer clang doesn't know, its -Wunknown-sanitizers warning at the string; on a
+        // variable of static storage, each one but address, hwaddress and memtag, its warning at the variable's name.
+        for (uint32_t argument = 0; valid && attribute->kind == CHECK_ATTRIBUTE_NO_SANITIZE && !attribute->subject_ignored && argument < attribute->argument_count;
+             argument += 1)
+        {
+            uint32_t first = attribute->argument_first;
+            uint32_t end = attribute->argument_end;
+            String8 sanitizer = { 0 };
+            const bool string = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_attribute_string(reader, first, end, &sanitizer);
+            const PredefinesSanitizers known = string ? predefines_sanitizer_value(sanitizer.pointer, sanitizer.length) : (PredefinesSanitizers){ 0 };
+            const bool unknown = string && known.kinds == 0 && known.groups == 0 && !check_input_attribute_equal(sanitizer, "coverage");
+            const bool global = (declaration & (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_GLOBAL)) == (BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_GLOBAL);
+            if (unknown)
+            {
+                check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_UNKNOWN_SANITIZERS, CHECK_WARNING_EVENT_UNKNOWN_SANITIZER, first, first);
+            }
+            else if (string && global && name < parser->tokens.count && !check_input_attribute_equal(sanitizer, "address") &&
+                     !check_input_attribute_equal(sanitizer, "hwaddress") && !check_input_attribute_equal(sanitizer, "memtag"))
+            {
+                check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_SANITIZER_GLOBAL, name, first);
+            }
+        }
+        // visibility's handler (#147): on a typedef, its "attribute ignored" warning; else a visibility it doesn't know, its
+        // "argument not supported" warning at the string (check_input_attribute_validate ignores it).
+        const bool visibility = valid && attribute->kind == CHECK_ATTRIBUTE_VISIBILITY && !attribute->subject_ignored;
+        if (visibility && (declaration & BUSTER_CHECK_SUBJECT_TYPEDEF) != 0)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        else if (visibility && !check_input_visibility_known(attribute->text))
+        {
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED, attribute->argument_first,
+                                                 attribute->argument_first);
+            attribute->subject_ignored = true;
+        }
         // After its subject's check, as clang's handleCommonAttributeFeatures has them (#147): an attribute already on the
         // declaration that excludes it (diagMutualExclusion), with the note at that one, then its count of arguments.
         const bool kept = valid && !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
@@ -3491,7 +4002,7 @@ static void check_input_attribute_nonnull_parameter(CheckInputReader* reader, Ch
 // Run after a full declarator is available, including a function-pointer typedef. Prefix attributes cannot perform
 // these checks before the function's parameters have been read. Warnings with no C semantic effect are retained as
 // ignored metadata; malformed parameter indices/types are errors. Per-argument values must already be evaluated.
-static bool check_input_attribute_function(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+static bool check_input_attribute_function(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint32_t name)
 {
     bool valid = type != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE;
     TypeId function = valid ? type_strip_aligned(reader->types, type) : 0;
@@ -3526,17 +4037,38 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
         const bool allocation = attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE || attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN;
         const bool nonnull = attribute->kind == CHECK_ATTRIBUTE_NONNULL;
         const bool format = attribute->kind == CHECK_ATTRIBUTE_FORMAT || attribute->kind == CHECK_ATTRIBUTE_FORMAT_ARG;
-        bool recognized_format = true;
-        if (attribute->kind == CHECK_ATTRIBUTE_FORMAT)
+        // format's kind, without a keyword's underscores, as clang's getFormatAttrKind knows it (#147): one it ignores, and
+        // one it doesn't know, which its warning ignores; strftime's, whose third argument is 0.
+        String8 kind_name = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->argument_first]) :
+                                                                        (String8){ 0 };
+        const bool surrounded = kind_name.length >= 4 && kind_name.pointer[0] == '_' && kind_name.pointer[1] == '_' &&
+                                kind_name.pointer[kind_name.length - 2] == '_' && kind_name.pointer[kind_name.length - 1] == '_';
+        kind_name = surrounded ? (String8){ kind_name.pointer + 2, kind_name.length - 4 } : kind_name;
+        const bool strftime = check_input_attribute_equal(kind_name, "strftime") || check_input_attribute_equal(kind_name, "gnu_strftime");
+        const bool ignored_format = check_input_attribute_equal(kind_name, "gcc_diag") || check_input_attribute_equal(kind_name, "gcc_cdiag") ||
+                                    check_input_attribute_equal(kind_name, "gcc_cxxdiag") || check_input_attribute_equal(kind_name, "gcc_tdiag");
+        static const char* const format_kinds[] = {
+            "NSString", "CFString", "scanf", "printf", "printf0", "strfmon", "gnu_scanf", "gnu_printf", "gnu_strfmon", "cmn_err",
+            "vcmn_err", "zcmn_err", "kprintf", "syslog", "freebsd_kprintf", "os_trace", "os_log",
+        };
+        bool recognized_format = attribute->kind != CHECK_ATTRIBUTE_FORMAT || strftime;
+        for (uint32_t k = 0; !recognized_format && k < BUSTER_ARRAY_LENGTH(format_kinds); k += 1)
         {
-            const String8 name = check_input_attribute_name(reader, reader->parser->tokens.names[attribute->argument_first]);
-            recognized_format = check_input_attribute_equal(name, "printf") || check_input_attribute_equal(name, "scanf") ||
-                                check_input_attribute_equal(name, "strftime") || check_input_attribute_equal(name, "strfmon") ||
-                                check_input_attribute_equal(name, "gnu_printf") || check_input_attribute_equal(name, "gnu_scanf") ||
-                                check_input_attribute_equal(name, "gnu_strftime") || check_input_attribute_equal(name, "gnu_strfmon") ||
-                                check_input_attribute_equal(name, "ms_printf") || check_input_attribute_equal(name, "ms_scanf");
+            recognized_format = check_input_attribute_equal(kind_name, format_kinds[k]);
         }
-        if (!recognized_format || (allocation && type_kind(reader->types, type_strip_aligned(reader->types, result)) != BUSTER_TYPE_KIND_POINTER))
+        const bool pointer_result = type_kind(reader->types, type_strip_aligned(reader->types, result)) == BUSTER_TYPE_KIND_POINTER;
+        if (!recognized_format && !ignored_format)
+        {
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED, attribute->first,
+                                                 attribute->argument_first);
+        }
+        // alloc_size's and alloc_align's function that returns no pointer: their handlers' warnings, which ignore them.
+        if (allocation && !pointer_result)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                                              attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE ? CHECK_WARNING_EVENT_RETURN_POINTERS : CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES);
+        }
+        if (!recognized_format || (allocation && !pointer_result))
         {
             attribute->ignored = true;
         }
@@ -3547,6 +4079,9 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
             bool any_pointer = false;
             bool out_of_bounds = false;
             uint32_t failed = begin;
+            // clang's error of an argument past its bounds' (#147): a parameter's type, at the argument (PARAMETER_TYPE), or
+            // at the attribute.
+            CheckAttributeArgumentError failure = CHECK_ARGUMENT_COUNT;
             for (uint32_t argument = begin; valid && argument < end; argument += 1)
             {
                 const bool scalar = attribute->schema == CHECK_ATTRIBUTE_INTEGER;
@@ -3561,10 +4096,12 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
                 if (valid && allocation)
                 {
                     valid = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT || kind == BUSTER_TYPE_KIND_ENUM;
+                    failure = valid ? failure : CHECK_ARGUMENT_PARAMETER_TYPE;
                 }
                 if (valid && format)
                 {
                     valid = check_input_attribute_string_type(reader->types, parameter);
+                    failure = valid ? failure : CHECK_ARGUMENT_FORMAT_STRING;
                 }
                 // nonnull's index of a parameter that is no pointer: clang's warning, and the index is dropped (#147).
                 const bool pointer = ellipsis_argument || (parameter != 0 && check_input_nonnull_pointer(reader->types, parameter));
@@ -3575,17 +4112,35 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
                 any_pointer |= valid && pointer;
                 failed = valid ? failed : argument;
             }
-            if (valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT)
+            // format's first argument to check, as clang's handleFormatAttr reads it (its 32 bits unsigned): 0, or strftime's
+            // error; a variadic function's first variadic argument; else past the format, with -Wgcc-compat's warning at the
+            // declaration's name.
+            const uint32_t first_checked = valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT ? (uint32_t)attribute->argument_values[2] : 0;
+            if (first_checked != 0 && strftime)
             {
-                const int64_t first_checked = attribute->argument_values[2];
-                const int64_t format_index = attribute->argument_values[1];
-                out_of_bounds = first_checked > (int64_t)count + 1;
-                valid = first_checked == 0 || (first_checked > format_index && first_checked <= (int64_t)count + 1);
+                valid = false;
+                failure = CHECK_ARGUMENT_STRFTIME;
+            }
+            else if (first_checked != 0 && variadic)
+            {
+                valid = first_checked == count + 1;
+                out_of_bounds = !valid;
+                failed = 2;
+            }
+            else if (first_checked != 0)
+            {
+                if (name < reader->parser->tokens.count)
+                {
+                    check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_GCC_COMPAT, CHECK_WARNING_EVENT_GCC_VARIADIC, name, BUSTER_CHECK_WARNING_NO_SOURCE);
+                }
+                valid = first_checked > (uint32_t)attribute->argument_values[1];
+                out_of_bounds = !valid;
                 failed = 2;
             }
             if (valid && attribute->kind == CHECK_ATTRIBUTE_FORMAT_ARG)
             {
                 valid = check_input_attribute_string_type(reader->types, result);
+                failure = valid ? failure : CHECK_ARGUMENT_FORMAT_RESULT;
             }
             // nonnull of no pointer index, or of none: clang's warning where the function has no pointer parameter and isn't
             // variadic, unless a macro wrote the attribute.
@@ -3609,6 +4164,13 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
                 attributes->error_first = attribute->first;
                 attributes->error_end = attribute->end;
                 check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS, failed + 1);
+            }
+            else if (!valid && failure != CHECK_ARGUMENT_COUNT)
+            {
+                uint32_t first = attribute->argument_first;
+                uint32_t after = attribute->end;
+                check_input_attribute_argument(attribute, failed, &first, &after);
+                check_input_attribute_argument_error(reader, attributes, attribute, failure == CHECK_ARGUMENT_PARAMETER_TYPE ? first : attribute->first, failure, 0);
             }
             else if (!valid)
             {
