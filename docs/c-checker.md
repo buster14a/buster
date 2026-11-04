@@ -386,13 +386,31 @@ does, each rule checked against clang's answers on probes of it:
   The ordinary control walk is specialized without the prefix checks.
   Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
-  or a compound statement's start. Its state changes nothing, since nothing
-  here contracts `a * b + c` into a fused operation.
+  or a compound statement's start. `ON` and `OFF` override the command-line
+  contraction mode within their lexical scope; `DEFAULT` restores that mode.
+  Exiting a compound restores the enclosing setting. The optional source-token column
+  `CheckInput.fp_contracts` preserves this policy without changing constant
+  evaluation or the `FENV_ACCESS` column.
+  With the default `-ffp-contract=on`, shared object/direct lowering contracts
+  scalar `float`/`double` multiply-add/subtract expressions on FMA targets
+  (including per-function target attributes). It matches source edges, not
+  local definitions: stores, separate statements, narrowing conversions and
+  control-flow joins retain their intermediate rounding. Parentheses, no-op
+  casts, one product negation and comma prefixes preserve contraction;
+  prefixes still execute once. Compound assignments contract the right-hand
+  product. Templates defer these candidates to the ordinary worklist path.
+  Effective `off` never contracts; the `fast` modes permit broader optimization
+  but, like Clang at `-O0`, do not themselves introduce expression contractions.
+  A source `ON` still requests expression contraction under either fast default.
+  No-FMA targets retain the ordinary arithmetic. The driver regression
+  (`c_check_contract_driver_test.c`, `tests/driver/fp-contract.c`) compares
+  exact result bits with Clang at each target and mode, on both parser paths
+  and both emission paths; it reports unavailable native execution.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
   `#pragma fenv_access(on|off)` at file scope or a compound's start updates
   the same runtime `FENV_ACCESS` column as the STDC form, with the same
   nested-scope restoration; `#pragma clang fp contract(on|off|fast)` retains
-  its state (`fast` distinct) without contracting anything; and
+  the same scoped contraction policy (`fast` distinct); and
   `#pragma float_control(precise, on)` records the precise policy already used.
   The handler names are not macro-expanded, but their argument words are, so a
   spelling that was a macro anywhere in the unit is refused conservatively

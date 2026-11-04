@@ -1588,6 +1588,14 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 | `-mcmodel=`, `-mlong-double-64`/`80`/`128` | `__code_model_*__`, the `long double` macros |
 | `-mfpmath=` | none, but it must agree with SSE |
 
+`-ffp-contract=off|on|fast|fast-honor-pragmas` is retained as ordered
+code-generation policy, without changing predefined macros. The default is
+`on`. Enabling fast/unsafe math selects `fast`; disabling it restores the
+last explicit contraction choice. Floating models reset the current mode,
+subject to the existing `-Ofast` model rule. The resolved mode is included
+in source request receipts; lexical contraction pragmas are applied by the
+checker.
+
 The stack-protection default follows the compiler building Buster:
 `__SSP_ALL__`, `__SSP_STRONG__` or `__SSP__` selects all, strong or ordinary
 protection, and no such macro selects off. The supported build passes

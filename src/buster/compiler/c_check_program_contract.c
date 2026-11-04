@@ -7,14 +7,15 @@
 // existing X86 FMA row consumes three values in their original evaluation order. Both object and direct emission
 // use this lowering. Included after the operand, instruction and operation-table helpers, before compound updates.
 
-// A lexical override is mode + 1; zero restores the command-line default. Clang's fast ignores contraction pragmas.
+// A lexical override is mode + 1; zero restores the command-line default. Source ON requests expression contraction
+// even with a fast command-line default, as Clang's -O0 emission does.
 // Tier 0 implements the expression contractions of on. The fast modes permit broader optimization but, like Clang
 // -O0, do not introduce expression fmuladd operations themselves; they do not turn on unsafe cross-statement folding.
 static uint8_t check_lower_contract_mode(const CheckLowerWriter* writer, uint32_t node)
 {
     const CheckInput* input = writer->program->input;
     uint8_t mode = writer->program->fp_contract;
-    if (mode != BUSTER_PREDEFINES_CONTRACT_FAST && input->fp_contracts != NULL)
+    if (input->fp_contracts != NULL)
     {
         const uint32_t token = input->graph.tokens[node];
         const uint8_t override = token < input->token_count ? input->fp_contracts[token] : 0;

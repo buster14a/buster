@@ -60,7 +60,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
                 {
                     required = arena.length;
                     const bool published = valid && !input.resource && input.fp_pragma_count == BUSTER_ARRAY_LENGTH(kinds) &&
-                                           input.fp_pragmas != 0 && input.fp_environments != 0 && input.cx_limited_ranges != 0 &&
+                                           input.fp_pragmas != 0 && input.fp_environments != 0 && input.cx_limited_ranges != 0 && input.fp_contracts != 0 &&
                                            input.graph.fp_environments != 0;
                     check_test_expect(test, published && scratch.length == 29, "FP extensions initialize poisoned policy storage and restore scratch");
                     if (published)
@@ -85,7 +85,8 @@ static void check_test_pragma_extension_history(CheckTest* test)
                                 if (intern_length(&identifiers, name) == strlen(names[item]) && memcmp(intern_bytes(&identifiers, name), names[item], strlen(names[item])) == 0)
                                 {
                                     found += 1;
-                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0,
+                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0 &&
+                                                           input.fp_contracts[token] == (item == 0 ? 0 : BUSTER_PREDEFINES_CONTRACT_FAST + 1),
                                                       "fenv_access and STDC settings share scope restoration without changing complex-range policy");
                                 }
                             }
@@ -107,7 +108,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
                         untouched &= handled[pragma] == 0;
                     }
                     check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 &&
-                                           input.fp_environments == 0 && input.cx_limited_ranges == 0 && input.graph.fp_environments == 0 &&
+                                           input.fp_environments == 0 && input.cx_limited_ranges == 0 && input.fp_contracts == 0 && input.graph.fp_environments == 0 &&
                                            untouched && arena.length == 31 && scratch.length == 29,
                                       "FP extension allocation failure publishes neither state nor handled marks");
                 }

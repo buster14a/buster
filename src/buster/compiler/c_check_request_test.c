@@ -423,6 +423,9 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
         { "-nostdinc", "-funsigned-char", 0 },
         { "-nostdinc", 0 },
         { "-nostdinc", "--scalar", 0 },
+        { "-nostdinc", "-ffp-contract=off", 0 },
+        { "-nostdinc", "-ffp-contract=fast", 0 },
+        { "-nostdinc", "-ffp-contract=fast-honor-pragmas", 0 },
     };
     enum { SETS = BUSTER_ARRAY_LENGTH(sets) };
     CheckRequestReceipt receipts[SETS + 2];
@@ -461,7 +464,7 @@ static void check_test_request_receipts(CheckTest* test, const char* directory, 
             const bool same_target = target != 0 && language != 0 && zero_target != 0 && strncmp(target, zero_target, (size_t)(language - target)) == 0;
             distinct &= s == 4 || (receipts[s].digest != receipts[0].digest && same_target);
         }
-        check_test_expect(test, distinct, "request: -D, -funsigned-char, --scalar, -I and the overrides each change the digest, not the target");
+        check_test_expect(test, distinct, "request: -D, -funsigned-char, --scalar, contraction modes, -I and overrides each change the digest, not the target");
         check_test_expect(test, strstr(receipts[0].text, " overrides=path:vector,client:test") != 0 && strstr(receipts[0].text, " unwind=on debug=off ") != 0 &&
                                 strstr(receipts[SETS + 1].text, " overrides=path:vector,client:other") != 0,
                           "request: the receipt names -c's output requirements, the path and the client's overrides");

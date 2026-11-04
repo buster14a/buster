@@ -303,7 +303,7 @@ struct CheckProgram
     bool asm_helpers;
     uint32_t helper_forms;
     X86Target target;
-    // Resolved once from the ordered floating options; source-token pragmas override it except in fast mode.
+    // Resolved once from the ordered floating options; source-token pragmas override its expression policy.
     uint8_t fp_contract;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm

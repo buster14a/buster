@@ -6353,6 +6353,7 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
 
 #include "c_check_hardening_driver_test.c"
 #include "c_check_deep_driver_test.c"
+#include "c_check_contract_driver_test.c"
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
@@ -6878,6 +6879,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && !lazy && check_test_driver_takes())
     {
         check_test_driver_deep(&test, clang, executable, directory);
+    }
+    if (temporary && !lazy && check_test_driver_takes())
+    {
+        check_test_driver_contract(&test, clang, executable, directory);
     }
     for (uint32_t i = 0; temporary && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
