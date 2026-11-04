@@ -537,7 +537,11 @@ The decoding:
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
   register and frame byte its records write (by their effects) killed, its
-  definition written where its interval starts. A call's sequence is checked
+  definition written where its interval starts. A register the records copy into
+  another first and back from it last, that other written by none between, they
+  leave as they found it, and it isn't killed (the copy's register is): a
+  compare-exchange (`TIER1_RULE_ATOMIC_RMW`, #1059) keeps `rax` so in the
+  scratch register around its `lock cmpxchg` where its result isn't `rax`. A call's sequence is checked
   against the IR (its target's reference, `al`, its result's extension), its
   arguments read in their ABI registers and outgoing slots (a value passed
   twice at each of its locations), then every register the SysV ABI lets the
@@ -619,7 +623,13 @@ rbp set after its allocation, that load and the rows are elsewhere, and it is
 refused. A conditional tail `je false; edge move; jne true`, walked directly, is
 refused when the move is a zero's `xor`, whose flags the `jne` would read. A
 fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
-its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
+its extensions made `mov edi, edi` or a 32-bit load of the slot are refused. A
+compare-exchange with four values live across it and five registers
+allocatable, so that one lives in `rax`, is certified by both paths with and
+without rematerialization, and its restore of `rax` left out or taken from
+another register is refused: `test-checker-driver`'s counters litmus, every
+read/modify/write and compare-exchange loop of #1059 by `--tier1 --verify`,
+was refused until the restore was modeled.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an

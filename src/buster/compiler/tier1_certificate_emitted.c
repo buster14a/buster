@@ -732,6 +732,31 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
             }
         }
     }
+    // A register the records copy into another first and back from it last, that other register written by none between,
+    // they leave as they found it: no clobber, though the copy's register is one. Tier 1's compare-exchange
+    // (TIER1_RULE_ATOMIC_RMW's, #1059) keeps rax so in the scratch register around its lock cmpxchg where its result
+    // isn't rax: a value living across it in rax lives on.
+    uint32_t first = 0;
+    while (first < count && records[first].form == X86_FORM_NOP)
+    {
+        first += 1;
+    }
+    if (valid && !kernel->call && count >= first + 2)
+    {
+        const X86Instruction save = records[first];
+        const X86Instruction restore = records[count - 1];
+        bool kept = save.form == X86_FORM_MOV_R64_RM64 && restore.form == X86_FORM_MOV_R64_RM64 && save.mode == BUSTER_X86_REGISTER_DIRECT && restore.mode == BUSTER_X86_REGISTER_DIRECT &&
+                    save.rm < 16 && save.reg < 16 && save.reg != save.rm && restore.reg == save.rm && restore.rm == save.reg;
+        for (uint32_t r = first + 1; kept && r + 1 < count; r += 1)
+        {
+            uint64_t read = 0;
+            uint64_t written = 0;
+            uint16_t opmasks = 0;
+            x86_instruction_effects_opmasks_scalar(&records[r], &read, &written, &opmasks);
+            kept = (written & BUSTER_X86_RESOURCE_GPR(save.reg)) == 0;
+        }
+        writes &= kept ? ~BUSTER_X86_RESOURCE_GPR(save.rm) : ~UINT64_C(0);
+    }
     // A call's callee may change every caller-saved register (the SysV ABI's: rax, rcx, rdx, rsi, rdi, r8 to r11, every
     // xmm and opmask register), which x86_semantics' effects of the call instruction itself don't say; and it owns its
     // outgoing area.
