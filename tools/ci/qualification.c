@@ -6,11 +6,11 @@
 // This administrative predicate is outside compiler/measurement hot paths.
 //
 // The `evidence` job (tools/ci/nightly.c) must succeed in every run, and says
-// whether the 9700X job was admitted. Its one reuse that passes here is a
-// push's: native correctness of the identical tree from its pull request's
-// newest run, with the 9700X job skipped for it (`skip` and `native-reused`),
-// once the host-identity job found the host as that run recorded it
-// (HOST_MATCH); unconfirmed, the 9700X job runs, as if admitted.
+// whether the 9700X job was admitted. On a ready pull request that job
+// measures without its native correctness step (#1272): the context passes on
+// hosted correctness and the 9700X measurements, and says that native
+// correctness was not run. Every other green run with code ran the 9700X job
+// in full, native correctness first.
 // A nightly dispatch (backlog, snapshot) reports through its coverage record,
 // not this context; one that reaches this predicate fails.
 
@@ -56,9 +56,7 @@ typedef enum Hardware Hardware;
 enum Hardware
 {
     HARDWARE_ADMIT,
-    // Skipped for a push whose pull request's run qualified the identical tree.
-    HARDWARE_REUSED,
-    // Skipped for any other reason (a draft, the nightly window, a deferral).
+    // Skipped for any reason (a draft, the nightly window, a deferral).
     HARDWARE_SKIP,
     HARDWARE_INVALID,
     HARDWARE_COUNT
@@ -137,9 +135,7 @@ static bool qualification_pass(const Qualification* input)
     bool native = hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS;
     native = native && (input->fuzz == RESULT_SUCCESS || (event == EVENT_PR && input->fuzz == RESULT_SKIPPED));
     native = native && !(event == EVENT_PR && input->draft);
-    // A push whose pull request's newest run qualified its identical tree natively (tools/ci/nightly.c's reuse).
-    bool reused = hosted && event == EVENT_PUSH && input->hardware == HARDWARE_REUSED && input->native == RESULT_SKIPPED && input->fuzz == RESULT_SUCCESS;
-    return valid && (qualification_no_code(input) || native || reused);
+    return valid && (qualification_no_code(input) || native);
 }
 
 // Each input's place in a mixed-radix index over every combination, for the self-test's table of allowed tuples.
@@ -162,12 +158,11 @@ static int qualification_test(void)
 {
     // These are all allowed tuples, independently of the predicate's branches.
     // The only green draft is the explicit no-code exemption, not native coverage;
-    // the only green skipped 9700X job with code is a push's evidenced reuse.
+    // no green tuple with code skipped the 9700X job.
     const Qualification allowed[] = {
         { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SUCCESS },
         { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
         { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_REUSED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED },
         { EVENT_SCHEDULE, CODE_UNSET, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
         { EVENT_DISPATCH, CODE_UNSET, false, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
         { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
@@ -254,15 +249,9 @@ int main(int argc, char** argv)
         static const char* const drafts[] = { "false", "true" };
         static const char* const purposes[] = { "", "full", "nightly" };
         const int draft = qualification_find(getenv("PR_DRAFT"), drafts, sizeof(drafts) / sizeof(drafts[0]));
-        // The evidence job's hardware decision and its reason: a skip for a push's reuse is the one green skip.
         const char* hardware = getenv("HARDWARE");
-        const char* reason = getenv("HARDWARE_REASON");
-        const char* host_match = getenv("HOST_MATCH");
-        const bool confirmed = host_match != NULL && strcmp(host_match, "true") == 0;
+        const bool admit = hardware != NULL && strcmp(hardware, "admit") == 0;
         const bool skip = hardware != NULL && strcmp(hardware, "skip") == 0;
-        const bool native_reused = skip && reason != NULL && strcmp(reason, "native-reused") == 0;
-        const bool reused = native_reused && confirmed;
-        const bool admit = (hardware != NULL && strcmp(hardware, "admit") == 0) || (native_reused && !confirmed);
         const char* purpose = getenv("PURPOSE");
         const char* nightly = purpose != NULL && (strcmp(purpose, "backlog") == 0 || strcmp(purpose, "snapshot") == 0) ? "nightly" : purpose;
         Qualification input = {
@@ -270,7 +259,7 @@ int main(int argc, char** argv)
             .code = (Code)qualification_find(getenv("CODE_CHANGED"), codes, sizeof(codes) / sizeof(codes[0])),
             .draft = draft == 1,
             .purpose = (Purpose)qualification_find(nightly != NULL ? nightly : "", purposes, sizeof(purposes) / sizeof(purposes[0])),
-            .hardware = admit ? HARDWARE_ADMIT : reused ? HARDWARE_REUSED : skip ? HARDWARE_SKIP : HARDWARE_INVALID,
+            .hardware = admit ? HARDWARE_ADMIT : skip ? HARDWARE_SKIP : HARDWARE_INVALID,
             .changes = qualification_result("CHANGES_RESULT"),
             .size = qualification_result("SIZE_RESULT"),
             .hooks = qualification_result("DCO_RESULT"),
@@ -285,10 +274,9 @@ int main(int argc, char** argv)
         {
             puts("Documentation-only change; explicit no-code exemption, not native qualification.");
         }
-        else if (passed && input.hardware == HARDWARE_REUSED)
+        else if (passed && input.event == EVENT_PR)
         {
-            const char* source = getenv("NATIVE_SOURCE");
-            printf("Hosted correctness passed; native correctness reused from run %s, its pull request's newest run of this identical tree, on the host it recorded (confirmed now). Measurements go to the nightly backlog unless that run's were reusable too.\n", source != NULL ? source : "(unknown)");
+            puts("Hosted correctness and the 9700X measurements passed. Native correctness was NOT run on the 9700X: pull requests skip it (#1272); it runs after the merge, on main's push and the scheduled runs.");
         }
         else if (passed)
         {
