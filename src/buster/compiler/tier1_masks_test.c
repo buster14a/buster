@@ -60,6 +60,8 @@ struct Tier1MasksTest
     uint8_t* v3;
     // x86-64-v2's with AVX, Sandy Bridge's (#1281's review): AVX's without AVX2, which the fixtures marked `avx` are emitted for.
     uint8_t* avx;
+    // x86-64-v3's with AVX512F but not VL (#1281's review), which the fixtures marked `foundation` are emitted for.
+    const uint8_t* foundation;
     // x86-64-v4's forms with AVX512-FP16's complex multiplication, which no target of Tier 1's allows yet, for the
     // fixtures of rows of it (Tier1MasksFixture.fp16); and the forms of the fixture that runs.
     uint8_t* fp16;
@@ -123,6 +125,9 @@ struct Tier1MasksFixture
     bool v3;
     // Emitted for Sandy Bridge, a target with AVX but not AVX2 (#1281's review): its 32-byte vectors by AVX's forms alone.
     bool avx;
+    // Emitted for x86-64-v3 with AVX512F but not AVX512VL, as Knights Landing has AVX-512 (#1281's review): zmm16 and on
+    // and EVEX's 512-bit forms, but no EVEX form of an xmm or a ymm register.
+    bool foundation;
     // Its machine rows and the moves around them into their roles' registers and out of them (#1283,
     // Tier1EmitResult.row_moves), by the vector path and by the scalar one (whose allocators assign registers
     // differently; a host without the vector path runs the scalar one for both), with and without rematerialization:
@@ -230,6 +235,42 @@ static void tier1_masks_test_vex_rows_model(const uint8_t* input, uint64_t count
     {
         memcpy(output + 224 + 4 * lane, input + 64 + 4 * (3 - lane), 4);
     }
+}
+
+// The pressure fixtures' buffer (#1281's review): of the 15 vectors of `bytes` bytes at 0, 4, ..., 56, the exclusive or
+// of the last 13 at 128, and the row's a ^ (a + b) of the first two at 128 + `bytes`, as doublewords.
+static void tier1_masks_test_pressure(const uint8_t* input, uint8_t* output, uint32_t bytes)
+{
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    for (uint32_t lane = 0; lane < bytes / 4; lane += 1)
+    {
+        uint32_t folded = 0;
+        for (uint32_t v = 2; v < 15; v += 1)
+        {
+            uint32_t x = 0;
+            memcpy(&x, input + 4 * v + 4 * lane, 4);
+            folded ^= x;
+        }
+        uint32_t a = 0;
+        uint32_t b = 0;
+        memcpy(&a, input + 4 * lane, 4);
+        memcpy(&b, input + 4 + 4 * lane, 4);
+        const uint32_t row = a ^ (a + b);
+        memcpy(output + 128 + 4 * lane, &folded, 4);
+        memcpy(output + 128 + bytes + 4 * lane, &row, 4);
+    }
+}
+
+static void tier1_masks_test_pressure_model64(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    tier1_masks_test_pressure(input, output, 64);
+}
+
+static void tier1_masks_test_pressure_model32(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    tier1_masks_test_pressure(input, output, 32);
 }
 
 // The floating row's buffer (#141): the low lanes of a float's and another's bits added as integers at 128, the result
@@ -1230,7 +1271,7 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .v3 = true,
     },
     {
-        // #1281: machine rows at a target without AVX-512, their vector roles in a run of free registers below 16 and
+        // #1281: machine rows at a target without AVX-512, their vector roles in free registers below 16 and
         // their floating ones below 16 too: a VEX row of 32-byte vectors, x live past it; a floating row whose result is
         // read as its first operand, and one that writes its second floating operand, a and b live past both; and a
         // 16-byte vector's row. Its vectors move, spill and compute by VEX forms.
@@ -1502,6 +1543,129 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "  %35 = ret.void\n"
                 "}\n",
         .avx = true,
+    },
+    {
+        // #1281's review: a 64-byte EVEX row at x86-64-v3 with AVX512F but not VL (Knights Landing's AVX-512), its two
+        // operands dying at it and 13 vectors live across it, so that xmm0 to xmm14 are taken and only xmm15 is free
+        // below 16: its roles stay in place or take zmm16, rather than a run of two free registers below 16, which isn't
+        // there.
+        .name = "a 64-byte row under register pressure at AVX512F without VL",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXORD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v16i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v16i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v16i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v16i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v16i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v16i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v16i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v16i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v16i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v16i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v16i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v16i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v16i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v16i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v16i32 %29 align=4\n"
+                "  %31 = call.v16i32 row #0(%2, %4) fixed=(v16i32, v16i32) variadic=0\n"
+                "  %32 = xor.v16i32 %6, %8\n"
+                "  %33 = xor.v16i32 %32, %10\n"
+                "  %34 = xor.v16i32 %33, %12\n"
+                "  %35 = xor.v16i32 %34, %14\n"
+                "  %36 = xor.v16i32 %35, %16\n"
+                "  %37 = xor.v16i32 %36, %18\n"
+                "  %38 = xor.v16i32 %37, %20\n"
+                "  %39 = xor.v16i32 %38, %22\n"
+                "  %40 = xor.v16i32 %39, %24\n"
+                "  %41 = xor.v16i32 %40, %26\n"
+                "  %42 = xor.v16i32 %41, %28\n"
+                "  %43 = xor.v16i32 %42, %30\n"
+                "  %44 = address.ptr %0 offset=128\n"
+                "  %45 = store.void %44, %43 align=1\n"
+                "  %46 = address.ptr %0 offset=192\n"
+                "  %47 = store.void %46, %31 align=1\n"
+                "  %48 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_pressure_model64,
+        .foundation = true,
+    },
+    {
+        // #1281's review: its VEX twin at x86-64-v3, 13 32-byte vectors live across it beside its two dying operands: its
+        // roles stay in place (the result in a dying operand's register), or take xmm15, the one free register below 16,
+        // one at a time, not a run of two.
+        .name = "a VEX row under register pressure at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector32, vector32) -> vector32 [VPADDD_Y_Y_YM256 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXOR_Y_Y_YM256 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v8i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v8i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v8i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v8i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v8i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v8i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v8i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v8i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v8i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v8i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v8i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v8i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v8i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v8i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v8i32 %29 align=4\n"
+                "  %31 = call.v8i32 row #0(%2, %4) fixed=(v8i32, v8i32) variadic=0\n"
+                "  %32 = xor.v8i32 %6, %8\n"
+                "  %33 = xor.v8i32 %32, %10\n"
+                "  %34 = xor.v8i32 %33, %12\n"
+                "  %35 = xor.v8i32 %34, %14\n"
+                "  %36 = xor.v8i32 %35, %16\n"
+                "  %37 = xor.v8i32 %36, %18\n"
+                "  %38 = xor.v8i32 %37, %20\n"
+                "  %39 = xor.v8i32 %38, %22\n"
+                "  %40 = xor.v8i32 %39, %24\n"
+                "  %41 = xor.v8i32 %40, %26\n"
+                "  %42 = xor.v8i32 %41, %28\n"
+                "  %43 = xor.v8i32 %42, %30\n"
+                "  %44 = address.ptr %0 offset=128\n"
+                "  %45 = store.void %44, %43 align=1\n"
+                "  %46 = address.ptr %0 offset=160\n"
+                "  %47 = store.void %46, %31 align=1\n"
+                "  %48 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_pressure_model32,
+        .v3 = true,
     },
     {
         .name = "vectors across calls at x86-64-v3",
@@ -2187,7 +2351,7 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
     const bool native = test->native;
     test->native = native && (!fixture->fp16 || test->native_fp16);
     test->native_fixtures += test->native ? 1 : 0;
-    test->forms = fixture->fp16 ? test->fp16 : fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4;
+    test->forms = fixture->fp16 ? test->fp16 : fixture->foundation ? test->foundation : fixture->avx ? test->avx : fixture->v3 ? test->v3 : test->v4;
     IrFunction function;
     IrDominance dominance;
     if (tier1_masks_test_parse(test, fixture->text, &function, &dominance))
@@ -2952,6 +3116,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             x86_target_forms(&sandybridge, test.avx);
             const X86Target f = { .features = v3.features | BUSTER_X86_FEATURE(AVX512F), .architecture = X86_ARCH_OTHER };
             x86_target_forms(&f, foundation);
+            test.foundation = foundation;
             // The native runs execute code checked against x86-64-v4's forms (the fixtures', the typed programs' and Tier
             // 0's rows), so they need every feature of it: AVX512F's words, DQ's bytes, BW's doublewords and quadwords,
             // and VL's EVEX forms at 128 and 256 bits, which the vectors' fixtures take (#1204's review).

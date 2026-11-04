@@ -165,6 +165,9 @@ struct Tier1EmitPrepared
     // (tier1_select_class_forms, Tier1SelectHoles.vex), and machine rows place their roles below xmm16
     // (tier1_emit_cfg_row).
     bool vex;
+    // The target has AVX512F (#1281's review): zmm16 and on and EVEX's 512-bit moves, which a 64-byte row's roles keep
+    // even without AVX512VL (Knights Landing's).
+    bool zmm;
     // The target has AVX2 (#1281's review): without it, a 32-byte vector's VEX kernels take AVX's forms alone
     // (Tier1SelectHoles.avx2).
     bool avx2;

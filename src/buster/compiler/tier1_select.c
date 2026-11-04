@@ -2733,8 +2733,8 @@ static bool tier1_select_row_low_floating(const Tier0Operation* row)
 // Whether the CFG consumer places a row call's machine row (#141, TIER1_RULE_ROW): a row Tier 0 places (tier0_operation_valid,
 // which needs x86_semantics.c's tables). Its vector roles are zmm16 and on, which no value takes, and its floating ones
 // past them, below 32, where every record that names a vector register is an EVEX form's; a row with a VEX or legacy
-// form's vector register (tier0_operation_reach's vex_vectors) takes a run of free xmm registers below 16 for its
-// vector roles where it runs (tier1_emit_cfg_row). A row with a floating role in such a form (#1281,
+// form's vector register (tier0_operation_reach's vex_vectors) takes free xmm registers below 16 for its vector roles
+// that don't stay in place where it runs (tier1_emit_cfg_row). A row with a floating role in such a form (#1281,
 // tier1_select_row_low_floating) takes free xmm registers below 16 for its written floating operands and its result, and
 // so does every row at a target without AVX512VL: its vector roles and its floating ones fit in 16 registers. Whether as
 // many are free where it runs is the CFG consumer's to find (TIER1_EMIT_UNSUPPORTED where they aren't).
