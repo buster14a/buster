@@ -22,7 +22,7 @@ static bool check_init_embed(CheckInitWalker* walker, const uint8_t* bytes, uint
         {
             if (frame->braced && walker->ignore_excess)
             {
-                check_init_warning(walker, token);
+                check_init_warning(walker, token, frame->type, false);
                 consumed = length;
                 excess = true;
             }

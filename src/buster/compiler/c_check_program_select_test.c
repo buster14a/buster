@@ -136,7 +136,9 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             }
             if (ready)
             {
-                snprintf(description, sizeof(description), "%s: independently stated code/data emission counts", name);
+                snprintf(description, sizeof(description), "%s: emission counts functions=%u/%u objects=%u/%u, expected %u/%u", name,
+                         selection.selected_functions, selection.program.body_count, selection.selected_objects, selection.data.count,
+                         functions, objects);
                 check_test_expect(test, selection.selected_functions == functions && selection.selected_objects == objects &&
                                        selection.program.body_count == functions && selection.data.count == objects, description);
                 check_test_expect(test, full.body_count == (mode == 0 ? lazy.body_count : lazy.selected_count),
@@ -288,9 +290,6 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
         // The objects clang's model selects, 0 for the same as -c's: the model counts the operands that a constant
         // condition never evaluates, and so the statics of their statement expressions, which no code emits.
         uint32_t model_objects;
-        // Whether -c keeps an arm that clang's object leaves out: compared with clang's object by its counts alone,
-        // and run.
-        bool wider;
     };
     static const CheckFoldedIf fixtures[] = {
         { "folded-if-sizeof-chain",
@@ -377,31 +376,74 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
           "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}"
           "int tested(int n){if((n,0))n=a(n);if(({(n,0);0;}))n=b(n);if(({int x=(n,0);0;}))n=c(n);if((1,0))n=d(n);if((sizeof(n),0))n=d(n);"
           "return n;}", 4, 0 },
-        // Conservative where the checker's verdict on a statement expression is a side effect (a return in its dead
-        // if, in a loop that never runs or in a switch's body before any case; a volatile object's initialization) or
-        // the walk doesn't model the statement (a switch's case, a loop that a break leaves): both arms are kept,
-        // which runs as clang's build runs.
-        { "folded-if-statement-expression-kept-arms",
+        // #1194: prove the evaluated statement path without changing the semantic stream's effects or constants.
+        // Every case now compares actual object symbols with clang, not merely wider emission counts.
+        { "folded-if-statement-expression-control-flow",
           "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}static int d(int n){return n+4;}"
           "static int e(int n){return n+5;}static int g(int n){return n+6;}static int h(int n){return n+7;}static int i(int n){return n+8;}"
           "static int j(int n){return n+9;}static int k(int n){return n+10;}"
           "int tested(int n){if(({if(0)return 0;0;}))n=a(n);if(({volatile int x=1;0;}))n=b(n);if(({switch(0){case 0:;}0;}))n=c(n);"
           "if(({while(1){break;}0;}))n=d(n);if(({for(;;){break;}0;}))n=e(n);if(({do{break;}while(0);0;}))n=g(n);if(({while(1){if(1)break;}0;}))n=h(n);"
           "if(({while(0){return 0;}0;}))n=i(n);if(({for(;0;){return 0;}0;}))n=j(n);if(({switch(0){return 0;}0;}))n=k(n);return n;}",
-          11, 0, 0, true },
+          1, 0 },
+        { "folded-if-statement-expression-skipped-gotos",
+          "static int a(int n){return n+1;}int tested(int n){if(({if(0)goto out;0;}))n=a(n);"
+          "if(({while(0){goto out;}0;}))n=a(n);out:return n;}", 1, 0 },
+        { "folded-if-statement-expression-const-reads",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}int tested(int n){"
+          "if(({const int x=0;x;}))n=a(n);if(({const unsigned char x=0;x;}))n=c(n);"
+          "if(({const unsigned char x=256;x;}))n=c(n);if(({const int x=1;x;}))n=b(n);return n;}", 2, 0 },
+        { "folded-if-statement-expression-element-and-vla-addresses",
+          "static int a(int n){return n+1;}int tested(int n){if(({int arr[2];int*p=&arr[1];0;}))n=a(n);"
+          "if(({int arr[2];int*p=&1[arr];0;}))n=a(n);if(({int arr[n+8];int*p=arr;0;}))n=a(n);return n;}", 1, 0 },
+        { "folded-if-statement-expression-switch-selection",
+          "static int a(int n){return n+1;}int tested(int n){if(({switch(0){default:;}0;}))n=a(n);"
+          "if(({switch(2){default:n++;break;case 1:;case 2:;case 3:break;n++;}0;}))n=a(n);"
+          "if(({switch(-1){case -2 ... -1:break;default:n++;}0;}))n=a(n);"
+          "if(({switch((unsigned)-1){case -1:break;default:n++;}0;}))n=a(n);return n;}", 1, 0 },
+        { "folded-if-statement-expression-break-order",
+          "static int a(int n){return n+1;}int tested(int n){if(({while(1){while(1){break;}break;n++;}0;}))n=a(n);"
+          "if(({do{break;}while(n++);0;}))n=a(n);if(({for(;;n++){break;}0;}))n=a(n);return n;}", 1, 0 },
+        { "folded-if-statement-expression-effect-boundaries",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}static int c(int n){return n+3;}"
+          "static int d(int n){return n+4;}static int e(int n){return n+5;}static int g(int n){return n+6;}"
+          "int tested(int n){if(({while(1){n++;break;}0;}))n=a(n);if(({for(int x=n;;){break;}0;}))n=b(n);"
+          "if(({switch(0){case 0:n++;break;default:;}0;}))n=c(n);if(({const int x=n;x;}))n=d(n);"
+          "if(({volatile int x=0;x;}))n=e(n);if(({int arr[2];int*p=&arr[n&1];0;}))n=g(n);return n;}", 7, 0 },
+        // Preserve the ordinary evaluator's existing cleanup behavior, including clang's object and execution.
+        { "folded-if-statement-expression-cleanup",
+          "static int cleaned;static void clean(int*p){cleaned+=*p;}static int a(int n){return n+1;}"
+          "int tested(int n){cleaned=0;if(({int x __attribute__((cleanup(clean)))=1;0;}))n=a(n);return n+cleaned;}", 1, 1 },
+        { "folded-if-statement-expression-inner-break",
+          "static int a(int n){return n+1;}int tested(int n){"
+          "if(({while(1){switch(0){case 0:break;}n++;break;}0;}))n=a(n);return n;}", 2, 0 },
+        { "folded-if-statement-expression-unknown-control",
+          "static int a(int n){return n+1;}static int b(int n){return n+2;}int tested(int n){"
+          "if(({while(n){break;}0;}))n=a(n);if(({switch(n){case 0:;default:;}0;}))n=b(n);return n;}", 3, 0 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         const CheckFoldedIf* fixture = fixtures + i;
         char name[160];
         check_test_program_selection_run(test, fixture->source, fixture->name, fixture->functions, fixture->objects, CHECK_PROGRAM_OK, clang,
-                                         fixture->wider ? 0 : clang, 0, false);
+                                         clang, 0, false);
         snprintf(name, sizeof(name), "%s-in-clangs-model", fixture->name);
         // A model that selects other objects than clang's object defines is compared by its counts alone, and run.
         const uint32_t model_objects = fixture->model_objects != 0 ? fixture->model_objects : fixture->objects;
         check_test_program_selection_run(test, fixture->source, name, fixture->functions, model_objects, CHECK_PROGRAM_OK, clang,
-                                         model_objects == fixture->objects && !fixture->wider ? clang : 0, 0, true);
+                                         model_objects == fixture->objects ? clang : 0, 0, true);
     }
+    // A separate safety assertion, not an emission-parity fixture: clang 23's evaluator discards these bound
+    // updates along with the constant conditions. Do not copy that behavior or use its execution as this oracle.
+    // Assert that the conservative fallback retains all three functions and that both checking modes/kernels
+    // publish byte-identical objects. All of the issue's listed shapes above still compare actual clang objects.
+    const char* bounds = "static int a(int n){return n+1;}static int b(int n){return n+2;}"
+                         "int tested(int n){int k=(n&3)+1;if(({volatile int force=0;int(*p)[k++];0;}))n=a(n);"
+                         "if(({volatile int force=0;typedef int A[k++];0;}))n=b(n);return n+k;}";
+    check_test_program_selection_run(test, bounds, "conservative-statement-expression-bound-effects", 3, 0,
+                                     CHECK_PROGRAM_OK, 0, 0, 0, false);
+    check_test_program_selection_run(test, bounds, "conservative-statement-expression-bound-effects-in-model", 3, 0,
+                                     CHECK_PROGRAM_OK, 0, 0, 0, true);
 }
 
 static void check_test_program_selection(CheckTest* test, const char* clang)

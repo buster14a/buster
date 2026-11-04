@@ -37,14 +37,18 @@ Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeli
 observed in a non-emitting action is not a promise that Buster can generate the
 corresponding instrumentation or parallel runtime calls.
 
-The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
-`-Werror` does not guarantee the warnings or build failures Clang gives for the
-same source: some warnings are not produced, and some produced warnings are not
-promoted by `-Werror`. For example, an unused local, an address of a local
-returned from a function, or a mismatched `printf` format can pass with
-`-Wall -Werror`. Use Clang as a separate diagnostic check when those warnings
-matter. The individual supported diagnostics and their boundaries are described
-in this guide; the remaining warning work is tracked in
+The driver gives Clang's common default and `-Wall`/`-Wextra` warnings for
+constant conversions and bounds, shifts and division, parenthesization, unused
+results and names, format calls, returned stack addresses, uninitialized reads
+and enum switches, with Clang's messages, places, notes and
+`#pragma clang diagnostic` policy; `-Werror` and its `=group` and
+`-Wno-error=` forms promote them. The remaining gaps are the full
+`-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
+computed `case` expressions in `-Wswitch`, and several rarer
+`-Wparentheses`/`-Wreturn-stack-address` shapes and `-Wunused-but-set-variable`,
+so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
+their boundaries and their differential tests are described in "Common
+warnings (#823)" below; the remaining work stays tracked in
 [#823](https://github.com/buster14a/buster/issues/823).
 
 `-c` and the direct path lower only the definitions that the unit's roots reach,
@@ -3707,6 +3711,111 @@ result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or
 case, every record it followed with the value it made. The files are removed
 unless `--keep` or a failure.
 
+## Common warnings (#823)
+
+`c_check_common_warnings.c`, included by the driver, reports the expression
+warnings that need the completed graph or the parser's operator tree:
+`-Wdivision-by-zero`, `-Wconstant-conversion`, `-Warray-bounds`,
+`-Wsign-compare`, `-Wunused-comparison`, `-Wunused-value`,
+`-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
+bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
+`-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
+`-Wdangling-else` and `-Wuninitialized`. `c_check_binding.c` adds
+`-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
+`-Wunused-parameter` as sparse events, with the declaration's body deciding
+the completion, so they follow Clang's after-function order; a redeclaration
+inherits an earlier `unused` or `used` attribute. A file-scope variable's
+unused warning is given only in the main file, as Clang leaves a header's
+file-scope variables alone because every unit that includes the header shares
+them. The graph pass adds `-Wunused-but-set-parameter` for a parameter a
+statement assignment writes and no read uses.
+
+Each uses the shared warning policy, so a default or group option, a
+`#pragma clang diagnostic` change and `-Werror` promotion behave as the other
+sparse warnings do. A token from a system-header macro is suppressed by its
+spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
+for it. The `-Wswitch` check needs a named enum's source definition and literal
+enumerator `case` labels; it compares the enumerators' checked values, so
+aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
+computed case leaves the switch to a full constant evaluator.
+`-Wuninitialized` follows graph evaluation order: a local scalar object read
+before any write and not address-taken warns; a `sizeof` operand (except a
+variably modified type's bound), a void cast, an address computation, an
+unselected `&&`/`||`/`?:` arm, a static selection's unselected arms and
+controlling expression, and an assignment target are not reads, while an
+initializer's value, a compound assignment and an increment are, with the write
+ordered after the read. A brace initializer writes its object even without an
+expression node, and a variable read in its own initializer (braced or not) gets
+Clang's "within its own initialization" message. An unmodeled write through inline
+assembly or a builtin suppresses the warning, and `-Wunused-but-set-parameter`
+keeps a separate read that is not the target of the same compound assignment or
+increment.
+`-Wformat` checks the four `printf`-family names, a declaration's
+`format(printf, ...)` attribute, the integer class for every length modifier
+(`long` against `long long`, `%zd`, `%jd`, `%td`, ...; the signed and unsigned
+types of one class agree), `%n`'s integer pointer by class (`signed char *`,
+`short *`, `int *`, `long *`, `long long *`, and the unsigned counterparts),
+each `*` field width's `int` and `.*` field precision's `int`, extra and
+insufficient arguments, positional `%1$d`/`%2$d` conversions with positional
+widths and precisions and their used-argument counting, C23 `%b`/`%B` (whose
+expected name is the signed class), and wide `%ls`/`%lc` (and `%S`/`%C`)
+arguments with a signed 32-bit `wchar_t` or `wint_t`, and literal formats'
+common conversions and sizes. Its literal-internal diagnostics keep Clang's
+column and the diagnostic collector's source order. The attribute's archetype
+is compared after the attribute checker's reserved-name stripping, so
+`__printf__` and `__gnu_printf__` check as `printf`. A `va_list` callee
+(`format(printf, N, 0)`) keeps scanning past an invalid conversion, as Clang's
+data arguments then start at the call's first: a positioned `%N$Q` stops the
+scan only once N passes the call's argument count. A conditional format whose
+condition folds selects its arm by the converted value, so
+`(unsigned char)256 ? "%d" : "%s"` checks `"%s"`.
+A common-warning pass whose scratch allocation fails reports
+`fatal error: common warning capacity exhausted` and fails the unit rather
+than publishing fewer warnings; the binding's unused-name columns report theirs
+as the checker input's resource error. The test hook
+`BUSTER_TEST_COMMON_WARNING_FAIL_AT=N`, read in every build as
+`BUSTER_TEST_LANE_FAIL_AT` is, fails the unit's Nth (from 0) common-warning
+scratch allocation.
+`-Wunused-value` covers a bare identifier or literal, a parenthesized
+comparison, a cast (including a typedef of `void`), a conditional, and a comma
+expression, parenthesized or not; a comma operand with a call, assignment or
+increment has an effect and does not get the left-operand warning. Its reports
+complete with the function's closing brace, as Clang's do, after the body's
+own warnings and before an unused declaration's.
+`-Warray-bounds` reports a direct array object, including a nested subscript
+such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
+struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
+declaration chain once, at its definition when it has one and otherwise at its
+first declaration; a shadowing local use does not keep a file-scope variable
+used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
+but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
+`else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
+`while` or `?:` condition; a write in that condition is a use of the parameter,
+not an unused-but-set statement write. The `-Wswitch` definition is the one its
+selector's tag type names, so a fixed underlying type and a shadowing tag in
+another scope resolve correctly. The return-flow walk runs for non-aggregate
+functions only where `-Wreturn-type` is enabled.
+
+`test-checker-driver`'s `check_test_driver_common_warnings` compares the
+filtered diagnostics of `defaults`, `-Wall`, `-Wextra`, `-Werror`,
+`-Werror=unused-function`, `-Wno-*`, warning-clean and header fixtures, the
+uninitialized evaluation contexts, static selections, self-initialization,
+read-modify-writes and VLA bounds, wide and width-mismatched formats, enum
+aliases, fixed-underlying and shadowing definitions, zero sign comparisons,
+array-member/nested/zero-length bounds, declaration chains, scope-aware enum
+definitions, brace initializers and self-initialization, bare/parenthesized/
+cast/conditional/comma unused values with side-effect operands and their
+function-end order, `for` conditions and writes, positional indexing and used-
+argument counting, C23 `%b`, integer classes, unsigned `%n` pointers, exact and
+precision formats, reserved-name archetypes, `va_list` invalid conversions,
+constant and nested conditional formats, and returned stack addresses line for
+line against Clang on both check paths; a filtered output that does not fit the
+comparison buffer fails its case. `check_test_driver_common_exhaustion` fails
+each common-warning scratch allocation in turn and requires the capacity error,
+then the unconstrained output once the index passes the last. The semantics are also covered by
+`test-checker`'s existing warning and constraint fixtures, and by
+`test-diagnostics` for their ordering.
+
 ## The constraint catalogue
 
 `test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For
@@ -5080,7 +5189,22 @@ change, it refused such a declaration by name.
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
-  arguments, to the statement's end (`check_input_loop_statement_end`).
+  arguments, to the statement's end (`check_input_loop_statement_end`). The
+  callee is its name through parentheses and the prefix `*`, `&` and `+`
+  (`(f)()`, `(*f)()`, `(&f)()`), as clang's `getCalleeDecl` finds it
+  (`check_input_callee_name`).
+- **Selections in statement attributes.** clang's `CallExprFinder` and
+  `HasSideEffects` visit a `_Generic`'s or a `__builtin_choose_expr`'s
+  selected arm alone, so a call or a side effect in another arm, or in
+  `_Generic`'s controlling expression, counts for none of `nomerge`,
+  `noinline`, `always_inline` and `assume` (`check_input_unselected`). An
+  assumption's argument is evaluated where it is read, and the evaluator
+  records the arm it takes (`CheckInputReader.selection_arms`). A statement
+  with a selection is checked once the reader's selections are read
+  (`check_input_statement_defer` and `check_input_statement_deferred`), with
+  its callees' declarations as the bindings resolved them: a speculative
+  evaluation as the statement is read would append binding events out of
+  their order.
   MSVC's `forceinline` and `forceinline_calls` are ignored off its ABI with
   "'X' attribute ignored", at the statement or, on a function, at the
   attribute after its subject's check. An asm statement's C23 attributes are

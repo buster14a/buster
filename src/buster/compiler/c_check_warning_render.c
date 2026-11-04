@@ -92,6 +92,7 @@ struct CheckWarningSpelling
     uint32_t count;
     String8* anonymous;
     uint32_t anonymous_count;
+    bool built;
 };
 
 // Each unnamed tag's diagnostic name (#992): the first typedef naming it, as clang's `T`/`T *` and `T2 *`'s
@@ -178,6 +179,40 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
     return valid;
 }
 
+// One pass's spelling rows, built on its first rendered type (#992): a pass that renders none never scans the
+// token columns. A built pass keeps its rows until it ends, above every per-event mark.
+static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                        CheckWarningSpelling* spell, Arena* scratch)
+{
+    if (!spell->built)
+    {
+        spell->built = true;
+        spell->count = pp->table->count;
+        spell->bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell->count);
+        spell->lengths = spell->bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell->count) : NULL;
+        bool valid = spell->count == 0 || spell->lengths != NULL;
+        for (uint32_t i = 0; valid && i < spell->count; i += 1)
+        {
+            spell->bytes[i] = intern_bytes(pp->table, i);
+            spell->lengths[i] = intern_length(pp->table, i);
+        }
+        bool unnamed = false;
+        for (uint32_t tag = 1; valid && types != NULL && tag < types->tags.count; tag += 1)
+        {
+            unnamed |= types->tags.name[tag] == 0;
+        }
+        if (valid && unnamed)
+        {
+            valid = check_driver_spelling_build(parser, pp, input, types, spell, scratch);
+        }
+        if (!valid)
+        {
+            spell->bytes = NULL;
+        }
+    }
+    return spell->count == 0 || spell->bytes != NULL;
+}
+
 static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* input, const CheckWarningEvents* view, const CheckRepair* repair)
 {
     bool promoted = false;
@@ -201,8 +236,8 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
     if (type != 0 && type_is_valid(types, type))
     {
         // Only diagnostic rendering needs these spelling arrays; clean checking retains no identifier-sized view.
-        // The pass's columns live in `spell`, built before the events' marks (#992).
-        if (spell->bytes != NULL)
+        // The pass's columns live in `spell`, built on the pass's first rendered type below its marks (#992).
+        if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
         {
             TypeNames names = {
                 .bytes = spell->bytes,
@@ -793,6 +828,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_STANDALONE_SPECIFIER:
             result = name.length != 0 ? check_warning_text(scratch, "'%.*s' ignored on this declaration", (int)name.length, name.pointer) : NULL;
             break;
+        case CHECK_WARNING_EVENT_UNUSED_VARIABLE:
+            result = check_warning_text(scratch, "unused variable '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_FUNCTION:
+            result = check_warning_text(scratch, "unused function '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_UNUSED_PARAMETER:
+            result = check_warning_text(scratch, "unused parameter '%.*s'", (int)name.length, name.pointer);
+            break;
         default: break;
     }
     return result;
@@ -869,29 +913,10 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     // rendered type pays nothing for what the pass already scanned. A unit with no unnamed tag skips the
     // spelling rows entirely.
     const uint64_t spelling_mark = scratch->length;
-    CheckWarningSpelling spell = { .count = pp->table->count };
+    CheckWarningSpelling spell = { 0 };
     if (renders)
     {
-        spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
-        spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
-        if (spell.count != 0)
-        {
-            valid = spell.lengths != NULL;
-        }
-        for (uint32_t i = 0; valid && i < spell.count; i += 1)
-        {
-            spell.bytes[i] = intern_bytes(pp->table, i);
-            spell.lengths[i] = intern_length(pp->table, i);
-        }
-        bool unnamed = false;
-        for (uint32_t t = 1; types != NULL && t < types->tags.count; t += 1)
-        {
-            unnamed |= types->tags.name[t] == 0;
-        }
-        if (valid && unnamed)
-        {
-            valid = check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
-        }
+        valid = check_driver_spelling_ready(parser, pp, input, types, &spell, scratch);
     }
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
@@ -940,6 +965,15 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
                         pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                    }
+                    else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER) &&
+                             event->completion_kind != CHECK_WARNING_COMPLETE_TU_END)
+                    {
+                        // Scope-pop warnings: clang pops a scope's unused declarations before replaying the
+                        // body's deferred diagnostics at that boundary. At the translation unit's end the
+                        // scope rule no longer applies — every unused warning shares one boundary, and a
+                        // lexical phase would order file-scope objects ahead of earlier declarations.
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else
                     {

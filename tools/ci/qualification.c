@@ -114,7 +114,8 @@ static Result qualification_result(const char* name)
 
 static bool qualification_no_code(const Qualification* input)
 {
-    bool selected = input->event == EVENT_PR || input->event == EVENT_PUSH;
+    // Only pre-merge PRs may claim the no-code exemption; every main push needs full hosted CI (#1271).
+    bool selected = input->event == EVENT_PR;
     bool result = selected && input->changes == RESULT_SUCCESS && input->code == CODE_NO;
     result = result && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS;
     result = result && input->tests == RESULT_SKIPPED && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
@@ -167,7 +168,6 @@ static int qualification_test(void)
         { EVENT_DISPATCH, CODE_UNSET, false, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
         { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
         { EVENT_PR, CODE_NO, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
-        { EVENT_PUSH, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
     };
     // Seven job results, five values each (including missing/unknown), and every event, selector output, draft
     // state, dispatch purpose and hardware decision.

@@ -980,6 +980,8 @@ static void check_input_expression_coded(CheckInputReader* reader, uint32_t toke
     }
     // Left tokens are counted in units the coded walk takes alone: in another, the walk's visit takes every token. The
     // tokens acted at by class are each class's tokens less those it left (check_input_expressions_coded's count).
+    // Not hinted, though 98% of sqlite3.c's tokens act: with the visit's counters and clock in this branch, a hint
+    // that the visit is rare took 19 thousand more taken branches (#1175).
     if (!acted)
     {
         reader->output->expression_left[code] += coded;

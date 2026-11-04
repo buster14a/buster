@@ -1785,6 +1785,17 @@ static TypeId check_constant_control_type(CheckInputReader* reader, const CheckV
     return type;
 }
 
+// The arm a selection's evaluation takes, from `first` to `end` (past its last), by its `)` (`close`), where an
+// assumption's check asks for it (#147, CheckInputReader.selection_arms).
+static void check_constant_record_arm(CheckInputReader* reader, uint32_t close, uint32_t first, uint32_t end)
+{
+    if (reader->selection_arms != NULL && close >= reader->selection_arm_base && close < reader->selection_arm_end)
+    {
+        reader->selection_arms[2 * (close - reader->selection_arm_base)] = first;
+        reader->selection_arms[2 * (close - reader->selection_arm_base) + 1] = end;
+    }
+}
+
 static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword, uint32_t first, uint32_t separator, uint32_t token, CheckValue* value, CheckValue* proof)
 {
     CheckInputReader* reader = input->reader;
@@ -1798,6 +1809,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         valid = next < token && check_input_integer_ice(reader, &control) && check_action_truth(reader->types, &control, &condition);
         if (valid)
         {
+            check_constant_record_arm(reader, token, condition ? separator + 1 : next + 1, condition ? next : token);
             valid = check_constant_range_value(input, condition ? separator + 1 : next + 1, condition ? next : token, value);
             if (valid)
             {
@@ -1867,6 +1879,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         valid &= chosen_first != BUSTER_CHECK_NONE;
         if (valid)
         {
+            check_constant_record_arm(reader, token, chosen_first, chosen_end);
             valid = check_constant_range_value(input, chosen_first, chosen_end, value);
             if (valid)
             {

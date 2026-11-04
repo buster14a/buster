@@ -1259,11 +1259,12 @@ static TypeId type_qualify(const TypeTable* table, TypeId type, uint32_t qualifi
     return result;
 }
 
-// The index whose size, code and completeness a type has: an ALIGNED type's base's.
+// The index whose size, code and completeness a type has: an ALIGNED type's base's. As in type_strip_aligned, an
+// aligned type is rare, which the hint says (#1175; never, among sqlite3.c's 244 thousand lookups).
 static uint32_t type_resolved_index(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-    if (table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED)
+    if (__builtin_expect(table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED, 0))
     {
         index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
     }
@@ -5931,7 +5932,9 @@ static bool type_changes_initialize(TypeChanges* changes, Arena* arena, uint32_t
 static void type_changes_at(TypeTable* table, uint32_t position)
 {
     TypeChanges* changes = table->changes;
-    if (changes != 0 && changes->position != position)
+    // Only the deferred bodies' tables record their changes (c_check_deferred.c, -flazy-system-headers), so the input
+    // reader's walk, which calls this once a visit, nearly always has none (#1175).
+    if (__builtin_expect(changes != 0, 0) && changes->position != position)
     {
         changes->position = position;
         changes->sequence = 0;
