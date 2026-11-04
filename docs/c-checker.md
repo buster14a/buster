@@ -2560,7 +2560,17 @@ What the lowering covers past scalars (#145's programs):
     VMOVDQU16). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
     instruction deposits or extracts bits), of 32-bit zero extensions of 8- and
     16-bit ones, through frame objects of the vectors
-    (`check_lower_vector_deposit`);
+    (`check_lower_vector_lanes`). clmul (#148) is each element's carry-less
+    product's low bits: with AVX-512VL and VPCLMULQDQ, where the elements'
+    64-bit zero extensions take 64 bytes at most (`check_vector_clmul_packed`),
+    VPMOVZX to quadwords, VPCLMULQDQ of each 16 bytes' first quadwords (0x00)
+    and second ones (0x11), VSHUFPD by 0 for their low quadwords (clang's
+    VPUNPCKLQDQ, whose EVEX forms `x86_semantics.c` doesn't cover) and VPMOV
+    back to the elements, as clang computes 64-bit elements' (an element's
+    product's low bits are its operands' bits' alone); else element by element
+    through frame objects, as pdep's, VMOVD or VMOVQ into a vector register,
+    VPCLMULQDQ and back (EVEX's with AVX-512VL and VPCLMULQDQ, else VEX's, of
+    AVX and PCLMUL);
   - the floating functions clang -O0's code computes by instructions are clang's
     sequences, operand for operand, so that NaN payloads and zeros' signs are
     clang's (`check_vector_floating_row`, of vectors of floats and doubles, and
@@ -2629,8 +2639,8 @@ What the lowering covers past scalars (#145's programs):
   minimum, maximumnum and minimumnum (x87 sequences in clang's code) and its
   ldexp by a 64-bit exponent; a scalar's roundings, round, canonicalize,
   copysign, maximum and minimum functions and ldexp without AVX-512F; ldexp by
-  an exponent wider than 64 bits; carry-less products (clmul: VPCLMULQDQ is no
-  form `x86_semantics.c` covers); the masked memory builtins (their masks are
+  an exponent wider than 64 bits; carry-less products without AVX and PCLMUL;
+  the masked memory builtins (their masks are
   vectors of bools, which the lowering has no class for); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the leading

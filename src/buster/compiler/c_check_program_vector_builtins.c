@@ -697,6 +697,16 @@ static void check_vector_constant(Tier0Operation* row, CheckVectorConstants* con
     check_vector_constant_bytes(row, constants, pattern, bytes <= 8 ? bytes : 8, class, operand_bytes);
 }
 
+// Whether __builtin_elementwise_clmul of `vector`, a vector of integers, is check_vector_elementwise_row's: its elements
+// zero-extended to 64 bits take 64 bytes at most, and the target has VPCLMULQDQ and AVX-512VL (EVEX's forms at every
+// width). Else the lowering takes its elements one by one (check_lower_vector_lanes).
+static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* target, TypeId vector)
+{
+    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(VPCLMULQDQ);
+    return shape.integer && shape.element != 0 && shape.bytes * (8 / shape.element) <= 64 && (target->features & needed) == needed;
+}
+
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading and
 // trailing zero counts (clzg's and ctzg's second operands the elements a zero element takes) and funnel shifts; of
@@ -808,9 +818,41 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
     {
-        // VPCLMULQDQ, the one instruction of carry-less products, is no form x86_semantics.c covers, which Tier 0's rows
-        // take alone (tier0_operation_form_valid).
-        reason = "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes";
+        // Each element zero-extended to 64 bits (VPMOVZX, where it is narrower), the products of each 16 bytes' first
+        // quadwords and of their second ones (VPCLMULQDQ by 0x00 and 0x11), their low quadwords put back into their
+        // places (VSHUFPD by 0, which takes each 16 bytes' first quadword of each, as clang's VPUNPCKLQDQ does: EVEX's
+        // VPUNPCKLQDQ is no form x86_semantics.c covers), then truncated to the elements (VPMOV): an element's
+        // product's low bits are the product's of its operands' bits alone, as llvm.clmul's are, which clang's code
+        // computes the same way for 64-bit elements. Wider extensions than 64 bytes are check_vector_clmul_packed's to
+        // refuse: the lowering takes them element by element (check_lower_vector_lanes).
+        static const CheckVectorForms extend[3] = { BUSTER_CHECK_VECTOR_FORMS(VPMOVZXBQ_X_XM16_EVEX, VPMOVZXBQ_Y_XM32_EVEX, VPMOVZXBQ_Z_XM64),
+                                                    BUSTER_CHECK_VECTOR_FORMS(VPMOVZXWQ_X_XM32_EVEX, VPMOVZXWQ_Y_XM64_EVEX, VPMOVZXWQ_Z_XM128),
+                                                    BUSTER_CHECK_VECTOR_FORMS(VPMOVZXDQ_X_XM64_EVEX, VPMOVZXDQ_Y_XM128_EVEX, VPMOVZXDQ_Z_YM256) };
+        // The form's rm is its destination.
+        static const CheckVectorForms truncate[3] = { BUSTER_CHECK_VECTOR_FORMS(VPMOVQB_XM16_X, VPMOVQB_XM32_Y, VPMOVQB_XM64_Z),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPMOVQW_XM32_X, VPMOVQW_XM64_Y, VPMOVQW_XM128_Z),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPMOVQD_XM64_X, VPMOVQD_XM128_Y, VPMOVQD_YM256_Z) };
+        static const CheckVectorForms products = BUSTER_CHECK_VECTOR_FORMS(VPCLMULQDQ_X_X_XM128_IMM8_EVEX, VPCLMULQDQ_Y_Y_YM256_IMM8_EVEX,
+                                                                           VPCLMULQDQ_Z_Z_ZM512_IMM8);
+        static const CheckVectorForms interleaves = BUSTER_CHECK_VECTOR_FORMS(VSHUFPD_X_X_XM128_IMM8_EVEX, VSHUFPD_Y_Y_YM256_IMM8_EVEX, VSHUFPD_Z_Z_ZM512_IMM8);
+        const uint32_t e = shape.element == 1 ? 0 : shape.element == 2 ? 1 : 2;
+        const uint32_t wide = check_vector_builtin_width(shape.bytes * (8 / shape.element));
+        uint32_t r = 0;
+        if (shape.element < 8)
+        {
+            row->records[r++] = check_vector_lower_record(extend[e].forms[wide], v0, 0, v0);
+            row->records[r++] = check_vector_lower_record(extend[e].forms[wide], v1, 0, v1);
+        }
+        row->records[r++] = check_vector_lower_record(products.forms[wide], v2, v0, v1);
+        row->records[r] = check_vector_lower_record(products.forms[wide], v0, v0, v1);
+        row->records[r++].immediate = 0x11;
+        row->records[r++] = check_vector_lower_record(interleaves.forms[wide], v0, v2, v0);
+        if (shape.element < 8)
+        {
+            row->records[r++] = check_vector_lower_record(truncate[e].forms[wide], v0, 0, v0);
+        }
+        row->record_count = (uint8_t)r;
+        reason = check_vector_clmul_packed(types, target, vector) ? NULL : "vector carry-less multiplication without AVX-512VL and VPCLMULQDQ";
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_CTZG)
     {

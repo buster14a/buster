@@ -7728,7 +7728,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ELEMENTWISE_MINIMUMNUM, "__builtin_elementwise_minimumnum", false, true, false },
         { CBUILTIN_ELEMENTWISE_LDEXP, "__builtin_elementwise_ldexp", false, true, false },
         { CBUILTIN_ELEMENTWISE_CTZG, "__builtin_elementwise_ctzg", false, true, false },
-        { CBUILTIN_ELEMENTWISE_CLMUL, "__builtin_elementwise_clmul", false, false, false },
+        { CBUILTIN_ELEMENTWISE_CLMUL, "__builtin_elementwise_clmul", false, true, false },
         { CBUILTIN_ELEMENTWISE_PDEP, "__builtin_elementwise_pdep", false, true, false },
         { CBUILTIN_ELEMENTWISE_PEXT, "__builtin_elementwise_pext", false, true, false },
         { CBUILTIN_REDUCE_XOR, "__builtin_reduce_xor", false, true, false },

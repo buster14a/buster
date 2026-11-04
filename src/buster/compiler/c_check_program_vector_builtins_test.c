@@ -550,7 +550,9 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
         {
             // Bit reversal and the integer functions past the 23 observed spellings: trailing zero counts (of nonzero
             // elements alone with one operand, which clang leaves undefined for zero, and with zeros among them with
-            // two), bit deposits and extractions, of every element size at each width, and xor reductions.
+            // two), bit deposits and extractions and carry-less products (of each 16 bytes' quadwords where the
+            // elements' 64-bit extensions take 64 bytes at most, element by element past them), of every element size
+            // at each width, and xor reductions.
             "vector-integer-bits",
             "typedef unsigned char v4qu __attribute__((vector_size(4)));typedef unsigned char v8qu __attribute__((vector_size(8)));"
             "typedef unsigned short v2hu __attribute__((vector_size(4)));typedef unsigned short v4hu __attribute__((vector_size(8)));"
@@ -563,6 +565,7 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "#define EACH(M) M(b4)M(b8)M(b16)M(b32)M(b64)M(s2)M(s4)M(s8)M(s16)M(s32)M(i2)M(i4)M(i8)M(i16)M(q2)M(q4)M(q8)\n"
             "#define REV(v) U(bitreverse,v)\n"
             "#define DEP(v) B(pdep,v,w##v)B(pext,v,w##v)B(pdep,w##v,v)\n"
+            "#define CL(v) B(clmul,v,w##v)B(clmul,v,v)\n"
             "#define XOR(v) X(v)\n"
             "int tested(int n){unsigned h=2166136261u;v4qu b4,wb4;v8qu b8,wb8;v16qu b16,wb16;v32qu b32,wb32;v64qu b64,wb64;v2hu s2,ws2;v4hu s4,ws4;"
             "v8hu s8,ws8;v16hu s16,ws16;v32hu s32,ws32;v2su i2,wi2;v4su i4,wi4;v8su i8,wi8;v16su i16,wi16;v2du q2,wq2;v4du q4,wq4;v8du q8,wq8;"
@@ -571,11 +574,12 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "fill(&s16,32,n+16);fill(&ws16,32,n+17);fill(&s32,64,n+18);fill(&ws32,64,n+19);fill(&i2,8,n+20);fill(&wi2,8,n+21);fill(&i4,16,n+22);"
             "fill(&wi4,16,n+23);fill(&i8,32,n+24);fill(&wi8,32,n+25);fill(&i16,64,n+26);fill(&wi16,64,n+27);fill(&q2,16,n+28);fill(&wq2,16,n+29);"
             "fill(&q4,32,n+30);fill(&wq4,32,n+31);fill(&q8,64,n+32);fill(&wq8,64,n+33);"
-            "EACH(REV)EACH(DEP)EACH(XOR)"
+            "EACH(REV)EACH(DEP)EACH(CL)EACH(XOR)"
             "T(b4,0x80)T(b8,0x80)T(b16,0x80)T(b32,0x80)T(b64,0x80)T(s2,0x8000)T(s4,0x8000)T(s8,0x8000)T(s16,0x8000)T(s32,0x8000)"
             "T(i2,0x80000000u)T(i4,0x80000000u)T(i8,0x80000000u)T(i16,0x80000000u)T(q2,1ull<<63)T(q4,1ull<<63)T(q8,1ull<<63)"
             "{v16qs t=__builtin_elementwise_bitreverse((v16qs)b16);FOLD(t);v8ds c=__builtin_elementwise_ctzg((v8ds)q8|1);FOLD(c);"
-            "v8hs e=__builtin_elementwise_pext((v8hs)s8,(v8hs)ws8);FOLD(e);}"
+            "v8hs e=__builtin_elementwise_pext((v8hs)s8,(v8hs)ws8);FOLD(e);v4ss l=__builtin_elementwise_clmul((v4ss)i4,(v4ss)wi4);FOLD(l);"
+            "v8ds k=__builtin_elementwise_clmul((v8ds)q8,(v8ds)wq8);FOLD(k);}"
             "return (int)h;}",
         },
         {
@@ -784,10 +788,11 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64-v4", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_bitreverse(a);return (int)c[0];}", "vector bit reversal without GFNI", 2 },
         { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_bitreverse(a);return c[0];}", "vector bit reversal without GFNI",
           2 },
-        { "znver5", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
-          "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes", 3 },
-        { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
-          "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes", 3 },
+        { "x86-64-v3", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
+          "vector carry-less multiplication without AVX and PCLMUL", 3 },
+        { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
+          "vector carry-less multiplication without AVX and PCLMUL", 3 },
+        { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "elementwise builtins of scalars", 0 },
         { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_ctzg(a);return c[0];}",
           "vector trailing zero counts of 8- and 16-bit elements without AVX-512 BITALG", 2 },
         { "x86-64-v4", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_ctzg(a);return (int)c[0];}",

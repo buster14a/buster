@@ -50,8 +50,8 @@
 // Exact source spellings and audited source capabilities. A zero entry is recognized but has no complete native
 // source path. The scoped families (__scoped_atomic_*, __hip_atomic_* and __opencl_atomic_*) are their base builtins'
 // operations with a scope (c_check_builtin_atomic_c11.c). CHECKER alone is a builtin the checker checks as clang does
-// but no lowering takes: __builtin_elementwise_clmul (VPCLMULQDQ is no form Tier 0's rows cover) and the masked memory
-// builtins (their masks are vectors of bools, which the lowering has no class for). The matrix ones are SOURCE: every
+// but no lowering takes: the masked memory builtins (their masks are vectors of bools, which the lowering has no class
+// for). The matrix ones are SOURCE: every
 // call is an error, as clang's is without -fenable-matrix (no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
@@ -330,7 +330,7 @@
     X(ELEMENTWISE_MINIMUMNUM, 0x341u, "__builtin_elementwise_minimumnum", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_LDEXP, 0x342u, "__builtin_elementwise_ldexp", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_CTZG, 0x343u, "__builtin_elementwise_ctzg", BUSTER_CBUILTIN_SOURCE) \
-    X(ELEMENTWISE_CLMUL, 0x344u, "__builtin_elementwise_clmul", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(ELEMENTWISE_CLMUL, 0x344u, "__builtin_elementwise_clmul", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_PDEP, 0x345u, "__builtin_elementwise_pdep", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_PEXT, 0x346u, "__builtin_elementwise_pext", BUSTER_CBUILTIN_SOURCE) \
     X(REDUCE_XOR, 0x350u, "__builtin_reduce_xor", BUSTER_CBUILTIN_SOURCE) \

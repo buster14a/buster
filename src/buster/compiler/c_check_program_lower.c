@@ -9627,11 +9627,16 @@ static void check_lower_reduce_in_order(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
-// __builtin_elementwise_pdep and _pext of vectors of integers: each element's BMI2 PDEP or PEXT (no vector instruction
-// deposits or extracts bits), of its zero extension to 32 bits for 8- and 16-bit elements (the mask's extension has no
-// bits past theirs, so neither has the result), the elements read from frame objects the vectors are stored into and
-// each result, truncated to its element, written into another, the result vector.
-static void check_lower_vector_deposit(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin)
+// __builtin_elementwise_pdep and _pext of vectors of integers, element by element: each element's BMI2 PDEP or PEXT (no
+// vector instruction deposits or extracts bits), of its zero extension to 32 bits for 8- and 16-bit elements (the mask's
+// extension has no bits past theirs, so neither has the result), the elements read from frame objects the vectors are
+// stored into and each result, truncated to its element, written into another, the result vector. And so
+// __builtin_elementwise_clmul's where check_vector_elementwise_row doesn't take it (check_vector_clmul_packed: elements
+// whose extensions are past 64 bytes, or a target without AVX-512VL or VPCLMULQDQ): each element's VPCLMULQDQ of its
+// zero extension, by VMOVD or VMOVQ into the vector registers and back, whose low bits are its product's: EVEX's forms
+// where the target has AVX-512VL and VPCLMULQDQ (its vector values are in the registers past 15), else VEX's, of AVX
+// and PCLMUL.
+static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin)
 {
     const CheckProgram* program = writer->program;
     const CheckStream* stream = program->stream;
@@ -9647,9 +9652,14 @@ static void check_lower_vector_deposit(CheckLowerWriter* writer, uint32_t node, 
     {
         check_lower_unsupported(writer, "elementwise vector builtins of elements of this size");
     }
-    else if ((writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
+    else if (builtin != CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
     {
         check_lower_unsupported(writer, "vector bit deposits and extractions without BMI2");
+    }
+    else if (builtin == CBUILTIN_ELEMENTWISE_CLMUL &&
+             (writer->target.features & (BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(PCLMUL))) != (BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(PCLMUL)))
+    {
+        check_lower_unsupported(writer, "vector carry-less multiplication without AVX and PCLMUL");
     }
     else
     {
@@ -9659,10 +9669,27 @@ static void check_lower_vector_deposit(CheckLowerWriter* writer, uint32_t node, 
         const bool deposit = builtin == CBUILTIN_ELEMENTWISE_PDEP;
         Tier0Operation row;
         memset(&row, 0, sizeof(row));
-        row.records[0] = check_vector_lower_record(deposit ? (wide ? X86_FORM_PDEP_R64_R64_RM64 : X86_FORM_PDEP_R32_R32_RM32) :
-                                                             (wide ? X86_FORM_PEXT_R64_R64_RM64 : X86_FORM_PEXT_R32_R32_RM32),
-                                                   BUSTER_TIER0_ROLE_INTEGER_RESULT, BUSTER_TIER0_ROLE_INTEGER(0), BUSTER_TIER0_ROLE_INTEGER(1));
-        row.record_count = 1;
+        if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
+        {
+            const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+            const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+            const uint64_t evex_features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(VPCLMULQDQ);
+            const bool evex = (writer->target.features & evex_features) == evex_features;
+            const uint32_t into = wide ? (evex ? X86_FORM_VMOVQ_X_RM64_EVEX : X86_FORM_VMOVQ_X_RM64) : (evex ? X86_FORM_VMOVD_X_RM32_EVEX : X86_FORM_VMOVD_X_RM32);
+            const uint32_t from = wide ? (evex ? X86_FORM_VMOVQ_RM64_X_EVEX : X86_FORM_VMOVQ_RM64_X) : (evex ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_VMOVD_RM32_X);
+            row.records[0] = check_vector_lower_record(into, v0, 0, BUSTER_TIER0_ROLE_INTEGER(0));
+            row.records[1] = check_vector_lower_record(into, v1, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+            row.records[2] = check_vector_lower_record(evex ? X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8_EVEX : X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8, v0, v0, v1);
+            row.records[3] = check_vector_lower_record(from, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+            row.record_count = 4;
+        }
+        else
+        {
+            row.records[0] = check_vector_lower_record(deposit ? (wide ? X86_FORM_PDEP_R64_R64_RM64 : X86_FORM_PDEP_R32_R32_RM32) :
+                                                                 (wide ? X86_FORM_PEXT_R64_R64_RM64 : X86_FORM_PEXT_R32_R32_RM32),
+                                                       BUSTER_TIER0_ROLE_INTEGER_RESULT, BUSTER_TIER0_ROLE_INTEGER(0), BUSTER_TIER0_ROLE_INTEGER(1));
+            row.record_count = 1;
+        }
         row.operand_count = 2;
         row.operand_classes[0] = computed;
         row.operand_classes[1] = computed;
@@ -9960,9 +9987,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_reduce_in_order(writer, node);
     }
-    else if (builtin == CBUILTIN_ELEMENTWISE_PDEP || builtin == CBUILTIN_ELEMENTWISE_PEXT)
+    else if (builtin == CBUILTIN_ELEMENTWISE_PDEP || builtin == CBUILTIN_ELEMENTWISE_PEXT ||
+             (builtin == CBUILTIN_ELEMENTWISE_CLMUL && (check_lower_vector_of(writer, result) == 0 || !check_vector_clmul_packed(types, target, result))))
     {
-        check_lower_vector_deposit(writer, node, builtin);
+        check_lower_vector_lanes(writer, node, builtin);
     }
     else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE)
     {
