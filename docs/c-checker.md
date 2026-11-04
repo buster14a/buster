@@ -2571,6 +2571,19 @@ What the lowering covers past scalars (#145's programs):
     through frame objects, as pdep's, VMOVD or VMOVQ into a vector register,
     VPCLMULQDQ and back (EVEX's with AVX-512VL and VPCLMULQDQ, else VEX's, of
     AVX and PCLMUL);
+  - the masked memory builtins (#148, `check_vector_masked_row`) are clang's
+    llvm.masked.* code with AVX-512: the mask, a vector of bools (its object's
+    address, as a transport vector's value is), is its bits, loaded and cleared
+    past its lanes where the instruction has more (a vector of 2 or 3 lanes, or
+    of 4 or 8 bytes), moved into k1 by KMOVW (KMOVD or KMOVQ past 16 lanes); then
+    one instruction under k1: a load's VMOVDQU8, 16, 32 or 64, zeroing the lanes
+    k1 leaves or merging into the passthru's; an expanding load's VPEXPANDB, W,
+    D or Q; a store's VMOVDQU and a compressing store's VPCOMPRESS; a gather's
+    VPGATHERDD, DQ, QD or QQ by its elements' and its indices' sizes, into zeros
+    or the passthru, its indices of 8 or 16 bits sign-extended first (VPMOVSX),
+    as a GEP's are, scaled by the element's bytes; a scatter's VPSCATTER, scaled
+    by the index's element's bytes, as clang 23's code has it (its GEP's
+    element type is the index's, `CGBuiltin.cpp`);
   - the floating functions clang -O0's code computes by instructions are clang's
     sequences, operand for operand, so that NaN payloads and zeros' signs are
     clang's (`check_vector_floating_row`, of vectors of floats and doubles, and
@@ -2640,8 +2653,10 @@ What the lowering covers past scalars (#145's programs):
   ldexp by a 64-bit exponent; a scalar's roundings, round, canonicalize,
   copysign, maximum and minimum functions and ldexp without AVX-512F; ldexp by
   an exponent wider than 64 bits; carry-less products without AVX and PCLMUL;
-  the masked memory builtins (their masks are
-  vectors of bools, which the lowering has no class for); a shuffle by a vector
+  the masked memory builtins without AVX-512F and AVX-512VL, of 8- and 16-bit
+  elements without AVX-512BW (expanding loads and compressing stores without
+  AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
+  instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the leading
   zero counts of 8- and 16-bit elements; the integer elementwise functions of

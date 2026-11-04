@@ -9992,11 +9992,61 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_vector_lanes(writer, node, builtin);
     }
-    else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE)
+    else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MASKED_SCATTER)
     {
-        // A masked builtin's mask is a vector of bools, which the lowering has no class for; a matrix builtin's call is
-        // an error before it (no unit has a matrix type).
-        reason = "masked vector memory builtins, whose masks are vectors of bools";
+        // check_vector_masked_row's row, its operands the arguments in their order: the mask's bits loaded from its object
+        // (a vector of bools is its object's address, check_lower_transport_type), at least 32 of them, and cleared past
+        // its lanes where the instruction has more (`kept`), the others as they are.
+        const bool loads = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_GATHER;
+        const bool addressed = builtin == CBUILTIN_MASKED_GATHER || builtin == CBUILTIN_MASKED_SCATTER;
+        const TypeId mask = count >= 1 ? stream->argument_conversions[first].type : BUSTER_TYPE_VOID;
+        const TypeId value = loads ? result : count >= 3 ? stream->argument_conversions[first + (builtin == CBUILTIN_MASKED_SCATTER ? 2 : 1)].type : BUSTER_TYPE_VOID;
+        const TypeId index = addressed && count >= 2 ? stream->argument_conversions[first + 1].type : value;
+        const bool passthru = (builtin == CBUILTIN_MASKED_GATHER && count == 4) || ((builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD) && count == 3);
+        const bool invalid = count < 2 || !check_lower_bool_vector(types, mask);
+        uint64_t kept = 0;
+        if (invalid)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        else if (check_lower_vector_of(writer, value) == 0 || check_lower_vector_of(writer, index) == 0)
+        {
+            reason = "vector types of other than 4, 8, 16, 32 or 64 bytes";
+        }
+        else
+        {
+            reason = check_vector_masked_row(types, target, builtin, value, index, mask, passthru, rows, &kept);
+        }
+        if (reason == NULL && !invalid)
+        {
+            const uint64_t mask_bytes = type_size(types, mask);
+            const uint8_t stored = check_x86_lower_mask_class(8u * (uint32_t)mask_bytes);
+            const uint8_t mask_class = rows[0].operand_classes[0];
+            check_lower_instruction(writer, BUSTER_TYPED_X86, rows[0].result_class, check_lower_operation_index(writer, rows));
+            for (uint32_t a = count; a-- > 0;)
+            {
+                if (a == 0 && kept != 0)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_AND, mask_class, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, mask_class, kept);
+                }
+                if (a == 0 && stored != mask_class)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, mask_class, 0);
+                }
+                if (a == 0)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored, 0);
+                }
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+            writer->vectors = true;
+        }
+    }
+    else if (builtin >= CBUILTIN_MATRIX_TRANSPOSE && builtin <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE)
+    {
+        // A matrix builtin's call is an error before it: no unit has a matrix type.
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else if (builtin >= CBUILTIN_REDUCE_MAXIMUM && builtin <= CBUILTIN_REDUCE_ASSOC_FADD)
     {

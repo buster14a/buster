@@ -49,9 +49,8 @@
 
 // Exact source spellings and audited source capabilities. A zero entry is recognized but has no complete native
 // source path. The scoped families (__scoped_atomic_*, __hip_atomic_* and __opencl_atomic_*) are their base builtins'
-// operations with a scope (c_check_builtin_atomic_c11.c). CHECKER alone is a builtin the checker checks as clang does
-// but no lowering takes: the masked memory builtins (their masks are vectors of bools, which the lowering has no class
-// for). The matrix ones are SOURCE: every
+// operations with a scope (c_check_builtin_atomic_c11.c). CHECKER alone would be a builtin the checker checks as clang
+// does but no lowering takes (none is now). The matrix ones are SOURCE: every
 // call is an error, as clang's is without -fenable-matrix (no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
@@ -338,12 +337,12 @@
     X(REDUCE_MINIMUM, 0x352u, "__builtin_reduce_minimum", BUSTER_CBUILTIN_SOURCE) \
     X(REDUCE_ASSOC_FADD, 0x353u, "__builtin_reduce_assoc_fadd", BUSTER_CBUILTIN_SOURCE) \
     X(REDUCE_IN_ORDER_FADD, 0x354u, "__builtin_reduce_in_order_fadd", BUSTER_CBUILTIN_SOURCE) \
-    X(MASKED_LOAD, 0x360u, "__builtin_masked_load", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_STORE, 0x361u, "__builtin_masked_store", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_EXPAND_LOAD, 0x362u, "__builtin_masked_expand_load", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_COMPRESS_STORE, 0x363u, "__builtin_masked_compress_store", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_GATHER, 0x364u, "__builtin_masked_gather", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_SCATTER, 0x365u, "__builtin_masked_scatter", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(MASKED_LOAD, 0x360u, "__builtin_masked_load", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_STORE, 0x361u, "__builtin_masked_store", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_EXPAND_LOAD, 0x362u, "__builtin_masked_expand_load", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_COMPRESS_STORE, 0x363u, "__builtin_masked_compress_store", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_GATHER, 0x364u, "__builtin_masked_gather", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_SCATTER, 0x365u, "__builtin_masked_scatter", BUSTER_CBUILTIN_SOURCE) \
     X(MATRIX_TRANSPOSE, 0x370u, "__builtin_matrix_transpose", BUSTER_CBUILTIN_SOURCE) \
     X(MATRIX_COLUMN_MAJOR_LOAD, 0x371u, "__builtin_matrix_column_major_load", BUSTER_CBUILTIN_SOURCE) \
     X(MATRIX_COLUMN_MAJOR_STORE, 0x372u, "__builtin_matrix_column_major_store", BUSTER_CBUILTIN_SOURCE) \

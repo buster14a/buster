@@ -159,9 +159,10 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
-but refused names would remain zero (none is now), and the vector builtins
-the checker checks but no lowering takes (the masked memory builtins) have
-`BUSTER_CBUILTIN_CAP_CHECKER` alone, so `__has_builtin` answers 0 for them. The matrix builtins are an error at every
+but refused names would remain zero (none is now), and so would builtins the
+checker checks but no lowering takes, with `BUSTER_CBUILTIN_CAP_CHECKER`
+alone (none is now: the masked memory builtins and
+`__builtin_elementwise_clmul` have their code, #148). The matrix builtins are an error at every
 call, as clang's are without `-fenable-matrix`, so they have the source
 capability and `__has_builtin` answers 1 for them, as clang's does. clang's sized legacy atomics
 (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog
