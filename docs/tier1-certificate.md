@@ -675,7 +675,14 @@ fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
 its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
 A compare-exchange with four values live across it, rax among the four
 allocatable registers, is certified; its restore of rax made `mov rax, rax` or
-`mov rax, rcx` is refused.
+`mov rax, rcx` is refused. A realigned frame (#1284's review: a 64-byte object
+aligned to 64, a value across a call in rbx) is certified; with its allocation
+moved before rbx's push, its epilogue matched so that every register and the
+return address still come back (its reset from rbp lower by the allocation, and
+`mov rsp, rbp` before rbp's pop), it is refused: rbx's slot is below the
+allocation, among the bytes the rows may take once the realignment moves rsp.
+Without the prologue's rule that nothing but the realignment follows the
+allocation, that mutant is accepted.
 `test-tier1-masks` corrupts every machine row it emits and every wide
 vector's move (#1284): each borrowed opmask register's reload after a row made
 its move into itself, the mask it held lost; each staging copy into a general

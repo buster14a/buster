@@ -37,7 +37,8 @@ requirements. [Command index](README.md).
   spills around calls: each must be refused. Its compare-exchange fixture keeps
   a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
   certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
-  its own cases too. `test-tier1-masks` corrupts machine rows and wide vectors'
+  its own cases too. Its realigned fixture's prologue, its allocation moved
+  before its push of rbx and its epilogue matched, must be refused. `test-tier1-masks` corrupts machine rows and wide vectors'
   moves: borrowed masks' reloads left out, staging copies onto live registers,
   claimed placements of roles sharing a register or of k0 for a numbered opmask
   register, and ymm or zmm moves narrowed to xmm; each must be refused.
