@@ -987,6 +987,15 @@ Every round of the split copy was below every round of the base. On this
 session's Xeon, a build with the split alone took 4% off the statements in 7
 of 8 alternating rounds.
 
+The next run ([run at `0ce575ef`](https://github.com/buster14a/buster/actions/runs/41777114635/job/126402983237))
+took the plain copy's other cold paths out of line in a copy of its own, 10.4
+KB: an unsupported feature's report at each of the expansion's 11 refusals, a
+compound literal's first evaluation, and the handlers of the task kinds past
+`CONTROL` (the builtins', copies, fills, bit-fields' reads and stores,
+`va_arg`'s, VLA sizes, atomics, complex values). Five rounds in turn gave
+`lower.statements` 7.007 ms against the base's 6.970 (6.912 to 7.047), and
+`lower` 10.832 against 10.799: no gain, so it isn't kept.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
