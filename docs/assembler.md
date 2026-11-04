@@ -243,8 +243,14 @@ includes and `#line`; the column refers to the expanded assembly line.
 
 Named labels, GCC's quoted symbol names, and numeric labels `0` through `9` support forward/backward
 references. Numeric labels have a namespace distinct from user names.
-An undefined ordinary symbol becomes an external; undefined `.L` names,
-numeric labels and explicitly local symbols are errors. Global/weak symbols
+An undefined ordinary symbol becomes an external, a global unless `.weak`, as
+GNU as makes one `.local` names too (#1115). Undefined `.L` names and numeric
+labels are errors (GNU as lists the former as an undefined global, for the link
+to refuse). As GNU as does, the object lists every undefined symbol the source
+names, though no relocation refers to it: `.globl x`, `.hidden x`, `.size x, 4`,
+`.type x, @function`, an alias's target, or `x - x`; with its `.type` and
+`.size` (`ObjectOptions.undefined_types`), and its visibility. A `.weak` one is
+listed only if something refers to it. Global/weak symbols
 retain relocations where interposition or linking can change their address.
 As with GNU as without `-mshared`, same-section global `jmp`/`jcc` targets
 resolve in place. Global calls retain PLT32, and cross-section local branches
@@ -278,8 +284,10 @@ target. Once the source has defined every symbol, the alias of a label it define
 is a symbol at the label's place plus the constant, as GNU as makes it (its
 relocations in a merged section refer to it: `.LC4 - 4`); a reference to the
 alias of an undefined symbol is one to that symbol plus the constant, and that
-alias, which can't be exported, is in no table. An alias of an alias is its
-target's target. As GNU as's `copy_symbol_attributes` does, an alias takes its
+alias is in no table, exported (`.globl`, `.weak`) or not: GNU as drops it with
+its own binding, visibility, type and size (#1115). Its target is listed, with
+the target's own binding (a `.weak` target stays weak). An alias of an alias is
+its target's target. As GNU as's `copy_symbol_attributes` does, an alias takes its
 target's type and size where it has none of its own. It takes them at `.set`
 when the target is defined by then (a later `.type` or `.size` of the target
 isn't copied), or once a target defined later is. GCC writes `.weak alias` and
@@ -308,9 +316,14 @@ power of two up to 8. A global's repeated `.comm` keeps the first size, as GNU
 as does (it warns of another), and takes the last directive's alignment, or
 without one (or 0) the kept size's power of two: `.comm x,4,4` then `.comm
 x,4,16` is aligned to 16. A local's repeated `.comm` or `.lcomm` and a defined
-name are duplicate definitions, as in GNU as; a weak name is refused, and so is
-a common symbol made local and declared again, which GNU as places in `.bss` at
-its common size past its alignment's place.
+name are duplicate definitions, as in GNU as; a weak name is refused. A global
+common made local (`.local x`) stays a global common, as GNU as keeps it, until
+it is declared again: GNU as then places it in `.bss` with the other local
+commons, at the new directive's alignment (its operand, none for `.comm`
+without one, or `.lcomm`'s by size) plus its first common size, and of that
+first size, so `.comm x,4,4` / `.local x` / `.comm x,8,8` reserves 8 bytes and
+puts the 4-byte `x` at the second 4. The assembler does the same
+(`AsmSymbol.common_bias`).
 The writer automatically emits a non-executable-stack note. Both GCC's
 `.section .note.GNU-stack,"",@progbits` and Clang's quoted section name are
 accepted; the note must remain empty and non-executable.
@@ -335,7 +348,12 @@ within `[INT64_MIN, UINT64_MAX]`; each output field has a separate range check.
 Bitwise operations use 64-bit two's-complement values (`~0` is `-1`).
 One symbol plus an addend is relocatable. Same-section label differences can
 be used in data and `.size`; instruction operands require an absolute value
-or symbol plus addend. Constant values are captured at their use point.
+or symbol plus addend. As GNU as does (#1115: GCC's PIE jump tables, `.long
+.L45-.L35` in `.rodata` of `.text`'s labels), a `.long` or `.quad` difference
+whose subtrahend is a label of the datum's own section and whose minuend is
+elsewhere or undefined is PC-relative: a PC32 or PC64 relocation of the
+minuend, whose addend adds the datum's distance from the subtrahend. A
+subtrahend in another section is refused, as GNU as refuses it. Constant values are captured at their use point.
 
 Instruction selection preserves immediate values: an imm8 sign-extending
 form can represent `-128..127`, so `add rax,200` uses a wider form. Whole-width
@@ -360,8 +378,11 @@ instruction. The TLS models' modifiers (#1115), in either case (clang writes
   32-bit field: a displacement without RIP or an immediate the form
   sign-extends (`movl %fs:x@tpoff, %eax`, `leaq x@dtpoff(%rax), %rdx`,
   `addq $x@tpoff, %rax`), as TPOFF32 and DTPOFF32. `.long` takes them too
-  (DWARF's `.long x@dtpoff`); the 64-bit ones (`.quad`'s, `movabs`'s) are
-  TPOFF64 and DTPOFF64, which the `Link` doesn't have.
+  (DWARF's `.long x@dtpoff`).
+- The same in 64 bits: `.quad x@tpoff` and `.quad x@dtpoff` (GCC's and Clang's
+  `-g` DWARF of a TLS variable) and a 64-bit immediate (`movabsq $x@tpoff,
+  %rax`), as TPOFF64 and DTPOFF64. Inline assembly's templates take only the
+  code generators' kinds (`link_kind_fits`), which these aren't.
 - `@GOTTPOFF` (initial-exec), `@TLSGD` (general-dynamic) and `@TLSLD`
   (local-dynamic) on a RIP-relative displacement, as GOTTPOFF, TLSGD and TLSLD.
 
@@ -1090,10 +1111,10 @@ The first corpus runs found three gaps beyond the issue's, which are fixed:
   as long (above);
 - GCC 15's `.base64` (above), which it writes where GNU as takes it.
 
-`-g` output isn't in the corpus. Its `.loc`s give no `.debug_line` here, its
-TLS variables' DWARF uses `.quad x@dtpoff` (DTPOFF64), and GCC's view numbers
-(`.byte .LVU27`) are numbers GNU as assigns, where this assembler makes them
-labels. Those are separate work.
+`-g` output isn't in the corpus. Its `.loc`s give no `.debug_line` here, and
+GCC's view numbers (`.byte .LVU27`) are numbers GNU as assigns, where this
+assembler makes them labels. Its TLS variables' DWARF, `.quad x@dtpoff`, is
+DTPOFF64 (above).
 
 Syntax and encoding rules are checked against the
 [GNU assembler manual](https://sourceware.org/binutils/docs/as/), including its

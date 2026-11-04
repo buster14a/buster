@@ -179,6 +179,9 @@ struct ObjectOptions
     // 4-byte object, which takes its size), where a Link symbol lies within its atom.
     const uint64_t* symbol_sizes;
     uint32_t symbol_size_count;
+    // For an assembler's objects (#1115): an undefined symbol keeps its type and size, as GNU as writes `.type x,
+    // @function` and `.size x, 4` of one; otherwise only TLS's, as compilers write an undefined symbol of every other.
+    bool undefined_types;
     // The DWARF of each unit's functions, indexed by unit (debug_count of them, the units' count), or null for none:
     // each object takes its unit's entry (in object_write_units too), and an entry without sections or functions gives
     // it none. A unit's entry describes its functions alone: object_build refuses another unit's.
@@ -1886,10 +1889,12 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         }
         entry += 1;
     }
-    // The undefined symbols: no type but TLS, as GNU as writes them, with their binding and visibility; and the common
-    // ones (ObjectOptions.common_alignments), OBJECTs of SHN_COMMON with their alignment and size.
+    // The undefined symbols: no type but TLS (or each its own, ObjectOptions.undefined_types), with their binding and
+    // visibility; and the common ones (ObjectOptions.common_alignments), OBJECTs of SHN_COMMON with their alignment and
+    // size.
     const SymbolId* undefined = builder->undefined;
     const uint32_t* common_alignments = builder->options.common_alignments;
+    const bool typed = builder->options.undefined_types;
     for (uint64_t i = 0; i < builder->undefined_count; i += 1)
     {
         const SymbolId symbol = undefined[i];
@@ -1897,13 +1902,16 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         const uint8_t flags = symbol_flags[symbol];
         const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
         const uint32_t alignment = common_alignments != 0 ? common_alignments[symbol] : 0;
+        const uint8_t info = alignment != 0 ? (uint8_t)((flags & BUSTER_LINK_SYMBOL_BINDING) | STT_OBJECT)
+                           : typed          ? link_symbol_elf_info(flags)
+                                            : (uint8_t)((flags & BUSTER_LINK_SYMBOL_BINDING) | (tls ? STT_TLS : STT_NOTYPE));
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 ? (uint32_t)name : 0,
-            .st_info = (flags & BUSTER_LINK_SYMBOL_BINDING) | (alignment != 0 ? STT_OBJECT : tls ? STT_TLS : STT_NOTYPE),
+            .st_info = info,
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
             .st_shndx = alignment != 0 ? SHN_COMMON : SHN_UNDEF,
             .st_value = alignment,
-            .st_size = alignment != 0 ? symbol_sizes[symbol] : 0,
+            .st_size = alignment != 0 || typed ? symbol_sizes[symbol] : 0,
         };
         if (name_bytes_with_nul != 0)
         {

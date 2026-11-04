@@ -96,6 +96,9 @@ struct AsmSymbol
     // An alias whose target wasn't defined at its `.set`, which takes the target's type and size once it is (GNU as's
     // copy_symbol_attributes; asm_alias_inherit).
     bool inherits;
+    // An alias of it names it (#1115): GNU as lists an undefined weak symbol only when something uses it, a relocation
+    // or an alias, and every other undefined symbol the source names (asm_object_options).
+    bool used;
     // A size that reaches past its section's end, which GNU as writes and the Link's symbol, within its atom, can't
     // hold: the object's st_size (ObjectOptions.symbol_sizes), or 0.
     uint64_t beyond;
@@ -106,6 +109,8 @@ struct AsmSymbol
     uint32_t common_alignment;
     uint32_t common_next;
     uint64_t common_size;
+    // A global common made local and declared again: the bytes before its place in .bss (asm_common_directive).
+    uint64_t common_bias;
 };
 
 #define ASM_COMMON_GLOBAL 1
@@ -2617,7 +2622,12 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
         {
             const uint8_t kind = local ? ASM_COMMON_BSS : ASM_COMMON_GLOBAL;
             const bool repeated = symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_GLOBAL;
-            const uint32_t bytes = repeated ? (uint32_t)symbol->common_size : (uint32_t)size;
+            // A global common made local and declared again (`.comm x,4,4`, `.local x`, then `.comm x` or `.lcomm x`):
+            // GNU as keeps its first size, as for a repeated .comm, and places it in .bss with the new directive's
+            // alignment, but at its common size past that place, as the symbol's value is still that size when
+            // bss_alloc gives it its frag; the .bss it takes is twice the size (#1115).
+            const bool relocal = symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_BSS;
+            const uint32_t bytes = (repeated || relocal) && symbol->common_size != 0 ? (uint32_t)symbol->common_size : (uint32_t)size;
             uint32_t power = 1;
             while (power < bytes && power < 16)
             {
@@ -2625,13 +2635,7 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
             }
             const uint32_t placed = lcomm ? (bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1) : alignment != 0 ? (uint32_t)alignment : 1;
             const uint32_t chosen = local ? placed : alignment != 0 ? (uint32_t)alignment : power;
-            if (symbol->common == ASM_COMMON_GLOBAL && kind == ASM_COMMON_BSS)
-            {
-                // GNU as places it in .bss at its common size past its own alignment's place, a quirk this assembler
-                // doesn't follow.
-                asm_fail(parser, location, "a common symbol made local and declared again");
-            }
-            else if ((symbol->common != 0 && !repeated) || symbol->defined || symbol->absolute)
+            if ((symbol->common != 0 && !repeated && !relocal) || symbol->defined || symbol->absolute)
             {
                 asm_fail(parser, location, "duplicate symbol definition");
             }
@@ -2641,6 +2645,8 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
             }
             else
             {
+                symbol->common_bias = relocal ? symbol->common_size : 0;
+                parser->common_count -= relocal;
                 symbol->common = kind;
                 symbol->common_size = bytes;
                 symbol->common_alignment = chosen;
@@ -2678,6 +2684,7 @@ static void asm_place_commons(AsmParser* parser)
             asm_fail(parser, symbol->location, "duplicate symbol definition");
         }
         const uint32_t align = asm_fragment(parser, ASM_ALIGN, symbol->location);
+        const uint32_t bias = symbol->common_bias != 0 ? asm_fragment(parser, ASM_FILL, symbol->location) : 0;
         const uint32_t label = asm_fragment(parser, ASM_LABEL, symbol->location);
         const uint32_t fill = asm_fragment(parser, ASM_FILL, symbol->location);
         if (parser->result.error == 0)
@@ -2685,6 +2692,11 @@ static void asm_place_commons(AsmParser* parser)
             parser->fragments[align].alignment = symbol->common_alignment;
             parser->fragments[align].maximum = BUSTER_ASM_MAX_SECTION;
             parser->fragments[align].padding = ASM_PADDING_FILL;
+            if (bias != 0)
+            {
+                parser->fragments[bias].size = (uint32_t)symbol->common_bias;
+                parser->fragments[bias].padding = ASM_PADDING_FILL;
+            }
             parser->fragments[fill].size = (uint32_t)symbol->common_size;
             parser->fragments[fill].padding = ASM_PADDING_FILL;
             symbol->defined = true;
@@ -2773,9 +2785,12 @@ static void asm_resolve_aliases(AsmParser* parser)
                 asm_alias_inherit(symbol, target);
             }
         }
-        else if (symbol->alias && (symbol->explicit_binding || symbol->has_size))
+        else if (symbol->alias)
         {
-            asm_fail(parser, symbol->location, "exported aliases of undefined symbols are not supported by the shared object writer");
+            // An alias of an undefined symbol, exported or not, is in no table, as GNU as leaves it out (its binding,
+            // type and size with it): references to it are the target's, and the target is listed, a weak one too,
+            // which an alias uses (asm_object_options).
+            target->used = true;
         }
     }
     for (uint32_t i = 0; parser->alias_count != 0 && i < parser->instruction_count; i += 1)
@@ -4609,14 +4624,15 @@ static void asm_emit(AsmParser* parser)
             symbol->link = link_add_symbol(link, name, target->atom, 0, 0, symbol->flags, BUSTER_LINK_SOURCE_PROGRAM);
             continue;
         }
-        if (!symbol->defined && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0) || (symbol->explicit_binding && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL)))
+        if (!symbol->defined && (symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0)))
         {
             asm_fail(parser, symbol->location, "undefined local symbol");
             continue;
         }
-        if (!symbol->defined && !symbol->explicit_binding)
+        // An undefined symbol is global unless weak: also one `.local` names, which GNU as lists as a global (#1115).
+        if (!symbol->defined && (!symbol->explicit_binding || (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL))
         {
-            symbol->flags |= BUSTER_LINK_SYMBOL_GLOBAL;
+            symbol->flags = (uint8_t)((symbol->flags & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
         }
         const AsmFragment* definition = &parser->fragments[symbol->fragment];
         // GNU as makes a symbol of a TLS section a TLS variable (`.type tl, @object` in .tbss, as clang and GCC write

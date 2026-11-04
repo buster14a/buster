@@ -221,6 +221,15 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     }
 }
 
+// Whether the object lists an undefined symbol though no relocation may refer to it (#1115), as GNU as lists every one
+// the source names (`.globl x`, `.size x, 4`, `.hidden x`, an alias's target, `_GLOBAL_OFFSET_TABLE_`), but a weak
+// one nothing uses (`.weak x` alone): one a relocation refers to is listed first, and once.
+static bool asm_object_declares(const AsmSymbol* symbol)
+{
+    const bool weak = (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    return symbol->link != 0 && !symbol->defined && !symbol->absolute && !symbol->alias && symbol->common == 0 && !symbol->internal && (!weak || symbol->used);
+}
+
 static void asm_object_options(AsmParser* parser)
 {
     Link* link = &parser->result.link;
@@ -254,11 +263,17 @@ static void asm_object_options(AsmParser* parser)
             .atom_section_count = link->atoms.count,
             .temporary_symbols = temporary,
             .temporary_symbol_count = link->symbols.count,
+            .undefined_types = true,
         };
     }
-    // The undefined symbols GNU as lists without a relocation (#1115): the common ones, with their alignments, and the
-    // _GLOBAL_OFFSET_TABLE_ that a GOT or TLS modifier declares.
-    const uint32_t declared_count = parser->common_count + (parser->got_symbol != 0 && parser->symbols[parser->got_symbol].link != 0 ? 1 : 0);
+    // The undefined symbols GNU as lists without a relocation (#1115): the common ones, with their alignments, then every
+    // other the source names (asm_object_declares), as the _GLOBAL_OFFSET_TABLE_ a GOT or TLS modifier declares.
+    uint32_t declared_count = 0;
+    for (uint32_t i = 1; i < parser->symbol_count; i += 1)
+    {
+        declared_count += parser->symbols[i].common == ASM_COMMON_GLOBAL && parser->symbols[i].link != 0;
+        declared_count += asm_object_declares(&parser->symbols[i]);
+    }
     if (parser->result.error == 0 && declared_count != 0)
     {
         SymbolId* declared = BUSTER_ARENA_PUSH_ARRAY(parser->arena, SymbolId, declared_count);
@@ -283,10 +298,12 @@ static void asm_object_options(AsmParser* parser)
                     declared[count++] = symbol->link;
                 }
             }
-            if (parser->got_symbol != 0 && parser->symbols[parser->got_symbol].link != 0 && parser->symbols[parser->got_symbol].common == 0 &&
-                !parser->symbols[parser->got_symbol].defined)
+            for (uint32_t i = 1; i < parser->symbol_count; i += 1)
             {
-                declared[count++] = parser->symbols[parser->got_symbol].link;
+                if (asm_object_declares(&parser->symbols[i]))
+                {
+                    declared[count++] = parser->symbols[i].link;
+                }
             }
             parser->result.object_options.declared_symbols = declared;
             parser->result.object_options.declared_symbol_count = count;

@@ -39,7 +39,13 @@ static const char asm_test_common_fixture[] =
     // A global's repeated .comm, as GNU as takes it: the first size, the last alignment (its default, by the kept size).
     ".comm ra,4,4\n.comm ra,4,16\n.comm rb,4,16\n.comm rb,4,4\n.comm rc,4,4\n.comm rc,8,16\n.comm rd,8,8\n.comm rd,4,2\n.comm re,4,8\n.comm re,4\n"
     ".comm rf,4\n.comm rf,4,32\n.comm rg,24\n.comm rg,24\n.comm rh,4,4\n.comm rh,4,0\n.comm rx,4,4\n.comm rx,100\n.comm ry,100,64\n.comm ry,2\n"
-    ".comm rz,0,8\n.comm rz,0\n";
+    ".comm rz,0,8\n.comm rz,0\n"
+    // A global common made local and declared again, which GNU as places in .bss (subsection 1, after .lcomm's) at its
+    // new alignment's place plus its first size, of that first size: by .comm with the same size, a larger one, none
+    // and no alignment, and by .lcomm; then one made local without being declared again, which stays a global common.
+    ".text\nmovl ma(%rip), %eax\nmovl mf(%rip), %eax\n.comm ma,4,4\n.local ma\n.comm ma,4,4\n.comm mb,4,4\n.local mb\n.comm mb,8,8\n"
+    ".comm mc,4,4\n.local mc\n.lcomm mc,4\n.comm md,4,4\n.local md\n.comm md,4\n.comm me,24,4\n.local me\n.comm me,24,8\n"
+    ".comm mf,4,4\n.local mf\n.lcomm mg,3\n.data\n.quad me+4\n";
 static const char asm_test_wide_fixture[] =
     ".section .rodata.str4.8,\"aMS\",@progbits,4\n.align 8\n.LC2:\n.string \"h\"\n.string \"\"\n.string \"\"\n.string \"i\"\n.string \"\"\n.string \"\"\n"
     ".string \"\"\n.string \"\"\n.string \"\"\n.string \"\"\n"
@@ -163,6 +169,17 @@ static const char asm_test_jump_fixture[] =
     "notrack jmp *%rax\n.L1: movl $1, %eax\nret\n.L2: movl $2, %eax\nret\n.Ldef: xorl %eax, %eax\nret\n"
     ".section .rodata\n.align 4\n.Ltab: .long .L1-.Ltab\n.long .L2-.Ltab\n.long .Ldef-.Ltab\n.long ext-.Ltab\n.long ext-.\n"
     ".long .L2-.Ltab+8\n.quad .L1-.\n.quad dispatch-.Ltab\n";
+// Undefined symbols as GNU as lists them (#1115): each named one is a global, from .globl, a TLS or GOT reference, an
+// expression, an alias's target, .hidden, .protected, .internal, .size, .type and even .local, keeping its .type and
+// .size; a weak one only when something refers to it. An alias of an undefined symbol, exported or not, isn't listed:
+// its references are its target's, whose binding is its own (`wtarget` stays weak), and a chain resolves through each.
+static const char asm_test_undefined_fixture[] =
+    ".text\n.globl alias1\n.set alias1, ext1\ncall alias1\nmovq alias1@GOTPCREL(%rip), %rax\n.weak walias\n.set walias, ext2\n"
+    ".globl galias\n.type galias,@function\n.set galias, ext3\n.size galias, 8\n.globl unused\n.set unused, ext4\ncall walias\n"
+    ".set quiet, ext5\n.weak wtarget\n.globl alias6\n.set alias6, wtarget\ncall alias6\n.globl halias\n.hidden halias\n"
+    ".set halias, ext6\n.local lalias\n.set lalias, ext7\n.globl declared\n.weak wunused\n.hidden hidden_undefined\n"
+    ".protected protected_undefined\n.internal internal_undefined\n.size sized_undefined, 4\n.type typed_undefined, @function\n"
+    ".local local_undefined\n.set chain_b, chain_a\n.set chain_a, ext13 + 4\n.data\n.long ext14 - ext14\n.quad alias1+4\n.quad chain_b\n";
 
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
@@ -179,6 +196,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_relax_fixture, X86_ARCH_BASELINE },
         { asm_test_alias_fixture, X86_ARCH_BASELINE },
         { asm_test_jump_fixture, X86_ARCH_BASELINE },
+        { asm_test_undefined_fixture, X86_ARCH_BASELINE },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -202,11 +220,11 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`),
     // @GOTTPOFF without RIP, a 2-byte TLS offset as data, a TLS modifier on a symbol outside a TLS section;
     // .comm's alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined
-    // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
-    // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
-    // characters; %st(8); fsubp of ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an
-    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); malformed base64; and a label
-    // difference whose subtrahend is in neither the datum's section nor the minuend's, which GNU as can't resolve.
+    // or weak common symbol, a local's .comm or .lcomm declared again; strings of 8-byte characters; %st(8); fsubp of
+    // ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an uppercase mnemonic, as every
+    // mnemonic is lowercase here (GNU as takes either); malformed base64; a label difference whose subtrahend is in
+    // neither the datum's section nor the minuend's, which GNU as can't resolve; and, deliberately, an undefined .L label,
+    // which GNU as lists as an undefined global for the link to fail on.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",
@@ -222,8 +240,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".lcomm x,4\n.data\nx: .long 0\n",
         ".weak x\n.comm x,4,4\n",
         ".local x\n.comm x,4,4\n.comm x,4,16\n",
-        ".comm x,4,4\n.local x\n.comm x,4,4\n",
         ".lcomm x,4\n.lcomm x,4\n",
+        ".text\njmp .Lnowhere\n",
         ".section .rodata.str8.8,\"aMS\",@progbits,8\n.quad 0\n",
         "fadd %st(8)\n",
         "fld %st(x)\n",
