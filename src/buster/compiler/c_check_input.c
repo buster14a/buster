@@ -1390,6 +1390,7 @@ struct CheckInputReader
     uint32_t* objects;
     uint8_t* ignored;
     // Assignment modes 1 (scalar) and 2 (list); 3 marks a complete compact #embed list item.
+    // Mode 4 marks a direct initializer's closing group, whose opening alone prepares the declaration.
     uint8_t* initializers;
     uint8_t* static_initializers;
     uint32_t* initializer_declarations;
@@ -6989,7 +6990,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         // Clang checks every argument but initializes from the first alone, not from a comma
                         // expression. Keep later expressions in the checked graph, without making them runtime roots.
                         // The opening owns declaration preparation; the closing owns the graph's conversion only.
-                        reader->initializers[direct_close] = reader->initializers[i];
+                        reader->initializers[direct_close] = 4;
+                        reader->initializer_declarations[direct_close] = name;
                         for (uint32_t separator = direct_end; separator < direct_close;)
                         {
                             reader->ignored[separator] = true;
@@ -7651,7 +7653,7 @@ static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t 
         const bool syntax = token < reader->parser->tokens.count && check_input_visit_of(reader->parser, reader->syntax[token], token);
         const bool scope = reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < token;
         const bool finish = reader->initializer_finish_heads[token] != BUSTER_CHECK_NONE;
-        const bool declaration = (reader->initializers[token] != 0 && reader->initializer_declarations[token] != BUSTER_CHECK_NONE) ||
+        const bool declaration = ((reader->initializers[token] & 3) != 0 && reader->initializer_declarations[token] != BUSTER_CHECK_NONE) ||
                                  reader->declaration_bases[token] != 0;
         const bool query = reader->designator_valid[token] == 2 || reader->specifier_finishes[token] != 0 || reader->selection_type_ends[token] != 0 ||
                            reader->vararg_types[token] != 0 || reader->builtin_type_ends[token] != 0;
@@ -7909,7 +7911,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             check_input_statement_attributes(reader, i);
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->initializers[i] != 0 &&
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && (reader->initializers[i] & 3) != 0 &&
             reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
@@ -9101,14 +9103,14 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         list = true;
         if (reader->initializers[token] != 0)
         {
-            const uint32_t opening = parser->tree.parents[token];
-            reader->initializer_declarations[token] = reader->initializer_declarations[opening];
+            const uint32_t declaration = reader->initializer_declarations[token];
+            const uint32_t opening = check_sparse_get(reader->output->initializer_begins, declaration) - 1;
             reader->query_types[token] = reader->query_types[opening];
             check_input_rare_claim(reader, &reader->static_initializers[token]);
             reader->static_initializers[token] = reader->static_initializers[opening];
-            op = reader->initializers[token] == 1 ? CHECK_OP_INITIALIZE : CHECK_OP_COUNT;
+            op = reader->initializers[opening] == 1 ? CHECK_OP_INITIALIZE : CHECK_OP_COUNT;
             supported = count != 0;
-            list = reader->initializers[token] == 2;
+            list = reader->initializers[opening] == 2;
             // Aggregates use the ordinary initializer planner, with just the first expression as its value.
             if (supported && list)
             {
