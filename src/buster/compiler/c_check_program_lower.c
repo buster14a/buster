@@ -816,6 +816,10 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 16384: an integer constant of a plain
+    // class written by check_lower_constant's first test, on the vector path; bit 8192 is the preparation's (the runtimes'
+    // test with the linkage first).
+    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -5395,7 +5399,24 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
 {
     const uint8_t class = check_lower_class(writer, value->type);
     uint64_t bits = (uint64_t)value->integer;
-    if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
+    // #1048's experiment (bit 16384): an integer constant of the classes I8 to U64 whose type has none of the facts the
+    // cases below test (an aggregate's, a complex value's, a _BitInt's), in a program without a _BitInt type: the last
+    // case's bits, sign- or zero-extended from its class's width, written first.
+    const uint8_t facts = (writer->experiment & 16384) != 0 && writer->type_templates != NULL && value->constant_kind == CHECK_CONSTANT_INTEGER && !writer->bit_ints ?
+                              (uint8_t)(check_lower_type_info(writer, value->type) >> 8) : UINT8_MAX;
+    if ((facts & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 && class >= BUSTER_TYPED_CLASS_I8 &&
+        class <= BUSTER_TYPED_CLASS_U64)
+    {
+        const uint32_t width = 8u << ((class - 1) / 2);
+        if (width < 64)
+        {
+            const uint64_t mask = (UINT64_C(1) << width) - 1;
+            bits &= mask;
+            bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+        }
+        check_lower_emit(writer, BUSTER_TYPED_CONST, class, bits);
+    }
+    else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
         check_lower_address(writer, value->object, value->offset);
         // An lvalue's constant address is the object's, which its caller takes, whatever the object's type. An rvalue's is
@@ -11914,11 +11935,15 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
 // Whether `declaration` declares one of the `spelled` runtime functions the unit spells (`identifiers`, their runtimes in
 // `runtimes`), as a declaration with linkage of an object: the first one's symbol becomes the runtime's.
 static inline __attribute__((always_inline)) void check_lower_declared_runtime(const CheckProgram* program, uint32_t declaration, const IdentId* names,
-                                                                              const IdentId* identifiers, const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols)
+                                                                              const IdentId* identifiers, const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols,
+                                                                              bool linkage_first)
 {
     const CheckInput* input = program->input;
-    const uint32_t object = input->objects[declaration];
-    const IdentId name = names[declaration];
+    // #1048's experiment (bit 8192): the linkage and the declaration's own token first, which the locals' test loads
+    // too, and the object and the name only for a declaration with external linkage.
+    const bool external = !linkage_first || (check_input_linkage(input->declaration_bits, declaration) == 2 && input->declarations[declaration] == declaration);
+    const uint32_t object = external ? input->objects[declaration] : 0;
+    const IdentId name = external ? names[declaration] : 0;
     if (name != 0 && input->declarations[declaration] == declaration && check_input_linkage(input->declaration_bits, declaration) == 2 && object != 0 &&
         object < program->object_count)
     {
@@ -11951,7 +11976,7 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
     const uint32_t count = scalar ? program->input->token_count : declaring_count;
     for (uint32_t d = 0; d < count; d += 1)
     {
-        check_lower_declared_runtime(program, scalar ? d : declaring[d], program->parser->tokens.names, identifiers, runtimes, spelled, symbols);
+        check_lower_declared_runtime(program, scalar ? d : declaring[d], program->parser->tokens.names, identifiers, runtimes, spelled, symbols, false);
     }
 }
 
@@ -12349,6 +12374,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         // over every token (check_lower_declared_runtimes) is its twin.
         const bool runtimes_merged = !BUSTER_SCALAR_PATH(scalar) && spelled != 0 && program->parser != NULL;
         const IdentId* token_names = runtimes_merged ? program->parser->tokens.names : NULL;
+        const char* experiment_variable = getenv("BUSTER_LOWER_EXPERIMENT");
+        const bool linkage_first = experiment_variable != NULL && (strtoul(experiment_variable, NULL, 10) & 8192) != 0;
         // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
         // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
         for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -12370,7 +12397,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             const uint32_t token = declaring[d];
             if (runtimes_merged)
             {
-                check_lower_declared_runtime(program, token, token_names, identifiers, spelled_runtimes, spelled, shared->declared_runtimes);
+                check_lower_declared_runtime(program, token, token_names, identifiers, spelled_runtimes, spelled, shared->declared_runtimes, linkage_first);
             }
             const uint32_t opening = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
             const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
@@ -12576,6 +12603,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
+    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
