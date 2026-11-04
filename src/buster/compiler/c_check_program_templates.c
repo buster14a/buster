@@ -221,8 +221,8 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     const bool discard = (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) != 0;
     const uint32_t a = graph->operand0[node];
     const uint32_t b = graph->operand1[node];
-    const TypeId type_a = stream->conversions[node].operands[0].type;
-    const TypeId type_b = stream->conversions[node].operands[1].type;
+    const TypeId type_a = check_stream_conversions(stream, node).operands[0].type;
+    const TypeId type_b = check_stream_conversions(stream, node).operands[1].type;
     const uint8_t facts = check_lower_facts(writer, value->type);
     const bool aggregate = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
     const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
@@ -517,7 +517,7 @@ static void check_lower_template_own(const CheckLowerWriter* writer, uint32_t no
     }
     else if (kind == CHECK_LOWER_TEMPLATE_TRUTH)
     {
-        const uint8_t operand_class = check_lower_class(writer, stream->conversions[node].operands[0].type);
+        const uint8_t operand_class = check_lower_class(writer, check_stream_conversions(stream, node).operands[0].type);
         const bool narrow = check_lower_narrow(operand_class);
         if (narrow)
         {
@@ -536,7 +536,7 @@ static void check_lower_template_own(const CheckLowerWriter* writer, uint32_t no
         {
             check_lower_template_put(entries, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
         }
-        check_lower_template_put(entries, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(types, stream->conversions[node].operands[0].type));
+        check_lower_template_put(entries, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(types, check_stream_conversions(stream, node).operands[0].type));
         if (op == CHECK_OP_SUBSCRIPT && !address && !address_value)
         {
             check_lower_template_put(entries, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value->type));
@@ -791,7 +791,7 @@ static void check_lower_template_scatter(CheckLowerWriter* writer, uint32_t firs
                 }
                 else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_A || to == BUSTER_CHECK_LOWER_TEMPLATE_TO_B)
                 {
-                    target = stream->conversions[node].operands[to == BUSTER_CHECK_LOWER_TEMPLATE_TO_B].type;
+                    target = check_stream_conversions(stream, node).operands[to == BUSTER_CHECK_LOWER_TEMPLATE_TO_B].type;
                 }
                 else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_VOID)
                 {
@@ -799,8 +799,8 @@ static void check_lower_template_scatter(CheckLowerWriter* writer, uint32_t firs
                 }
                 else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_INDEX)
                 {
-                    const bool pointer = (check_lower_facts(writer, stream->conversions[node].operands[0].type) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
-                    target = pointer ? BUSTER_TYPE_LONG : stream->conversions[node].operands[1].type;
+                    const bool pointer = (check_lower_facts(writer, check_stream_conversions(stream, node).operands[0].type) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
+                    target = pointer ? BUSTER_TYPE_LONG : check_stream_conversions(stream, node).operands[1].type;
                 }
                 else if (to == BUSTER_CHECK_LOWER_TEMPLATE_TO_COMMA)
                 {
@@ -940,7 +940,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
     {
         // A member's read, or its address: past the base's, its offset's addition where it has one.
-        const TypeId type_a = stream->conversions[node].operands[0].type;
+        const TypeId type_a = check_stream_conversions(stream, node).operands[0].type;
         const TypeId record = op == CHECK_OP_ARROW ? type_element(program->types, type_a) : check_stream_type(stream, graph->operand0[node]);
         const uint8_t record_kind = check_action_kind(program->types, record);
         const uint64_t bits = stream->member_offsets[node];
@@ -997,8 +997,8 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     {
         const uint32_t a = graph->operand0[node];
         const uint32_t b = graph->operand1[node];
-        const TypeId type_a = stream->conversions[node].operands[0].type;
-        const TypeId type_b = stream->conversions[node].operands[1].type;
+        const TypeId type_a = check_stream_conversions(stream, node).operands[0].type;
+        const TypeId type_b = check_stream_conversions(stream, node).operands[1].type;
         const bool arithmetic = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_SUBSCRIPT;
         const bool left_pointer = arithmetic && (check_lower_facts(writer, type_a) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
         const bool right_pointer = arithmetic && (check_lower_facts(writer, type_b) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;

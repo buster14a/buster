@@ -700,7 +700,6 @@ static inline __attribute__((always_inline)) void check_transition_write(CheckSt
     uint32_t* const value_objects = stream->value_objects;
     uint8_t* const value_categories = stream->value_categories;
     uint8_t* const value_constants = stream->value_constants;
-    CheckNodeConversions* const node_conversions = stream->conversions;
     CheckDiagnostic* const diagnostics = stream->diagnostics;
     uint32_t* const diagnostic_operands = stream->diagnostic_operands;
     uint32_t* const node_warnings = stream->warnings;
@@ -720,7 +719,7 @@ static inline __attribute__((always_inline)) void check_transition_write(CheckSt
         value_categories[node] = (uint8_t)packed;
         value_constants[node] = (uint8_t)(packed >> 8);
     }
-    node_conversions[node] = conversions;
+    check_stream_set_conversions(stream, node, &conversions);
     diagnostics[node] = (CheckDiagnostic)(packed >> 18 & 0x3f);
     diagnostic_operands[node] = packed >> 24;
     node_warnings[node] = warnings;
@@ -770,7 +769,7 @@ static void check_transitions_insert(CheckTransitions* table, const CheckGraph* 
         entry->guard = guards->count == 1 ? (guards->tags[0] + 1) | (guards->answers & 1) << 31 : 0;
         entry->extra = 0;
         entry->payload = template;
-        entry->conversions = stream->conversions[node];
+        entry->conversions = check_stream_conversions(stream, node);
         entry->member_offset = stream->member_offsets[node];
         if (extra)
         {
@@ -824,7 +823,7 @@ static bool check_transition_value_equal(const CheckValue* a, const CheckValue* 
 static __attribute__((noinline)) void check_transition_verify(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch)
 {
     const CheckValue value = check_stream_value(stream, node);
-    const CheckNodeConversions conversions = stream->conversions[node];
+    const CheckNodeConversions conversions = check_stream_conversions(stream, node);
     const CheckDiagnostic diagnostic = stream->diagnostics[node];
     const uint32_t diagnostic_operand = stream->diagnostic_operands[node];
     const uint32_t warnings = stream->warnings[node];
@@ -841,7 +840,8 @@ static __attribute__((noinline)) void check_transition_verify(TypeTable* types, 
     check_graph_guarded_node(types, graph, stream, node, arguments, scratch, false, NULL);
     stream->statistics.scalar_nodes -= 1;
     const CheckValue checked = check_stream_value(stream, node);
-    bool equal = check_transition_value_equal(&value, &checked) && memcmp(&conversions, stream->conversions + node, sizeof(conversions)) == 0 &&
+    const CheckNodeConversions checked_conversions = check_stream_conversions(stream, node);
+    bool equal = check_transition_value_equal(&value, &checked) && memcmp(&conversions, &checked_conversions, sizeof(conversions)) == 0 &&
                  diagnostic == stream->diagnostics[node] && diagnostic_operand == stream->diagnostic_operands[node] && warnings == stream->warnings[node] &&
                  member_offset == stream->member_offsets[node] && interned == types->types.count;
     for (uint32_t i = 0; equal && i < count; i += 1)

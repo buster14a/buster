@@ -577,7 +577,7 @@ static bool check_program_atomic_update_direct(const CheckProgram* program, uint
 {
     const CheckOp op = program->input->graph.ops[node];
     const bool additive = (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) || op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN;
-    const TypeId computed = additive ? program->stream->conversions[node].operands[0].type : 0;
+    const TypeId computed = additive ? check_stream_conversions(program->stream, node).operands[0].type : 0;
     const uint8_t kind = check_action_kind(program->types, value_type);
     const uint8_t computed_kind = additive ? check_action_kind(program->types, computed) : BUSTER_TYPE_KIND_NONE;
     return additive && (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM) && type_unqualified(value_type) != BUSTER_TYPE_BOOL &&

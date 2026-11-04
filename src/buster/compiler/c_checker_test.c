@@ -1562,17 +1562,19 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
                  a->varargs_count == b->varargs_count && check_builtin_stream_metadata_equal(a, b, check_test_value_equal);
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
+        const CheckNodeConversions conversions_a = check_stream_conversions(a, i);
+        const CheckNodeConversions conversions_b = check_stream_conversions(b, i);
         const CheckValue value_a = check_stream_value(a, i);
         const CheckValue value_b = check_stream_value(b, i);
         equal = check_test_value_equal(&value_a, &value_b) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
                 (a->diagnostic_operands != NULL ? a->diagnostic_operands[i] : 0) == (b->diagnostic_operands != NULL ? b->diagnostic_operands[i] : 0) &&
                 (a->member_offsets != NULL ? a->member_offsets[i] : 0) == (b->member_offsets != NULL ? b->member_offsets[i] : 0) &&
                 (a->warning_ignored != NULL ? a->warning_ignored[i] : 0) == (b->warning_ignored != NULL ? b->warning_ignored[i] : 0) &&
-                a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
+                conversions_a.store.type == conversions_b.store.type && conversions_a.store.flags == conversions_b.store.flags;
         for (uint32_t operand = 0; equal && operand < 3; operand += 1)
         {
-            equal = a->conversions[i].operands[operand].type == b->conversions[i].operands[operand].type &&
-                    a->conversions[i].operands[operand].flags == b->conversions[i].operands[operand].flags;
+            equal = conversions_a.operands[operand].type == conversions_b.operands[operand].type &&
+                    conversions_a.operands[operand].flags == conversions_b.operands[operand].flags;
         }
     }
     for (uint32_t i = 0; equal && i < arguments; i += 1)
@@ -1643,9 +1645,9 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     if (scalar_valid && recorded_room)
     {
         check_graph_record_finish(&recorded);
-        for (uint32_t path = 0; path < 8; path += 1)
+        for (uint32_t path = 0; path < 16; path += 1)
         {
-            const CheckOptions options = { .scalar = path % 4 == 0, .verify = path >= 4, .level_order = path % 4 == 2, .regions = path % 4 == 3 };
+            const CheckOptions options = { .scalar = path % 4 == 0, .verify = path % 8 >= 4, .level_order = path % 4 == 2, .regions = path % 4 == 3, .conversion_ids = path >= 8 };
             CheckStream stream;
             const uint64_t recorded_mark = scratch->length;
             const bool checked = check_graph_run(table, &recorded, output, scratch, &options, &stream);
@@ -1659,33 +1661,37 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     // Each batch size by each of the vector path's orders but node order, which takes none: its regions in postorder
     // batches (CheckOptions.regions), its regions by level (CheckOptions.level_order), and its memoized transitions (#1050),
     // every hit verified against its action.
-    for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    for (uint32_t layout = 0; layout < 2; layout += 1)
     {
-        const uint32_t batch = run / 3;
-        const uint32_t order = run % 3;
-        const CheckOptions vector_options = {
-            .batch_size = batch,
-            .regions = order == 0,
-            .level_order = order == 1,
-            .transitions = order == 2,
-            .verify_transitions = true,
-        };
-        CheckStream vector;
-        const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
-                                vector.statistics.transition_verified == vector.statistics.transition_hits,
-                          order == 1 ? "graph paths or level-order batch partitions differ" :
-                          order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
-        check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
-        if (vector_valid)
+        for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
         {
-            check_test_expect(test, vector.statistics.nodes == graph->count, "graph statistics lost nodes");
-            for (uint32_t i = 1; i < vector.report_count; i += 1)
+            const uint32_t batch = run / 3;
+            const uint32_t order = run % 3;
+            const CheckOptions vector_options = {
+                .batch_size = batch,
+                .regions = order == 0,
+                .level_order = order == 1,
+                .transitions = order == 2,
+                .verify_transitions = true,
+                .conversion_ids = layout != 0,
+            };
+            CheckStream vector;
+            const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
+            check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
+                                    vector.statistics.transition_verified == vector.statistics.transition_hits,
+                              order == 1 ? "graph paths or level-order batch partitions differ" :
+                              order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
+            check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
+            if (vector_valid)
             {
-                check_test_expect(test, vector.reports[i - 1].token <= vector.reports[i].token, "diagnostics are not in source-token order");
+                check_test_expect(test, vector.statistics.nodes == graph->count, "graph statistics lost nodes");
+                for (uint32_t i = 1; i < vector.report_count; i += 1)
+                {
+                    check_test_expect(test, vector.reports[i - 1].token <= vector.reports[i].token, "diagnostics are not in source-token order");
+                }
             }
+            arena_pop_to(output, scalar_end);
         }
-        arena_pop_to(output, scalar_end);
     }
     arena_pop_to(output, mark);
 }
@@ -6010,6 +6016,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 }
 
 #include "c_check_graph_test.c"
+#include "c_check_conversion_ids_test.c"
 #include "c_check_stream_columns_test.c"
 #include "c_check_builtin_graph_test.c"
 #include "c_check_varargs_graph_test.c"
@@ -6171,6 +6178,7 @@ static int run_checker_tests(int argc, char** argv)
     bool requests = false;
     bool sizeof_only = false;
     bool transitions_only = false;
+    bool conversion_ids_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -6238,6 +6246,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             requests = true;
         }
+        else if (strcmp(argv[i], "--conversion-ids") == 0)
+        {
+            conversion_ids_only = true;
+        }
         else if (strcmp(argv[i], "--transitions") == 0)
         {
             transitions_only = true;
@@ -6267,9 +6279,9 @@ static int run_checker_tests(int argc, char** argv)
     // The selections run their own checks whole: --part deals the default run's.
     options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
-                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
+                                                           program_library || embed_initializers || requests || sizeof_only || transitions_only || conversion_ids_only || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions|--conversion-ids]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -6294,6 +6306,18 @@ static int run_checker_tests(int argc, char** argv)
             check_test_const_sources(&test, clang);
             check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
+        }
+        else if (initialized && conversion_ids_only)
+        {
+            check_test_conversion_ids(&test);
+            Arena storage = arena_reserve(UINT64_C(1) << 27);
+            Arena output = arena_reserve(UINT64_C(1) << 28);
+            Arena scratch = arena_reserve(UINT64_C(1) << 27);
+            check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
+            check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
+            arena_release(&scratch);
+            arena_release(&output);
+            arena_release(&storage);
         }
         else if (initialized && embed_initializers)
         {
@@ -6444,6 +6468,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_const_programs(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_conversion_ids(&test);
             }
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);

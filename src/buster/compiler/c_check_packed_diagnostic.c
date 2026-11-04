@@ -51,7 +51,7 @@ static bool check_input_packed_finalize(CheckInput* input, const Parser* parser,
                                          (op == CHECK_OP_CONDITIONAL && i == 0);
                     // Explicit casts cancel only a directly addressed member, already handled by the source
                     // witness. Their target must not flow into a conditional/comma expression inside the cast.
-                    const TypeId target = explicit || comparison ? 0 : boolean ? BUSTER_TYPE_BOOL : stream->conversions[node].operands[i].type;
+                    const TypeId target = explicit || comparison ? 0 : boolean ? BUSTER_TYPE_BOOL : check_stream_conversions(stream, node).operands[i].type;
                     uint8_t alignment = check_packed_conversion_alignment(types, check_stream_type(stream, operand), target);
                     const bool inherit = op == CHECK_OP_SELECT || (op == CHECK_OP_COMMA && i == 1) || (op == CHECK_OP_CONDITIONAL && i != 0);
                     alignment = inherit && targets[node] < alignment ? targets[node] : alignment;

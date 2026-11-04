@@ -858,7 +858,7 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
     {
         const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
         const uint32_t conversion = op == CHECK_OP_ASSIGN ? 1u : 0u;
-        const uint32_t flags = stream->conversions[node].operands[conversion].flags;
+        const uint32_t flags = check_stream_conversions(stream, node).operands[conversion].flags;
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
             check_common_integer_constant(stream, source))
         {
@@ -1678,7 +1678,7 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
     {
         const CheckOp op = graph->ops[node];
         const uint32_t operand = op == CHECK_OP_ADDRESS || op == CHECK_OP_CONVERT ? graph->operand0[node] : BUSTER_CHECK_NONE;
-        const bool arrays = op == CHECK_OP_CONVERT && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_ARRAY) != 0;
+        const bool arrays = op == CHECK_OP_CONVERT && (check_stream_conversions(stream, node).operands[0].flags & BUSTER_CHECK_CONVERT_ARRAY) != 0;
         if ((op == CHECK_OP_ADDRESS || arrays) && operand < graph->count)
         {
             const uint32_t root = op == CHECK_OP_ADDRESS ? check_common_address_root(graph, stream, types, operand, true) :
@@ -3072,7 +3072,7 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         for (uint32_t steps = 0; selector_node < stream->count && steps < stream->count; steps += 1)
         {
             if (stream->graph->ops[selector_node] != CHECK_OP_CONVERT ||
-                (stream->conversions[selector_node].operands[0].flags & BUSTER_CHECK_CONVERT_CAST) != 0)
+                (check_stream_conversions(stream, selector_node).operands[0].flags & BUSTER_CHECK_CONVERT_CAST) != 0)
             {
                 break;
             }

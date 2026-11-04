@@ -159,7 +159,7 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
         if (checked)
         {
             check_test_expect(test, check_stream_type(&expected, start) == BUSTER_TYPE_VOID && check_stream_value(&expected, start).fault == CHECK_FAULT_NONE &&
-                                   expected.conversions[start].operands[1].type == 0 && expected.varargs[0].node == start &&
+                                   check_stream_conversions(&expected, start).operands[1].type == 0 && expected.varargs[0].node == start &&
                                    expected.varargs[0].evaluated_operands == 1 && expected.varargs[0].mutates_list &&
                                    expected.varargs[0].warnings == BUSTER_CHECK_VARARGS_WARN_LAST_PARAMETER,
                               "va_start typechecks its source context but does not evaluate the second operand's fault/effect");

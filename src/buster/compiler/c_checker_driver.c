@@ -2168,13 +2168,13 @@ static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream
         printf(" flags=0x%x fault=%u warnings=0x%x", value->flags, value->fault, stream->warnings[node]);
         for (uint32_t i = 0; i < 3; i += 1)
         {
-            const CheckConversion conversion = stream->conversions[node].operands[i];
+            const CheckConversion conversion = check_stream_conversions(stream, node).operands[i];
             if (conversion.flags != 0)
             {
                 printf(" operand%u=(type:%u,conversions:0x%x)", i, conversion.type, conversion.flags);
             }
         }
-        const CheckConversion store = stream->conversions[node].store;
+        const CheckConversion store = check_stream_conversions(stream, node).store;
         if (store.flags != 0)
         {
             printf(" store=(type:%u,conversions:0x%x)", store.type, store.flags);
@@ -3566,6 +3566,7 @@ struct CheckDriverCommand
     bool verify;
     // --check-transitions: the checker's vector path by its memoized transitions (CheckOptions.transitions, #1050).
     bool check_transitions;
+    bool check_conversion_ids;
     bool dump;
     bool dump_static;
     bool quiet;
@@ -3803,6 +3804,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     .scalar = scalar,
                     .verify = verify,
                     .transitions = command->check_transitions,
+                    .conversion_ids = command->check_conversion_ids,
                     .verify_transitions = verify,
                     // The run is the output arena's first user in the unit, through no copy of it: past its length it is
                     // as the kernel mapped it unless an earlier unit's pushes reached there (arena_untouched).
@@ -4361,6 +4363,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool verify = false;
     // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
     bool check_transitions = false;
+    bool check_conversion_ids = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -4579,6 +4582,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--verify") == 0)
         {
             verify = true;
+        }
+        else if (strcmp(arguments[i], "--check-conversion-ids") == 0)
+        {
+            check_conversion_ids = true;
         }
         else if (strcmp(arguments[i], "--check-transitions") == 0)
         {
@@ -4815,6 +4822,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .scalar = scalar,
         .verify = verify,
         .check_transitions = check_transitions,
+        .check_conversion_ids = check_conversion_ids,
         .dump = dump,
         .dump_static = dump_static,
         .quiet = quiet,
@@ -4873,7 +4881,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--check-conversion-ids] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

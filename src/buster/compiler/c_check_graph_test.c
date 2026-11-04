@@ -12,7 +12,7 @@ static bool check_test_graph_cleared(const CheckGraph* graph)
 
 static bool check_test_graph_failed_stream(const CheckStream* stream)
 {
-    return !check_stream_has_values(stream) && stream->conversions == 0 && stream->argument_conversions == 0 && stream->diagnostics == 0 && stream->reports == 0 && stream->count == 0 && stream->report_count == 0 && stream->status == CHECK_STATUS_RESOURCE && stream->failed_node == BUSTER_CHECK_NONE && stream->statistics.nodes == 0 && stream->statistics.levels == 0 && stream->statistics.batches == 0 && stream->statistics.scalar_nodes == 0 && stream->statistics.vector_nodes == 0 && stream->statistics.output_bytes == 0 && stream->statistics.scratch_bytes == 0;
+    return !check_stream_has_values(stream) && stream->conversions == 0 && stream->conversion_ids == NULL && stream->conversion_table.values == NULL && stream->argument_conversions == 0 && stream->diagnostics == 0 && stream->reports == 0 && stream->count == 0 && stream->report_count == 0 && stream->status == CHECK_STATUS_RESOURCE && stream->failed_node == BUSTER_CHECK_NONE && stream->statistics.nodes == 0 && stream->statistics.levels == 0 && stream->statistics.batches == 0 && stream->statistics.scalar_nodes == 0 && stream->statistics.vector_nodes == 0 && stream->statistics.output_bytes == 0 && stream->statistics.scratch_bytes == 0;
 }
 
 static bool check_test_graph_canary(const uint8_t* bytes, uint64_t begin, uint64_t end)
@@ -253,8 +253,8 @@ static void check_test_graph_barriers(CheckTest* test, Arena* storage, Arena* ou
                     const TypeId function_pointer = (TypeId)(first_derived + 2) << BUSTER_TYPE_INDEX_SHIFT;
                     const TypeId qualified_pointer = (TypeId)(first_derived + 3) << BUSTER_TYPE_INDEX_SHIFT;
                     check_test_expect(test, check_stream_type(stream, address) == int_pointer && type_element(table, int_pointer) == BUSTER_TYPE_INT, "address creates the first source-order derived type");
-                    check_test_expect(test, check_stream_type(stream, decay) == short_pointer && stream->conversions[decay].operands[0].type == short_pointer && type_element(table, short_pointer) == BUSTER_TYPE_SHORT, "array decay creates the next source-order derived type");
-                    check_test_expect(test, check_stream_type(stream, call) == BUSTER_TYPE_INT && stream->conversions[call].operands[0].type == function_pointer && type_element(table, function_pointer) == function, "callee decay retains source-order type identity");
+                    check_test_expect(test, check_stream_type(stream, decay) == short_pointer && check_stream_conversions(stream, decay).operands[0].type == short_pointer && type_element(table, short_pointer) == BUSTER_TYPE_SHORT, "array decay creates the next source-order derived type");
+                    check_test_expect(test, check_stream_type(stream, call) == BUSTER_TYPE_INT && check_stream_conversions(stream, call).operands[0].type == function_pointer && type_element(table, function_pointer) == function, "callee decay retains source-order type identity");
                     check_test_expect(test, check_stream_type(stream, conditional) == qualified_pointer && type_element(table, qualified_pointer) == (BUSTER_TYPE_LONG | BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE), "conditional pointer composite follows earlier type creation");
                     check_test_expect(test, check_stream_value(stream, query).integer == 6 && check_stream_value(stream, sum).integer == 7 && table->types.count == first_derived + 4, "builtin region after barriers reads completed dependencies without new types");
                 }
@@ -389,15 +389,16 @@ static void check_test_graph_updates(CheckTest* test, TypeTable* table, Arena* s
             const uint32_t node = nodes[i];
             const CheckValue checked_value = check_stream_value(&stream, node);
             const CheckValue* value = &checked_value;
-            const CheckNodeConversions* conversions = &stream.conversions[node];
+            const CheckNodeConversions conversions_value = check_stream_conversions(&stream, node);
+            const CheckNodeConversions* conversions = &conversions_value;
             check_test_expect(test, value->type == BUSTER_TYPE_UCHAR && value->category == CHECK_RVALUE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 && value->constant_kind == CHECK_CONSTANT_NONE && (value->flags & BUSTER_CHECK_ICE) == 0, "update expression is an unqualified nonconstant value with a side effect");
             check_test_expect(test, conversions->operands[0].type == BUSTER_TYPE_INT && (conversions->operands[0].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0 && conversions->store.type == BUSTER_TYPE_UCHAR && (conversions->store.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0, "update retains distinct promoted LHS read and narrow store conversions");
         }
         if (valid)
         {
-            check_test_expect(test, check_stream_type(&stream, mixed) == BUSTER_TYPE_UCHAR && stream.conversions[mixed].operands[0].type == BUSTER_TYPE_DOUBLE && stream.conversions[mixed].operands[1].type == BUSTER_TYPE_DOUBLE && stream.conversions[mixed].store.type == BUSTER_TYPE_UCHAR, "mixed compound assignment retains floating arithmetic and integer storage types");
-            check_test_expect(test, check_stream_type(&stream, pointer_update) == pointer && stream.conversions[pointer_update].store.type == pointer && check_stream_value(&stream, query).integer == 8 && (check_stream_flags(&stream, query) & BUSTER_CHECK_SIDE_EFFECT) == 0, "pointer update stays typed across its barrier and unevaluated sizeof suppresses its effect");
-            check_test_expect(test, stream.conversions[left].store.type == 0 && stream.conversions[right].store.type == 0 && stream.conversions[query].store.type == 0, "ordinary nodes do not retain stale store conversions");
+            check_test_expect(test, check_stream_type(&stream, mixed) == BUSTER_TYPE_UCHAR && check_stream_conversions(&stream, mixed).operands[0].type == BUSTER_TYPE_DOUBLE && check_stream_conversions(&stream, mixed).operands[1].type == BUSTER_TYPE_DOUBLE && check_stream_conversions(&stream, mixed).store.type == BUSTER_TYPE_UCHAR, "mixed compound assignment retains floating arithmetic and integer storage types");
+            check_test_expect(test, check_stream_type(&stream, pointer_update) == pointer && check_stream_conversions(&stream, pointer_update).store.type == pointer && check_stream_value(&stream, query).integer == 8 && (check_stream_flags(&stream, query) & BUSTER_CHECK_SIDE_EFFECT) == 0, "pointer update stays typed across its barrier and unevaluated sizeof suppresses its effect");
+            check_test_expect(test, check_stream_conversions(&stream, left).store.type == 0 && check_stream_conversions(&stream, right).store.type == 0 && check_stream_conversions(&stream, query).store.type == 0, "ordinary nodes do not retain stale store conversions");
         }
         arena_pop_to(output, output_mark);
         graph.operand1[nodes[0]] = right;

@@ -64,9 +64,9 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
                                    expected.effects[1].value.integer == 254 && expected.effects[0].destination.object == 211 &&
                                    expected.effects[0].destination.offset == 3 && expected.effects[0].destination.type == destination,
                               "compact store effects preserve source order, target bits and destination provenance");
-            check_test_expect(test, expected.conversions[first].operands[0].type == BUSTER_TYPE_UCHAR &&
-                                   expected.conversions[first].operands[1].type == BUSTER_TYPE_INT &&
-                                   expected.conversions[first].store.type == type_element(table, destination),
+            check_test_expect(test, check_stream_conversions(&expected, first).operands[0].type == BUSTER_TYPE_UCHAR &&
+                                   check_stream_conversions(&expected, first).operands[1].type == BUSTER_TYPE_INT &&
+                                   check_stream_conversions(&expected, first).store.type == type_element(table, destination),
                               "overflow graph conversions retain original integer shapes and volatile store type");
             check_test_expect(test, check_stream_value(&expected, selected).integer == 1 && (check_stream_flags(&expected, selected) & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
                                    check_stream_value(&expected, query).integer == 1 && (check_stream_flags(&expected, query) & BUSTER_CHECK_SIDE_EFFECT) == 0,
@@ -116,8 +116,8 @@ static void check_test_builtin_graph_typed(CheckTest* test, TypeTable* table, Ar
                                    check_stream_value(&expected, overflow).integer == 1 && expected.effects[1].value.integer == UINT64_MAX - 1 &&
                                    expected.effects[0].value.type == BUSTER_TYPE_ULONG && expected.effects[0].runtime_builtin == CBUILTIN_MUL_OVERFLOW &&
                                    expected.effects[0].evaluated_operands == 7 && expected.effects[0].unsupported == 0 &&
-                                   expected.conversions[alias].operands[0].type == BUSTER_TYPE_ULONG &&
-                                   expected.conversions[alias].operands[1].type == BUSTER_TYPE_ULONG,
+                                   check_stream_conversions(&expected, alias).operands[0].type == BUSTER_TYPE_ULONG &&
+                                   check_stream_conversions(&expected, alias).operands[1].type == BUSTER_TYPE_ULONG,
                               "typed ULONG multiply truncates before arithmetic and retains normalized runtime and store metadata");
             check_test_expect(test, expected.effects[2].node == warning && expected.effects[2].warnings == BUSTER_CHECK_BUILTIN_TYPED_OVERFLOW_WARN_QUALIFIERS &&
                                    expected.effects[2].warning_operands == 4 && expected.effects[2].value.integer == 4 &&

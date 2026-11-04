@@ -513,7 +513,8 @@ static void check_lower_half_chain(CheckLowerWriter* writer, uint32_t node, bool
 {
     const CheckProgram* program = writer->program;
     const CheckOp op = program->input->graph.ops[node];
-    const CheckNodeConversions* conversion = program->stream->conversions + node;
+    const CheckNodeConversions conversion_value = check_stream_conversions(program->stream, node);
+    const CheckNodeConversions* conversion = &conversion_value;
     if (op == CHECK_OP_NEGATIVE)
     {
         check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_F32, 0);
@@ -540,7 +541,8 @@ static void check_lower_half_expression(CheckLowerWriter* writer, uint32_t node,
     const CheckProgram* program = writer->program;
     const CheckOp op = program->input->graph.ops[node];
     const TypeId type = check_stream_type(program->stream, node);
-    const CheckNodeConversions* conversion = program->stream->conversions + node;
+    const CheckNodeConversions conversion_value = check_stream_conversions(program->stream, node);
+    const CheckNodeConversions* conversion = &conversion_value;
     if (!check_lower_half_excess(writer, format) && format == CHECK_HALF_BRAIN)
     {
         check_lower_unsupported(writer, "__bf16 arithmetic where the unit's target has AVX10.2");

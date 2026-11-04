@@ -206,7 +206,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     const TypeId declared = op == CHECK_OP_INITIALIZE ? graph->types[node] : 0;
                     if (check_warning_graph_null_candidate(graph, stream, source))
                     {
-                        check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion);
+                        check_warning_graph_null(&reader, stream, source, check_stream_conversions(stream, node).operands[slot].type, lvalue, declared, completion);
                     }
                 }
                 else if (op == CHECK_OP_CALL)

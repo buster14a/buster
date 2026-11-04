@@ -377,7 +377,9 @@ static bool check_init_vector_fold(CheckInitWalker* walker, uint32_t node, uint8
     const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR;
     const uint32_t left_node = graph->operand0[node];
     const uint32_t right_node = binary ? graph->operand1[node] : left_node;
-    const CheckNodeConversions* conversions = walker->stream->conversions != NULL ? walker->stream->conversions + node : NULL;
+    const bool has_conversions = walker->stream->conversions != NULL || walker->stream->conversion_ids != NULL;
+    const CheckNodeConversions decoded = has_conversions ? check_stream_conversions(walker->stream, node) : (CheckNodeConversions){ 0 };
+    const CheckNodeConversions* conversions = has_conversions ? &decoded : NULL;
     TypeId left_type = conversions != NULL ? conversions->operands[0].type : 0;
     TypeId right_type = conversions != NULL ? conversions->operands[1].type : 0;
     left_type = check_vector_type(walker->types, left_type) ? left_type : check_stream_type(walker->stream, left_node);

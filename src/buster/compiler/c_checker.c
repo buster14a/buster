@@ -308,6 +308,23 @@ struct CheckNodeConversions
     CheckConversion store;
 };
 
+// The optional conversion-ID writer owns its growing arrays in the output arena. Hash slots are needed only while
+// checking; readers retain only values/count and the per-node IDs. No pointer into values survives an insertion.
+typedef struct CheckConversionTable CheckConversionTable;
+struct CheckConversionTable
+{
+    CheckNodeConversions* values;
+    uint32_t* hashes;
+    uint32_t* slots;
+    uint32_t count;
+    uint32_t capacity;
+    uint32_t slot_count;
+    Arena* arena;
+    uint32_t failed_node;
+    bool scalar;
+    bool failed;
+};
+
 typedef struct CheckStatistics CheckStatistics;
 struct CheckStatistics
 {
@@ -560,7 +577,11 @@ struct CheckStream
     uint32_t* payload_rows;
     CheckValue* payloads;
     uint32_t payload_count;
+    // Dense conversions remain the default and the hand-built stream representation. The opt-in layout instead
+    // writes one conversion_ids word per node; check_stream_conversions is the only reader of either representation.
     CheckNodeConversions* conversions;
+    uint32_t* conversion_ids;
+    CheckConversionTable conversion_table;
     CheckConversion* argument_conversions;
     CheckDiagnostic* diagnostics;
     // The operand each diagnostic names, as CheckActionResult.diagnostic_operand has it (a CALL's argument i is 1 + i).
@@ -640,7 +661,11 @@ struct CheckOptions
     // past it are as the kernel mapped them, zero (#628's fresh_output): the C driver's output arena, whose first user the
     // run is. The run then clears no column and writes no zero in its main loop (CheckStream.zero_columns).
     bool fresh_output;
+    // Experimental #1238 layout. Enable explicitly until the producer and lowering have 9700X qualification.
+    bool conversion_ids;
 };
+
+#include "c_check_conversion_ids.c"
 
 _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, category) == 4 && __builtin_offsetof(CheckValue, flags) == 8 && __builtin_offsetof(CheckValue, constant_kind) == 12 &&
                __builtin_offsetof(CheckValue, integer) == 16 && __builtin_offsetof(CheckValue, object) == 64,
@@ -1752,12 +1777,17 @@ static inline __attribute__((always_inline)) CheckConversion check_conversion_fi
 static inline __attribute__((always_inline)) void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
     check_stream_set_value_flags(stream, node, &result->value, check_value_source_flags((CheckOp)stream->graph->ops[node], result->value.flags));
-    CheckNodeConversions* conversions = stream->conversions + node;
+    CheckNodeConversions compact;
+    CheckNodeConversions* conversions = stream->conversion_ids != NULL ? &compact : stream->conversions + node;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->conversions); i += 1)
     {
         conversions->operands[i] = check_conversion_fields(&result->conversions[i]);
     }
     conversions->store = check_conversion_fields(&result->store_conversion);
+    if (stream->conversion_ids != NULL)
+    {
+        check_stream_set_conversions(stream, node, &compact);
+    }
     // Few nodes have a diagnostic or a warning: in a fresh output (CheckStream.zero_columns), the run writes only those
     // that do. A member's offset is written whatever it is, since the member accesses, a node in 13 of sqlite3.c's, touch
     // every line of its column anyway.
@@ -1830,9 +1860,17 @@ static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTab
     check_stream_set_value(stream, node, valid ? leaf : &(const CheckValue){ 0 });
     // In a fresh output (CheckStream.zero_columns) the record's other fields, the warnings, the member's offset and a
     // valid leaf's diagnostic are zero already.
+    if (stream->conversion_ids != NULL)
+    {
+        const CheckNodeConversions conversions = { .operands = { { .type = leaf->type } } };
+        check_stream_set_conversions(stream, node, &conversions);
+    }
     if (stream->zero_columns)
     {
-        stream->conversions[node].operands[0].type = leaf->type;
+        if (stream->conversion_ids == NULL)
+        {
+            stream->conversions[node].operands[0].type = leaf->type;
+        }
         if (!valid)
         {
             stream->diagnostics[node] = CHECK_DIAG_INVALID_TYPE;
@@ -1840,7 +1878,10 @@ static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTab
     }
     else
     {
-        stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
+        if (stream->conversion_ids == NULL)
+        {
+            stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
+        }
         stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
         stream->warnings[node] = 0;
         stream->member_offsets[node] = 0;
@@ -3663,7 +3704,16 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             memset(stream->payload_rows, 0, (uint64_t)count * sizeof(uint32_t));
         }
-        stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
+        if (options->conversion_ids)
+        {
+            stream->conversion_ids = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+            stream->conversion_table.arena = output;
+            stream->conversion_table.scalar = BUSTER_SCALAR_PATH(options->scalar);
+        }
+        else
+        {
+            stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
+        }
         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
         stream->diagnostic_operands = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->member_offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count);
@@ -3685,7 +3735,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity, &stream->statistics.scratch_bytes);
         stream->overload_addresses = stream->overload_address_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadAddressEffect, stream->overload_address_capacity) : 0;
         result = stream->value_types != 0 && stream->value_flags != 0 && stream->value_objects != 0 && stream->value_categories != 0 &&
-                 stream->value_constants != 0 && stream->payload_rows != 0 && stream->payloads != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
+                 stream->value_constants != 0 && stream->payload_rows != 0 && stream->payloads != 0 && (options->conversion_ids ? stream->conversion_ids != NULL : stream->conversions != NULL) && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
                  stream->warnings != 0 &&
                  stream->warning_ignored != 0 && stream->reports != 0 &&
                  (!constant_contexts || stream->constant_evaluated != NULL) &&
@@ -3774,7 +3824,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->zero_columns = false;
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
-            const uint32_t exhausted = check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));
+            const uint32_t exhausted = stream->conversion_table.failed ? stream->conversion_table.failed_node :
+                                       check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));
             if (exhausted != BUSTER_CHECK_NONE)
             {
                 result = false;
@@ -3803,6 +3854,14 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 check_graph_reports(types, graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
             }
         }
+    }
+    if (result)
+    {
+        stream->statistics.output_bytes = output->length - output_start;
+        // There are no more writers. Do not expose a live writer or its temporary lookup arrays to consumers.
+        stream->conversion_table.arena = NULL;
+        stream->conversion_table.hashes = NULL;
+        stream->conversion_table.slots = NULL;
     }
     if (!result)
     {

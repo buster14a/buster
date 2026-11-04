@@ -126,11 +126,11 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
         const CheckValue value_b = check_stream_value(b, i);
         equal = check_benchmark_value_equal(&value_a, &value_b) && a->diagnostics[i] == b->diagnostics[i] &&
                 a->warnings[i] == b->warnings[i] && a->warning_ignored[i] == b->warning_ignored[i] && a->member_offsets[i] == b->member_offsets[i];
-        equal = equal && a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
+        equal = equal && check_stream_conversions(a, i).store.type == check_stream_conversions(b, i).store.type && check_stream_conversions(a, i).store.flags == check_stream_conversions(b, i).store.flags;
         for (uint32_t j = 0; equal && j < 3; j += 1)
         {
-            equal = a->conversions[i].operands[j].type == b->conversions[i].operands[j].type &&
-                    a->conversions[i].operands[j].flags == b->conversions[i].operands[j].flags;
+            equal = check_stream_conversions(a, i).operands[j].type == check_stream_conversions(b, i).operands[j].type &&
+                    check_stream_conversions(a, i).operands[j].flags == check_stream_conversions(b, i).operands[j].flags;
         }
     }
     for (uint32_t i = 0; equal && i < arguments; i += 1)

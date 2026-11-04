@@ -239,7 +239,7 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
     const bool pointer = check_action_kind(writer->program->types, plan->value_type) == BUSTER_TYPE_KIND_POINTER;
     const TypeId computed =
         plan->builtin ? plan->value_type == BUSTER_TYPE_BOOL ? BUSTER_TYPE_UINT : type_promote(writer->program->types, plan->value_type)
-                      : stream->conversions[plan->node].operands[0].type;
+                      : check_stream_conversions(stream, plan->node).operands[0].type;
     const uint8_t class = check_lower_class(writer, computed);
     uint8_t operation = increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op);
     if (plan->builtin)
@@ -799,9 +799,9 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         else if (operation == BUSTER_CHECK_ATOMIC_UPDATE && !(op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT))
         {
             const TypeId own = check_stream_type(stream, graph->operand1[node]);
-            const TypeId converted = stream->conversions[node].operands[1].type;
+            const TypeId converted = check_stream_conversions(stream, node).operands[1].type;
             plan->operand_type = check_action_kind(types, value) == BUSTER_TYPE_KIND_POINTER ? BUSTER_TYPE_LONG
-                                 : check_lower_complex(writer, stream->conversions[node].operands[0].type)
+                                 : check_lower_complex(writer, check_stream_conversions(stream, node).operands[0].type)
                                      ? check_lower_complex_target(writer, own, converted)
                                      : converted;
             plan->arguments[1] = check_lower_temporary(writer, check_lower_value_class(writer, plan->operand_type));

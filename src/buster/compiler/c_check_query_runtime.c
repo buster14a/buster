@@ -278,7 +278,7 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
             if (operands[i] != BUSTER_CHECK_NONE)
             {
                 const CheckValue operand = check_stream_value(stream, operands[i]);
-                effect |= proofs[indices[operands[i]]].syntax_effects || check_query_read_effect(types, &operand, stream->conversions[node].operands[i]);
+                effect |= proofs[indices[operands[i]]].syntax_effects || check_query_read_effect(types, &operand, check_stream_conversions(stream, node).operands[i]);
             }
         }
         if (check_graph_has_arguments(op))
@@ -409,7 +409,8 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
         result.value = check_stream_value(stream, node);
         result.value.constant_kind = CHECK_CONSTANT_NONE;
         result.diagnostic = stream->diagnostics[node];
-        memcpy(result.conversions, stream->conversions[node].operands, sizeof(result.conversions));
+        const CheckNodeConversions node_conversions = check_stream_conversions(stream, node);
+        memcpy(result.conversions, node_conversions.operands, sizeof(result.conversions));
     }
     else
     {

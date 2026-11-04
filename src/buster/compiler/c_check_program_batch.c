@@ -115,7 +115,7 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
         }
         else
         {
-            const TypeId type = stream->conversions[node].operands[0].type;
+            const TypeId type = check_stream_conversions(stream, node).operands[0].type;
             check_lower_truth(writer, type, op == CHECK_OP_NOT);
             check_lower_operand(writer, node, 0, false, type);
         }
@@ -255,8 +255,8 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
     if (valid)
     {
         const TypeId left = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ? value->type :
-                            op == CHECK_OP_SELECT ? 0 : program->stream->conversions[node].operands[0].type;
-        const TypeId right = binary ? program->stream->conversions[node].operands[1].type : 0;
+                            op == CHECK_OP_SELECT ? 0 : check_stream_conversions(program->stream, node).operands[0].type;
+        const TypeId right = binary ? check_stream_conversions(program->stream, node).operands[1].type : 0;
         valid = (graph->ops[a] == CHECK_OP_VALUE || check_stream_constant_kind(program->stream, a) == CHECK_CONSTANT_INTEGER) &&
                 (!binary || graph->ops[b] == CHECK_OP_VALUE || check_stream_constant_kind(program->stream, b) == CHECK_CONSTANT_INTEGER) &&
                 (left == 0 || left == check_stream_type(program->stream, a) || check_lower_conversion_empty(writer, check_stream_type(program->stream, a), left)) &&

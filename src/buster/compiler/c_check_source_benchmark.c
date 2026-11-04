@@ -300,8 +300,10 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
             const CheckValue selected_value = check_stream_value(stream, selected);
             equal = check_test_value_equal(&expected, &selected_value) && source->diagnostics[node] == stream->diagnostics[selected] &&
                     source->warnings[node] == stream->warnings[selected] && source->warning_ignored[node] == stream->warning_ignored[selected];
-            const CheckNodeConversions* a = source->conversions + node;
-            const CheckNodeConversions* b = stream->conversions + selected;
+            const CheckNodeConversions a_value = check_stream_conversions(source, node);
+            const CheckNodeConversions* a = &a_value;
+            const CheckNodeConversions b_value = check_stream_conversions(stream, selected);
+            const CheckNodeConversions* b = &b_value;
             for (uint32_t operand = 0; equal && operand < 3; operand += 1)
             {
                 equal = a->operands[operand].type == b->operands[operand].type && a->operands[operand].flags == b->operands[operand].flags;
