@@ -2917,10 +2917,17 @@ static void check_action_scalar(TypeTable* table, const CheckAction* action, Che
     check_action_compute(table, action, result, 0, NULL);
 }
 
+// The operators whose integer folds a batch takes 8 lanes at a time (check_action_fold_vector).
+static bool check_action_fold_operator(CheckOp op)
+{
+    return op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT ||
+           (op >= CHECK_OP_SHIFT_LEFT && op <= CHECK_OP_BIT_XOR);
+}
+
 static bool check_action_vector_eligible(const TypeTable* table, const CheckAction* action)
 {
     const CheckOp op = action->op;
-    bool result = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || (op >= CHECK_OP_SHIFT_LEFT && op <= CHECK_OP_BIT_XOR);
+    bool result = check_action_fold_operator(op);
     const uint32_t count = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT ? 1 : 2;
     for (uint32_t i = 0; i < count && result; i += 1)
     {

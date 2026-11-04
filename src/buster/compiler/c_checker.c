@@ -2763,12 +2763,21 @@ static void check_graph_region_postorder(TypeTable* types, const CheckGraph* gra
                 {
                     open &= operands[i] == BUSTER_CHECK_NONE || operands[i] < begin || (marks[operands[i]] & BUSTER_CHECK_MARK_DONE) != 0;
                 }
-                // A discard whose operand is done is written at once (check_graph_discard), as the batch's actions read none
-                // of each other and it interns no type: the same records, and the same table.
+                // Only the operators whose integer folds a batch takes 8 lanes at a time (check_action_fold_operator)
+                // join it. Another node whose operands are done is checked at once, a discard without its action
+                // (check_graph_discard), as the batch's actions read none of each other and a region's nodes intern no
+                // type: the same records, and the same table. On sqlite3.c's -c a batch held 1.4 nodes, and its
+                // machinery cost more than it saved where no fold went with it (#1050).
                 CheckValue discarded;
                 if (open && check_graph_discard_taken(types, graph, stream, node, &discarded))
                 {
                     check_graph_discard(types, stream, node, &discarded);
+                    marks[node] |= BUSTER_CHECK_MARK_DONE;
+                    node += 1;
+                }
+                else if (open && !check_action_fold_operator(graph->ops[node]))
+                {
+                    check_graph_node_action(types, graph, stream, node, 0, 0, false, NULL);
                     marks[node] |= BUSTER_CHECK_MARK_DONE;
                     node += 1;
                 }
