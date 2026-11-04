@@ -2783,6 +2783,11 @@ static const CheckImplicitIntFixture check_implicit_int_fixtures[] =
     { "a pointer declarator with a GNU attribute", "*__attribute__((unused)) p;\n" },
     { "a pointer declarator with a GNU attribute and its initializer", "*__attribute__((unused)) p = 0;\n" },
     { "a function declarator with a GNU attribute", "*__attribute__((unused)) p(void);\n" },
+    { "a prototype parameter that is a pointer declarator", "int f(*p) { return 0; }\n" },
+    { "a const prototype parameter without a type specifier", "int g(const x) { return x; }\n" },
+    { "a register prototype parameter without a type specifier", "int h(register r) { return r; }\n" },
+    { "a pointer prototype parameter after a typed one", "int k(int a, *p);\n" },
+    { "qualified pointer and object prototype parameters", "int m(const *p, volatile v) { return *p + v; }\n" },
     {
         "an old-style program with file-scope, block-scope and parameter implicit int",
         "static x = 3;\n"
@@ -2801,15 +2806,6 @@ struct CheckImplicitIntMode
     // C94 (iso9899:199409) is C89 with digraphs, as the preprocessor's mode table makes it.
     uint8_t digraphs;
 };
-
-// Whether the checker's `message` is clang's `oracle` message without its warning option, which the checker doesn't
-// repeat in an input report.
-static bool check_test_implicit_int_message(const char* message, const char* oracle)
-{
-    const char* option = strstr(oracle, " [-W");
-    const size_t length = option != NULL ? (size_t)(option - oracle) : strlen(oracle);
-    return length < sizeof(((CheckCorpusOutcome*)0)->message) ? strncmp(message, oracle, length) == 0 && message[length] == 0 : false;
-}
 
 // Every fixture in the C89 modes (where clang and the checker accept it) and the C99 boundary (where both refuse it
 // with clang's diagnostic).
@@ -2874,10 +2870,9 @@ static void check_test_implicit_int(CheckTest* test, const char* clang, const ch
                 {
                     // An old-style definition's parser keeps its missing return type first, before clang's first
                     // undeclared parameter (both on line 1): its message is the parser's missing-type one. Every other
-                    // row's is clang's, without clang's warning option.
-                    const char* const missing = "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int";
-                    const bool same = fixture->old_style ? strcmp(outcome.message, missing) == 0 :
-                                                            check_test_implicit_int_message(outcome.message, oracle.message);
+                    // row's is clang's, with clang's warning option, as the parser gives it (#1227).
+                    const char* const missing = "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]";
+                    const bool same = strcmp(outcome.message, fixture->old_style ? missing : oracle.message) == 0;
                     snprintf(description, sizeof(description), "implicit int %s (%s): the diagnostic is the existing implicit-int one", fixture->rule, standard);
                     check_test_expect(test, same, description);
                 }

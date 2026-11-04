@@ -78,7 +78,8 @@ Parenthesized identifiers and non-call uses of ordinary names do not acquire an 
 
 C89's implicit `int` is read too (#1121): a declaration whose specifiers give no
 type has type `int`, at file scope and in a block, for objects, functions,
-parameters, members (`struct S { const x; };`), `register`/`auto`/`static`/
+parameters (an identifier list's and a prototype's, as in `int f(*p)`,
+`int g(const x)`, `int h(register r)` and `int k(int a, *p)`), members (`struct S { const x; };`), `register`/`auto`/`static`/
 `const` declarations and typedefs. A file-scope declaration with no specifier at
 all is such a declaration too (`x;`, `main() {}`, `f(a, b) {}`, `(x);`, `*p;`,
 and a declarator whose name follows a pointer's qualifier or attribute, as in

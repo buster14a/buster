@@ -3433,6 +3433,19 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "tested(n) { register i; i = helper(x + n); return i; }\n";
         check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-c89", clang, 1989, false, "-std=c89");
         check_test_program_source_standard(test, implicit_int_program_source, "implicit-int-program-gnu89", clang, 1989, true, "-std=gnu89");
+        // Prototype parameters without a type specifier (#1121, after #1240's parser): a pointer declarator, a const, a
+        // register and a volatile object, and a pointer after a typed parameter, whose declaration the definition's
+        // `int *` must match — each parameter's type decides the value clang's build computes.
+        static const char implicit_int_parameter_source[] =
+            "static f(*p) { return *p + (int)sizeof(*p); }\n"
+            "static g(const x) { return x * 2; }\n"
+            "static h(register r) { return r + 1; }\n"
+            "static m(const *p, volatile v) { return *p - v; }\n"
+            "int k(int a, *p);\n"
+            "int k(int a, int *p) { return a + *p; }\n"
+            "int tested(int n) { int v = 5; return f(&v) + g(n) + h(n) + m(&v, n) + k(n, &v); }\n";
+        check_test_program_source_standard(test, implicit_int_parameter_source, "implicit-int-parameters-c89", clang, 1989, false, "-std=c89");
+        check_test_program_source_standard(test, implicit_int_parameter_source, "implicit-int-parameters-gnu89", clang, 1989, true, "-std=gnu89");
     }
     if (check_test_takes())
     {
