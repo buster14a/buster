@@ -438,12 +438,18 @@ publish()
         printf 'The ledger is not published: no BUSTER_PERFORMANCE_LEDGER_TOKEN in the nightly-ledger environment (docs/ci.md).\n'
         return 0
     fi
-    local target="$work/publication" header
+    # Best effort: a publication that fails (a token refused, the network, the branch moved on meanwhile) warns and
+    # changes nothing else. The coordinator's artifacts carry the ledger from run to run, and the next run publishes it
+    # again; a fresh history is only ever pushed to a branch that doesn't exist yet, never forced over one that does.
+    local target="$work/publication" header remote=${NIGHTLY_PERFORMANCE_REMOTE:-https://github.com/buster14a/buster-performance.git}
     header=$(printf 'x-access-token:%s' "$NIGHTLY_PUBLICATION_TOKEN" | base64 -w 0)
     printf '::add-mask::%s\n' "$header"
-    local remote=https://github.com/buster14a/buster-performance.git
+    local auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header")
+    local published=true
+    : > "$work/publication.log"
     rm -rf "$target"
-    if ! git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" clone -q --depth 1 --branch nightly-ledger "$remote" "$target" 2> /dev/null; then
+    if ! GIT_TERMINAL_PROMPT=0 git "${auth[@]}" clone -q --depth 1 --branch nightly-ledger "$remote" "$target" 2>> "$work/publication.log"; then
+        rm -rf "$target"
         git init -q -b nightly-ledger "$target"
     fi
     mkdir -p "$target/nightly/reports"
@@ -451,9 +457,19 @@ publish()
     cp "$work/report.md" "$target/nightly/reports/$cycle.md"
     git -C "$target" add nightly
     if ! git -C "$target" diff --cached --quiet; then
-        git -C "$target" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "Nightly ledger: cycle $cycle (buster run ${GITHUB_RUN_ID:-local})"
-        git -C "$target" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push -q "$remote" HEAD:nightly-ledger
+        if ! git -C "$target" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Nightly ledger: cycle $cycle (buster run ${GITHUB_RUN_ID:-local})" 2>> "$work/publication.log" ||
+            ! GIT_TERMINAL_PROMPT=0 git -C "$target" "${auth[@]}" push -q "$remote" HEAD:nightly-ledger 2>> "$work/publication.log"; then
+            published=false
+        fi
+    fi
+    if [ "$published" = true ]; then
+        printf 'The ledger is published: buster-performance, branch nightly-ledger, nightly/reports/%s.md.\n' "$cycle"
+    else
+        # git's own reasons (`remote:` and `fatal:` lines) say why better than its last line.
+        local reason
+        reason=$(awk '/^(remote|fatal): / && n < 3 { r = r (n ? " " : "") $0; n += 1 } { last = $0 } END { print n ? r : last }' "$work/publication.log")
+        printf '::warning title=Nightly ledger::the ledger could not be published to buster-performance (%s); this run'"'"'s artifact keeps it, and the next run publishes it again\n' "$reason"
     fi
 }
 
@@ -621,10 +637,13 @@ coordinate()
         sleep "$pause"
     done
     summary < "$work/report.md"
-    publish "$cycle"
     if [ "$phase" = prepare ]; then
         output snapshot "$(awk -F '\t' -v cycle="$cycle" '$1 == "cycle" && $2 == cycle { print $3 }' "$ledger" | tail -n 1)"
         output pending "$(pending_handoff "$pending")"
+    fi
+    # After the handoff's outputs, and never failing the job: the window job's night doesn't depend on buster-performance.
+    publish "$cycle"
+    if [ "$phase" = prepare ]; then
         # The window job runs when the window is open, or opens before this job's 6 hours end (5 hours 55 minutes from
         # its start, to leave the job a margin).
         local current

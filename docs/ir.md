@@ -37,7 +37,7 @@ no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
 with `IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c` checks actual C
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c` checks actual C
 producers, both lowering paths and both text parsers. It explicitly requires
 promotion of a function with vectors (#141) and of one whose only SIMD values
 are masks (#179), as ordinary corpus mode requires promotion of every
@@ -123,7 +123,7 @@ column comparisons deterministic.
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
 | Binary arithmetic | `a,b` are values; result/operand types agree |
-| `mulhu` | `a,b` are `i64`, result `i64`: the high 64 bits of their unsigned 128-bit product (#141), which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); a pure operation the optimizer doesn't fold |
+| `intrinsic` | `a,b` of the result's type, `i32` or `i64`; `c` the operation (`BUSTER_IR_INTRINSIC_*`, printed after the operands as a comparison's predicate is), each a pure operation the optimizer doesn't fold (#141): `mulhu`, an `i64`'s alone, the high 64 bits of their unsigned 128-bit product, which Tier 1's split of the 128-bit integers makes ([the Tier 1 guide](tier1.md)'s "The 128-bit integers"); and the x86 builtins' bit manipulations, as BMI's instructions give them, `a` the source: `pdep` and `pext` (`a`'s low bits deposited at mask `b`'s set bits, or its bits there packed into the low ones), `bzhi` (`a` with its bits from `b`'s low byte up cleared, none past the width) and `bextr` (`a`'s bits from `b`'s low byte up, as many as its second byte says, zeros past the width), which the typed stream's rows of BMI2 and BMI1 lower to ([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins") |
 | Shifts | `a` matches the result; `b` has an integer type |
 | `icmp`, `fcmp` | `a,b` are equally typed; `c` is `IrPredicate`; result is `i1` |
 | `select` | `a:i1`, `b,c` match the result type |
@@ -525,6 +525,29 @@ addition and compare-exchange (that succeeds and fails, each operand in rax in
 turn) on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
 through both lowerings, promotion, the text's round trip and the IR's three forms
 against clang.
+
+### Intrinsics (#141)
+
+`intrinsic` keeps its operation in `c` (`BUSTER_IR_INTRINSIC_*`): `mulhu`,
+`pdep`, `pext`, `bzhi` and `bextr`, one opcode since the opcode tables'
+byte-permute register holds 64 and was full, the 128-bit integers' `mulhu`
+before it the opcode's. The text names the operation after the operands, as a
+comparison's predicate (`%2 = intrinsic.i64 %0, %1 pdep`). Both verifiers check
+it by its own rule (`IR_RULE_INTRINSIC`, which the vector path checks with the
+others rather than deferring it): both operands of the result's type, `i32` or
+`i64`, an operation below the count, and `mulhu` an `i64`'s alone. The
+interpreter evaluates each as the instruction's pseudocode has it; the
+optimizer's passes neither fold it nor number its values, nor move it out of a
+loop; dead code removes an unused one. The typed stream's BMI rows lower to it
+([the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), and Tier 1 selects
+`mulhu` as `mul` and the others as their VEX instructions ([the selection
+guide](tier1-selection.md)). `tests/ir/intrinsics.ir` reads each operation of
+both widths back, `test-ir-parse` refuses an unnamed or unknown operation, an
+`i32`'s `mulhu`, an `i16`'s and mixed operand types, `test-ir-interpreter` checks
+each against values a Zen 5's instructions give (an index, a start or a length
+at and past the width, of zero, and of the control's bytes alone), and
+`test-checker-driver`'s Tier 1 fixture of the builtins runs both units' code by
+`-march=x86-64-v3` against clang's.
 
 ### Effects through the consumers (#1059)
 

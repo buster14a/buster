@@ -46,6 +46,9 @@ asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
 the complete suite before any benchmarks. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
 external cross-checks. There is no vector emulation or randomized runner pool.
+Hosted runners are virtual machines, so the compiler runs there with
+transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
+9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
 `BUSTER_SANITIZER=address|undefined|thread|memory`, for both host architectures.
@@ -195,9 +198,10 @@ Benchpress.
 Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
 `9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
 median and nearest-rank 95th percentile of successful hardware jobs' queue,
-execution, runner-hook, setup/build, native-test, benchmark-step and
-host-occupation durations. Host occupation runs from the job's first step,
-after the runner hook took the lock, to the job's end. Four classes stay
+execution, runner-hook, lock-wait, lock-hold, setup/build, native-test,
+benchmark-step and host-occupation durations. Host occupation runs from the
+job's first step, after the runner hook took the lock, to the job's end. Four
+classes stay
 separate:
 
 - PR;
@@ -212,10 +216,31 @@ This adds no benchmark work and changes no hardware scheduling or merge gate.
 
 Missing or inconsistent timestamps contribute no sample; a job or step that
 failed/skipped is not a successful timing observation. No observations means
-unknown, not zero. `runner-hook` includes hook overhead and possible waiting;
-**it is not the exact shared-lock wait**. Exact lock acquisition/release and
-therefore exact lock occupation still require host-hook instrumentation, which
-this report does not pretend to infer from `started_at`.
+unknown, not zero. `runner-hook` is the job-started hook's step, from the
+API's whole-second step times: hook overhead and any waiting.
+
+The shared lock's times come from the 9700X's runner hooks themselves, which
+log every acquisition and release in the job's log. The job-started hook
+(`/usr/local/libexec/buster-9700x/job-started.sh`) prints
+`buster-9700x: waiting for the machine, held by: …` while another holder has
+it, then `buster-9700x: this job has the machine`. The job-completed hook prints
+`buster-9700x: gave the machine back`. The collector reads those lines and
+their sub-second runner timestamps from each successful hardware job's log,
+read as data and not kept, and reports two metrics:
+
+- `lock-wait`, from the job-started hook's start to `this job has the
+  machine`;
+- `lock-hold`, from there to `gave the machine back`, the host's time under
+  this job's lock.
+
+Both are rounded to whole seconds. The lines bracket the lock operations, so
+each metric also includes the hook's own work around them. In the job below
+that was 14 ms from the hook's start to its `waiting` line, and 4 ms from the
+job-completed hook's start to its release line: tens of milliseconds, below
+the rounding, but not zero. A log that can't be read, or that lacks one of the
+lines, gives that metric no sample. On 2026-11-03, PR run 41664434811's
+job waited 8.0 s behind an agent session's differential test and held the
+lock for 151.6 s.
 
 The collector (`tools/ci/timings.sh`) uses read-only Actions access on the
 hosted runner. `tools/ci/timings.c` validates bounded tab-separated observations,
@@ -344,7 +369,10 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    harvests the records of completed runs the ledger lacks. A record that
    disagrees with the API's job conclusions counts as nothing.
 2. **Pin.** The cycle (the night ahead, from noon) pins main's head as its
-   snapshot once. Every dispatch of the cycle names that pin, not main's head
+   snapshot once, from 22:00 Europe/Madrid the evening before the window, in
+   local time whatever the clocks do that night. A step
+   before then pins and plans nothing, unless an override admits work now.
+   Every dispatch of the cycle names that pin, not main's head
    at dispatch, which may have moved on. The worker checks the state's
    first-parent ancestry against the pin and records it.
 3. **Prepare.** Before the window, the coordinator dispatches the snapshot's
@@ -409,11 +437,20 @@ runs over, and the hook then releases the lock. The lock's protocol and its
 fairness to agent sessions are unchanged; nightly work is kept out of the day
 rather than given priority.
 
-**Late schedules.** GitHub starts scheduled runs late. In the week before this,
-the daily run's 07:23 UTC never started before 12:39 UTC. So the coordinator
-has six schedules, from 22:07 to 07:17. A run that prepares before the window
-waits for it when it opens within 5 hours 55 minutes of the job's start. Any
-other run waits in the concurrency group, or reports.
+**Late schedules.** GitHub starts this repository's scheduled runs hours late.
+In the week of 2026-10-28, the daily run's `23 7 * * *` started 6h22m to
+9h53m late, and `selfhost.yml`'s `47 5 * * *` started 7h13m late. So the
+coordinator has nine schedules:
+
+- every two hours from 16:07 to 04:07;
+- then 05:37 and 07:17.
+
+A run that prepares before the window waits for it when it opens within 5 hours
+55 minutes of the job's start. For any common delay up to about 14 hours, some
+run starts between 22:05 and 06:35, close enough to wait or still inside the
+window. Unless delayed, the earlier schedules start before 22:00: they harvest
+and report, and pin nothing (step 2). Any other run waits in the concurrency
+group, or reports.
 
 **Override.** Both workflows' manual dispatches take an `override` reason for
 deliberate out-of-window work. The window checks report the reason and never
@@ -434,6 +471,12 @@ and `nightly/reports/CYCLE.md`) when the `nightly-ledger` environment holds
 that repository alone, and the environment should allow main only. Each run's
 own record is the source the ledger is rebuilt from, so a lost ledger costs
 only the re-harvest.
+
+Publication is best effort. A refused token, a network error or a branch that
+moved on meanwhile gives a warning with git's reason. It changes nothing else:
+the prepare job has already handed over its outputs, the window job's night
+goes ahead, and the next run publishes again. A fresh history is pushed only
+to a branch that doesn't exist yet, never forced over one that does.
 
 **The report** gives each status's count; this cycle's selected, completed,
 failed and deferred runs and hosted preparations; reuse; the oldest carried-over
@@ -456,8 +499,6 @@ pushes measure targeted, the coordinator dispatches, and the daily run's
 
 **Open items** this repository can't close:
 
-- exact lock-wait and lock-hold times, which need the host's runner hooks to
-  record their acquisition;
 - the ledger's publication token;
 - whether the coordinator's capacity drains the observed arrivals, which only
   enabled cycles will tell.

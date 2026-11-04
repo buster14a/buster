@@ -198,12 +198,16 @@ manual dispatch. It samples the latest 100 main CI workflow runs and reports the
 median and nearest-rank p95 separately for PR, main-push, nightly targeted and
 full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
 run name. Besides queue and execution, it reports the host's occupation, from
-the job's first step (after the runner hook took the lock) to its end. It keeps
+the job's first step (after the runner hook took the lock) to its end. It also
+reports the shared lock's wait and hold, which it reads from the runner hooks'
+lines in each job's log. It keeps
 the raw API responses and normalized observations as workflow artifacts. It
 does not run benchmarks, weaken the hardware gate, or change any schedule.
 
-Read `docs/ci.md` for metric definitions and limitations. In particular, runner
-hook duration includes overhead and is not an exact shared-lock wait; missing
-timestamps are unknown rather than zero. Run its network-free fixtures with
+Read `docs/ci.md` for metric definitions and limitations. In particular, the
+runner hook's step duration includes its overhead. The shared-lock wait and
+hold (`lock-wait`, `lock-hold`) come from the hooks' own log lines, which
+bracket the lock operations to within tens of milliseconds.
+Missing timestamps are unknown rather than zero. Run its network-free fixtures with
 `bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
 in this repository's retired `docs/measurements` path.

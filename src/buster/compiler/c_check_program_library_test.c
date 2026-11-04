@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
 //
-// #148's library builtins (c_builtin_library.c, c_check_builtin_library.c): the lists against clang 23.1.1's table, the
+// #148's library builtins (c_builtin_library.c, c_check_builtin_library.c): the lists against the pinned clang 23.1.4's table, the
 // folds' constant contexts against clang's acceptance, and programs of each family against clang -O0's build, run
 // natively by the harness (check_test_program_source), by both paths. c_checker_test.c includes it after the program
 // harness's sections; test-checker runs it, and `test-checker --program-library` alone. test-checker-driver has the

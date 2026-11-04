@@ -38,7 +38,10 @@
 //   from the handler through the helper to main; without unwind tables, it still traps into the handler.
 // - A third (#177) compiled by --tier1 with --verify, every function but main by Tier 1 (none named by
 //   --tier1-refusals), whose frames are Tier 0's protocol with Tier 1's shapes: a frame of spill slots alone (`kept`),
-//   one with callee-saved registers' pushes too (`crowded`), two returns each after its own epilogue (`early`, the
+//   one with callee-saved registers' pushes too (`crowded`), one whose six values live past its call take the six
+//   callee-saved registers, rbp among them without a frame pointer (`six`, #1116: its branch and join keep it off the
+//   straight-line consumer, which takes no callee-saved register, and its FDE must save rbp in a row whose CFA is rsp's),
+//   two returns each after its own epilogue (`early`, the
 //   first one's teardown remembered and restored), a loop whose latch's jump is the code's last record, so that its
 //   frame is open and its one return a teardown of its own (`spin`), a realigned frame (`aligned`), with a frame
 //   pointer, the same open (`aligned_spin`) and with two returns (`aligned_early`), and a leaf whose spills are in the
@@ -50,13 +53,13 @@
 //   row exactly for the frame pointers, and red_leaf's one row, its whole description. By each path (whose frames'
 //   slots may be colored apart, so not the same bytes), by --lanes 1 and 8 into the vector path's bytes, and its object
 //   linked by cc through GNU ld and lld, the unwinder walks through every function to main; without unwind tables it
-//   stops at the first, and the program prints 1 1 1 1 -1 1 1 1 1 -1. And gdb, without -g, at every instruction of
-//   each of the nine from its first to its ret, the two-return functions' both returns and the loops' iterations among
-//   them: each backtrace's frames are the function and main.
+//   stops at the first, and the program prints 1 1 1 1 1 1 -1 1 1 1 1 -1. And gdb, without -g, at every instruction of
+//   each of the ten from its first to its ret, the two-return functions' both returns, six's both sides of its branch
+//   and the loops' iterations among them: each backtrace's frames are the function and main.
 // - The Tier 1 fixture with -g (#1056's bounded subset: a Tier 1 function's rows are its own, the declaration's line
 //   from its entry to its last epilogue and the closing brace's there; docs/tier1.md's "Debug information"), by each
 //   path and by --lanes 1 and 8 and --id-order into the vector path's bytes: it runs as without -g, llvm-dwarfdump
-//   --verify passes, and gdb, stopped at depth (a Tier 1 function) each of the 14 times it runs, places it at its
+//   --verify passes, and gdb, stopped at depth (a Tier 1 function) each of the 16 times it runs, places it at its
 //   declaration's line and its caller at the caller's: a Tier 1 caller's declaration line, main's (Tier 0's) the line of
 //   its call. And its -c -g object by each path, which llvm-dwarfdump --verify passes, linked by cc through GNU ld into
 //   a program that runs, which gdb places the same way.
@@ -301,6 +304,23 @@ static const char check_unwind_test_tier1_text[] =
     "    return sum - 14 * x - 105 + frames;\n"
     "}\n"
     "\n"
+    "long six(long x)\n"
+    "{\n"
+    "    long y = x;\n"
+    "    if (x < 0)\n"
+    "    {\n"
+    "        y = -x;\n"
+    "    }\n"
+    "    long a = y * 3 + 1;\n"
+    "    long b = y * 5 + 2;\n"
+    "    long c = y * 7 + 3;\n"
+    "    long d = y * 11 + 4;\n"
+    "    long e = y * 13 + 5;\n"
+    "    long f = y * 17 + 6;\n"
+    "    long frames = depth();\n"
+    "    return a + b + c + d + e + f - 133 + frames;\n"
+    "}\n"
+    "\n"
     "long early(long x)\n"
     "{\n"
     "    long a = x * 3 + 1;\n"
@@ -387,6 +407,8 @@ static const char check_unwind_test_tier1_text[] =
     "    int baseline = depth();\n"
     "    long held = kept(5);\n"
     "    long crowd = crowded(-3);\n"
+    "    long sixth = six(2);\n"
+    "    long sixth_negative = six(-2);\n"
     "    long positive = early(4);\n"
     "    long negative = early(-4);\n"
     "    long spun = spin(3);\n"
@@ -394,9 +416,10 @@ static const char check_unwind_test_tier1_text[] =
     "    int realigned_spun = aligned_spin(3);\n"
     "    int realigned_positive = aligned_early(7);\n"
     "    int realigned_negative = aligned_early(-7);\n"
-    "    printf(\"%d %ld %ld %ld %ld %ld %d %d %d %d\\n\", baseline, held, crowd, positive, negative, spun, realigned, realigned_spun,\n"
-    "           realigned_positive, realigned_negative);\n"
-    "    return baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && positive == baseline + 1 && negative == -(baseline + 1) &&\n"
+    "    printf(\"%d %ld %ld %ld %ld %ld %ld %ld %d %d %d %d\\n\", baseline, held, crowd, sixth, sixth_negative, positive, negative, spun, realigned,\n"
+    "           realigned_spun, realigned_positive, realigned_negative);\n"
+    "    return baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && sixth == baseline + 1 && sixth_negative == baseline + 1 &&\n"
+    "                   positive == baseline + 1 && negative == -(baseline + 1) &&\n"
     "                   spun == baseline + 1 && realigned == baseline + 1 && realigned_spun == baseline + 1 && realigned_positive == baseline + 1 &&\n"
     "                   realigned_negative == -(baseline + 1) ?\n"
     "               0 :\n"
@@ -625,7 +648,37 @@ struct CheckUnwindTestRows
     uint32_t returns;
     bool open;
     bool frame_pointer;
+    // Some row has rbp saved (its column a CFA offset, "c-N").
+    bool rbp_saved;
 };
+
+// The index of the word `name` among the space-separated words of the line at `line`, or UINT32_MAX without it.
+static uint32_t check_unwind_test_word(const char* line, const char* name)
+{
+    const size_t length = strlen(name);
+    uint32_t found = UINT32_MAX;
+    uint32_t index = 0;
+    for (const char* at = line + strspn(line, " "); found == UINT32_MAX && at[0] != '\n' && at[0] != 0; index += 1)
+    {
+        const size_t word = strcspn(at, " \n");
+        found = word == length && strncmp(at, name, length) == 0 ? index : found;
+        at += word;
+        at += strspn(at, " ");
+    }
+    return found;
+}
+
+// The first character of the word `index` of the line at `line`, or 0 past its words.
+static char check_unwind_test_word_at(const char* line, uint32_t index)
+{
+    const char* at = line + strspn(line, " ");
+    for (uint32_t k = 0; k < index && at[0] != '\n' && at[0] != 0; k += 1)
+    {
+        at += strcspn(at, " \n");
+        at += strspn(at, " ");
+    }
+    return at[0] != '\n' ? at[0] : 0;
+}
 
 // The function's FDE's rows in readelf -wF's `text` into *rows; false without the FDE, or with a row it can't read or
 // outside the function, or with a first row that isn't the function's entry's (CFA rsp+8 at its address). readelf
@@ -639,6 +692,8 @@ static bool check_unwind_test_rows(const char* text, uint64_t address, uint64_t 
     const bool table = after != 0 && strncmp(after, "   LOC ", 7) == 0;
     const bool bare = after != 0 && (after[0] == '\n' || after[0] == 0);
     const char* first = table ? strchr(after, '\n') : 0;
+    // The header's words are LOC, CFA and a column per register some row describes, the rows' words in that order.
+    const uint32_t rbp = table ? check_unwind_test_word(after, "rbp") : UINT32_MAX;
     *rows = (CheckUnwindTestRows){ 0 };
     rows->rows = bare ? 1 : 0;
     bool valid = first != 0 || bare;
@@ -655,6 +710,7 @@ static bool check_unwind_test_rows(const char* text, uint64_t address, uint64_t 
         entry = rows->rows == 0 ? location == address && returned : entry;
         rows->returns += rows->rows != 0 && returned ? 1 : 0;
         rows->frame_pointer = rows->frame_pointer || strncmp(cfa, "rbp+", 4) == 0;
+        rows->rbp_saved = rows->rbp_saved || (rbp != UINT32_MAX && check_unwind_test_word_at(line, rbp) == 'c');
         rows->rows += 1;
         line = next != 0 ? next + 1 : line + strlen(line);
     }
@@ -891,7 +947,7 @@ static bool check_unwind_test_tier1_compile(const char* source, const char* outp
 }
 
 // Whether the Tier 1 fixture's program runs as its unwind tables (or their absence) make it: with them, it returns 0
-// having printed depths that walk through main; without them, it returns 1 having printed 1 1 1 1 -1 1 1 1 1 -1.
+// having printed depths that walk through main; without them, it returns 1 having printed 1 1 1 1 1 1 -1 1 1 1 1 -1.
 static bool check_unwind_test_tier1_run(const char* program, bool tables, Arena* arena)
 {
     char report[PATH_MAX + 8];
@@ -902,6 +958,8 @@ static bool check_unwind_test_tier1_run(const char* program, bool tables, Arena*
     int baseline = 0;
     long held = 0;
     long crowd = 0;
+    long sixth = 0;
+    long sixth_negative = 0;
     long positive = 0;
     long negative = 0;
     long spun = 0;
@@ -909,12 +967,14 @@ static bool check_unwind_test_tier1_run(const char* program, bool tables, Arena*
     int realigned_spun = 0;
     int realigned_positive = 0;
     int realigned_negative = 0;
-    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %ld %ld %ld %ld %ld %d %d %d %d", &baseline, &held, &crowd, &positive, &negative, &spun,
-                                                     &realigned, &realigned_spun, &realigned_positive, &realigned_negative) == 10;
-    const bool walked = status == 0 && baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && positive == baseline + 1 && negative == -(baseline + 1) &&
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %ld %ld %ld %ld %ld %ld %ld %d %d %d %d", &baseline, &held, &crowd, &sixth, &sixth_negative, &positive,
+                                                     &negative, &spun, &realigned, &realigned_spun, &realigned_positive, &realigned_negative) == 12;
+    const bool walked = status == 0 && baseline >= 3 && held == baseline + 1 && crowd == baseline + 1 && sixth == baseline + 1 && sixth_negative == baseline + 1 &&
+                        positive == baseline + 1 && negative == -(baseline + 1) &&
                         spun == baseline + 1 && realigned == baseline + 1 && realigned_spun == baseline + 1 && realigned_positive == baseline + 1 &&
                         realigned_negative == -(baseline + 1);
-    const bool stopped = status == 1 && baseline == 1 && held == 1 && crowd == 1 && positive == 1 && negative == -1 && spun == 1 && realigned == 1 &&
+    const bool stopped = status == 1 && baseline == 1 && held == 1 && crowd == 1 && sixth == 1 && sixth_negative == 1 && positive == 1 && negative == -1 && spun == 1 &&
+                         realigned == 1 &&
                          realigned_spun == 1 && realigned_positive == 1 && realigned_negative == -1;
     return read && (tables ? walked : stopped);
 }
@@ -928,12 +988,15 @@ struct CheckUnwindTestShape
     uint32_t returns;
     bool open;
     bool frame_pointer;
+    // Its FDE must save rbp in a frame without a frame pointer: the allocator gave a value rbp (#1116).
+    bool rbp;
 };
 
 static const CheckUnwindTestShape check_unwind_test_tier1_shapes[] = {
     { .name = "depth", .returns = 1, .open = false, .frame_pointer = false },
     { .name = "kept", .returns = 1, .open = false, .frame_pointer = false },
     { .name = "crowded", .returns = 1, .open = false, .frame_pointer = false },
+    { .name = "six", .returns = 1, .open = false, .frame_pointer = false, .rbp = true },
     { .name = "early", .returns = 2, .open = false, .frame_pointer = false },
     { .name = "spin", .returns = 1, .open = true, .frame_pointer = false },
     { .name = "aligned", .returns = 1, .open = false, .frame_pointer = true },
@@ -959,11 +1022,11 @@ static void check_unwind_test_tier1_shapes_of(CheckDebugTestTally* tally, const 
         CheckUnwindTestRows rows;
         const bool read = check_unwind_test_rows(text.pointer, address, size, &rows);
         const bool shaped = read && rows.returns == shape->returns && rows.open == shape->open && rows.frame_pointer == shape->frame_pointer &&
-                            (shape->returns != 0 || rows.rows == 1);
+                            (shape->returns != 0 || rows.rows == 1) && (!shape->rbp || rows.rbp_saved);
         char detail[PATH_MAX + 160];
-        snprintf(detail, sizeof(detail), "%s: %s, %u rows, %u returns, %s, %s", report, shape->name, rows.rows, rows.returns, rows.open ? "open" : "closed",
-                 rows.frame_pointer ? "a frame pointer" : "no frame pointer");
-        check_debug_test_expect(tally, shaped, "a Tier 1 function's FDE covers it with its frame's shape: its returns, open or closed, a frame pointer or none", detail);
+        snprintf(detail, sizeof(detail), "%s: %s, %u rows, %u returns, %s, %s%s", report, shape->name, rows.rows, rows.returns, rows.open ? "open" : "closed",
+                 rows.frame_pointer ? "a frame pointer" : "no frame pointer", rows.rbp_saved ? ", rbp saved" : "");
+        check_debug_test_expect(tally, shaped, "a Tier 1 function's FDE covers it with its frame's shape: its returns, open or closed, a frame pointer or none, rbp saved where its values take it", detail);
     }
 }
 
@@ -994,7 +1057,7 @@ static uint32_t check_unwind_test_tier1_line(const char* name)
     return line;
 }
 
-// gdb at depth in `program` (the Tier 1 fixture with -g), each of the 14 times it runs: depth at its declaration's line,
+// gdb at depth in `program` (the Tier 1 fixture with -g), each of the 16 times it runs: depth at its declaration's line,
 // its caller at a Tier 1 caller's declaration's line or at main's line of its call. `tag` names the script's files.
 static void check_unwind_test_tier1_lines(CheckDebugTestTally* tally, const char* program, const char* directory, const char* tag, Arena* arena)
 {
@@ -1008,7 +1071,7 @@ static void check_unwind_test_tier1_lines(CheckDebugTestTally* tally, const char
     char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-x", commands, (char*)program, 0 };
     const bool ran = scripted && object_test_run(gdb, report, "/dev/null") == 0;
     const String8 text = ran ? foreign_test_read(arena, report) : (String8){ 0 };
-    static const char* const callers[] = { "kept", "crowded", "early", "spin", "aligned", "aligned_spin", "aligned_early", "main" };
+    static const char* const callers[] = { "kept", "crowded", "six", "early", "spin", "aligned", "aligned_spin", "aligned_early", "main" };
     char depth_location[32];
     snprintf(depth_location, sizeof(depth_location), "dbg_tier1.c:%u", check_unwind_test_tier1_line("depth"));
     uint32_t stops = 0;
@@ -1037,9 +1100,9 @@ static void check_unwind_test_tier1_lines(CheckDebugTestTally* tally, const char
         placed = placed && known;
         stops += 1;
     }
-    check_debug_test_expect(tally, placed && stops == 14 && tier1_callers == 13,
-                            "gdb places depth and each Tier 1 caller at its declaration's line, main at its call's, each of depth's 14 runs", report);
-    if (!(placed && stops == 14) && text.pointer != 0)
+    check_debug_test_expect(tally, placed && stops == 16 && tier1_callers == 15,
+                            "gdb places depth and each Tier 1 caller at its declaration's line, main at its call's, each of depth's 16 runs", report);
+    if (!(placed && stops == 16) && text.pointer != 0)
     {
         printf("%.3000s\n", text.pointer);
     }
@@ -1194,11 +1257,12 @@ static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* dire
         check_debug_test_expect(tally, linked && check_unwind_test_tier1_run(program, true, arena), "the linked Tier 1 program's unwinder walks through every frame", program);
     }
     // gdb at every instruction of each Tier 1 function: early's and aligned_early's two calls take both of their
-    // returns, and spin's and aligned_spin's one call their loops' iterations and their returns; depth's first caller
+    // returns, six's both sides of its branch, and spin's and aligned_spin's one call their loops' iterations and their returns; depth's first caller
     // is main.
     static const char* const depth[] = { "depth", "main" };
     static const char* const kept[] = { "kept", "main" };
     static const char* const crowded[] = { "crowded", "main" };
+    static const char* const six[] = { "six", "main" };
     static const char* const early[] = { "early", "main" };
     static const char* const spin[] = { "spin", "main" };
     static const char* const aligned[] = { "aligned", "main" };
@@ -1211,6 +1275,7 @@ static void check_unwind_test_tier1(CheckDebugTestTally* tally, const char* dire
         check_unwind_test_gdb(tally, outputs[0], files[0], depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], kept, BUSTER_ARRAY_LENGTH(kept), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], crowded, BUSTER_ARRAY_LENGTH(crowded), 1, arena);
+        check_unwind_test_gdb(tally, outputs[0], files[0], six, BUSTER_ARRAY_LENGTH(six), 2, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], early, BUSTER_ARRAY_LENGTH(early), 2, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], spin, BUSTER_ARRAY_LENGTH(spin), 1, arena);
         check_unwind_test_gdb(tally, outputs[0], files[0], aligned, BUSTER_ARRAY_LENGTH(aligned), 1, arena);

@@ -250,7 +250,13 @@ static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* 
 {
     bool same = true;
     *file = (String8){ 0 };
-    const uint8_t* saved = executable_test_save(link, arena);
+    // The section runs are laid out before the bytes are saved, so that the save and the writes' restores find the same
+    // atoms in the same places (#1122).
+    ExecutableShared grouped_shared = { 0 };
+    ExecutableResult grouped_result = { 0 };
+    const bool grouped = executable_bound_sections(link, true, arena, &grouped_shared, &grouped_result) && grouped_result.error == EXECUTABLE_ERROR_NONE;
+    dynamic_test_expect(tally, grouped, "room for the sections' runs", 0);
+    const uint8_t* saved = grouped ? executable_test_save(link, arena) : 0;
     dynamic_test_expect(tally, saved != 0, "room for the atoms' bytes", 0);
     const bool accesses = dynamic_test_tls_accesses(link) != 0;
     for (uint32_t l = 0; saved != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
@@ -866,13 +872,18 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
             }
             const AtomId atom = found != 0 ? link->symbols.atom[found] : 0;
             const Elf64_Shdr* section = entry->st_shndx < image->header->e_shnum ? &image->section_headers[entry->st_shndx] : 0;
-            // A TLS symbol's value is its offset in the TLS segment, in its section.
+            // A TLS symbol's value is its offset in the TLS segment, in its section. A bound the linker defines is
+            // its bound atoms' address in their section, as GNU ld's __start_ and __stop_ are.
             const Elf64_Phdr* tls_segment = dynamic_test_segment(image, PT_TLS);
             const bool tls = atom != 0 && link_class_is_tls(link->atoms.class[atom]);
             const uint64_t address = found != 0 ? dynamic_test_address(link, found) : 0;
             const uint64_t value = !tls ? address : tls_segment != 0 ? address - tls_segment->p_vaddr : UINT64_MAX;
-            const bool placed = atom != 0 && section != 0 && entry->st_value == value && entry->st_size == link->symbols.size[found] && address >= section->sh_addr &&
-                                address <= section->sh_addr + section->sh_size;
+            const bool bound = atom == 0 && found != 0 && link->symbols.source[found] == BUSTER_LINK_SOURCE_LINKER &&
+                               link_bound_suffix(link, link->symbols.name[found], 0).length != 0;
+            const bool placed = atom != 0 ? (section != 0 && entry->st_value == value && entry->st_size == link->symbols.size[found] && address >= section->sh_addr &&
+                                             address <= section->sh_addr + section->sh_size)
+                                        : bound && section != 0 && entry->st_value == value && entry->st_size == 0 && address >= section->sh_addr &&
+                                          address <= section->sh_addr + section->sh_size;
             dynamic_test_expect(tally, exported, "a defined entry an export of binding's", i);
             dynamic_test_expect(tally, kind && placed, "an export at its address, size and section", i);
             dynamic_test_expect(tally, versym == 0 || versym[i] == VER_NDX_GLOBAL, "an export unversioned", i);
@@ -3672,6 +3683,9 @@ struct DynamicTestSharedSource
     bool refused;
     bool lld_refuses;
     bool unwinder;
+    // A section __start_ or __stop_ bound: the objects the writer makes for the cross-check keep no named sections, so
+    // lld's link of them has nowhere to define the names (the fixture's own object, which cc links, has them).
+    bool no_cross_check;
 };
 
 static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
@@ -3915,6 +3929,26 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
         .option = "-mtls-dialect=gnu",
         .refused = true,
     },
+    {
+        // #1122: __start_ and __stop_ of a section of C identifier atoms, and a weak reference to a missing one.
+        .name = "section-bounds",
+        .source = "struct entry { long value; const char* name; };\n"
+                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e0 = { 11, \"a\" };\n"
+                  "__attribute__((aligned(16))) long between = 99;\n"
+                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e1 = { 22, \"b\" };\n"
+                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e2 = { 33, \"c\" };\n"
+                  "extern struct entry __start_bst_sec[], __stop_bst_sec[];\n"
+                  "extern int __start_bst_missing[] __attribute__((weak));\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    long total = 0;\n"
+                  "    for (struct entry* e = __start_bst_sec; e < __stop_bst_sec; e += 1) total += e->value;\n"
+                  "    return total != 66 || __stop_bst_sec - __start_bst_sec != 3 || between != 99 || __start_bst_missing != 0 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+        .option = "-mtls-dialect=gnu",
+        .no_cross_check = true,
+    },
 };
 
 // The program that loads a compiled library: it defines buster_helper and buster_data, which -rdynamic exports, so
@@ -4079,7 +4113,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
             const bool succeeded = dynamic_test_starve(&tally, &bound.link, &bound.bind, runtime, path, c);
             dynamic_test_expect(&tally, succeeded && dynamic_test_checks_hold(program, path.pointer), "then succeeds with room enough", c);
         }
-        if (bound_ok && cross_check)
+        if (bound_ok && cross_check && !library->no_cross_check)
         {
             char* lld[] = { "cc", "-shared", "-fuse-ld=lld", "-o", lld_path, object_path, 0 };
             const bool lld_linked = object_test_run(lld, out, err) == 0;
@@ -4289,6 +4323,84 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
         unlink(harness);
         unlink(out);
         unlink(err);
+    }
+    return dynamic_test_report(&tally);
+}
+
+// #1122: __start_ and __stop_ of a section of C identifier atoms, and a weak reference to a missing one, in a dynamic
+// PIE compiled by cc, imported, bound and written here: its checks must hold, as cc's own PIE's do.
+static const char dynamic_test_section_bounds_source[] =
+    "struct entry { long value; const char* name; };\n"
+    "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e0 = { 11, \"a\" };\n"
+    "__attribute__((aligned(16))) long between = 99;\n"
+    "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e1 = { 22, \"b\" };\n"
+    "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e2 = { 33, \"c\" };\n"
+    "__attribute__((section(\"bst_one\"))) int one = 5;\n"
+    "extern struct entry __start_bst_sec[], __stop_bst_sec[];\n"
+    "extern int __start_bst_one[], __stop_bst_one[];\n"
+    "extern int __start_bst_missing[] __attribute__((weak));\n"
+    "int main(void)\n"
+    "{\n"
+    "    long total = 0;\n"
+    "    for (struct entry* e = __start_bst_sec; e < __stop_bst_sec; e += 1) total += e->value;\n"
+    "    return total == 66 && __stop_bst_sec - __start_bst_sec == 3 && one == 5 && __stop_bst_one - __start_bst_one == 1 && between == 99 &&\n"
+    "                   __start_bst_missing == 0\n"
+    "               ? 0\n"
+    "               : 1;\n"
+    "}\n";
+
+static bool dynamic_test_section_bounds(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
+{
+    DynamicTestTally tally = {
+        .check = "section bounds",
+    };
+    Scratch scratch = scratch_begin(0);
+    char source_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char object_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char reference_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char out[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char err[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snprintf(source_path, sizeof(source_path), "%s/section-bounds.c", directory->path);
+    snprintf(object_path, sizeof(object_path), "%s/section-bounds.o", directory->path);
+    snprintf(reference_path, sizeof(reference_path), "%s/section-bounds-cc", directory->path);
+    snprintf(out, sizeof(out), "%s/section-bounds.out", directory->path);
+    snprintf(err, sizeof(err), "%s/section-bounds.err", directory->path);
+    const bool written = bind_test_write_file(source_path, dynamic_test_section_bounds_source, sizeof(dynamic_test_section_bounds_source) - 1);
+    char* compile[] = { "cc", "-O2", "-fPIE", "-c", "-o", object_path, source_path, 0 };
+    const bool compiled = written && object_test_run(compile, out, err) == 0;
+    dynamic_test_expect(&tally, compiled, "cc compiles the fixture", 0);
+    char* reference[] = { "cc", "-pie", "-o", reference_path, object_path, 0 };
+    const bool referenced = compiled && object_test_run(reference, out, err) == 0 && executable_test_runs(reference_path, (const uint8_t*)"", 0);
+    dynamic_test_expect(&tally, referenced, "cc's PIE runs its checks", 0);
+    const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
+    BindTestLink bound;
+    const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
+    const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena);
+    const bool ended = begun && bind_end(&bound.bind, &bound.link);
+    const bool linked = ended && link_check(&bound.link) == LINK_ERROR_NONE;
+    dynamic_test_expect(&tally, linked, "imported and bound", 0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "section-bounds", path_bytes);
+    ExecutableResult result = { 0 };
+    String8 file = { 0 };
+    const bool wrote = linked && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, "section bounds", &result, &file, directory->id_order, scratch.arena);
+    if (wrote)
+    {
+        dynamic_test_structure(&tally, &bound.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), 0);
+    }
+    (void)cross_check;
+    dynamic_test_expect(&tally, wrote && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "the PIE runs its checks", 0);
+    if (imported)
+    {
+        bind_test_link_end(&bound);
+    }
+    scratch_end(scratch);
+    if (!directory->keep)
+    {
+        unlink(source_path);
+        unlink(object_path);
+        unlink(reference_path);
+        unlink(path.pointer);
     }
     return dynamic_test_report(&tally);
 }
@@ -4667,6 +4779,7 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_libraries(&directory, &runtime) && passed;
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
         passed = dynamic_test_libgcc_s(&directory, &runtime, cross_check) && passed;
+        passed = dynamic_test_section_bounds(&directory, &runtime, cross_check) && passed;
         static const DynamicTestTlsProgram tls_programs[] = {
             // Six general-dynamic accesses and two local-dynamic ones, two of them to errno, an import.
             { "general- and local-dynamic TLS", "tls-accesses", dynamic_test_tls_source, 6, 2, BUSTER_DYNAMIC_TEST_TLS_STATUS },

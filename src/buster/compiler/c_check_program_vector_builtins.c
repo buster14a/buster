@@ -4,8 +4,9 @@
 // Clang's generic vector builtins as Tier 0's machine operations (#136, #148): the rows (Tier0Operation) of
 // __builtin_shufflevector, __builtin_convertvector, the __builtin_elementwise_* functions, the __builtin_reduce_*
 // functions and __builtin_nontemporal_load and _store at their vectors' types, as clang -O0's code computes them, an
-// instruction per element type where AVX-512 has one. A row's forms are EVEX ones of AVX-512F and AVX-512VL, which the
-// lowering requires of a function with vectors (check_lower_vector_target), and those of the extension each row names:
+// instruction per element type where AVX-512 has one. A row's forms are EVEX ones of AVX-512F and AVX-512VL (at a target
+// without them, their reviewed SSE or VEX forms, check_vector_baseline_row, and SSE's and AVX's shuffles,
+// check_vector_baseline_shuffle_row: #775), and those of the extension each row names:
 // AVX-512BW's for 8- and 16-bit elements, DQ's conversions of 64-bit integers, VBMI's byte permutes, BITALG's and
 // VPOPCNTDQ's counts, CD's leading zero counts, VBMI2's funnel shifts, GFNI's bit reversal and AVX512-BMM's byte bit
 // reversal; and only forms x86_semantics.c covers (tier0_operation_form_valid). Byte products reduce through widened
@@ -131,6 +132,24 @@ static const char* check_vector_shuffle_row(const TypeTable* types, const X86Tar
     if (in.element == 0 || out.lanes > BUSTER_CHECK_VECTOR_SHUFFLE_LANES || in.lanes == 0)
     {
         reason = "vector shuffles of elements of this size";
+    }
+    else if (!identity && (target->features & (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL))) !=
+                              (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL)))
+    {
+        // Without VPERMT2, SSE's and AVX's shuffles (#775), with a constant operand where they take one.
+        uint8_t constant[64] = { 0 };
+        uint32_t constant_bytes = 0;
+        reason = check_vector_baseline_shuffle_row(target, in.element, in.lanes, in.bytes, out.lanes, out.bytes, indices, BUSTER_TIER0_ROLE_VECTOR(operands), row,
+                                                   constant, &constant_bytes);
+        plan->permutes = constant_bytes != 0;
+        if (constant_bytes != 0)
+        {
+            memcpy(plan->constant, constant, sizeof(constant));
+            plan->constant_bytes = constant_bytes;
+            row->operand_classes[operands] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[operands] = (uint8_t)constant_bytes;
+            operands += 1;
+        }
     }
     else if (!identity)
     {
@@ -420,7 +439,18 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
         row->record_count = 1;
         needed = pair == 0 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
     }
-    if (reason == NULL && (target->features & needed) != needed)
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    Tier0Operation baseline;
+    if (reason == NULL && row->record_count != 0 && (target->features & evex) != evex)
+    {
+        // Without AVX-512, SSE's or AVX's form of the conversion (#775), which the lowering takes in the EVEX one's place
+        // (check_lower_operation_index): SSE4.1's extensions among the integers'; their truncations have none.
+        const bool truncates = !in.floating && !out.floating && out.element < in.element;
+        reason = check_vector_baseline_row(target, row, &baseline) ? NULL :
+                 truncates ? "vector truncations of integers without AVX-512" :
+                 !in.floating && !out.floating ? "vector extensions of integers without SSE4.1" : "vector conversions unavailable at this target";
+    }
+    else if (reason == NULL && (target->features & needed) != needed)
     {
         reason = "vector conversions of 8-bit elements to 16-bit ones without AVX-512BW";
     }
@@ -932,7 +962,21 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
             row->records[0] = check_vector_lower_record(form, v0, v0, v1);
             row->record_count = 1;
         }
-        if (reason == NULL && (target->features & needed) != needed)
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+        Tier0Operation baseline;
+        if (reason == NULL && (target->features & evex) != evex)
+        {
+            // Without AVX-512, SSE's or AVX's form of the operation (#775), which the lowering takes in the EVEX one's
+            // place (check_lower_operation_index), or its refusal by name.
+            const bool extreme = builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_ELEMENTWISE_MIN;
+            reason = check_vector_baseline_row(target, row, &baseline) ? NULL :
+                     extreme && shape.element == 8 ? "vector minimum and maximum of 64-bit elements without AVX-512" :
+                     extreme ? "vector minimum and maximum of these elements without SSE4.1" :
+                     builtin == CBUILTIN_ELEMENTWISE_ABS ? "vector absolute values without SSSE3" :
+                     (target->features & needed) != needed ? check_vector_builtin_feature_reason(builtin, needed, target->features) :
+                                                             "elementwise vector builtins unavailable at this target";
+        }
+        else if (reason == NULL && (target->features & needed) != needed)
         {
             reason = check_vector_builtin_feature_reason(builtin, needed, target->features);
         }
@@ -956,7 +1000,29 @@ static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId b
     }
     else if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0)
     {
-        reason = "elementwise builtins of scalars without AVX-512F";
+        // Without AVX-512F, SQRTSS's or SQRTSD's (VSQRTSS's with AVX: #775), and FMA's VFMADD213SS or SD.
+        const bool d = class == BUSTER_TYPED_CLASS_F64;
+        const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+        const uint8_t f0 = BUSTER_TIER0_ROLE_FLOATING(0);
+        const uint8_t result = BUSTER_TIER0_ROLE_FLOATING_RESULT;
+        if (root)
+        {
+            row->records[0] = avx ? check_vector_lower_record(d ? X86_FORM_VSQRTSD_X_X_XM64 : X86_FORM_VSQRTSS_X_X_XM32, result, f0, f0) :
+                                    check_vector_lower_record(d ? X86_FORM_SQRTSD_X_XM64 : X86_FORM_SQRTSS_X_XM32, result, 0, f0);
+        }
+        else
+        {
+            row->records[0] = check_vector_lower_record(d ? X86_FORM_VFMADD213SD_X_X_XM64 : X86_FORM_VFMADD213SS_X_X_XM32, result, BUSTER_TIER0_ROLE_FLOATING(1),
+                                                        BUSTER_TIER0_ROLE_FLOATING(2));
+            reason = (target->features & BUSTER_X86_FEATURE(FMA)) == 0 ? "fused multiply-adds of scalars without FMA or AVX-512F" : NULL;
+        }
+        row->record_count = 1;
+        row->operand_count = (uint8_t)arguments;
+        for (uint32_t j = 0; j < arguments; j += 1)
+        {
+            row->operand_classes[j] = class;
+        }
+        row->result_class = class;
     }
     else
     {

@@ -15,9 +15,13 @@ requirements. [Command index](README.md).
   export of `libgcc_s.so.1` (the unwinder: `_Unwind_Resume`,
   `_Unwind_Backtrace`), which the link then needs, as GCC's driver names it
   as needed after `libgcc.a` (#489), or for a weak reference to nothing; with
-  the link's imports and exports listed. On a system without
-  `libgcc_s.so.1`, a name that only the members which joined refer to and
-  nothing defines is refused, naming the member
+  the link's imports and exports listed. An undefined `__start_NAME` or
+  `__stop_NAME` whose `NAME` is a C identifier and an input section of the
+  link's atoms goes to the linker, which the executable places at that
+  section's bounds, as GNU ld and lld define them (#1122); a weak reference
+  to a missing section is left to nothing, and a strong one undefined. On a
+  system without `libgcc_s.so.1`, a name that only the members which joined
+  refer to and nothing defines is refused, naming the member
   (`BIND_ERROR_MEMBER_UNDEFINED`): `libgcc.a`'s split-stack `morestack.o`'s
   unwinder. It has a vector path and an exact
   one, its twin, which make the same link. `link_program.c`'s programs leave
@@ -80,7 +84,10 @@ exports and members:
   hidden one (it joins); hidden and protected references to `puts`, which only
   libc.so.6 defines (an error), and a weak hidden one (nothing, not an
   import); references to the init and fini arrays' bounds (the linker's);
-  references to `__morestack` and to `__splitstack_getcontext`, whose
+  `__start_` and `__stop_` of a section of the program's atoms (the
+  linker's), and a weak reference to one of a missing section (nothing) and a
+  strong one (an error); references to `__morestack` and to
+  `__splitstack_getcontext`, whose
   members of `libgcc.a` make `morestack.o` join (its `_Unwind_Resume` a
   strong import of `libgcc_s.so.1`'s, and against the runtime without it,
   `bind_test_without_gcc_s`, refused, naming `_Unwind_Resume` and the

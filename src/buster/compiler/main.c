@@ -1647,6 +1647,8 @@ extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const ui
 #endif
 static int main_driver(int argc, char** argv)
 {
+    // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
+    arena_page_policy(getenv("BUSTER_HUGE_PAGES"));
 #if BUSTER_SANITIZER_RESOURCES
     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
     lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;

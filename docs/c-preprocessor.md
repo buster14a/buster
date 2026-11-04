@@ -1330,7 +1330,15 @@ decisions in #154 and on #117's configuration):
   `-fno-builtin-NAME`, `-ffreestanding` and `-fhosted` among them): its
   `__has_builtin` for every builtin buster implements, and 0 for the others,
   and its `__has_constexpr_builtin` wherever buster's answers 1; and the gates'
-  facts with clang's table.
+  facts with clang's table. The plain library names are pinned to Clang
+  23.1.4, CI's reference release, whose GNU library builtins include `strlcat`
+  and `strlcpy` (23.1.5's table drops them): the oracle compares
+  `clang --version` with it, prints `expected clang 23.1.4, found …` when the
+  release differs, and skips only the plain names the found release is known to
+  classify differently (`cbuiltin_library_table_differences`: 23.1.5's
+  `strlcat` and `strlcpy`), a difference no named release explains still
+  failing. A fixture reruns the check under a fake clang 23.1.5, so CI's
+  reference release exercises the skip path too.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.

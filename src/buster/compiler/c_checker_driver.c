@@ -2421,6 +2421,9 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
             case EXECUTABLE_CAUSE_UNSUPPORTED_VERSION:
                 fprintf(out, "error: can't link %s: symbol '%s' has unavailable version %" PRIu64 "\n", path, unsupported, result->value);
                 break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_BOUND:
+                fprintf(out, "error: can't link %s: '%s' bounds an input section whose atoms one output section can't hold\n", path, unsupported);
+                break;
             default: fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path, unsupported); break;
         }
     }
@@ -2929,6 +2932,10 @@ struct CheckDriverCommand
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
+    // --units-memory=BYTES, #1109's test option: the memory the units' lanes may hold at once, by their estimates, in
+    // place of what the process may take, and the command reports how many units waited for it, after the units'
+    // diagnostics (c_checker_units.c). 0 without it.
+    uint64_t units_memory;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2959,6 +2966,7 @@ struct CheckDriverCommand
 
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
+static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
@@ -3028,6 +3036,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
+        // One of several units (#1109): the unit's estimated peak, from its tokens, out of the memory the units' lanes
+        // share, before the parse and the checker take it; it may wait for another lane's units to give theirs back.
+        if (lanes != NULL && lanes->units_lane != NULL)
+        {
+            check_units_admit(lanes->units_lane, pp->output.count);
+        }
         if (ready)
         {
             ready = parse_translation_unit(parser, pp);
@@ -3388,7 +3402,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         kept != NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3412,7 +3426,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         false, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3702,9 +3716,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
-    // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
+    // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
+    // (CheckDriverCommand's).
     bool poison_arenas = false;
     bool shared_parts = false;
+    uint64_t units_memory = 0;
+    bool invalid_units_memory = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -3744,6 +3761,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // part (CheckProgramLanes.grow_supply), read only when it is set.
     const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
     lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
+    // And another (#673): "LANE,MICROSECONDS", a lane (its index plus one) that sleeps that long at each part it takes,
+    // before each part's lowering in a growing team (CheckProgramLanes.slow_lane), read only when it is set.
+    const char* slow_lane = getenv("BUSTER_TEST_SLOW_LANE");
+    char* slow_end = NULL;
+    lanes.slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
+    lanes.slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
     bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
@@ -3979,6 +4002,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             shared_parts = true;
         }
+        else if (strncmp(arguments[i], "--units-memory=", 15) == 0)
+        {
+            char* end = NULL;
+            units_memory = strtoull(arguments[i] + 15, &end, 10);
+            invalid_units_memory |= end == arguments[i] + 15 || *end != 0 || units_memory == 0 || arguments[i][15] == '-';
+        }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
@@ -4089,7 +4118,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
@@ -4137,6 +4166,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_order = id_order,
         .poison_arenas = poison_arenas,
         .shared_parts = shared_parts,
+        .units_memory = units_memory,
         .emit_object = emit_object,
         .link = link,
         .runtime_kind = runtime_kind,
@@ -4182,7 +4212,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

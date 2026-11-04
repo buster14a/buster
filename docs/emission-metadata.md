@@ -336,7 +336,7 @@ compiles and runs the resulting DWARF.
 `test-check-debug --cross-check` compiles its Tier 1 unwind fixture with `-g`
 too (`c_check_unwind_test.c`): by each path and by `--lanes 1` and 8 into the
 same bytes, the program runs and walks as without `-g`, `llvm-dwarfdump --verify`
-passes, and gdb stopped at a Tier 1 function each of the 14 times it runs places
+passes, and gdb stopped at a Tier 1 function each of the 16 times it runs places
 it at its declaration's line and each Tier 1 caller at its own (main, Tier 0's,
 at its call's line). Every existing unwind check (`test-unwind`,
 `test-check-debug`'s gdb at every instruction of each Tier 1 shape) runs on the
