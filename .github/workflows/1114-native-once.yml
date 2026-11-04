@@ -1,95 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# One manually initiated development branch; not included in the implementation PR.
 name: Issue 1114 bounded development check
 on:
   push:
     branches: [agent/1114-native-once]
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: issue-1114-manual-development
   cancel-in-progress: true
 jobs:
-  validate:
-    if: github.repository == 'buster14a/buster' && github.actor == 'davidgmbb'
-    runs-on:
-      group: buster-9700x-service-dispatch
-      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
-    timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
-    env:
-      BUSTER_HOST_ARCH: znver5
-      BUSTER_DEBUG_INFO: '0'
-      CORES_TITLE: Issue 1114 bounded development check
-      CORES_LINK: https://github.com/buster14a/buster/issues/1114
+  retired:
+    if: false
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: true
-      - name: Verify dedicated host
-        run: grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-      - name: Apply development patches
-        id: patch
-        run: |
-          set -euo pipefail
-          cat .agent-1114/patch.0 .agent-1114/patch.1 .agent-1114/patch.2 | base64 --decode | xz --decompress > "$RUNNER_TEMP/1114.patch"
-          echo 'fd663d4b0ba60e38f017b8cd1d084b8e7bc782d85aaf4ffbda000b62ce2f3f93  '"$RUNNER_TEMP/1114.patch" | sha256sum --check
-          git apply --check "$RUNNER_TEMP/1114.patch"
-          git apply "$RUNNER_TEMP/1114.patch"
-          for patch in .agent-1114/fix-*.patch; do test ! -f "$patch" || git apply "$patch"; done
-          git diff --check
-          directory=$(mktemp -d "$RUNNER_TEMP/1114-tests.XXXXXXXX")
-          echo "TMPDIR=$directory" >> "$GITHUB_ENV"
-          echo 'applied=true' >> "$GITHUB_OUTPUT"
-      - name: Use pinned correctness tools under the runner hook's host lock
-        run: bash tools/ci/setup-benchpress.sh
-      - name: Build Debug compiler
-        run: |
-          set -euo pipefail
-          if command -v cores >/dev/null; then cores -n 4 -- ./build.sh --config Debug --jobs 4; else ./build.sh --config Debug --jobs 4; fi 2>&1 | tee "$RUNNER_TEMP/1114-build.log"
-      - name: Focused correctness checks, bounded per command
-        run: |
-          set -uo pipefail
-          status=0
-          for suite in test-debug test-check-debug test-object-writer; do
-              args=()
-              if test "$suite" != test-object-writer; then args+=(--cross-check); fi
-              if test "$suite" = test-check-debug; then args+=(--keep); fi
-              if command -v cores >/dev/null; then timeout --kill-after=10s 240s cores -n 4 -- ./build/compiler "$suite" "${args[@]}"; else timeout --kill-after=10s 240s ./build/compiler "$suite" "${args[@]}"; fi 2>&1 | tee "$RUNNER_TEMP/1114-$suite.log" || status=1
-          done
-          exit "$status"
-      - name: Publish source-only branch, independent of validation outcome
-        if: always() && steps.patch.outputs.applied == 'true'
-        run: |
-          set -euo pipefail
-          base=441db2428d2bd8d28503037b28c1b3740fe4b25a
-          branch=agent/1114-debug-values
-          git fetch --no-tags origin "$base"
-          parent=$base
-          if test -n "$(git ls-remote --heads origin "refs/heads/$branch")"; then git fetch --no-tags origin "refs/heads/$branch"; parent=$(git rev-parse FETCH_HEAD); fi
-          git reset --soft "$parent"
-          git read-tree "$base"
-          git add -- docs/debug.md src/buster/compiler/c_check_debug.c src/buster/compiler/c_check_debug_test.c src/buster/compiler/c_check_debug_values.c src/buster/compiler/c_check_debug_values_test.c src/buster/compiler/c_check_program_emit.c src/buster/compiler/c_check_program_lower.c src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_units.c src/buster/compiler/debug_executable_test.c src/buster/compiler/emitted_code.c src/buster/compiler/executable.c src/buster/compiler/native_debug.h src/buster/compiler/object_writer.c src/buster/compiler/tier0.c
-          git diff --cached --check
-          git diff --cached --stat "$base"
-          git config user.name 'ChatGPT'
-          git config user.email 'noreply@openai.com'
-          sh .githooks/enable-sign-off.sh --maintainer-session
-          if ! git diff --cached --quiet; then git commit -m 'feat(debug): describe C types and Tier 0 values in DWARF' -m 'Carry source bindings and final homes into lexical ranges and location lists. Preserve global definition relocations through native output, relocatable objects and merged units. Add debugger value/type regressions and document unavailable locations. Refs #1114.'; fi
-          git log -1 --format='%H%n%B'
-          test "$(git log -1 --format='%B' | grep -Fc 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>')" = 1
-          tree=$(git rev-parse 'HEAD^{tree}')
-          git push origin "HEAD:refs/heads/$branch" || { git fetch --no-tags origin "refs/heads/$branch"; test "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$tree"; }
-      - name: Retain correctness evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: issue-1114-native-${{ github.run_number }}
-          path: |
-            ${{ runner.temp }}/1114-*.log
-            ${{ env.TMPDIR }}
-          retention-days: 3
-          if-no-files-found: ignore
+      - run: echo 'Superseded by hosted correctness on agent/1114-workspace.'
