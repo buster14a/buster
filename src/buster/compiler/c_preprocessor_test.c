@@ -7871,6 +7871,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE, "__builtin_os_log_format_buffer_size", false, true, true },
         { CBUILTIN_OS_LOG_FORMAT, "__builtin_os_log_format", false, true, false },
         { CBUILTIN_DUMP_STRUCT, "__builtin_dump_struct", false, true, false },
+        { CBUILTIN_AVAILABLE, "__builtin_available", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

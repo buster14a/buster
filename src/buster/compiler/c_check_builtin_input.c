@@ -242,6 +242,16 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         const uint32_t keyword = reader->first_child[token];
         check_input_os_log_evidence(reader, keyword < token ? keyword + 2 : token, token, builtin == CBUILTIN_OS_LOG_FORMAT, count, evidence);
     }
+    if (builtin == CBUILTIN_AVAILABLE)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        bool silent = false;
+        if (keyword < token)
+        {
+            check_input_availability_specs(reader, keyword, token, false, &silent);
+        }
+        evidence->availability_silent = silent;
+    }
     if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
     {
         const uint32_t keyword = reader->first_child[token];

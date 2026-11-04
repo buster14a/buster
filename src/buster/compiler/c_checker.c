@@ -59,6 +59,9 @@ struct CheckBuiltinCall
     bool os_log_known;
     bool os_log_invalid_mask;
     uint64_t os_log_taken[4];
+    // Whether __builtin_available's specs have an empty version (`0.0.0`, #148), which clang refuses without a diagnostic:
+    // its code generation then refuses the call ("cannot compile this scalar expression yet").
+    bool availability_silent;
     // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
     // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
     uint32_t function_objects[4];

@@ -479,7 +479,8 @@
     X(CALL_WITH_STATIC_CHAIN, 0x4B0u, "__builtin_call_with_static_chain", BUSTER_CBUILTIN_SOURCE) \
     X(OS_LOG_FORMAT_BUFFER_SIZE, 0x4B1u, "__builtin_os_log_format_buffer_size", BUSTER_CBUILTIN_CONSTANT) \
     X(OS_LOG_FORMAT, 0x4B2u, "__builtin_os_log_format", BUSTER_CBUILTIN_SOURCE) \
-    X(DUMP_STRUCT, 0x4B3u, "__builtin_dump_struct", BUSTER_CBUILTIN_SOURCE)
+    X(DUMP_STRUCT, 0x4B3u, "__builtin_dump_struct", BUSTER_CBUILTIN_SOURCE) \
+    X(AVAILABLE, 0x4B4u, "__builtin_available", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -769,7 +770,7 @@ static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
     return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING) ||
            (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) || id == CBUILTIN_INFER_ALLOC_TOKEN ||
-           (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_DUMP_STRUCT);
+           (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_AVAILABLE);
 }
 
 // The Microsoft and z/OS va_list builtins (#148, __builtin_ms_va_start to __builtin_zos_va_copy), which take the
@@ -789,13 +790,13 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 // Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
 // fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's, and the literal and
 // function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is, cpu_supports and
-// __builtin___CFStringMakeConstantString, __builtin_infer_alloc_token's token, __builtin_call_with_static_chain's call and
-// the os_log builtins' formats.
+// __builtin___CFStringMakeConstantString, __builtin_infer_alloc_token's token, __builtin_call_with_static_chain's call,
+// the os_log builtins' formats and __builtin_available's specs.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
                         id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS || id == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING ||
-                        id == CBUILTIN_INFER_ALLOC_TOKEN || (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_OS_LOG_FORMAT);
+                        id == CBUILTIN_INFER_ALLOC_TOKEN || (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_OS_LOG_FORMAT) || id == CBUILTIN_AVAILABLE;
     return result;
 }
 

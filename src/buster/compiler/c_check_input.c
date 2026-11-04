@@ -155,6 +155,17 @@ typedef enum CheckInputMessage
     CHECK_INPUT_SPECIFIER_SIGN,
     CHECK_INPUT_SPECIFIER_WIDTH,
     CHECK_INPUT_SPECIFIER_COMPLEX,
+    // __builtin_available's specs (#148, c_check_availability_input.c), as clang's parser reports them: a number that is
+    // no version, at it; a zero version, at the token after it; a platform clang doesn't know, at its name; an
+    // anyAppleOS version below 26, at it; a platform's second version, at its name (`detail` the platform); a second
+    // `*`, at it; and no `*`, just past the last version.
+    CHECK_INPUT_AVAILABILITY_VERSION,
+    CHECK_INPUT_AVAILABILITY_ZERO,
+    CHECK_INPUT_AVAILABILITY_PLATFORM,
+    CHECK_INPUT_AVAILABILITY_APPLE,
+    CHECK_INPUT_AVAILABILITY_REPEATED,
+    CHECK_INPUT_AVAILABILITY_STAR,
+    CHECK_INPUT_AVAILABILITY_WILDCARD,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -238,6 +249,13 @@ static const char* const check_input_messages[] =
     "type cannot be signed or unsigned",
     "invalid width for the type",
     "invalid _Complex type",
+    "expected a version of the form 'major[.minor[.subminor]]'",
+    "version number must have non-zero major, minor, or sub-minor version",
+    "unrecognized platform name",
+    "invalid anyAppleOS version in availability check",
+    "version for the platform already specified",
+    "'*' query has already been specified",
+    "must handle potential future platforms with '*'",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -1602,6 +1620,8 @@ static void check_input_warning(CheckInputReader* reader, uint32_t id, uint32_t 
 }
 
 static void check_input_warning_once(CheckInputReader* reader, const CheckWarningEvent* event);
+// c_check_availability_input.c's, which the constant evaluator asks too (#148).
+static void check_input_availability_warning(CheckInputReader* reader, uint32_t keyword, uint32_t close);
 
 // clang's -Wgnu-alignof-expression (#147): C11's _Alignof or C23's alignof of an expression, a GNU extension, at the
 // keyword as written, once whichever evaluation reaches it (the walk's or the constant evaluator's). GNU's __alignof__
@@ -6827,6 +6847,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
 
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
+#include "c_check_availability_input.c"
 #include "c_check_builtin_input.c"
 #include "c_check_asm_input.c"
 #include "c_check_musttail.c"
@@ -7135,6 +7156,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             if (!reader->ignored[i] && check_input_source_builtin(parser->tokens.names[i]) && reader->output->report_count == 0 && !reader->output->resource)
             {
                 check_input_builtin_constant_prepare(reader, i);
+            }
+            if (!reader->ignored[i] && parser->tokens.names[i] == C_NAME_BUILTIN_AVAILABLE && parser->tokens.kinds[i] == PARSE_KIND_TYPE_ARGUMENT)
+            {
+                check_input_availability_prepare(reader, i);
             }
             if (!reader->ignored[i] && (parser->tokens.names[i] == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || parser->tokens.names[i] == C_NAME_BUILTIN_OFFSETOF))
             {

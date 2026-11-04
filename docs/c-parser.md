@@ -153,9 +153,11 @@ always is in C23; and at file scope a declarator without specifiers (`(x);`,
 `*p;`) has an implicit int too. Selection and iteration statements are blocks, and so is
 each of their substatements (C 6.8.4p3, 6.8.5p5): what a condition declares
 ends with its statement, and what a then-statement or a do's body declares ends
-with it. `__builtin_offsetof`'s member designator and `_Static_assert`'s
-message have grammars of their own, as clang reads them: members' names,
-whatever the ordinary names mean, `.` and subscripts; and string literals. So
+with it. `__builtin_offsetof`'s member designator, `_Static_assert`'s
+message and `__builtin_available`'s specs (#148) have grammars of their own, as
+clang reads them: members' names, whatever the ordinary names mean, `.` and
+subscripts; string literals; and a `*` or a platform's name, whatever the
+ordinary names mean, and its version, a number, separated by commas. So
 do an asm statement's sections, as clang's `ParseAsmStatement` reads them: the
 template, the outputs and inputs (each a symbolic name in `[...]`, a constraint
 and its operand in parentheses), the clobbers and asm goto's labels, all of

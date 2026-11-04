@@ -1688,6 +1688,18 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 valid = check_constant_type_builtin_prepare(input, token, keyword == C_NAME_BUILTIN_BIT_CAST ? CBUILTIN_BIT_CAST : CBUILTIN_CONVERTVECTOR);
             }
+            else if (valid && keyword == C_NAME_BUILTIN_AVAILABLE)
+            {
+                // __builtin_available (#148): its specs are syntax, which names nothing; the call takes no operand.
+                input->syntax[token - 1 - input->first] = true;
+                for (uint32_t item = token + 1; item < close; item += 1)
+                {
+                    input->syntax[item - input->first] = true;
+                }
+                check_input_rare_claim(reader, &reader->builtins[close]);
+                reader->builtins[close] = CBUILTIN_AVAILABLE;
+                check_input_availability_warning(reader, token - 1, close);
+            }
         }
         if (valid && input->syntax[index] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM))
         {
@@ -2883,6 +2895,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 valid = check_constant_source_builtin(input, token, count, action.operands, &input->values[index]);
                 proof = input->values[index];
             }
+            else if (reader->builtins[token] == CBUILTIN_AVAILABLE)
+            {
+                valid = count == 0 && check_constant_call(input, reader->first_child[token], token, CBUILTIN_AVAILABLE, 0, action.operands, 0, &input->values[index]);
+                proof = input->values[index];
+            }
             else
             {
                 valid = check_constant_builtin(input, token, &input->values[index], &proof);
@@ -3314,6 +3331,9 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             valid = builtin != CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT);
             const bool type_builtin = builtin == CBUILTIN_CONVERTVECTOR || builtin == CBUILTIN_BIT_CAST;
             const TypeId destination = type_builtin ? input->queries[close - input->first] : 0;
+            // __builtin_available's specs are no operands (#148): its call takes none, read at its `)`.
+            const bool availability = builtin == CBUILTIN_AVAILABLE;
+            arguments = availability ? 0 : arguments;
             if (type_builtin)
             {
                 valid &= arguments == 2 && destination != 0;
@@ -3332,7 +3352,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 };
                 operators[operator_count++] = (CheckConstantOperator){ .token = open, .marker = 3 };
             }
-            token = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, open + 1, close, PARSE_KIND_COMMA) + 1 : open + 1;
+            token = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, open + 1, close, PARSE_KIND_COMMA) + 1 : availability ? close : open + 1;
         }
         else if (operand && kind == PARSE_KIND_IDENTIFIER && check_input_intrinsic_type(reader, token) != 0)
         {
@@ -3683,6 +3703,26 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             {
                 input->attribute_starts[index]->publish = false;
             }
+        }
+        if (kind == PARSE_KIND_L_PAREN && token > input->first && parser->tokens.names[token - 1] == C_NAME_BUILTIN_AVAILABLE &&
+            parser->tokens.kinds[token - 1] == PARSE_KIND_TYPE_ARGUMENT)
+        {
+            // __builtin_available's specs (#148), which name nothing: syntax, up to the call's `)`, which takes no operand.
+            const uint32_t close = parser->tree.parents[token];
+            valid = close > token && close < input->end;
+            if (valid)
+            {
+                input->syntax[index - 1] = true;
+                for (uint32_t item = token; item < close; item += 1)
+                {
+                    input->syntax[item - input->first] = true;
+                }
+                check_input_rare_claim(reader, &reader->builtins[close]);
+                reader->builtins[close] = CBUILTIN_AVAILABLE;
+                check_input_availability_warning(reader, token - 1, close);
+                token = close - 1;
+            }
+            continue;
         }
         if (kind == PARSE_KIND_L_PAREN)
         {

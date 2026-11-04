@@ -1707,6 +1707,9 @@ compile, and this compiler doesn't yet:
   more than 8 bytes;
 - `__builtin_dump_struct`, whose generated calls.
 
+`__builtin_available` with an empty version (`0.0.0`) is refused too, as
+clang's code generation refuses it.
+
 A unit that only checks them (`-fsyntax-only`) gets clang's answers. A unit
 that compiles one gets the refusal's message, at the call.
 
@@ -1827,6 +1830,58 @@ record dump, as `BuiltinDumpStruct` checks it.
 - **Code.** clang's code is those calls, with each field's value or address
   and type names it prints. This compiler doesn't make them, so `-c` refuses
   the call by name.
+
+`__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
+a keyword whose specs are no expressions: each a `*`, or a platform's name and
+its version (`macos 10.12`, `iOS 10_3`). It is a `_Bool` that is no constant
+expression. On an x86-64 Linux target, whose platform name is empty, the
+`*`'s, clang's code is the constant 1.
+
+- **The parser.** The scalar parser reads the specs in their own modes
+  (`PARSE_MODE_AVAILABILITY_SPEC`, `_VERSION`, `_NEXT`): a `*` or an
+  identifier, whatever the ordinary names mean (a typedef's name too), then
+  a number, then `,` or `)`. Its errors are clang's where the kinds don't fit:
+  "expected '('" just past the keyword, "expected a platform name here",
+  "expected a version of the form 'major[.minor[.subminor]]'", and the
+  balanced delimiters' "expected ')'". The vector path's checks never take the
+  keyword (`PARSE_CLASS_OPERAND_KEYWORD`), so its declarations fall back.
+- **The specs' checks.** `c_check_availability_input.c` makes the checks of
+  clang's parser past the kinds, at the keyword, in the walk's source order:
+  - `ParseVersionTuple`'s reading of the number's spelling: a numeric
+    constant (not `true` or `__func__`), its components separated by `.` or
+    `_`, their values wrapping as unsigned ones, a zero version's error at the
+    token after the number, and -Wavailability's warning where the
+    separators differ (`1.2_3`);
+  - the platform, canonicalized as `canonicalizePlatformName` does, one of
+    the 19 `getPrettyPlatformName` names, and none with `xros` in it;
+  - an anyAppleOS version of 26 at least;
+  - and then, where each spec is valid, the list's: a second `*`, a
+    platform's second version, and no `*`, just past the last version.
+
+  A version whose kept components are all 0 (`0.0.0`, `0.2147483648`) is no
+  spec of clang's, without a diagnostic: clang's expression is invalid, and
+  its code generation refuses it ("cannot compile this scalar expression
+  yet"), as `-c` does here by name.
+- **The value.** The call takes no operand (its specs' tokens are ignored).
+  The walk and the constant evaluator, in its raw and its bound modes, give it
+  the builtin's id at its `)`, so `sizeof`, `typeof`, `_Generic` and a VLA's
+  bound read its type, and an integer constant expression refuses it.
+- **-Wunsupported-availability-guard.** clang warns at a check in a function's
+  body that isn't an if's condition, as written through parentheses and `!`,
+  nor a case label's value, once it has read the body: the warning completes
+  after the body's `}`. A check whose specs aren't each valid is no
+  expression of clang's, which no warning visits. A file-scope check gets
+  none. The walk and the constant evaluator (a `typeof`'s operand, which the
+  walk doesn't visit) each ask, once.
+- **Differences.** clang reads the rest of a list after a spec's error, and
+  its errors before a missing `)` include the list's; this parser stops at
+  its first. `__builtin_available` in a constant context gets the checker's
+  messages of a call that is no constant, as `__builtin_cpu_supports` does:
+  "initializer is not a constant expression" where clang says "initializer
+  element is not a compile-time constant", and a static assertion's message
+  at the call's `)`.
+
+`__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
 
 `__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
 arguments never run. It is clang 23's allocation token: the reader works it

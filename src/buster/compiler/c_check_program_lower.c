@@ -7789,6 +7789,20 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_unsupported(writer, "__builtin_dump_struct, whose calls of its printing function this compiler doesn't make");
     }
+    else if (runtime == CBUILTIN_AVAILABLE)
+    {
+        // clang's code for a check that names no Linux platform (#148): the constant 1, whatever the specs say. An empty
+        // version (`0.0.0`) makes clang's expression invalid without a diagnostic, and its code generation refuses it.
+        const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
+        if (witness == NULL || witness->availability_silent)
+        {
+            check_lower_unsupported(writer, "__builtin_available with an empty version, which clang doesn't compile either");
+        }
+        else
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U8, 1);
+        }
+    }
     else if (runtime == CBUILTIN_OS_LOG_FORMAT)
     {
         check_lower_os_log(writer, node);

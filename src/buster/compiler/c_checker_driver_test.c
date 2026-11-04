@@ -486,7 +486,8 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; and eh_return's
 // unwinding and the constant strings' objects, which clang makes and this compiler doesn't; z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; and
-// os_log formats whose items take their data out of order, or data past 8 bytes; and dump_struct's generated calls.
+// os_log formats whose items take their data out of order, or data past 8 bytes; dump_struct's generated calls; and
+// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
     static const struct
@@ -517,6 +518,8 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
         { "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s) { __builtin_dump_struct(s, printf); }\n",
           "unsupported: __builtin_dump_struct, whose calls of its printing function this compiler doesn't make" },
+        { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
+          "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
     };
     char source[256];
     char object[256];
@@ -6962,6 +6965,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_generic_builtins(&test, clang, executable, directory);
+            check_test_driver_availability(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

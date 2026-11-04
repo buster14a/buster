@@ -35,6 +35,8 @@ enum
     CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION = 43,
     CHECK_WARNING_ID_DEPRECATED_DECLARATIONS = 44,
     CHECK_WARNING_ID_CFSTRING_LITERAL = 45,
+    CHECK_WARNING_ID_UNSUPPORTED_AVAILABILITY_GUARD = 46,
+    CHECK_WARNING_ID_AVAILABILITY = 47,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -106,6 +108,10 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_DEPRECATED_USE,
     // A CFString builtin's literal that isn't UTF-8 (#148, check_input_cfstring_literal), at the literal.
     CHECK_WARNING_EVENT_CFSTRING_TRUNCATED,
+    // A __builtin_available that guards nothing (#148, check_input_availability_prepare), at its keyword, and a version
+    // whose separators differ (`1.2_3`), at its number.
+    CHECK_WARNING_EVENT_UNGUARDED_AVAILABILITY,
+    CHECK_WARNING_EVENT_VERSION_SEPARATORS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

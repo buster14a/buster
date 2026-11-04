@@ -375,6 +375,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: dump_struct of a wrong context", .source = "int pf(int* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s, long* l)\n{\n__builtin_dump_struct(s, pf, l);\n}\n", .rejected = true },
         { .name = "generic: dump_struct of an int format", .source = "int pf(void* ctx, int f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf, s);\n}\n", .rejected = true },
         { .name = "generic: dump_struct's value", .source = "int printf(const char*, ...);\nstruct S { int a; };\nint f(struct S* s)\n{\nreturn __builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        // __builtin_available (#148): a _Bool of no constant expression, its specs names and numbers of nothing of the
+        // unit's, a typedef's name among them; a spec's error and the list's, at file scope and in a function.
+        { .name = "generic: available", .source =
+          "typedef int macos;\nint s = sizeof(__builtin_available(*));\ntypeof(__builtin_available(ios 10, *)) t;\n"
+          "_Static_assert(_Generic(__builtin_available(*), _Bool: 1, default: 0), \"\");\nint f(int x)\n{\n"
+          "if (__builtin_available(macos 10.12, iOS 10_3, watchOS 3.1.2, *)) x += 1;\nif (!__builtin_available(*)) x += 2;\n"
+          "_Bool b = __builtin_available(android 21, *);\nint a[__builtin_available(*) + 1];\n"
+          "return x + b + (int)sizeof a + __builtin_available(anyAppleOS 26.1, *);\n}\n" },
+        { .name = "generic: available of no version", .source = "int f(void)\n{\nreturn __builtin_available(macos x, *);\n}\n", .rejected = true },
+        { .name = "generic: available of an unknown platform", .source = "int f(void)\n{\nreturn __builtin_available(linuxos 1, *);\n}\n", .rejected = true },
+        { .name = "generic: available of a zero version", .source = "int f(void)\n{\nreturn __builtin_available(macos 0.0, *);\n}\n", .rejected = true },
+        { .name = "generic: available without a star", .source = "int f(void)\n{\nreturn __builtin_available(macos 1);\n}\n", .rejected = true },
+        { .name = "generic: available of a repeated platform", .source = "int f(void)\n{\nreturn __builtin_available(macos 1, macosx 2, *);\n}\n", .rejected = true },
+        { .name = "generic: available of an old anyAppleOS", .source = "int f(void)\n{\nreturn __builtin_available(anyAppleOS 25, *);\n}\n", .rejected = true },
+        { .name = "generic: available as a constant", .source = "enum { E = __builtin_available(*) };\n", .rejected = true },
+        { .name = "generic: available's static", .source = "static int v = __builtin_available(*);\n", .rejected = true },
         { .name = "generic: infer_alloc_token of none", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token();\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of void", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token((void)0);\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of no type", .source = "_Static_assert(__builtin_infer_alloc_token(1) == 0, \"\");\n", .rejected = true },
@@ -549,6 +565,14 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "return (int)((pushed((const unsigned char*)saver)&callee)*4+(pushed((const unsigned char*)kept)&callee)*2+"
         "((pushed((const unsigned char*)plain)&callee)!=0))+plain(n)*7+kept(n);}",
         "generic-unwind-init-saves", clang);
+    // __builtin_available (#148): 1 for every platform's spec on Linux, in conditions, negated, as a value, through its
+    // type's queries, which never run it, and in a loop's condition.
+    check_test_program_source(test,
+        "int tested(int n){int r=0;if(__builtin_available(macos 10.12,ios 10,*))r+=1;if(!__builtin_available(*))r+=2;"
+        "_Bool b=__builtin_available(android 21,*);r+=b*4;r+=(int)sizeof(__builtin_available(*))*8;"
+        "r+=_Generic(__builtin_available(*),_Bool:16,default:0);typeof(__builtin_available(*)) t=7;r+=t*32;"
+        "for(int i=0;i<n&&__builtin_available(*);i++)r+=64;return r+(n>3?__builtin_available(swift 5,*):0)*1024;}",
+        "generic-available", clang);
     // The alloca variants' bytes and alignments, in a loop whose allocations each stay apart; the checks' values; the
     // annotation's integer, once evaluated; and addressof's and function_start's addresses, of a local, a member, an
     // array, a function, and in static data.

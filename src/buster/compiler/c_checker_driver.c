@@ -149,6 +149,13 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_SPECIFIER_SIGN: result = "type cannot be signed or unsigned"; break;
         case CHECK_INPUT_SPECIFIER_WIDTH: result = "invalid width for the type"; break;
         case CHECK_INPUT_SPECIFIER_COMPLEX: result = "invalid _Complex type"; break;
+        case CHECK_INPUT_AVAILABILITY_VERSION: result = "expected a version of the form 'major[.minor[.subminor]]'"; break;
+        case CHECK_INPUT_AVAILABILITY_ZERO: result = "version number must have non-zero major, minor, or sub-minor version"; break;
+        case CHECK_INPUT_AVAILABILITY_PLATFORM: result = "unrecognized platform name"; break;
+        case CHECK_INPUT_AVAILABILITY_APPLE: result = "invalid anyAppleOS version in availability check"; break;
+        case CHECK_INPUT_AVAILABILITY_REPEATED: result = "version for the platform already specified"; break;
+        case CHECK_INPUT_AVAILABILITY_STAR: result = "'*' query has already been specified"; break;
+        case CHECK_INPUT_AVAILABILITY_WILDCARD: result = "must handle potential future platforms with '*'"; break;
     }
     return result;
 }
@@ -1349,6 +1356,48 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
                                                         (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
                                                         (int)message.length, message.pointer);
+                        }
+                        else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
+                        {
+                            // __builtin_available's specs (#148): a platform's name as written, an anyAppleOS version as
+                            // clang's VersionTuple prints it, and a repeated platform's canonical name.
+                            const uint32_t name = parser->tokens.names[token];
+                            const uint32_t platform = input->reports[index].detail;
+                            if (kind == CHECK_INPUT_AVAILABILITY_PLATFORM)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "unrecognized platform name %.*s", (int)intern_length(pp->table, name),
+                                                      intern_bytes(pp->table, name));
+                            }
+                            else if (kind == CHECK_INPUT_AVAILABILITY_REPEATED)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "version for '%s' already specified",
+                                                      check_availability_platforms[platform < BUSTER_ARRAY_LENGTH(check_availability_platforms) ? platform : 0]);
+                            }
+                            else
+                            {
+                                const uint32_t at = parser->tokens.sources[token];
+                                const uint64_t spelling_mark = scratch->length;
+                                uint8_t* buffer = arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1);
+                                const uint8_t* bytes = NULL;
+                                const uint32_t length = buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at], buffer, &bytes) : 0;
+                                const CheckAvailabilityVersion version = check_availability_version(bytes, length);
+                                char text[48];
+                                snprintf(text, sizeof(text), version.components == 1 ? "%u" : version.components == 2 ? "%u.%u" : "%u.%u.%u", version.major, version.minor,
+                                         version.subminor);
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid anyAppleOS version '%s' in availability check", text);
+                                arena_pop_to(scratch, spelling_mark);
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_AVAILABILITY_WILDCARD && token < count)
+                        {
+                            // Just past the last version, where clang's fix-it inserts ", *".
+                            const uint32_t at = parser->tokens.sources[token];
+                            const uint64_t spelling_mark = scratch->length;
+                            uint8_t* buffer = arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1);
+                            const uint8_t* bytes = NULL;
+                            const uint32_t length = buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at], buffer, &bytes) : 0;
+                            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, length, publication, "must handle potential future platforms with '*'");
+                            arena_pop_to(scratch, spelling_mark);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
                         {

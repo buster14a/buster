@@ -1133,6 +1133,12 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_AVAILABLE)
+    {
+        // clang's ObjCAvailabilityCheckExpr (#148): a _Bool, of no constant expression, which its code makes 1 for this
+        // target (c_check_availability_input.c).
+        output->action.value = (CheckValue){ .type = BUSTER_TYPE_BOOL, .category = CHECK_RVALUE };
+    }
     else if (id == CBUILTIN_DUMP_STRUCT)
     {
         // clang's BuiltinDumpStruct (#148): a pointer, lvalue-converted, to a complete struct or union ("expected pointer
@@ -1511,6 +1517,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 31; break;
         // A record's pointer, a printing function, and that function's leading arguments.
         case CBUILTIN_DUMP_STRUCT: minimum = 2; maximum = 31; break;
+        // Its specs are no operands (c_check_availability_input.c).
+        case CBUILTIN_AVAILABLE: minimum = maximum = 0; break;
         case CBUILTIN_OPERATOR_NEW:
         case CBUILTIN_OPERATOR_DELETE:
             // C++'s alone, refused with any arguments, before their count can reach the operands' 32-bit mask.

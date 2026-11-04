@@ -575,6 +575,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "input conversion stopped due to an input byte that does not belong to the input codeset UTF-8";
             break;
         }
+        case CHECK_WARNING_EVENT_UNGUARDED_AVAILABILITY:
+        {
+            result = "__builtin_available does not guard availability here; use if (__builtin_available) instead";
+            break;
+        }
+        case CHECK_WARNING_EVENT_VERSION_SEPARATORS:
+        {
+            result = "use same version number separators '_' or '.'; as in 'major[.minor[.subminor]]'";
+            break;
+        }
         case CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE:
         {
             result = check_warning_text(scratch, "'%.*s' attribute ignored when parsing type", (int)name.length, name.pointer);
