@@ -23,10 +23,13 @@ requirements. [Command index](README.md).
 - `tier1_certificate_emitted.c` certifies the CFG consumer's code: its stream
   decoded from the emitted records (each record's origin, `Tier1Origin`, says
   which decoding applies), each node's records regenerated and compared, the
-  control flow walked. Shapes it doesn't decode yet (aggregates, dynamic
-  frames, variadic definitions, indirect jumps to several labels) leave the
-  code uncertified, by reason; `--tier1-report` counts `code_certified` and
-  `code_uncertified`. `test-tier1-pipeline` corrupts certified functions'
+  control flow walked: wide vectors, machine rows (their templates placed by the
+  emitter's claimed `Tier1RowPlacement`), realigned frames and by-value
+  aggregates among them (#1284). Shapes it doesn't decode yet (dynamic frames,
+  variadic definitions, long doubles, indirect jumps to several labels) leave
+  the code uncertified, by reason; `--tier1-report` counts `code_certified` and
+  `code_uncertified`, and `test-checker-driver --executable`'s Tier 1 fixtures
+  check those counts. `test-tier1-pipeline` corrupts certified functions'
   records, every prologue and epilogue record among them: a refused mutant
   counts, an accepted one runs natively and must agree with the interpreter.
   `test-tier1-emit`'s call fixture (`tier1_code_certificate_test.c`) leaves an
@@ -34,7 +37,12 @@ requirements. [Command index](README.md).
   spills around calls: each must be refused. Its compare-exchange fixture keeps
   a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
   certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
-  its own cases too.
+  its own cases too. Its realigned fixture's prologue, its allocation moved
+  before its push of rbx and its epilogue matched, must be refused. `test-tier1-masks` corrupts machine rows and wide vectors'
+  moves: borrowed masks' reloads left out, staging copies onto live registers,
+  claimed placements of roles sharing a register while both hold values, of k0
+  for a numbered opmask register or of a corrupted split (#1283's early
+  register), and ymm or zmm moves narrowed to xmm; each must be refused.
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and
