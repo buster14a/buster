@@ -285,6 +285,30 @@ static bool check_literal_table_integer_spelling(const uint8_t* spelling, uint32
     return integer;
 }
 
+// Whether an integer literal's spelling may hold a value that `width`'s format (32: float, 64: double) can't: more
+// digits than every value of that many is exact in, 2^24 or 2^53 being the format's least integer past which one isn't.
+// Decimal: 7 or 15 digits; hexadecimal: 6 or 13; octal: 8 or 17; binary: 24 or 53. Leading zeros count, and digit
+// separators don't, so the count errs only toward testing: a spelling counted short is still tested by its batch
+// (check_literal_table_floating_value), only later.
+static bool check_literal_table_integer_may_round(const uint8_t* spelling, uint32_t length, uint32_t width)
+{
+    const bool hexadecimal = length > 2 && spelling[0] == '0' && (spelling[1] | 0x20) == 'x';
+    const bool binary = length > 2 && spelling[0] == '0' && (spelling[1] | 0x20) == 'b';
+    const bool octal = !hexadecimal && !binary && length > 1 && spelling[0] == '0';
+    const uint32_t first = hexadecimal || binary ? 2 : octal ? 1 : 0;
+    const uint32_t limit = hexadecimal ? (width == 32 ? 6 : 13) : binary ? (width == 32 ? 24 : 53) : octal ? (width == 32 ? 8 : 17) : (width == 32 ? 7 : 15);
+    uint32_t digits = 0;
+    bool more = true;
+    for (uint32_t i = first; more && i < length; i += 1)
+    {
+        const uint8_t c = spelling[i];
+        const bool digit = (c >= '0' && c <= '9') || (hexadecimal && (c | 0x20) >= 'a' && (c | 0x20) <= 'f');
+        digits += digit;
+        more = digit || c == '\'';
+    }
+    return digits > limit;
+}
+
 // A floating table's elements, gathered once before any is converted: each one's token and spelling
 // (check_input_spelling, kept in scratch until the table is decided, so that no spelling is made twice), and which ones
 // are already converted, into the payload.
@@ -298,12 +322,14 @@ struct CheckLiteralTableElements
 };
 
 // Gathers the elements of tokens [begin, end), `count` of them, and converts those spelled as integers (no '.', no
-// exponent) longer than three characters into `payload`, before any floating conversion: so the refusals an integer's
-// value makes (its precision lost in the element's format) come first. One late in a table would otherwise come after
-// every element before it was converted in vain, which the ordinary path then converts again: 28% slower than main on
-// a 200,000-element table refused at its last element on the 9700X (#1210). Integers of three characters or fewer, at
-// most 999 (0777 in octal, 0xff), are exact in both formats, and the batches convert them. The other late refusals (a
-// range warning, an imaginary, bit-precise or malformed constant) are code that warns or fails, and keep their cost.
+// exponent) whose value may not be exact in the element's format (check_literal_table_integer_may_round) into
+// `payload`, before any other conversion: so the refusals an integer's precision loss makes come first. One late in a
+// table would otherwise come after every element before it was converted in vain, which the ordinary path then converts
+// again: 28% slower than main on a 200,000-element table refused at its last element on the 9700X (#1210). Testing every
+// integer of four characters or more first still left that table of exact long integers 23% slower, all of them
+// converted before the last refused it; integers that are exact by their digits now wait for their batch. The other
+// late refusals (a range warning, an imaginary, bit-precise or malformed constant) are code that warns or fails, and
+// keep their cost.
 static bool check_literal_table_floating_integers(CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId element, uint32_t width,
                                                   uint8_t* payload, const CheckLiteralTableElements* elements)
 {
@@ -319,7 +345,7 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, uint
             valid = check_input_spelling(reader, token, &elements->spellings[index], &elements->lengths[index]);
             const uint8_t* spelling = valid ? elements->spellings[index] : NULL;
             const uint32_t length = valid ? elements->lengths[index] : 0;
-            if (valid && length > 3 && check_literal_table_integer_spelling(spelling, length))
+            if (valid && length > 3 && check_literal_table_integer_spelling(spelling, length) && check_literal_table_integer_may_round(spelling, length, width))
             {
                 const uint64_t mark = reader->scratch->length;
                 uint64_t bits = 0;

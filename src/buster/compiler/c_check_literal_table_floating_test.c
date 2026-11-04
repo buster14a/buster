@@ -172,6 +172,39 @@ static void check_test_literal_floating_integer_spellings(CheckTest* test)
         check_test_expect(test, check_literal_table_integer_spelling((const uint8_t*)spelling, (uint32_t)strlen(spelling)) == cases[i].integer,
                           "an integer literal's spelling is told from a floating literal's");
     }
+    // Each base's longest spelling exact in the format, and one digit more, for float (32) and double (64).
+    typedef struct RoundCase RoundCase;
+    struct RoundCase
+    {
+        const char* spelling;
+        uint32_t width;
+        bool may_round;
+    };
+    static const RoundCase rounds[] = {
+        { "9999999", 32, false },
+        { "16777217", 32, true },
+        { "1677721u", 32, false },
+        { "0xffffff", 32, false },
+        { "0x1000001", 32, true },
+        { "077777777", 32, false },
+        { "0100000001", 32, true },
+        { "0b111111111111111111111111", 32, false },
+        { "0b1000000000000000000000001", 32, true },
+        { "999999999999999", 64, false },
+        { "9007199254740993ULL", 64, true },
+        { "0xfffffffffffff", 64, false },
+        { "0x20000000000001", 64, true },
+        { "077777777777777777", 64, false },
+        { "0400000000000000001", 64, true },
+        { "16'777'217", 32, true },
+        { "1'000'000", 32, false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rounds); i += 1)
+    {
+        const char* spelling = rounds[i].spelling;
+        check_test_expect(test, check_literal_table_integer_may_round((const uint8_t*)spelling, (uint32_t)strlen(spelling), rounds[i].width) == rounds[i].may_round,
+                          "an integer spelling is tested first exactly when its digits allow a value its format can't hold");
+    }
 }
 
 static void check_test_literal_floating_tails(CheckTest* test, bool wide)

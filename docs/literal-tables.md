@@ -46,14 +46,18 @@ publication use the existing lifetime and deferred-replay contract.
 
 The existing grammar kernel checks 64 token kinds at a time. A floating table
 then gathers every element's spelling once, kept in scratch until the table is
-decided, and converts the integers spelled with more than three characters
-first (`check_literal_table_floating_integers`), so that one whose value float
-or double can't hold refuses the table before any floating conversion: refused
-at its last element, a 200,000-element `float` table took 27.8% longer than
-main when every element before it was converted first (buster-performance#250).
-Integers of three characters or fewer are exact in both formats. Each batch
-then takes 16 of the gathered spellings, skipping the integers already
-converted; common short integer spellings use the existing SIMD decoder. Floating payloads are stored in masked eight-element batches, with
+decided, and first converts the integers whose digits allow a value the format
+can't hold (`check_literal_table_integer_may_round`: more than 7 decimal, 6
+hexadecimal, 8 octal or 24 binary digits for `float`; 15, 13, 17 or 53 for
+`double`), so that one whose value float or double can't hold refuses the table
+before any other conversion. Refused at its last element, a 200,000-element
+`float` table took 27.8% longer than main when every element before it was
+converted first, and still 23% longer when every integer of four characters or
+more was converted first in a table of such integers (buster-performance#250).
+Integers exact by their digits wait for their batch, which converts each
+element once. Each batch takes 16 of the gathered spellings, skipping the
+integers already converted; common short integer spellings use the existing
+SIMD decoder. Floating payloads are stored in masked eight-element batches, with
 bit-preserving 64-to-32-bit narrowing for `float`. The scalar path stores the
 same representations without vector instructions. Stable parser options and
 token-kind pointers are cached across spelling normalization and output stores.
