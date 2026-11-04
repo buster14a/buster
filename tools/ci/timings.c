@@ -19,7 +19,7 @@
 // and the nightly snapshot's comprehensive run).
 static const char* const timing_groups[] = { "pr", "main", "targeted", "full" };
 static const char* const timing_group_labels[] = { "PR", "main push", "nightly targeted", "full (daily, dispatched, snapshot)" };
-static const char* const timing_metrics[] = { "queue", "execution", "runner-hook", "setup-build", "native-tests", "benchmark-steps", "host-occupation" };
+static const char* const timing_metrics[] = { "queue", "execution", "runner-hook", "lock-wait", "lock-hold", "setup-build", "native-tests", "benchmark-steps", "host-occupation" };
 #define BUSTER_TIMINGS_GROUPS (sizeof(timing_groups) / sizeof(timing_groups[0]))
 #define BUSTER_TIMINGS_METRICS (sizeof(timing_metrics) / sizeof(timing_metrics[0]))
 
@@ -190,7 +190,7 @@ static int timing_report(FILE* input, FILE* output)
             fputs("\nNo eligible observations were returned; this is not zero latency.\n", output);
         }
         fputs("\np95 uses the nearest-rank definition. Missing timestamps are omitted.\n", output);
-        fputs("`runner-hook` includes hook overhead and possible lock waiting; it is **not** an exact lock-wait measurement. Exact lock acquisition/release requires runner-hook telemetry and is not inferred here.\n", output);
+        fputs("`runner-hook` is the job-started hook's step, from the API's whole-second step times. `lock-wait` and `lock-hold` come from the hooks' own log lines instead, rounded to whole seconds: the wait runs from the job-started hook's start to its `this job has the machine`, the hold from there to the job-completed hook's `gave the machine back`, the host's time under this job's lock.\n", output);
         fputs("`setup-build` spans host verification through the start of native tests. `benchmark-steps` is the sum of successful benchmark/measurement step durations, not a performance result.\n", output);
         fputs("`host-occupation` spans the job's first step after the runner hook (the lock is held by then) through the job's end: the time the host was this job's.\n", output);
         valid = fflush(output) == 0;
@@ -241,6 +241,8 @@ static int timing_test(void)
     failures += !timing_add(&timings, "18446744073709551615\tfull\texecution\t604800\n");
     checks += 1;
     failures += !timing_add(&timings, "5\ttargeted\thost-occupation\t60\n");
+    checks += 1;
+    failures += !timing_add(&timings, "5\ttargeted\tlock-wait\t0\n") || !timing_add(&timings, "5\ttargeted\tlock-hold\t61\n");
     checks += 1;
     failures += timing_add(&timings, "5\tperiodic\texecution\t60\n");
     checks += 1;

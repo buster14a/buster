@@ -195,9 +195,10 @@ Benchpress.
 Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
 `9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
 median and nearest-rank 95th percentile of successful hardware jobs' queue,
-execution, runner-hook, setup/build, native-test, benchmark-step and
-host-occupation durations. Host occupation runs from the job's first step,
-after the runner hook took the lock, to the job's end. Four classes stay
+execution, runner-hook, lock-wait, lock-hold, setup/build, native-test,
+benchmark-step and host-occupation durations. Host occupation runs from the
+job's first step, after the runner hook took the lock, to the job's end. Four
+classes stay
 separate:
 
 - PR;
@@ -212,10 +213,27 @@ This adds no benchmark work and changes no hardware scheduling or merge gate.
 
 Missing or inconsistent timestamps contribute no sample; a job or step that
 failed/skipped is not a successful timing observation. No observations means
-unknown, not zero. `runner-hook` includes hook overhead and possible waiting;
-**it is not the exact shared-lock wait**. Exact lock acquisition/release and
-therefore exact lock occupation still require host-hook instrumentation, which
-this report does not pretend to infer from `started_at`.
+unknown, not zero. `runner-hook` is the job-started hook's step, from the
+API's whole-second step times: hook overhead and any waiting.
+
+The shared lock's exact times come from the 9700X's runner hooks themselves,
+which log every acquisition and release in the job's log. The job-started hook
+(`/usr/local/libexec/buster-9700x/job-started.sh`) prints
+`buster-9700x: waiting for the machine, held by: …` while another holder has
+it, then `buster-9700x: this job has the machine`. The job-completed hook prints
+`buster-9700x: gave the machine back`. The collector reads those lines and
+their sub-second runner timestamps from each successful hardware job's log,
+read as data and not kept, and reports two metrics:
+
+- `lock-wait`, from the job-started hook's start to `this job has the
+  machine`;
+- `lock-hold`, from there to `gave the machine back`, the host's time under
+  this job's lock.
+
+Both are rounded to whole seconds. A log that can't be read, or that lacks one
+of the lines, gives that metric no sample. On 2026-11-03, PR run 41664434811's
+job waited 8.0 s behind an agent session's differential test and held the
+lock for 151.6 s.
 
 The collector (`tools/ci/timings.sh`) uses read-only Actions access on the
 hosted runner. `tools/ci/timings.c` validates bounded tab-separated observations,
@@ -456,8 +474,6 @@ pushes measure targeted, the coordinator dispatches, and the daily run's
 
 **Open items** this repository can't close:
 
-- exact lock-wait and lock-hold times, which need the host's runner hooks to
-  record their acquisition;
 - the ledger's publication token;
 - whether the coordinator's capacity drains the observed arrivals, which only
   enabled cycles will tell.
