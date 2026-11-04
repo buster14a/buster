@@ -1,0 +1,247 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+name: Checker layout acceptance (#1175)
+
+# This is a fixed, already-merged historical comparison, not a PR benchmark or a
+# replacement for 9700x.yml. Only the hosted qualification runs on pull requests.
+on:
+  pull_request:
+    paths: ['.github/workflows/checker-layout-1175.yml']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/checker-layout-1175.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-fast-9700x-layout-1175-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BASE_SHA: e36740b8f70cf5755cabff9b2a9a998b173c2878
+  HEAD_SHA: c79fd0076fc8ee3ba0a43d02f94dca417a7557ea
+  # Reviewed and merged buster-performance#248, including its strict counter reader.
+  EVIDENCE_SHA: 961e2893fe13ac4c30547ff86f1e2e279e09b06b
+  RECORD: evidence-1175/docs/measurements/layout-hints-1175-2026-11-03
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  qualify:
+    name: Qualify the pinned layout campaign on hosted Ubuntu
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      base_run: ${{ steps.sources.outputs.base_run }}
+      head_run: ${{ steps.sources.outputs.head_run }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the reviewed measurement harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster-performance
+          ref: ${{ env.EVIDENCE_SHA }}
+          path: evidence-1175
+          persist-credentials: false
+      - name: Check pins and qualify the counter reader without performance claims
+        run: |
+          set -euo pipefail
+          test "$(git -C evidence-1175 rev-parse HEAD)" = "$EVIDENCE_SHA"
+          test "$(git rev-parse "$HEAD_SHA^1")" = "$BASE_SHA"
+          git merge-base --is-ancestor "$HEAD_SHA" refs/remotes/origin/main
+          bash -n "$RECORD/scripts/campaign-9700x.sh"
+          for compiler in gcc clang; do
+              "$compiler" -std=c17 -O2 -Wall -Wextra -Werror "$RECORD/scripts/counters-test.c" -o "$RUNNER_TEMP/counters-test-$compiler"
+              "$RUNNER_TEMP/counters-test-$compiler"
+          done
+          clang -std=c17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all "$RECORD/scripts/counters-test.c" -o "$RUNNER_TEMP/counters-test-sanitize"
+          ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/counters-test-sanitize"
+      - name: Require successful correctness for each exact historical source
+        id: sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/layout-1175-qualification"
+          mkdir -p "$directory"
+          for pair in "base=$BASE_SHA" "head=$HEAD_SHA"; do
+              name=${pair%%=*}
+              sha=${pair#*=}
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$sha&event=push&status=success&per_page=100" > "$directory/$name-runs.json"
+              run=$(jq -r --arg sha "$sha" '.workflow_runs | map(select(.head_sha == $sha and .head_branch == "main" and .event == "push" and .path == ".github/workflows/9700x.yml" and .status == "completed" and .conclusion == "success" and .repository.id == 1421805693 and .head_repository.id == 1421805693)) | .[0].id // empty' "$directory/$name-runs.json")
+              test -n "$run"
+              gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" > "$directory/$name-jobs.json"
+              # Read all pages. A green aggregate with skipped tests is not source qualification.
+              jq -e '[.[].jobs[]] as $jobs | [$jobs[] | select(.name | startswith("Tests on Ubuntu "))] as $tests | [$jobs[] | select(.name | startswith("libFuzzer ("))] as $fuzz | ($tests | length > 0) and all($tests[]; .conclusion == "success") and any($tests[]; .name | contains(", x86-64, none,")) and any($tests[]; .name | contains(", native, none,")) and ($fuzz | length == 3) and all($fuzz[]; .conclusion == "success") and any($jobs[]; .name == "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)" and .conclusion == "success" and any(.steps[]?; .name == "Run complete native vector correctness before benchmarks" and .conclusion == "success"))' "$directory/$name-jobs.json"
+              printf '%s_run=%s\n' "$name" "$run" >> "$GITHUB_OUTPUT"
+              printf '%s %s %s/actions/runs/%s\n' "$name" "$sha" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$run" >> "$directory/sources.txt"
+          done
+      - name: Preserve source-qualification receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: checker-layout-1175-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/layout-1175-qualification/
+          if-no-files-found: warn
+          retention-days: 30
+
+  measure:
+    name: Collect the fixed checker-layout pair on the 9700X
+    needs: qualify
+    # No PR, fork, merge_group or branch dispatch can enqueue this job. It runs
+    # after this file is reviewed into main, or by an explicit dispatch on main.
+    if: github.repository_id == '1421805693' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      BUSTER_HOST_ARCH: znver5
+      BUSTER_DEBUG_INFO: '0'
+      CAMPAIGN_HOST_ARCH: znver5
+      CAMPAIGN_EVENTS: instructions:u,cycles:u,ex_ret_brn_tkn:u
+      CAMPAIGN_CPU: '2'
+      CAMPAIGN_RUNS: '11'
+      CAMPAIGN_LANES: ''
+      # As in setup-benchpress.sh, the runner's lifecycle hook already holds
+      # the host lock. The first step verifies this run's owner receipt; a
+      # second acquisition inside the standalone harness would deadlock.
+      CAMPAIGN_LOCK: env
+      EXCLUSIVE_OWNER: github-layout-1175
+      EXCLUSIVE_TITLE: 'Checker layout acceptance #1175'
+      EXCLUSIVE_LINK: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      BASE_RUN: ${{ needs.qualify.outputs.base_run }}
+      HEAD_RUN: ${{ needs.qualify.outputs.head_run }}
+    steps:
+      - name: Require the 9700X and this job's existing lifecycle lock
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          test -r /var/lib/buster-9700x/owner
+          grep -Fq -- "$EXCLUSIVE_LINK" /var/lib/buster-9700x/owner
+          directory=$(mktemp -d "$RUNNER_TEMP/layout-1175.XXXXXXXX")
+          mkdir "$directory/logs"
+          printf 'CAMPAIGN_DIRECTORY=%s\n' "$directory" >> "$GITHUB_ENV"
+          printf 'BUSTER_CI_CACHE=%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/buster/ci" >> "$GITHUB_ENV"
+          printf 'workflow %s\nbase %s (CI %s)\nhead %s (CI %s)\nharness %s\nrun %s\nattempt %s\n' "$GITHUB_SHA" "$BASE_SHA" "$BASE_RUN" "$HEAD_SHA" "$HEAD_RUN" "$EVIDENCE_SHA" "$EXCLUSIVE_LINK" "$GITHUB_RUN_ATTEMPT" > "$directory/logs/identity.txt"
+          cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor > "$directory/logs/governor.txt"
+          test "$(cat "$directory/logs/governor.txt")" = performance
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster-performance
+          ref: ${{ env.EVIDENCE_SHA }}
+          path: evidence-1175
+          persist-credentials: false
+      - name: Stage the official toolchain without changing system packages
+        run: bash tools/ci/setup-benchpress.sh
+      - name: Require vector code and verify the frozen corpus
+        run: |
+          set -euo pipefail
+          defines=$(clang -march=znver5 -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
+          grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"
+          test "$(git -C evidence-1175 rev-parse HEAD)" = "$EVIDENCE_SHA"
+          test "$(git rev-parse "$HEAD_SHA^1")" = "$BASE_SHA"
+          git merge-base --is-ancestor "$HEAD_SHA" HEAD
+          corpus="$RUNNER_TEMP/preprocessor-391e729af658"
+          bash tools/ci/fetch-corpus.sh "$corpus" 2>&1 | tee "$CAMPAIGN_DIRECTORY/logs/corpus-verification.txt"
+          printf 'CAMPAIGN_CORPUS=%s\n' "$corpus" >> "$GITHUB_ENV"
+      - name: Build and measure the integrated pair at four actual checker placements
+        id: campaign
+        run: |
+          set -euo pipefail
+          # Reserve time for receipts/upload; a timeout is incomplete evidence, never acceptance.
+          timeout --signal=TERM --kill-after=15s 480s bash "$RECORD/scripts/campaign-9700x.sh" "$GITHUB_WORKSPACE" "main=$BASE_SHA" "head=$HEAD_SHA" 2>&1 | tee "$CAMPAIGN_DIRECTORY/logs/campaign.txt"
+      - name: Verify placements and complete evidence before marking collection complete
+        id: verify
+        run: |
+          set -euo pipefail
+          R="$CAMPAIGN_DIRECTORY"
+          declare -A first_offset
+          for name in main head; do
+              for placement in 0:0 688:256 1376:512 2064:768; do
+                  skip=${placement%%:*}
+                  shift=${placement#*:}
+                  tag="$name-$skip-$shift"
+                  binary="$R/shifts/$name/compiler-$skip-$shift"
+                  sha256sum "$binary" >> "$R/logs/executables.sha256"
+                  nm --defined-only "$binary" > "$R/logs/$tag.nm"
+                  for symbol in check_input_resolve_range check_graph_run main; do
+                      address=$(awk -v symbol="$symbol" '$2 ~ /^[tT]$/ && $3 == symbol && !seen++ { print $1 }' "$R/logs/$tag.nm")
+                      [[ "$address" =~ ^[[:xdigit:]]+$ ]]
+                      offset=$((16#$address % 4096))
+                      if [ "$skip" -eq 0 ]; then first_offset["$name/$symbol"]=$offset; fi
+                      initial=${first_offset["$name/$symbol"]}
+                      actual=$(((offset - initial + 4096) % 4096))
+                      expected=$skip
+                      if [ "$symbol" = main ]; then expected=$shift; fi
+                      printf '%s %s offset=%s displacement=%s expected=%s\n' "$tag" "$symbol" "$offset" "$actual" "$expected" >> "$R/logs/placements.txt"
+                      test "$actual" -eq "$expected"
+                  done
+                  objects="$R/objects/$tag"
+                  test "$(find "$objects" -type f -name '*.o' | wc -l)" -eq 140
+                  (cd "$objects" && find . -type f -name '*.o' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$R/logs/objects-$tag.sha256"
+                  cmp "$R/logs/objects-main-0-0.sha256" "$R/logs/objects-$tag.sha256"
+              done
+          done
+          test "$(wc -l < "$R/logs/counters-expected.txt")" -eq 216
+          test "$(wc -l < "$R/logs/counters.txt")" -eq 216
+          test "$(find "$R/logs" -maxdepth 1 -type f -name 'perf-*.csv' | wc -l)" -eq 72
+          "$R/counters" "$R/logs/counters-expected.txt" < "$R/logs/counters.txt" > "$R/logs/counters-verified.txt"
+          cmp "$R/logs/counters-summary.txt" "$R/logs/counters-verified.txt"
+          test -s "$R/logs/time-runs.txt"
+          printf '%s\n' 'Collection complete. Review cycles, taken branches and timings before accepting #1175.' > "$R/logs/collection-complete.txt"
+      - name: Report collection status, not a performance verdict
+        if: always() && env.CAMPAIGN_DIRECTORY != ''
+        env:
+          CAMPAIGN_OUTCOME: ${{ steps.campaign.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          printf 'campaign=%s\nverification=%s\n' "$CAMPAIGN_OUTCOME" "$VERIFY_OUTCOME" > "$CAMPAIGN_DIRECTORY/logs/status.txt"
+          {
+              printf '## Checker layout #1175\n\nBase: `%s`\n\nCandidate: `%s`\n\nHarness: `%s`\n\nCampaign: **%s**; evidence checks: **%s**.\n\n' "$BASE_SHA" "$HEAD_SHA" "$EVIDENCE_SHA" "$CAMPAIGN_OUTCOME" "$VERIFY_OUTCOME"
+              printf '%s\n' 'These artifacts are collection evidence, not an automatic acceptance decision. Failed or timed-out runs are incomplete. Preserve the evidence in buster-performance and review the placement ranges before closing #1175.'
+              if [ -s "$CAMPAIGN_DIRECTORY/logs/counters-summary.txt" ]; then
+                  printf '\n```text\n'
+                  cat "$CAMPAIGN_DIRECTORY/logs/counters-summary.txt"
+                  printf '```\n'
+              fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve complete or partial raw evidence
+        if: always() && env.CAMPAIGN_DIRECTORY != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: checker-layout-1175-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CAMPAIGN_DIRECTORY }}/logs/
+            ${{ env.CAMPAIGN_DIRECTORY }}/arguments-*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove only this run's disposable worktrees
+        if: always() && env.CAMPAIGN_DIRECTORY != ''
+        run: |
+          for name in main head; do
+              tree="$CAMPAIGN_DIRECTORY/tree-$name"
+              if [ -d "$tree" ]; then git worktree remove --force "$tree"; fi
+          done
