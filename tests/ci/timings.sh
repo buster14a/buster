@@ -16,7 +16,7 @@ set -euo pipefail
 [[ "$1" == api ]]
 case "${*: -1}" in
     *workflows/9700x.yml/runs\?per_page=100)
-        printf '%s\n' '{"workflow_runs":[{"id":1,"event":"pull_request"},{"id":2,"event":"push"},{"id":3,"event":"schedule"},{"id":4,"event":"unsupported"}]}' ;;
+        printf '%s\n' '{"workflow_runs":[{"id":1,"event":"pull_request"},{"id":2,"event":"push"},{"id":3,"event":"schedule"},{"id":4,"event":"unsupported"},{"id":5,"event":"workflow_dispatch","display_title":"Nightly backlog (admit) of 0123456789abcdef0123456789abcdef01234567 [20261104.9.1.admit]"},{"id":6,"event":"workflow_dispatch","display_title":"Tests and Zen 5 benchmarks"}]}' ;;
     *runs/1/jobs\?per_page=100\&filter=latest)
         cat <<'JSON'
 {"jobs":[{"id":11,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:02:00Z","steps":[{"name":"Set up runner","conclusion":"success","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:00:20Z"},{"name":"Verify benchmark host","conclusion":"success","started_at":"2026-11-03T01:00:20Z","completed_at":"2026-11-03T01:00:21Z"},{"name":"Run complete native vector correctness before benchmarks","conclusion":"success","started_at":"2026-11-03T01:00:30Z","completed_at":"2026-11-03T01:01:00Z"},{"name":"Benchmark first","conclusion":"success","started_at":"2026-11-03T01:01:00Z","completed_at":"2026-11-03T01:01:10Z"},{"name":"Measure second","conclusion":"success","started_at":"2026-11-03T01:01:10Z","completed_at":"2026-11-03T01:01:15Z"},{"name":"Benchmark skipped","conclusion":"skipped","started_at":"2026-11-03T01:01:15Z","completed_at":"2026-11-03T01:01:59Z"}]}]}
@@ -34,6 +34,10 @@ JSON
 {"jobs":[{"id":32,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:00:30Z","steps":[{"name":"Run complete native vector correctness before benchmarks","conclusion":"success","started_at":null,"completed_at":"2026-11-03T01:00:20Z"}]}]}
 JSON
         ;;
+    *runs/5/jobs\?per_page=100\&filter=latest)
+        printf '%s\n' '{"jobs":[{"id":51,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-04T03:00:00Z","started_at":"2026-11-04T03:00:30Z","completed_at":"2026-11-04T03:04:30Z"}]}' ;;
+    *runs/6/jobs\?per_page=100\&filter=latest)
+        printf '%s\n' '{"jobs":[{"id":61,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-04T09:00:00Z","started_at":"2026-11-04T09:00:20Z","completed_at":"2026-11-04T09:20:20Z"}]}' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
 esac
 SH
@@ -45,16 +49,23 @@ cat > "$work/expected.tsv" <<'TSV'
 11	pr	runner-hook	10
 11	pr	setup-build	10
 11	pr	native-tests	30
+11	pr	host-occupation	100
 11	pr	benchmark-steps	15
 23	main	execution	100
-31	periodic	queue	5
-31	periodic	execution	5
-32	periodic	queue	10
-32	periodic	execution	20
+31	full	queue	5
+31	full	execution	5
+32	full	queue	10
+32	full	execution	20
+51	targeted	queue	30
+51	targeted	execution	240
+61	full	queue	20
+61	full	execution	1200
 TSV
 cmp "$work/expected.tsv" "$work/report/observations.tsv"
-grep -Fq '| scheduled/manual | queue | 2 | 7.5 | 10 |' "$work/report/summary.md"
-grep -Fq '| scheduled/manual | execution | 2 | 12.5 | 20 |' "$work/report/summary.md"
+grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work/report/summary.md"
+grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
+grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"
+grep -Fq '| PR | host-occupation | 1 | 100.0 | 100 |' "$work/report/summary.md"
 "$work/timings" < /dev/null > "$work/empty.md"
 grep -Fq 'No eligible observations' "$work/empty.md"
 printf '%s\n' 'invalid' > "$work/invalid.tsv"

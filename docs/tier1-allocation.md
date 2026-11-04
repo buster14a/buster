@@ -601,30 +601,29 @@ chain, or a block of a CFG (`Tier1EmitSaves`).
 - **A row isn't stored again while it holds the value.** For each general
   register, the code keeps the owner its row was stored or kept for. A call
   stores a register only where its owner is now another value. A fixed
-  registers' sequence, which stores those rows, forgets them. A CFG block whose
-  one predecessor comes before it in layout starts from that block's rows, and
-  any other block starts with none. The rows are one vector of the 16 general
-  registers' lanes, as the owners' first 16 locations are, so a call's kept
-  registers are one compare and its rows one blend (`tier1_emit_kept`,
-  `tier1_emit_saved`), each with a scalar twin that `test-tier1-emit` checks it
-  against on random rows. A row stays its owner's while that SSA
-  value's bits don't change, and they change only where the value is defined
-  again, an iteration later. Two facts keep a carried row valid:
-  - A loop's header has two predecessors at least, its entry and its back edge,
-    so no row carries across a back edge.
-  - A block that carries in is entered from its one predecessor alone, in the
-    same pass, and can't define a value a row holds. That value is live in the
-    predecessor, so its definition dominates it; a definition in the block would
-    make the block dominate its own one predecessor, reachable only through
-    itself.
+  registers' sequence, which stores those rows, forgets them. The rows are one
+  vector of the 16 general registers' lanes, as the owners' first 16 locations
+  are, so a call's kept registers are one compare and its rows one blend
+  (`tier1_emit_kept`, `tier1_emit_saved`), each with a scalar twin that
+  `test-tier1-emit` checks it against on random rows. A row stays its owner's
+  while that SSA value's bits don't change, and they change only where the
+  value is defined again, an iteration later.
+- **Every CFG block starts with no rows.** A row that a block's one
+  predecessor stored would still hold its value where that predecessor comes
+  first in layout. But the code's certificate (#939,
+  `tier1_certificate_emitted.c`) proves each block from its entry facts, which
+  hold each value in one place, the allocation's, so it can't know the row's.
+  The first call of a block stores again what it saves. On Lua 5.4.8, carrying
+  rows into such blocks stored 3,163 values where this stores 4,253, in 255,363
+  bytes of `.text` against 260,821.
 
 `test-tier1-emit`'s call fixtures check this natively, against hostile helpers
 that poison every caller-saved register (`tier1_call_test.c`):
 
 - **A run of calls in one block**, where the second call stores none of the
-  values live past both, and **the carries**: the second call stores none of
-  them in a block whose one predecessor comes first, and stores again at a join
-  and past a later predecessor.
+  values live past both, and **two blocks**: the second call stores them again
+  in a block whose one predecessor comes first, at a join and past a later
+  predecessor.
 - **Values live past a call** take the callee-saved registers the frame
   leaves. Six take all six, `rbp` among them, without a frame pointer. With
   one, five take exactly `rbx` and `r12` to `r15`, the frame pushing them and

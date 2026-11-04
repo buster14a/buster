@@ -477,6 +477,96 @@ refuses one written as text), and `tests/ir-source/atomics.c` runs through both
 lowerings, promotion, the text's round trip and the IR's three forms against
 clang, its `long`'s accesses printed `align=8`.
 
+### Atomic read/modify/writes (#1059)
+
+`rmw` (an integer of 1, 2, 4 or 8 bytes, a pointer's as `i64`; `a` the object's
+address, `b` the operand, of the result's type; its flags `BUSTER_IR_ATOMIC`, a C
+memory order, any of the six, since the locked access is a full barrier, and its
+operation (`BUSTER_IR_RMW_OPERATION`'s bits): `BUSTER_IR_RMW_EXCHANGE`,
+`BUSTER_IR_RMW_ADD` or `BUSTER_IR_RMW_COMPARE`, whose `b` is the expected value
+and `c` the desired one, of the result's type, an optional value the others
+have none of (`ir_optional_table`), since the IR's 64 operations leave no room
+for another; printed `rmw.iN %p, %v align=N xchg|add ORDER` and
+`rmw.iN %p, %e, %d align=N cas ORDER`) returns the object's old value and leaves
+the operand (an exchange), the sum (an addition), or the desired value where the
+old one is the expected one and the old one where it isn't (a compare-exchange,
+as `cmpxchg` writes it) in it, as one atomic access of its type's bytes: the
+typed stream's `ATOMIC_RMW`, which the C producer gives an exchange, an addition
+or a subtraction of a constant order, and its `ATOMIC_CAS`, whose address is a
+local's (`ir_lower` reads it), which it gives a compare-exchange
+([the builtin integration guide](c-builtins-integration.md)'s "Direct
+read/modify/writes"). Its alignment is its size at least, as an atomic load's
+is, and `ir_lower` gives it its class's natural one. No pass moves an access or a
+call across it, merges it or drops it: it is an optimizer root, neither value
+numbering nor loop-invariant motion takes it, and its address counts as taken,
+so promotion and private-field replacement leave its object in memory; dataflow
+reads its address and its operand, as a store's, and a compare-exchange's
+desired value, which inlining, rebuilding and every pass's operand mask
+(`ir_value_mask`) map as a call's optional destination is. Both verifiers check its flags
+(`ir_rmw_flags_valid`) and its type and alignment (`ir_atomic_access`, its own
+rule's, `IR_RULE_ATOMIC_RMW`); both interpreters run it as one thread does, a
+byte at a time through volatile accesses, refusing an address misaligned for its
+declared alignment and checking its object as a load's (undefined bytes are
+reported) before a store's (a compare-exchange's desired value is a use, even
+where it isn't stored). Tier 1 selects `TIER1_RULE_ATOMIC_RMW`:
+the operand copied to the scratch register, `xchg` or `lock xadd` of the object's
+width (never the narrow value's 32-bit register's), and the old value
+zero-extended as a load's is; a compare-exchange saves rax in the scratch
+register (reading an operand that was in rax from there), moves the expected
+value into rax, `lock cmpxchg` of the object's width, and the old value
+zero-extended from rax, rax restored unless it is the result's; a barrier no load
+folds past. `tests/ir/atomics.ir` reads every width, operation and order back,
+`test-ir`'s verifier cases refuse an operation past a compare-exchange, a
+compare-exchange without a desired value of its type and another operation with
+one, a non-atomic or a volatile one, an order past `seq_cst` and an 8-byte one
+aligned to 4 (and `test-ir-parse` one written as text aligned below its size, and
+the desired value's misuses), `test-tier1-select` runs each width's exchange,
+addition and compare-exchange (that succeeds and fails, each operand in rax in
+turn) on guard bytes, and `tests/ir-source/atomics.c`'s read/modify/writes run
+through both lowerings, promotion, the text's round trip and the IR's three forms
+against clang.
+
+### Effects through the consumers (#1059)
+
+An audit of every IR and Tier 1 consumer for the effects #1059 asks to survive:
+ordering (fences, atomic accesses and read/modify/writes), volatility, the
+floating environment and termination.
+
+- **Constant propagation and dead code** (`ir_optimize.c`). Loads, stores,
+  calls, fences, `rmw`s, branches, returns and `unreachable` are unconditional
+  roots (`ir_optimize_roots`), never dropped or folded. The floating operations
+  are roots too, and nothing folds them: the pass has no floating arithmetic, so
+  a `FENV_ACCESS` region's rounding and exception flags stay the code's.
+- **GVN and LICM** take allow-lists of pure operations (`ir_gvn_classify`'s and
+  `ir_licm_classify`'s tables). Neither numbers nor moves a load, a store, a call,
+  a fence, an `rmw` or a floating operation other than `fneg`, so a new operation
+  is impure until it is listed.
+- **SROA and promotion** leave every address-taken or volatile slot, and every
+  observable access, in memory. The C lowering marks a volatile local's slot
+  address-taken.
+- **The inliner and the rebuild** copy each node's flags and alignment, and map an
+  `rmw`'s optional desired value as a call's optional destination. Dataflow reads
+  every operand `ir_value_mask` gives.
+- **Tier 1's scheduler** pins every record that touches memory (a fence's effect
+  is one), control, calls or MXCSR, or may fault. So a locked access, `mfence` and
+  every SSE floating operation keep their places (`test-tier1-schedule`).
+- **Tier 1's load folding** moves a load into its single consumer past no store,
+  call, fence, `rmw`, stack move or other load (`tier1_select_fold_barrier`):
+  - The typed stream doesn't carry a C access's volatility, so the IR's loads of
+    volatile objects aren't flagged `volatile`. Two volatile reads must keep their
+    order, so the IR treats every unflagged load as possibly volatile.
+  - A volatile or atomic load folds into nothing.
+  - `test-checker-driver`'s volatile-order check compiles two volatile reads
+    through pointers by `--tier1`, which once read the second first.
+- **Tier 0** keeps every entry in the stream's order.
+- **Termination:** `unreachable` is a root that ends its block, and the terminal
+  builtins' calls are roots and barriers, as every call is.
+
+Carrying a C access's volatility in the typed stream (a marker on `LOAD`, `STORE`
+and `SET`, and on locals and globals) would let Tier 1 fold past ordinary loads
+again. That change touches every lowering path's access emission, and it isn't
+made here.
+
 ### Dynamic stack contract
 
 | Operation | Result | Operand a | Meaning |

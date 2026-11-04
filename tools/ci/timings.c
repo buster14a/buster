@@ -15,9 +15,13 @@
 #define BUSTER_TIMINGS_LINE 256
 #define BUSTER_TIMINGS_SECONDS 604800
 
-static const char* const timing_groups[] = { "pr", "main", "periodic" };
-static const char* const timing_group_labels[] = { "PR", "main push", "scheduled/manual" };
-static const char* const timing_metrics[] = { "queue", "execution", "runner-hook", "setup-build", "native-tests", "benchmark-steps" };
+// Pull requests' jobs, main pushes', the nightly backlog's targeted runs, and full ones (the daily run, full dispatches
+// and the nightly snapshot's comprehensive run).
+static const char* const timing_groups[] = { "pr", "main", "targeted", "full" };
+static const char* const timing_group_labels[] = { "PR", "main push", "nightly targeted", "full (daily, dispatched, snapshot)" };
+static const char* const timing_metrics[] = { "queue", "execution", "runner-hook", "setup-build", "native-tests", "benchmark-steps", "host-occupation" };
+#define BUSTER_TIMINGS_GROUPS (sizeof(timing_groups) / sizeof(timing_groups[0]))
+#define BUSTER_TIMINGS_METRICS (sizeof(timing_metrics) / sizeof(timing_metrics[0]))
 
 typedef struct TimingSample TimingSample;
 struct TimingSample
@@ -36,7 +40,7 @@ struct TimingSeries
 typedef struct Timings Timings;
 struct Timings
 {
-    TimingSeries series[3][6];
+    TimingSeries series[BUSTER_TIMINGS_GROUPS][BUSTER_TIMINGS_METRICS];
 };
 
 static bool timing_number(const char* text, uint64_t limit, uint64_t* value)
@@ -103,7 +107,7 @@ static bool timing_add(Timings* timings, const char* input)
     {
         group = timing_name(fields[1], timing_groups, sizeof(timing_groups) / sizeof(timing_groups[0]));
         metric = timing_name(fields[2], timing_metrics, sizeof(timing_metrics) / sizeof(timing_metrics[0]));
-        valid = group < 3 && metric < 6 && timing_number(fields[0], UINT64_MAX, &id) && id != 0;
+        valid = group < BUSTER_TIMINGS_GROUPS && metric < BUSTER_TIMINGS_METRICS && timing_number(fields[0], UINT64_MAX, &id) && id != 0;
         valid = valid && timing_number(fields[3], BUSTER_TIMINGS_SECONDS, &seconds);
     }
     if (valid)
@@ -168,9 +172,9 @@ static int timing_report(FILE* input, FILE* output)
         fputs("## 9700X CI latency\n\n", output);
         fputs("Successful hardware jobs only; seconds of wall time. Event classes are not benchmark-coverage certificates.\n\n", output);
         fputs("| Event class | Metric | Samples | Median (s) | p95 (s) |\n| --- | --- | ---: | ---: | ---: |\n", output);
-        for (size_t group = 0; group < 3; group += 1)
+        for (size_t group = 0; group < BUSTER_TIMINGS_GROUPS; group += 1)
         {
-            for (size_t metric = 0; metric < 6; metric += 1)
+            for (size_t metric = 0; metric < BUSTER_TIMINGS_METRICS; metric += 1)
             {
                 TimingSeries* series = &timings.series[group][metric];
                 double median = 0;
@@ -188,6 +192,7 @@ static int timing_report(FILE* input, FILE* output)
         fputs("\np95 uses the nearest-rank definition. Missing timestamps are omitted.\n", output);
         fputs("`runner-hook` includes hook overhead and possible lock waiting; it is **not** an exact lock-wait measurement. Exact lock acquisition/release requires runner-hook telemetry and is not inferred here.\n", output);
         fputs("`setup-build` spans host verification through the start of native tests. `benchmark-steps` is the sum of successful benchmark/measurement step durations, not a performance result.\n", output);
+        fputs("`host-occupation` spans the job's first step after the runner hook (the lock is held by then) through the job's end: the time the host was this job's.\n", output);
         valid = fflush(output) == 0;
     }
     return valid ? 0 : 1;
@@ -233,7 +238,11 @@ static int timing_test(void)
     checks += 1;
     failures += timing_add(&timings, "1\tmain\tqueue\t0\n");
     checks += 1;
-    failures += !timing_add(&timings, "18446744073709551615\tperiodic\texecution\t604800\n");
+    failures += !timing_add(&timings, "18446744073709551615\tfull\texecution\t604800\n");
+    checks += 1;
+    failures += !timing_add(&timings, "5\ttargeted\thost-occupation\t60\n");
+    checks += 1;
+    failures += timing_add(&timings, "5\tperiodic\texecution\t60\n");
     checks += 1;
     failures += !timing_quantiles(&timings.series[1][0], &median, &p95) || median != 0 || p95 != 0;
     printf("timings --self-test: %u checks, %u failures\n", checks, failures);

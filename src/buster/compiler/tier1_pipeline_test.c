@@ -65,6 +65,18 @@ struct Tier1PipelineFixture
     uint8_t argument_classes[3];
 };
 
+// #939: a corruption of a CFG function's emitted records that the certificate of its code accepted: its function, its
+// first record and its records' new values (two for a swap of adjacent records), run natively after its program's run.
+#define BUSTER_TIER1_PIPELINE_MUTANTS 64
+typedef struct Tier1PipelineMutant Tier1PipelineMutant;
+struct Tier1PipelineMutant
+{
+    X86Instruction records[2];
+    uint32_t function;
+    uint32_t record;
+    uint32_t count;
+};
+
 typedef struct Tier1PipelineTest Tier1PipelineTest;
 struct Tier1PipelineTest
 {
@@ -88,6 +100,19 @@ struct Tier1PipelineTest
     // #939: emissions whose allocation passed its certificate, and the CFG consumer's certificates' facts.
     uint64_t certified;
     uint64_t certificate_facts;
+    // #939: the CFG consumer's functions whose code passed the certificate decoded from its records; that code's mutants
+    // (tier1_pipeline_mutants), those the certificate refused, and those it accepted that ran natively, each of which must
+    // still agree with the interpreter. A program's accepted mutants wait for its run.
+    uint64_t code_certified;
+    uint64_t code_uncertified;
+    uint64_t mutants;
+    uint64_t mutants_refused;
+    uint64_t mutants_run;
+    // The prologue's and the epilogues' mutants, and those refused.
+    uint64_t frame_mutants[2];
+    uint64_t frame_refused[2];
+    Tier1PipelineMutant accepted[BUSTER_TIER1_PIPELINE_MUTANTS];
+    uint32_t accepted_count;
     uint32_t fixture;
     bool vector;
     bool rematerialize;
@@ -1176,6 +1201,168 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* 
     }
 }
 
+// Whether the program, `emitted` its functions' code, runs natively within its budget and returns the interpreter's bits
+// for every input: tier1_pipeline_execute's run, counted rather than expected.
+static bool tier1_pipeline_agrees(Tier1PipelineTest* test, const Tier0Program* program, Tier1EmitResult* emitted)
+{
+    uint64_t starts[BUSTER_TIER1_PIPELINE_FUNCTIONS] = {0};
+    uint64_t mapped = 0;
+    // The program's own run counts its resolved calls; a mutant's doesn't.
+    const uint32_t resolved = test->resolved_calls;
+    uint8_t* machine = tier1_pipeline_load(test, program, emitted, &mapped, starts);
+    test->resolved_calls = resolved;
+    uint64_t* actual = mmap(0, sizeof(test->expected[0]), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    bool agrees = machine != MAP_FAILED && actual != MAP_FAILED;
+    if (agrees)
+    {
+        fflush(0);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            alarm(10);
+            for (uint32_t input = 0; input < BUSTER_TIER1_PIPELINE_INPUTS; input += 1)
+            {
+                actual[input] = tier1_pipeline_call(machine + starts[program->function_count - 1], test->inputs[input]);
+            }
+            _exit(0);
+        }
+        agrees = tier1_pipeline_wait(child);
+    }
+    for (uint32_t input = 0; agrees && input < BUSTER_TIER1_PIPELINE_INPUTS; input += 1)
+    {
+        agrees = actual[input] == test->expected[test->fixture][input];
+    }
+    if (machine != MAP_FAILED)
+    {
+        munmap(machine, mapped);
+    }
+    if (actual != MAP_FAILED)
+    {
+        munmap(actual, sizeof(test->expected[0]));
+    }
+    return agrees;
+}
+
+// #939: corruptions of function `f`'s code (`emitted`, the CFG consumer's, its code certified), each checked by the
+// certificate decoded from its records: a move's, a node's or the prologue's or an epilogue's record with another
+// register, a frame access 8 bytes off, an immediate 8 off, and two adjacent records of one origin swapped. Every
+// prologue and epilogue record is corrupted, and the others' a sample. A refused one counts, the frame's by kind; an
+// accepted one is kept for a native run after its program's (tier1_pipeline_run_mutants), which must agree with the
+// interpreter: it changed nothing the program computes.
+static void tier1_pipeline_mutants(Tier1PipelineTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t f)
+{
+    X86Instruction* records = emitted->code.records;
+    const uint32_t count = emitted->code.count;
+    // A function's mutants at most, spread over its records.
+    const uint32_t budget = 24;
+    const uint32_t stride = count / budget + 1;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const Tier1Origin kind = (Tier1Origin)(emitted->origins[r] >> BUSTER_TIER1_ORIGIN_SHIFT);
+        const bool frame = kind == TIER1_ORIGIN_FRAME;
+        const bool epilogue = frame && (emitted->origins[r] & BUSTER_TIER1_ORIGIN_PAYLOAD) != 0;
+        const bool move = kind == TIER1_ORIGIN_MOVE || kind == TIER1_ORIGIN_EDGE || kind == TIER1_ORIGIN_ENTRY;
+        const bool sampled = frame || r % stride == 0;
+        const X86Instruction original = records[r];
+        const bool memory = (original.mode & BUSTER_X86_MODE_MEMORY) != 0;
+        for (uint32_t variant = 0; sampled && (move || frame || kind == TIER1_ORIGIN_NODE) && variant < 4; variant += 1)
+        {
+            Tier1PipelineMutant mutant = {
+                .records = { original, r + 1 < count ? records[r + 1] : original },
+                .function = f,
+                .record = r,
+                .count = 1,
+            };
+            bool made = true;
+            if (variant == 0)
+            {
+                mutant.records[0].reg ^= 1;
+            }
+            else if (variant == 1 && !memory)
+            {
+                mutant.records[0].rm ^= 1;
+                made = mutant.records[0].rm != X86_REGISTER_RSP && original.rm != X86_REGISTER_RSP;
+            }
+            else if (variant == 1)
+            {
+                mutant.records[0].displacement += 8;
+            }
+            else if (variant == 2 && (move || frame) && r + 1 < count && emitted->origins[r + 1] == emitted->origins[r])
+            {
+                mutant.records[0] = records[r + 1];
+                mutant.records[1] = original;
+                mutant.count = 2;
+                made = memcmp(&mutant.records[0], &mutant.records[1], sizeof(X86Instruction)) != 0;
+            }
+            else if (variant == 3 && original.immediate != 0)
+            {
+                mutant.records[0].immediate += 8;
+            }
+            else
+            {
+                made = false;
+            }
+            made = made && (mutant.records[0].reg & BUSTER_X86_REGISTER_HIGH_BYTE) == 0;
+            if (made)
+            {
+                const X86Instruction saved[2] = { records[r], r + 1 < count ? records[r + 1] : records[r] };
+                memcpy(records + r, mutant.records, mutant.count * sizeof(X86Instruction));
+                Tier1CertEmittedStats stats = { 0 };
+                const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(plan, emitted, &test->arenas[TIER1_PIPELINE_EMITTED], &test->arenas[TIER1_PIPELINE_SCRATCH], 0, &stats);
+                memcpy(records + r, saved, mutant.count * sizeof(X86Instruction));
+                test->mutants += 1;
+                test->mutants_refused += reason >= TIER1_CERT_EMITTED_REFUSED;
+                test->frame_mutants[epilogue] += frame;
+                test->frame_refused[epilogue] += frame && reason >= TIER1_CERT_EMITTED_REFUSED;
+                tier1_pipeline_expect(test, reason == TIER1_CERT_EMITTED_OK || reason >= TIER1_CERT_EMITTED_REFUSED, "a mutant of certified code is certified or refused, not unsupported");
+                if (reason == TIER1_CERT_EMITTED_OK && test->accepted_count < BUSTER_TIER1_PIPELINE_MUTANTS)
+                {
+                    test->accepted[test->accepted_count++] = mutant;
+                }
+            }
+        }
+    }
+}
+
+// The program's accepted mutants (tier1_pipeline_mutants), each run natively: it must agree with the interpreter. Loading
+// sizes the records' branches in place, so each run starts from the program's records as emitted, and they are put back
+// after it.
+static void tier1_pipeline_run_mutants(Tier1PipelineTest* test, const Tier0Program* program, Tier1EmitResult* bodies)
+{
+    X86Instruction* emitted[BUSTER_TIER1_PIPELINE_FUNCTIONS] = { 0 };
+    bool kept = true;
+    for (uint32_t f = 0; test->accepted_count != 0 && f < program->function_count; f += 1)
+    {
+        emitted[f] = malloc(((uint64_t)bodies[f].code.count + 1) * sizeof(X86Instruction));
+        kept = kept && emitted[f] != 0;
+        if (emitted[f] != 0)
+        {
+            memcpy(emitted[f], bodies[f].code.records, (uint64_t)bodies[f].code.count * sizeof(X86Instruction));
+        }
+    }
+    for (uint32_t k = 0; kept && k < test->accepted_count; k += 1)
+    {
+        const Tier1PipelineMutant* mutant = &test->accepted[k];
+        memcpy(bodies[mutant->function].code.records + mutant->record, mutant->records, mutant->count * sizeof(X86Instruction));
+        const bool agrees = tier1_pipeline_agrees(test, program, bodies);
+        tier1_pipeline_expect(test, agrees, "a mutant the code's certificate accepts computes what the interpreter does");
+        if (!agrees)
+        {
+            fprintf(stderr, "  accepted mutant: function %u record %u (%u records)\n", mutant->function, mutant->record, mutant->count);
+        }
+        for (uint32_t f = 0; f < program->function_count; f += 1)
+        {
+            memcpy(bodies[f].code.records, emitted[f], (uint64_t)bodies[f].code.count * sizeof(X86Instruction));
+        }
+        test->mutants_run += 1;
+    }
+    for (uint32_t f = 0; f < BUSTER_TIER1_PIPELINE_FUNCTIONS; f += 1)
+    {
+        free(emitted[f]);
+    }
+    test->accepted_count = 0;
+}
+
 // Each supported fixture's shape (tier1_pipeline_fixture), by fixture index: straight-line ones, then control flow.
 static const uint32_t tier1_pipeline_shapes[BUSTER_TIER1_PIPELINE_CASES] = {
     0,
@@ -1287,6 +1474,17 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         test->general += 1;
                         test->edge_moves += emitted->edge_moves;
                         test->edge_stubs += emitted->edge_stubs;
+                        // #939: and its code, through the certificate decoded from its records, and that code's mutants.
+                        // The dynamic stack's (shape 8's) isn't decoded yet: left uncertified, not refused.
+                        const uint32_t expected_reason = shape == 8 ? TIER1_CERT_EMITTED_DYNAMIC : TIER1_CERT_EMITTED_OK;
+                        tier1_pipeline_expect(test, emitted->code_checked && emitted->code_reason == expected_reason, "the certificate decoded from the CFG consumer's records proves its code, the dynamic stack's left uncertified");
+                        const bool code_certified = emitted->code_checked && emitted->code_reason == TIER1_CERT_EMITTED_OK;
+                        test->code_certified += code_certified;
+                        test->code_uncertified += emitted->code_checked && emitted->code_reason != TIER1_CERT_EMITTED_OK;
+                        if (code_certified)
+                        {
+                            tier1_pipeline_mutants(test, &plan, emitted, f);
+                        }
                     }
                     else if (ok)
                     {
@@ -1332,8 +1530,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                 }
                 if (ok)
                 {
+                    tier1_pipeline_run_mutants(test, &fixture.program, bodies);
                     tier1_pipeline_execute(test, &fixture.program, bodies);
                 }
+                test->accepted_count = 0;
             }
             tier1_pipeline_expect(test, tier1_pipeline_unchanged(&fixture, &original), "selection and native compilation preserve the frozen typed fixture");
         }
@@ -1550,6 +1750,8 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             tier1_pipeline_expect(&test, test.general == 9 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
                                   "every control-flow fixture, the floating one and the dynamic stack's go through the CFG consumer, whose edges move values, critical ones through stubs");
             tier1_pipeline_expect(&test, test.certified != 0 && test.certificate_facts != 0, "the emitter certified its allocations, CFG ones with block-entry facts");
+            tier1_pipeline_expect(&test, test.code_certified + test.code_uncertified == test.general && test.code_certified != 0 && test.mutants_refused != 0 && test.mutants_run != 0, "the CFG consumer's code is certified, and its mutants refused or harmless");
+            tier1_pipeline_expect(&test, test.frame_refused[0] != 0 && test.frame_refused[1] != 0, "the prologue's and the epilogues' mutants are refused or harmless");
             if (cross_check)
             {
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
@@ -1557,7 +1759,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
         }
         printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " twin mismatches\n", test.burs.functions,
                test.burs.nodes, test.burs.matched, test.burs.fallbacks, test.burs.mismatches);
-        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, seed);
+        printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " code-certified=%" PRIu64 "/%" PRIu64  " mutants=%" PRIu64 " refused=%" PRIu64 " accepted-run=%" PRIu64 " prologue-mutants=%" PRIu64 "/%" PRIu64 " epilogue-mutants=%" PRIu64 "/%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, test.code_certified, (uint64_t)test.general, test.mutants, test.mutants_refused, test.mutants_run, test.frame_refused[0], test.frame_mutants[0], test.frame_refused[1], test.frame_mutants[1], seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)
         {
             arena_release(&test.arenas[a]);

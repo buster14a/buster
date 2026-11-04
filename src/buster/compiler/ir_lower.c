@@ -153,8 +153,10 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
 // must be lowered (or refused, as FRAME_ADDRESS and TAIL_CALL are, and the X86 rows past the SIMD subset) here before
-// tier0_validate accepts it. A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is.
-_Static_assert(BUSTER_TYPED_KINDS == 50 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_KINDS == BUSTER_TYPED_FENCE + 1,
+// tier0_validate accepts it. A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is, and an
+// ATOMIC_RMW an IR_ATOMIC_RMW of its operation and order, and an ATOMIC_CAS one of the compare-exchange.
+_Static_assert(BUSTER_TYPED_KINDS == 52 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_ATOMIC_RMW == BUSTER_TYPED_FENCE + 1 &&
+                   BUSTER_TYPED_ATOMIC_CAS == BUSTER_TYPED_ATOMIC_RMW + 1 && BUSTER_TYPED_KINDS == BUSTER_TYPED_ATOMIC_CAS + 1,
                "ir_lower.c lowers or refuses every typed kind");
 _Static_assert(BUSTER_TYPED_FENCE_ORDER == BUSTER_IR_FENCE_ORDER && BUSTER_TYPED_FENCE_SIGNAL == BUSTER_IR_FENCE_SIGNAL &&
                BUSTER_TYPED_FENCE_SEQ_CST == BUSTER_IR_FENCE_SEQ_CST, "a typed fence's value is its IR_FENCE's operand");
@@ -286,6 +288,13 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_STORE_LOCAL:
                 case BUSTER_TYPED_STORE_GLOBAL:
                     // Consume and reproduce the value at the same depth.
+                    break;
+                case BUSTER_TYPED_ATOMIC_RMW:
+                case BUSTER_TYPED_ATOMIC_CAS:
+                    // An address and an operand, or an expected value and a desired one, and the old value in their place
+                    // (#1059).
+                    depth -= 1;
+                    stack[depth - 1] = class;
                     break;
                 case BUSTER_TYPED_FENCE:
                     // Neither takes nor leaves a value.

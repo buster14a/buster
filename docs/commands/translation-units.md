@@ -36,7 +36,9 @@ write would show. Each lane releases what its units shared, into its pool and
 then the pool itself, on the lane as soon as it takes no more units, before it
 helps the others' functions (#777); without a link, in a command whose process
 exits after the lanes (main's, which releases no memory), the lane that stops
-taking units last leaves its memory to the exit. The
+taking units last leaves its memory to the exit. The run counts the lanes
+still taking units itself, with or without the board, so that this holds when
+the board's allocation fails too. The
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
 that lane 0 announces and every lane runs, with a worker-budget lease of its
@@ -68,7 +70,8 @@ first in the units' order is the one reported, and a wide addend beside a unit
 without symbols, into the same bytes); a few large units (#777: a unit of 800
 functions beside a small one, whose lanes without units take its functions'
 parts, `--shared-parts`' report, into objects their own alone and executables
-one lane's); every reservation of two units' `-c` failed in turn, each run
+one lane's, and whose `-c` leaves one lane's memory to the exit, with the board
+and without it, `BUSTER_TEST_NO_UNITS_BOARD`); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
 jobserver's tokens held while the link writes; lanes that don't start; and
 `benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it

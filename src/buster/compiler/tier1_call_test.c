@@ -67,8 +67,8 @@ struct Tier1CallFixture
     bool indirect;
     // Two calls through the first two parameters (with `indirect`), past which the last three live (tier1_call_run_fixture).
     bool run;
-    // Two calls in two blocks, a value live past both (tier1_call_carry_fixture): where the second's block carries the
-    // first's rows in (TIER1_CALL_CARRY), and where it doesn't, at a join or past a later predecessor.
+    // Two calls in two blocks, a value live past both (tier1_call_carry_fixture): the second's block's one predecessor
+    // first in layout (TIER1_CALL_CARRY), a join, or a later predecessor.
     uint32_t carry;
     // A multi-block fixture's dominator tree, by preorder (IrDominance's enter and leave), which selection needs for a
     // value read outside its block; `dominated` says the fixture has one.
@@ -585,13 +585,14 @@ static bool tier1_call_run_fixture(Tier1EmitTest* test, Tier1CallFixture* fixtur
 // Two calls through the first two parameters in two blocks (#1116): the first, of the third parameter, in block P, and
 // the second, of the first's result, in block B; then the second's result plus the fourth parameter, which lives past
 // both in its incoming register, a caller-saved one, as the second, P's callee, does past the first. So the first call
-// stores both, P's jump takes them back, and B's call saves the fourth parameter again:
-// - TIER1_CALL_CARRY: B is P's one successor and P is B's one predecessor, before it in layout. B starts from P's rows,
-//   which hold the fourth parameter, so B's call stores nothing.
+// stores both, P's jump takes them back, and B's call saves the fourth parameter again, as every block starts with no
+// rows (the code's certificate, #939, proves a block from its entry facts, which don't hold a row's value):
+// - TIER1_CALL_CARRY: B is P's one successor and P is B's one predecessor, before it in layout. P's row still holds the
+//   fourth parameter, but B's call stores it again.
 // - TIER1_CALL_CARRY_JOIN: P branches on the first result to B or to an empty block C that jumps to B, so B has two
-//   predecessors and starts with no rows: its call stores the fourth parameter.
+//   predecessors.
 // - TIER1_CALL_CARRY_LATER: the entry, with the first call, jumps to P, the last block, which jumps back to B, between
-//   them. B's one predecessor comes after it in layout, so B starts with no rows either.
+//   them. B's one predecessor comes after it in layout.
 static bool tier1_call_carry_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture, uint32_t carry)
 {
     const uint32_t count = carry == TIER1_CALL_CARRY ? 9 : carry == TIER1_CALL_CARRY_JOIN ? 12 : 10;
@@ -1225,16 +1226,16 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             else if (fixture->run || fixture->carry != 0)
             {
                 // The values that live past both calls are stored at the first (some are, in their incoming caller-saved
-                // registers), and the second stores none of them where its code carries the first's rows: the run's one
-                // block, and the carry's block whose one predecessor comes first. Where it doesn't, a join's block or one
-                // whose predecessor comes later, the second call stores again (#1116). Each store is loaded back.
+                // registers), and the second stores none of them where its code has the first's rows: the run's one
+                // block. In another block, the carry's, the second call stores again (#1116, #939). Each store is loaded
+                // back.
                 const uint32_t first = tier1_call_record(&emitted, 0);
                 const uint32_t second = tier1_call_record(&emitted, 1);
                 const uint32_t before = tier1_emit_test_save_stores(&emitted, 0, first);
                 const uint32_t between = tier1_emit_test_save_stores(&emitted, first, second);
-                const bool carried = fixture->run || fixture->carry == TIER1_CALL_CARRY;
+                const bool carried = fixture->run;
                 tier1_emit_test_expect(test, emitted.general && second < emitted.code.count && before != 0 && (carried ? between == 0 : between != 0),
-                                       "a call doesn't store again a row that holds its value, and stores where the code can't know it does");
+                                       "a call doesn't store again a row its block stored its value into, and stores in another block");
                 if (test->failures < 20 && !(second < emitted.code.count && before != 0 && (carried ? between == 0 : between != 0)))
                 {
                     fprintf(stderr, "  run=%u carry=%u: stores before the first call %u, between the calls %u\n", fixture->run, fixture->carry, before, between);

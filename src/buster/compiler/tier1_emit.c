@@ -76,6 +76,10 @@ typedef enum Tier1EmitCause
     TIER1_EMIT_CAUSE_CERTIFICATE,
 } Tier1EmitCause;
 
+// A code certificate's refusal in a TIER1_EMIT_CAUSE_CERTIFICATE diagnostic: its Tier1CertEmittedReason plus this, past
+// every Tier1CertError.
+#define BUSTER_TIER1_EMIT_CODE_CERTIFICATE 0x100u
+
 typedef struct Tier1EmitDiagnostic Tier1EmitDiagnostic;
 struct Tier1EmitDiagnostic
 {
@@ -109,8 +113,10 @@ struct Tier1EmitOptions
     // #939: check each allocation before code is emitted from it, by the certificate checker of its kind: a CFG
     // allocation's published program (tier1_certificate_cfg_check), a straight-line allocation's fragments
     // (tier1_allocation_certificate_check). A refusal is TIER1_EMIT_CERTIFICATE and the checker's capacity
-    // TIER1_EMIT_MEMORY, each with the checker's Tier1CertError as the diagnostic's TIER1_EMIT_CAUSE_CERTIFICATE. The C
-    // driver's --verify sets it.
+    // TIER1_EMIT_MEMORY, each with the checker's Tier1CertError as the diagnostic's TIER1_EMIT_CAUSE_CERTIFICATE. The CFG
+    // consumer's code is then certified too, decoded from its records (tier1_certificate_emitted_check): a refusal is
+    // TIER1_EMIT_CERTIFICATE, the diagnostic's error its Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE.
+    // The C driver's --verify sets it.
     bool certify;
     Tier1EmitDiagnostic* diagnostic;
 };
@@ -223,6 +229,22 @@ struct Tier1EmitResult
     bool certified;
     uint64_t certificate_facts;
     uint64_t certificate_edits;
+    // #939: with Tier1EmitOptions.certify, the CFG consumer's records' origins (Tier1Origin and its payload) and values,
+    // each block's first record (and the records' count after them) and each split edge's stub's first (UINT32_MAX for
+    // an edge without a stub), which the certificate of its code decodes (tier1_certificate_emitted.c); null otherwise.
+    uint32_t* origins;
+    uint32_t* origin_values;
+    uint32_t* block_records;
+    uint32_t* stub_records;
+    // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
+    uint8_t* dropped;
+    // And the certificate of that code (tier1_certificate_emitted_check): its reason (Tier1CertEmittedReason: 0 where it
+    // proved the code, a shape's it doesn't decode yet, or a refusal's, which fails the function), and its decoded edits
+    // and nodes' instructions.
+    bool code_checked;
+    uint32_t code_reason;
+    uint64_t code_edits;
+    uint64_t code_originals;
 };
 
 typedef struct Tier1EmitTransitions Tier1EmitTransitions;
@@ -490,6 +512,49 @@ static Tier1EmitError tier1_emit_transitions(const Tier1EmitPrepared* prepared, 
     return error;
 }
 
+// #939: where each record of the CFG consumer's comes from, for the certificate of its code (tier1_certificate_emitted.c):
+// its kind in the top 4 bits, and below them the node, edge or block it belongs to. Every record is marked after the step
+// that writes it (tier1_emit_mark), with a value where the step has one (a value's transition, whose recomputation names
+// it), else BUSTER_IR_NONE. Untrusted: the bridge decodes every record by its own bytes, and an origin only says which
+// decoding applies. Without a certificate the columns are null and marking is a counter's update.
+#define BUSTER_TIER1_ORIGIN_SHIFT 28
+#define BUSTER_TIER1_ORIGIN_PAYLOAD ((1u << BUSTER_TIER1_ORIGIN_SHIFT) - 1)
+typedef enum Tier1Origin
+{
+    // Unmarked: the bridge refuses it.
+    TIER1_ORIGIN_NONE,
+    // The prologue (payload 0) and an epilogue (payload 1): tier1_frame_emit's.
+    TIER1_ORIGIN_FRAME,
+    // The entry's: narrow parameters' extensions, and the parameters' moves and loads (tier1_emit_cfg_entry).
+    TIER1_ORIGIN_ENTRY,
+    // A value's move between storage at position `payload`: a fragment's transition, a fixed rule's or a call's register
+    // save and restore, a call's argument moves (the node's definition phase's).
+    TIER1_ORIGIN_MOVE,
+    // Edge `payload`'s moves, wherever they are placed.
+    TIER1_ORIGIN_EDGE,
+    // Node `payload`'s own records: its rule's, a call's sequence, a branch's comparison.
+    TIER1_ORIGIN_NODE,
+    // A jump between blocks and stubs.
+    TIER1_ORIGIN_CONTROL,
+    // Node `payload`'s records the bridge doesn't decode: aggregates' copies, stack arguments, a dynamic frame's call area.
+    TIER1_ORIGIN_OTHER,
+} Tier1Origin;
+
+static uint32_t tier1_origin(Tier1Origin kind, uint32_t payload)
+{
+    return (uint32_t)kind << BUSTER_TIER1_ORIGIN_SHIFT | (payload & BUSTER_TIER1_ORIGIN_PAYLOAD);
+}
+
+static void tier1_emit_mark(Tier1EmitBuffer* buffer, uint32_t origin, uint32_t value)
+{
+    for (uint32_t r = buffer->marked; buffer->origins != 0 && r < buffer->count; r += 1)
+    {
+        buffer->origins[r] = origin;
+        buffer->origin_values[r] = value;
+    }
+    buffer->marked = buffer->count;
+}
+
 static bool tier1_emit_append(Tier1EmitBuffer* buffer, X86Instruction instruction)
 {
     const bool room = buffer->count < buffer->capacity;
@@ -582,6 +647,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
             {
                 result->spill_stores += 1;
             }
+            tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, position), value);
         }
     }
     for (uint32_t e = first; error == TIER1_EMIT_OK && e < end; e += 1)
@@ -615,6 +681,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
             result->spill_loads += error == TIER1_EMIT_OK;
             transitions->owners[base_location + reg] = value;
         }
+        tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, position), value);
         transitions->registers[value] = kind == BUSTER_TIER1_ALLOCATE_REGISTER ? (uint8_t)(base_location + reg) : UINT8_MAX;
         result->transition_count += 1;
     }
@@ -650,7 +717,7 @@ static X86Instruction tier1_emit_move(uint32_t source, uint32_t destination, uin
 // before its records and loaded after them. Both consumers give those registers rows (tier1_emit_prepare, and
 // tier1_emit_cfg_problem) and say which values live past the node, each by its own liveness. Out of line: the consumers'
 // loops over every node take it for a few of a function's, and the long sequences beneath it stay out of those loops.
-static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult* emitted, uint32_t saved, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult* emitted, uint32_t node, uint32_t saved, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
 {
     X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS];
     const uint32_t count = tier1_select_fixed(holes, records);
@@ -661,15 +728,18 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
         appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, false));
         emitted->call_stores += (saved >> reg) & 1;
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, buffer->origin_base + 2 * node + 1), BUSTER_IR_NONE);
     for (uint32_t r = 0; appended && r < count; r += 1)
     {
         appended = tier1_emit_append(buffer, records[r]);
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
         appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, true));
         emitted->call_loads += (saved >> reg) & 1;
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, buffer->origin_base + 2 * node + 1), BUSTER_IR_NONE);
     return appended ? TIER1_EMIT_OK : !rows ? TIER1_EMIT_ALLOCATION : count == 0 ? TIER1_EMIT_INVALID : TIER1_EMIT_MEMORY;
 }
 
@@ -679,9 +749,9 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
 // straight-line consumer's function, a CFG block), `owed` are the registers whose values are in their rows and not in
 // the registers, which the calls clobbered, and `rows` the value each row holds: its register's owner when a call stored
 // or kept it. A call doesn't store a register whose row holds its owner, unchanged since: within straight-line code an
-// SSA value's bits don't change, so the row still holds them. (A CFG block whose one predecessor comes first starts from
-// that block's rows, tier1_emit_cfg_records.) A register is owed while its owner is unchanged, so
-// whatever would change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
+// SSA value's bits don't change, so the row still holds them. (Every CFG block starts with no rows, as the code's
+// certificate proves it, tier1_emit_cfg_records.) A register is owed while its owner is unchanged, so whatever would
+// change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
 // The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the vector
 // path compares and blends them whole; `vector` picks it or its scalar twin, which gives the same rows and masks.
 typedef struct Tier1EmitSaves Tier1EmitSaves;
@@ -745,14 +815,17 @@ static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrep
     return needed & owed;
 }
 
-// The loads of `repaid`, owed registers, from their rows, the lowest register first: an iteration per load.
-static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* saves, uint32_t repaid, Tier1EmitBuffer* buffer)
+// The loads of `repaid`, owed registers, from their rows, the lowest register first: an iteration per load. They are
+// moves at the use phase, position `use`, of the node that needs them (#939: the code's certificate decodes them as
+// edits there).
+static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* saves, uint32_t repaid, uint32_t use, Tier1EmitBuffer* buffer)
 {
     bool appended = true;
     for (uint32_t left = repaid; appended && left != 0; left &= left - 1)
     {
         appended = tier1_emit_append(buffer, tier1_emit_call_save(result, (uint32_t)__builtin_ctz(left), true));
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, use), BUSTER_IR_NONE);
     result->call_loads += (uint32_t)__builtin_popcount(repaid);
     saves->owed &= ~repaid;
     return appended ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
@@ -1050,6 +1123,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
             error = TIER1_EMIT_MEMORY;
         }
     }
+    // The saves, the arguments' moves and their narrowing are moves of values (#939).
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, buffer->origin_base + 2 * node + 1), BUSTER_IR_NONE);
     // The aggregates' parts from their staging slots (#789), each its 8 bytes, or a whole vector register's its bytes (#141)
     // from its slots' lowest (tier1_emit_staging_part): past an aggregate's end, the register's bytes are padding, which the
     // callee ignores. A 64-byte part (#141) from the zmm register it waits in (tier1_emit_cfg_aggregate_zmm).
@@ -1076,6 +1151,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         const X86Instruction address = { .displacement = into->displacement, .reg = X86_REGISTER_RDI, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_LEA_R64_M };
         error = tier1_emit_append(buffer, address) ? error : TIER1_EMIT_MEMORY;
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_OTHER, node), BUSTER_IR_NONE);
     // A variadic call's al: how many vector registers its arguments take, an upper bound the callee's prologue reads (with
     // ABI records, its records' count, its aggregates' parts among them).
     const uint32_t vector_count = abi != 0 ? abi->call.vector_registers : vectors;
@@ -1108,6 +1184,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
             result->references[result->reference_count++] = reference;
         }
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     // An aggregate result in registers (#789): each part's bytes into the result object at its offset, exactly (the object
     // may be no larger than the aggregate), a general register's by tier1_emit_store_part and an xmm one's by movss or movsd,
     // or through the scratch register for any other size.
@@ -1153,6 +1230,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         const X86Instruction record = { .form = X86_FORM_FSTP_M80, .rm = error == TIER1_EMIT_OK ? into->base : 0, .mode = BUSTER_X86_MEMORY_BASE, .displacement = error == TIER1_EMIT_OK ? into->displacement : 0 };
         error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_OTHER, node), BUSTER_IR_NONE);
     // The result into its register, a narrow one zero-extended into its canonical 32-bit storage: the callee leaves the
     // bits past its width unspecified, as clang's code does. An I32 result stays where it is in rax: the bits past its
     // 32 are unspecified in Tier 1's storage too (tier1_select_width, #1116). A floating one from xmm0 (#141).
@@ -1176,6 +1254,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
             error = TIER1_EMIT_MEMORY;
         }
     }
+    tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     arena_pop_to(scratch, scratch_mark);
     return error;
 }
@@ -1244,7 +1323,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             const bool selected = !plan->covered[node] && op != IR_PHI && !tier1_select_entry_parameter(plan->function, node);
             const bool defines = !plan->covered[node] && op != IR_BR && op != IR_PARAM && op != IR_CALL && plan->function->type[node] != IR_VOID;
             const uint32_t repaid = tier1_emit_owed(plan, &result->prepared, &result->allocation, &transitions, node, node * 2, defines ? transitions.registers[node] : UINT8_MAX, selected, node + 1 == count && !leaves, saves.owed);
-            error = repaid != 0 ? tier1_emit_repay(result, &saves, repaid, &buffer) : error;
+            error = repaid != 0 ? tier1_emit_repay(result, &saves, repaid, node * 2, &buffer) : error;
         }
         error = error == TIER1_EMIT_OK ? tier1_emit_phase(&result->prepared, &result->allocation, &result->frame, &transitions, node * 2, &buffer, result) : error;
         Tier1SelectHoles holes = {0};
@@ -1314,7 +1393,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             // Its fixed registers' other values that live past it, as a call's (but the destination's, which no other
             // value holds at the node's definition).
             const uint32_t saved = tier1_emit_call_saved(result, &transitions, node) & tier1_select_fixed_registers(plan->patterns[node].rule) & ~(1u << holes.destination);
-            error = tier1_emit_fixed(result, saved, &holes, &buffer);
+            error = tier1_emit_fixed(result, node, saved, &holes, &buffer);
             tier1_emit_fixed_rows(&saves, tier1_select_fixed_registers(plan->patterns[node].rule));
         }
         else if (error == TIER1_EMIT_OK && !plan->covered[node] && plan->function->op[node] != IR_BR)
@@ -1398,6 +1477,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
 }
 
 #include "tier1_emit_cfg.c"
+#include "tier1_certificate_emitted.c"
 
 static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
@@ -1431,6 +1511,23 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     if (error == TIER1_EMIT_OK && !chain)
     {
         error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
+    }
+    if (error == TIER1_EMIT_OK && !chain && options->certify)
+    {
+        // The code's certificate (#939), decoded from its records: a refusal fails the function, a shape it doesn't
+        // decode yet leaves the code uncertified.
+        Tier1CertReport report = { 0 };
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(plan, &emitted, output, scratch, &report, &stats);
+        emitted.code_checked = true;
+        emitted.code_reason = reason;
+        emitted.code_edits = stats.edits + stats.edge_edits;
+        emitted.code_originals = stats.originals;
+        if (reason >= TIER1_CERT_EMITTED_REFUSED)
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);
+            error = reason == TIER1_CERT_EMITTED_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
+        }
     }
     if (error == TIER1_EMIT_OK && chain)
     {

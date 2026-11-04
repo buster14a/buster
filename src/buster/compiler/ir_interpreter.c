@@ -1016,6 +1016,11 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             {
                 operands = 0;
             }
+            else if (op == IR_ATOMIC_RMW && c != BUSTER_IR_NONE)
+            {
+                // A compare-exchange's desired value (#1059), which it uses whether or not it stores it.
+                operands = 7;
+            }
             for (uint32_t p = 0; result.status == INTERPRETER_OK && p < 3; p += 1)
             {
                 const uint32_t id = p == 0 ? a : p == 1 ? b : c;
@@ -1080,6 +1085,43 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     // One thread's accesses in program order, as this interpreter runs them, are what any fence orders
                     // them into (#1059): nothing to do. It is no model of other threads' views of memory.
                     break;
+                case IR_ATOMIC_RMW:
+                {
+                    // An atomic read/modify/write (#1059), as one thread runs it: its object's old value read, the operand
+                    // (an exchange), the sum (an addition), or, where the old value's bytes are the operand's, the desired
+                    // value (a compare-exchange; the old value written back where they aren't, as x86's cmpxchg writes it),
+                    // written, a byte at a time through volatile accesses as an atomic load's and store's are here, the old
+                    // value the result. With memory checks, its address is refused where its declared alignment isn't,
+                    // whatever its bytes hold; then its object is checked as a load's, which reports reading undefined
+                    // bytes, before a store's marks them written.
+                    const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
+                    const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
+                    result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
+                    if (result.status == INTERPRETER_OK)
+                    {
+                        result.status = interpreter_memory_access(&runtime, av.low, bytes, true);
+                    }
+                    if (result.status == INTERPRETER_OK)
+                    {
+                        uint64_t old = 0;
+                        volatile uint8_t* object = (volatile uint8_t*)(uintptr_t)av.low;
+                        for (uint32_t byte = 0; byte < bytes; byte += 1)
+                        {
+                            old |= (uint64_t)object[byte] << (8 * byte);
+                        }
+                        const uint32_t operation = function->flags[i] & BUSTER_IR_RMW_OPERATION;
+                        const uint64_t mask = bytes < 8 ? (UINT64_C(1) << (8 * bytes)) - 1 : UINT64_MAX;
+                        const uint64_t desired = operation == BUSTER_IR_RMW_COMPARE && c < function->instruction_count ? frame->values[c].low : 0;
+                        const uint64_t written = operation == BUSTER_IR_RMW_ADD       ? old + bv.low
+                                                 : operation == BUSTER_IR_RMW_COMPARE ? ((old ^ bv.low) & mask) == 0 ? desired : old
+                                                                                      : bv.low;
+                        for (uint32_t byte = 0; byte < bytes; byte += 1)
+                        {
+                            object[byte] = (uint8_t)(written >> (8 * byte));
+                        }
+                        value = ir_interpreter_value(old, type);
+                    }
+                } break;
                 case IR_ALLOCA:
                     result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
                     break;

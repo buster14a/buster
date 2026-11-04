@@ -107,21 +107,27 @@ patterns are:
 - A nonvolatile load whose only use is an arithmetic consumer in its block
   can become that consumer's memory operand (the right operand, or a
   commutative operation's left where its right isn't a load), its access moved
-  to the consumer (#141). It moves past the nodes between them that don't write
-  memory, call, access a volatile or atomic object, fence or move rsp
-  (arithmetic, constants, addresses, other nonvolatile loads) and past none that
-  do: a store to any address, a call, a volatile or atomic load (#1059:
-  `BUSTER_IR_OBSERVABLE`) or store, a fence of any order or scope (a signal
-  fence's too), an allocation or a restore of the dynamic stack; an atomic load
-  folds into nothing. A pass of its own after the plan's pass over
+  to the consumer (#141). It moves past the nodes between them that don't touch
+  memory, call, fence or move rsp (arithmetic, constants, addresses) and past
+  none that do: a store to any address, a call, any other load (#1059's audit:
+  the typed stream doesn't carry a C access's volatility, so that a load the IR
+  doesn't flag `BUSTER_IR_VOLATILE` may still be a volatile object's, and two
+  volatile reads keep their order: `tier1_select_fold_barrier`), an atomic
+  read/modify/write, a fence of any order or scope (a signal fence's too), an
+  allocation or a restore of the dynamic stack; a volatile or atomic load (#1059:
+  `BUSTER_IR_OBSERVABLE`) folds into nothing. On `main.c`'s `--tier1` build the
+  rule costs 6 records of 239,884 and 32 bytes of code. A pass of its own after the plan's pass over
   the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
   a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
   twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
   plan's pass, its store made the operands' walk reload the function's columns
   (the build's `-fno-strict-aliasing`): 40 instructions more per node. C's aligned atomic loads and stores of a constant
   order reach it as atomic accesses (#1059), selected as ordinary ones (`mov`, `movzx`) since x86-64's total store order
-  gives their orders, with a seq_cst store's `fence` after it; other atomic operations reach it as calls of the unit's
-  leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
+  gives their orders, with a seq_cst store's `fence` after it. An exchange, an addition or a subtraction of a constant
+  order reaches it as the IR's `rmw` (`TIER1_RULE_ATOMIC_RMW`): the operand copied to the scratch register, `xchg` or
+  `lock xadd` of the object's width (a byte's and a short's at their own, never their 32-bit register's, which
+  `test-tier1-select` runs on guard bytes), and the old value zero-extended into its register as a load's is, a barrier
+  no load folds past. Other atomic operations reach it as calls of the unit's leaves. A fence of a constant order is the IR's `fence` (`TIER1_RULE_FENCE`): `mfence` for a thread fence of `seq_cst`
   and no records for the others, a barrier no selection moves an access across. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
