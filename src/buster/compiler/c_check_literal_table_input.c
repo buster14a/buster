@@ -272,6 +272,48 @@ static bool check_literal_table_floating_value(CheckInputReader* reader, const u
     return valid;
 }
 
+// Whether a number's spelling is an integer literal's: no '.', and no exponent ('e' in decimal, 'p' in hexadecimal).
+static bool check_literal_table_integer_spelling(const uint8_t* spelling, uint32_t length)
+{
+    const bool hexadecimal = length > 2 && spelling[0] == '0' && (spelling[1] | 0x20) == 'x';
+    const uint8_t exponent = hexadecimal ? 'p' : 'e';
+    bool integer = true;
+    for (uint32_t i = 0; integer && i < length; i += 1)
+    {
+        integer = spelling[i] != '.' && (spelling[i] | 0x20) != exponent;
+    }
+    return integer;
+}
+
+// The refusals an integer's value makes (its precision lost in the element's format), found before any floating
+// conversion: one late in a table would otherwise come after every element before it was converted in vain, which the
+// ordinary path then converts again, 28% slower than main on a 200,000-element table refused at its last element on the
+// 9700X (#1210). Integers of three characters or fewer, at most 999 (0777 in octal, 0xff), are exact in both formats and
+// not tested. The other late refusals (a range warning, an imaginary, bit-precise or malformed constant) are code that
+// warns or fails, and keep their cost.
+static bool check_literal_table_floating_integers(CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId element)
+{
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    bool valid = true;
+    for (uint32_t token = begin; valid && token < end; token += 1)
+    {
+        const uint64_t mark = reader->scratch->length;
+        const uint8_t* spelling = NULL;
+        uint32_t length = 0;
+        if (kinds[token] == PARSE_KIND_NUMBER)
+        {
+            valid = check_input_spelling(reader, token, &spelling, &length);
+        }
+        if (valid && length > 3 && check_literal_table_integer_spelling(spelling, length))
+        {
+            uint64_t bits = 0;
+            valid = check_literal_table_floating_value(reader, spelling, length, kinds[token - 1] == PARSE_KIND_MINUS, element, &bits);
+        }
+        arena_pop_to(reader->scratch, mark);
+    }
+    return valid;
+}
+
 static bool check_literal_table_floating_batch(CheckInputReader* reader, const uint32_t* tokens, uint32_t count, TypeId element, uint32_t width, uint8_t* destination)
 {
     uint32_t words[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
@@ -374,7 +416,7 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     const uint64_t bytes = (uint64_t)count * (width / 8);
     uint8_t* payload = eligible ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, bytes) : NULL;
     input->resource |= eligible && payload == NULL;
-    bool accepted = eligible && payload != NULL;
+    bool accepted = eligible && payload != NULL && (!floating || check_literal_table_floating_integers(reader, begin + 1, end - 1, element));
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint32_t batch = 0;
     uint32_t written = 0;

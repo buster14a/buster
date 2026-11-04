@@ -140,6 +140,40 @@ static void check_test_literal_floating_values(CheckTest* test)
     arena_release(&scratch);
 }
 
+// Which spellings check_literal_table_floating_integers takes for integers: no '.', no exponent ('e' in decimal, 'p' in
+// hexadecimal, where 'e' is a digit).
+static void check_test_literal_floating_integer_spellings(CheckTest* test)
+{
+    typedef struct SpellingCase SpellingCase;
+    struct SpellingCase
+    {
+        const char* spelling;
+        bool integer;
+    };
+    static const SpellingCase cases[] = {
+        { "16777217", true },
+        { "0x1e", true },
+        { "0X1E5", true },
+        { "075", true },
+        { "9007199254740993ULL", true },
+        { "1e5", false },
+        { "1E5", false },
+        { "1.5", false },
+        { ".5", false },
+        { "1.", false },
+        { "0x1p3", false },
+        { "0x1P-3", false },
+        { "0x1.8", false },
+        { "0.1f", false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        const char* spelling = cases[i].spelling;
+        check_test_expect(test, check_literal_table_integer_spelling((const uint8_t*)spelling, (uint32_t)strlen(spelling)) == cases[i].integer,
+                          "an integer literal's spelling is told from a floating literal's");
+    }
+}
+
 static void check_test_literal_floating_tails(CheckTest* test, bool wide)
 {
     char source[8192];
@@ -226,6 +260,7 @@ static void check_test_literal_floating_tails(CheckTest* test, bool wide)
 static void check_test_literal_floating_tables(CheckTest* test, const char* clang)
 {
     check_test_literal_floating_values(test);
+    check_test_literal_floating_integer_spellings(test);
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
     char source[32768];
     char table[8192];
