@@ -16,6 +16,8 @@
 // implicit operands, LLVM's fucompi and AT&T's reversed subtractions and divisions; and the compare-predicate names.
 static const char asm_test_tls_fixture[] =
     ".text\ntls:\nmovl %fs:tl@TPOFF, %esi\nmovl %fs:tl@tpoff+4, %esi\nleaq tl@TPOFF(%rax), %rax\nmovq $tl@tpoff, %rax\naddq $tl@tpoff, %rax\n"
+    // The 64-bit offsets (R_X86_64_TPOFF64 and DTPOFF64): a 64-bit immediate's, and data's below.
+    "movabsq $tl@tpoff, %rax\nmovabsq $tl@dtpoff+4, %rdx\nmovabsq $ext@TPOFF, %rcx\n"
     "movq ext@GOTTPOFF(%rip), %rax\naddq ext@gottpoff(%rip), %rax\n"
     "data16\nleaq ext@TLSGD(%rip), %rdi\ndata16\ndata16\nrex64\ncall __tls_get_addr@PLT\n"
     "data16 leaq ext@tlsgd(%rip), %rdi\n.value 0x6666\nrex64\ncall __tls_get_addr@PLT\n"
@@ -26,6 +28,7 @@ static const char asm_test_tls_fixture[] =
     ".set tls_alias, tls_alias_target\nmovq %fs:tls_alias@TPOFF, %rax\nmovq tls_alias@GOTTPOFF(%rip), %rax\nleaq tls_alias@TLSGD(%rip), %rdi\n"
     "leaq tls_alias@TLSLD(%rip), %rdi\nmovl tls_alias@DTPOFF(%rax), %eax\n.set tls_local_alias, tl+4\nmovl %fs:tls_local_alias@tpoff, %eax\n.p2align 4\n"
     ".section .rodata.offsets,\"a\",@progbits\n.long tl@dtpoff\n.long stl@DTPOFF+4\n.long tl@tpoff\n.long tls_alias@DTPOFF\n"
+    ".quad tl@dtpoff\n.quad tl@tpoff+8\n.quad ext@DTPOFF\n.quad tls_alias@dtpoff\n"
     ".section .tbss,\"awT\",@nobits\n.type tl, @object\ntl: .zero 16\n.local stl\nstl: .zero 4\n"
     ".section .tdata,\"awT\",@progbits\n.globl data\ndata: .long 7\n";
 static const char asm_test_common_fixture[] =
@@ -196,8 +199,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // compared with GNU as here; the program corpus compares GCC 15's with a GNU as that does.
     static const uint8_t base64[] = { 'h', 'e', 'l', 'l', 'o', 0, 1, 2, 0xff, 'h', 'i' };
     asm_test_bytes(test, ".data\n.base64 \"aGVsbG8=\", \"AAEC/w==\"\n.base64 \"\"\n.base64 \"aGk=\"\n", 2, base64, sizeof(base64), ".base64 decodes each string");
-    // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`) or a
-    // 64-bit one, @GOTTPOFF without RIP, 64-bit TLS offsets as data, a TLS modifier on a symbol outside a TLS section;
+    // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`),
+    // @GOTTPOFF without RIP, a 2-byte TLS offset as data, a TLS modifier on a symbol outside a TLS section;
     // .comm's alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined
     // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
     // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
@@ -206,11 +209,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // difference whose subtrahend is in neither the datum's section nor the minuend's, which GNU as can't resolve.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
-        ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",
         ".text\nleaq ext@tlsgd(%rax), %rdi\n",
         ".text\nmovl tl@tpoff(%rip), %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
-        ".data\n.quad tl@dtpoff\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".data\n.short tl@dtpoff\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".data\n.long tl@gottpoff\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".data\nd: .long 0\n.text\nmovl %fs:d@tpoff, %eax\n",

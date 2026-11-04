@@ -4269,12 +4269,12 @@ static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment
         }
     }
     AsmExpr expression = asm_resolve(parser, source, fragment->location);
-    // A TLS variable's 32-bit offset as data (#1115): `.long x@dtpoff` (DWARF's location of a TLS variable in 32-bit
-    // DWARF expressions) and `.long x@tpoff`. The 64-bit ones are DTPOFF64 and TPOFF64, which the Link doesn't have.
+    // A TLS variable's offset as data (#1115): `.quad x@dtpoff` (DWARF's location of a TLS variable, which GCC and Clang
+    // write at -g), `.long x@dtpoff` (32-bit DWARF expressions), and `.quad x@tpoff` and `.long x@tpoff`.
     const bool offset = expression.relocation == ASM_RELOCATION_TPOFF || expression.relocation == ASM_RELOCATION_DTPOFF;
-    if (expression.relocation != ASM_RELOCATION_NONE && (!offset || fragment->size != 4))
+    if (expression.relocation != ASM_RELOCATION_NONE && (!offset || (fragment->size != 4 && fragment->size != 8)))
     {
-        asm_fail(parser, fragment->location, "of data, only .long takes a relocation modifier, @TPOFF or @DTPOFF");
+        asm_fail(parser, fragment->location, "of data, only .long and .quad take a relocation modifier, @TPOFF or @DTPOFF");
     }
     uint8_t* bytes = parser->result.link.atoms.bytes[atom];
     if (expression.plus == 0)
@@ -4301,8 +4301,9 @@ static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment
     }
     else
     {
-        const uint8_t kind = expression.relocation == ASM_RELOCATION_TPOFF  ? BUSTER_LINK_FIXUP_TPOFF32
-                           : expression.relocation == ASM_RELOCATION_DTPOFF ? BUSTER_LINK_FIXUP_DTPOFF32
+        const bool wide = fragment->size == 8;
+        const uint8_t kind = expression.relocation == ASM_RELOCATION_TPOFF  ? (wide ? BUSTER_LINK_FIXUP_TPOFF64 : BUSTER_LINK_FIXUP_TPOFF32)
+                           : expression.relocation == ASM_RELOCATION_DTPOFF ? (wide ? BUSTER_LINK_FIXUP_DTPOFF64 : BUSTER_LINK_FIXUP_DTPOFF32)
                            : relative                                       ? (fragment->size == 4 ? BUSTER_LINK_FIXUP_PC32 : BUSTER_LINK_FIXUP_PC64)
                            : fragment->size == 4                            ? BUSTER_LINK_FIXUP_ABS32
                                                                             : BUSTER_LINK_FIXUP_ABS64;
@@ -4316,16 +4317,17 @@ static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment
 // immediate the form sign-extends (`movl %fs:x@tpoff, %eax`, `leaq x@dtpoff(%rax), %rdx`, `addq $x@tpoff, %rax`), as
 // TPOFF32 and DTPOFF32; @GOTTPOFF (initial-exec), @TLSGD (general-dynamic) and @TLSLD (local-dynamic) in a
 // RIP-relative displacement, as their kinds.
-static uint8_t asm_tls_kind(AsmParser* parser, uint32_t location, uint16_t relocation, bool rip, bool signed32)
+static uint8_t asm_tls_kind(AsmParser* parser, uint32_t location, uint16_t relocation, bool rip, bool signed32, bool wide)
 {
     uint8_t kind = BUSTER_LINK_FIXUP_NONE;
     if (relocation == ASM_RELOCATION_TPOFF || relocation == ASM_RELOCATION_DTPOFF)
     {
-        if (!signed32)
+        // A 64-bit immediate (`movabs $x@tpoff, %rax`) takes the 64-bit kinds, R_X86_64_TPOFF64 and DTPOFF64.
+        if (!signed32 && !wide)
         {
-            asm_fail(parser, location, "@TPOFF and @DTPOFF take a signed 32-bit displacement or immediate");
+            asm_fail(parser, location, "@TPOFF and @DTPOFF take a signed 32-bit displacement or immediate, or a 64-bit immediate");
         }
-        kind = relocation == ASM_RELOCATION_TPOFF ? BUSTER_LINK_FIXUP_TPOFF32 : BUSTER_LINK_FIXUP_DTPOFF32;
+        kind = relocation == ASM_RELOCATION_TPOFF ? (wide ? BUSTER_LINK_FIXUP_TPOFF64 : BUSTER_LINK_FIXUP_TPOFF32) : (wide ? BUSTER_LINK_FIXUP_DTPOFF64 : BUSTER_LINK_FIXUP_DTPOFF32);
     }
     else
     {
@@ -4414,7 +4416,7 @@ static void asm_instruction_fixups(AsmParser* parser, AtomId atom, AsmInstructio
                     else if (expression.relocation != ASM_RELOCATION_NONE)
                     {
                         kind = asm_tls_kind(parser, instruction->location, expression.relocation, displacement && (operand->mode & BUSTER_X86_MODE_RIP) != 0,
-                                            !pc_relative && width == 4 && signed_field);
+                                            !pc_relative && width == 4 && signed_field, !pc_relative && !displacement && width == 8);
                     }
                     memset(bytes, 0, width);
                     link_add_fixup(&parser->result.link, atom, offset, kind, parser->symbols[expression.plus].link, addend);
@@ -5117,8 +5119,10 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 }
                 else if (expression.relocation != ASM_RELOCATION_NONE)
                 {
+                    // A C template's references take the code generators' kinds (link_kind_fits), which the 64-bit TLS
+                    // offsets aren't.
                     kind = asm_tls_kind(&parser, instruction->location, expression.relocation, displacement && (operand->mode & BUSTER_X86_MODE_RIP) != 0,
-                                        !pc_relative && width == 4 && signed_field);
+                                        !pc_relative && width == 4 && signed_field, false);
                 }
                 char* name = !symbol->internal && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
                 if (symbol->internal && symbol->defined)
