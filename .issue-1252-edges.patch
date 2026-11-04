@@ -1,0 +1,77 @@
+--- a/src/buster/compiler/c_check_direct_initializer_test.c
++++ b/src/buster/compiler/c_check_direct_initializer_test.c
+@@ -18,7 +18,7 @@
+         "__auto_type direct_auto __attribute__((unused)) (11);\n";
+     static const CheckInitExpected expected[] = {
+         { .name = "direct_one", .bytes = { 3 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+-        { .name = "direct_asm", .bytes = { 4 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
++        { .name = "renamed", .clang_name = "direct_asm", .bytes = { 4 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+         { .name = "direct_first", .bytes = { 5 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+         { .name = "direct_string", .bytes = { 'a', 'b', 'c', 0 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+         { .name = "direct_size", .bytes = { 4 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+@@ -47,15 +47,16 @@
+         check_init_test_source(test, invalid[i], NULL, 0, false, false, clang);
+     }
+     const CLanguage c23 = { .standard = 2023, .gnu = true };
+-    check_init_test_source_language(test, "auto x __attribute__((unused)) (3);constexpr int y __attribute__((unused)) (4);",
+-                                   NULL, 0, true, false, clang, c23);
++    check_init_test_source_language(test, "auto x __attribute__((unused)) (3);", NULL, 0, true, false, clang, c23);
++    check_init_test_source_language(test, "constexpr int y __attribute__((unused)) (4);", NULL, 0, true, false, clang, c23);
++    check_init_test_source_language(test, "auto x __attribute__((unused)) =3;", NULL, 0, true, false, clang, c23);
+     check_init_test_source_language(test, "auto x __attribute__((unused)) (3,4);", NULL, 0, false, false, clang, c23);
+     check_test_program_source(test,
+-        "int absent(void);int g;int tested(int n){g=0;int x __attribute__((unused)) (n+3,g++,absent());"
+-        "int y __asm__(\"local_y\") (x*2);return x+y+g*100;}", "direct-first-argument-only", clang);
++        "int absent(void);int g;int global __asm__(\"renamed_global\") (4);int tested(int n){g=0;int x __attribute__((unused)) (n+3,g++,absent());"
++        "int y __asm__(\"local_y\") (x*2);return x+y+g*100+global;}", "direct-first-argument-only", clang);
+     check_test_program_source(test,
+         "int absent(void);int tested(int n){int a=0;int x __attribute__((unused)) ((a++,n+3),a++,absent());"
+-        "int y __attribute__((unused)) (n? a++,n+4 : n-2,absent());return a*100+x+y;}", "direct-nested-comma-and-conditional", clang);
++        "int y __attribute__((unused)) (n? a++,n+4 : n-2,absent());int z=n? a++,n+4 : n-2;return a*100+x+y+z;}", "direct-nested-comma-and-conditional", clang);
+     check_test_program_source(test,
+         "int tested(int n){struct P{int a,b;};struct P a={n,n+7};"
+         "struct P b __attribute__((unused)) (a,n++);int *p __attribute__((unused)) (&b.a);"
+--- a/src/buster/compiler/c_parser.c
++++ b/src/buster/compiler/c_parser.c
+@@ -3471,7 +3471,11 @@
+         // type name, an error after which clang takes it for the type. A parameter in C23, which has no implicit int, is
+         // always the latter.
+         const bool parameter = frame->role == PARSE_ROLE_OPEN_FUNCTION;
+-        if ((parameter && parser->language.standard >= 2023) || !parse_scalar_valid_after_name(parser, i + 1))
++        // C23's auto already supplies the inferred type: its name may be followed by GNU attributes, including
++        // the attributes before a direct initializer (#1252), rather than being mistaken for an unknown type.
++        const bool inferred_attribute = parser->language.standard >= 2023 && (frame->flags & BUSTER_PARSE_FRAME_AUTO) != 0 &&
++                                        parser->kinds[i + 1] == PARSE_KIND_ATTRIBUTE;
++        if ((parameter && parser->language.standard >= 2023) || (!inferred_attribute && !parse_scalar_valid_after_name(parser, i + 1)))
+         {
+             parse_scalar_note(parser, i, PARSE_MESSAGE_UNKNOWN_TYPE_NAME, i, true);
+             step->role = PARSE_ROLE_SPECIFIER;
+--- a/src/buster/compiler/c_check_initializer.c
++++ b/src/buster/compiler/c_check_initializer.c
+@@ -685,17 +685,25 @@
+ static uint32_t check_init_expression_end(const Parser* parser, uint32_t begin, uint32_t end)
+ {
+     uint32_t depth = 0;
++    uint32_t questions = 0;
+     uint32_t token = begin;
+     bool done = false;
+     while (token < end && !done)
+     {
+         const uint8_t kind = parser->tokens.kinds[token];
+-        if (depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE))
++        if (depth == 0 && ((kind == PARSE_KIND_COMMA && questions == 0) || kind == PARSE_KIND_R_BRACE))
+         {
+             done = true;
+         }
+         else
+         {
++            // The middle operand of ?: is an expression, so an unparenthesized comma belongs to it, not the
++            // initializer list. Delimited operands own their question marks independently (#1252).
++            if (depth == 0)
++            {
++                questions += kind == PARSE_KIND_QUESTION;
++                questions -= kind == PARSE_KIND_COLON && questions != 0;
++            }
+             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+             {
+                 depth += 1;
