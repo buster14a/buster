@@ -4,8 +4,8 @@
 // The os_log builtins' format strings (#148): __builtin_os_log_format_buffer_size's and __builtin_os_log_format's
 // format, read as clang 23 reads it (clang/lib/AST/PrintfFormatString.cpp's ParsePrintfSpecifier with os_log's
 // annotations, FormatString.cpp's amounts and length modifiers). Two passes over it: the layout's, which stops where
-// clang/lib/AST/OSLog.cpp's handler stops and gives its items (each specifier's mask, field width, precision, count and
-// value, in that order, CheckOSLogItem), and the format checks', which go on past a %P without its length and record the
+// clang/lib/AST/OSLog.cpp's handler stops and gives its items (each specifier's mask, field width, precision or count,
+// and value, in that order, CheckOSLogItem), and the format checks', which go on past a %P without its length and record the
 // data arguments any specifier takes and whether a mask's size is invalid (Sema's CheckFormatArguments, whose errors are
 // os_log's). The items' sizes come from the arguments' types, which Sema knows (check_builtin_misc_os_log). Include
 // after c_check_builtin_evidence.c.
@@ -24,8 +24,8 @@ struct CheckOSLogAmount
 #define BUSTER_CHECK_OS_LOG_AMOUNT_INVALID 3u
 
 // The parser's place in the format, the next data argument a specifier without a position takes, whether a stop ended
-// it, and the pass's outputs: the layout's items (`items`, room for `capacity`; none for the checks' pass), and the
-// checks' arguments taken and invalid mask.
+// it, and the pass's outputs: the layout's `count` items, pushed on `arena` as the pass finds them (check_os_log_add;
+// none for the checks' pass), whether a push failed (`full`), and the checks' arguments taken and invalid mask.
 typedef struct CheckOSLogCursor CheckOSLogCursor;
 struct CheckOSLogCursor
 {
@@ -37,9 +37,10 @@ struct CheckOSLogCursor
     bool stop;
     bool checking;
     bool c23;
+    bool full;
+    Arena* arena;
     CheckOSLogItem* items;
     uint32_t count;
-    uint32_t capacity;
     uint64_t taken[4];
     bool invalid_mask;
 };
@@ -203,13 +204,21 @@ static bool check_os_log_length(CheckOSLogCursor* cursor)
     return length != 0;
 }
 
+// The layout's next item, pushed where its items so far end: nothing else pushes on the arena during the pass, so they
+// stay one array, exactly as long as the layout (#1329: no room reserved per `%`, which a %%, a byte past the format's
+// NUL or a specifier of fewer items would leave unused). A push that fails stops the pass, its layout unknown (`full`).
 static void check_os_log_add(CheckOSLogCursor* cursor, CheckOSLogItem item)
 {
-    if (cursor->count < cursor->capacity)
+    CheckOSLogItem* slot = cursor->full ? NULL : BUSTER_ARENA_PUSH_ARRAY(cursor->arena, CheckOSLogItem, 1);
+    cursor->items = cursor->count == 0 ? slot : cursor->items;
+    assert(slot == NULL || slot == cursor->items + cursor->count);
+    cursor->full = slot == NULL;
+    cursor->stop |= cursor->full;
+    if (!cursor->full)
     {
-        cursor->items[cursor->count] = item;
+        *slot = item;
+        cursor->count += 1;
     }
-    cursor->count += 1;
 }
 
 static void check_os_log_take(CheckOSLogCursor* cursor, uint32_t argument)
@@ -404,6 +413,56 @@ static void check_os_log_parse(CheckOSLogCursor* cursor)
     }
 }
 
+// A format's layout and its checks' facts: its layout's items, `count` of them, and whether it is known; whether the
+// arena couldn't hold them (`resource`); and the checks' invalid mask and arguments taken (the data arguments, as bits).
+typedef struct CheckOSLogFormat CheckOSLogFormat;
+struct CheckOSLogFormat
+{
+    CheckOSLogItem* items;
+    uint32_t count;
+    bool known;
+    bool resource;
+    bool invalid_mask;
+    uint64_t taken[4];
+};
+
+// The two passes over a format's `length` bytes, of `arguments` data arguments (C23's length modifiers where `c23`).
+// The layout's items are pushed on `arena`, 16 bytes for each and none past them (#1329): a format without items takes
+// no room, whatever its percent signs. Where the arena can't hold them, the layout is unknown and the arena as it was.
+static CheckOSLogFormat check_os_log_format(Arena* arena, const uint8_t* bytes, uint32_t length, uint32_t arguments, bool c23)
+{
+    const uint64_t start = arena->length;
+    CheckOSLogCursor layout = {
+        .bytes = bytes,
+        .length = length,
+        .arguments = arguments,
+        .c23 = c23,
+        .arena = arena,
+    };
+    check_os_log_parse(&layout);
+    CheckOSLogCursor checks = {
+        .bytes = bytes,
+        .length = length,
+        .arguments = arguments,
+        .c23 = c23,
+        .checking = true,
+    };
+    check_os_log_parse(&checks);
+    if (layout.full)
+    {
+        arena_pop_to(arena, start);
+    }
+    CheckOSLogFormat result = {
+        .items = layout.full ? NULL : layout.items,
+        .count = layout.full ? 0 : layout.count,
+        .known = !layout.full,
+        .resource = layout.full,
+        .invalid_mask = checks.invalid_mask,
+    };
+    memcpy(result.taken, checks.taken, sizeof(checks.taken));
+    return result;
+}
+
 // The os_log builtins' evidence (#148): the format, the call's argument from `first` (its arguments' first token) past
 // the buffer for __builtin_os_log_format (`buffer`), up to the call's `)` `closing`, of `count` arguments. It must be an
 // ordinary or UTF-8 string literal past its parentheses and casts (clang's CheckOSLogFormatStringArg); its layout's
@@ -450,23 +509,12 @@ static __attribute__((noinline)) void check_input_os_log_evidence(CheckInputRead
     if (literal)
     {
         const uint32_t length = (uint32_t)string->byte_count - 1;
-        uint32_t specifiers = 0;
-        for (uint32_t i = 0; i < length; i += 1)
-        {
-            specifiers += string->bytes[i] == '%';
-        }
-        const uint32_t capacity = specifiers * 5;
-        CheckOSLogItem* items = capacity != 0 ? arena_push_array(reader->arena, capacity, sizeof(CheckOSLogItem), 8) : NULL;
-        reader->output->resource |= capacity != 0 && items == NULL;
-        CheckOSLogCursor layout = { .bytes = string->bytes, .length = length, .arguments = arguments, .c23 = parser->language.standard >= 2023,
-                                    .items = items, .capacity = items != NULL ? capacity : 0 };
-        check_os_log_parse(&layout);
-        CheckOSLogCursor checks = { .bytes = string->bytes, .length = length, .arguments = arguments, .c23 = layout.c23, .checking = true };
-        check_os_log_parse(&checks);
-        evidence->os_log_known = layout.count <= layout.capacity;
-        evidence->os_log_items = items;
-        evidence->os_log_count = layout.count <= layout.capacity ? layout.count : 0;
-        evidence->os_log_invalid_mask = checks.invalid_mask;
-        memcpy(evidence->os_log_taken, checks.taken, sizeof(checks.taken));
+        const CheckOSLogFormat format = check_os_log_format(reader->arena, string->bytes, length, arguments, parser->language.standard >= 2023);
+        reader->output->resource |= format.resource;
+        evidence->os_log_known = format.known;
+        evidence->os_log_items = format.items;
+        evidence->os_log_count = format.count;
+        evidence->os_log_invalid_mask = format.invalid_mask;
+        memcpy(evidence->os_log_taken, format.taken, sizeof(format.taken));
     }
 }
