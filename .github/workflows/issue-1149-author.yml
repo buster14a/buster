@@ -2,7 +2,7 @@ name: Issue 1149 branch authoring
 on:
   push:
     branches: [astra/1149-wide-cfa]
-    paths: [.github/workflows/issue-1149-author.yml, .github/issue-1149.patch]
+    paths: [.github/workflows/issue-1149-author.yml]
 permissions:
   contents: write
 jobs:
@@ -18,14 +18,28 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
-      - name: Apply and commit the exact branch-local patch
-        if: hashFiles('.github/issue-1149.patch') != ''
+      - name: Apply the reviewed patches and verify every resulting blob
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .github/issue-1149.patch | gzip -dc > "$RUNNER_TEMP/issue-1149.patch"
-          git apply --check --index "$RUNNER_TEMP/issue-1149.patch"
-          git apply --index "$RUNNER_TEMP/issue-1149.patch"
+          git apply --check --index --unidiff-zero .github/issue-1149-core.diff .github/issue-1149-tests.diff .github/issue-1149-docs.diff
+          git apply --index --unidiff-zero .github/issue-1149-core.diff .github/issue-1149-tests.diff .github/issue-1149-docs.diff
+          while read -r expected path; do
+            actual=$(git hash-object "$path")
+            test "$actual" = "$expected" || { printf 'Source mismatch: %s expected %s actual %s\n' "$path" "$expected" "$actual"; exit 1; }
+          done <<'BLOBS'
+          597f4df5261768685e192d65198bf5bda1e54f06 docs/commands/emission.md
+          b680939a4cda5f1ce029fc1a1c13b3361e358feb docs/emission-metadata.md
+          debe9072a3f5222eb03b7ad66fe662539ffefe71 docs/unwind.md
+          ac1997d130e57290fd9913dd1af83d13d12fbd1d src/buster/compiler/c_check_program_emit.c
+          a3623e9b6cf45fe55c2103e2e1e68a8e8c30d72c src/buster/compiler/emission_metadata.c
+          168f0c3dc4675157ebbe3f2ec61be086d4cccb5e src/buster/compiler/emission_metadata_test.c
+          026d493f15f4b039ac1ad569a0b942df3a9ef898 src/buster/compiler/emitted_code.c
+          24d1f3ab3a7610312f5142a89392447b08bf1586 src/buster/compiler/emitted_code_test.c
+          4390e349a160c2510d3d40c407c66d782c7b3e60 src/buster/compiler/tier1_frame_emit.c
+          f90414090fdfc8a1d183f57d8fb8b694c7414a5f src/buster/compiler/unwind.c
+          6e35d60b6f151a7cafd023ea40dc3176b8e10a24 src/buster/compiler/emitted_code_limits_test.c
+          BLOBS
           git diff --cached --check
           git diff --cached --stat
           git config user.name 'github-actions[bot]'
@@ -35,10 +49,8 @@ jobs:
           git log -1 --format=fuller
           git push origin HEAD:refs/heads/astra/1149-wide-cfa
       - name: Install the existing hosted test toolchain
-        if: hashFiles('.github/issue-1149.patch') != ''
         run: bash tools/ci/setup-hosted.sh
       - name: Build and run focused correctness tests
-        if: hashFiles('.github/issue-1149.patch') != ''
         shell: bash
         run: |
           set -euo pipefail
