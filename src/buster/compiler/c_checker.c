@@ -761,7 +761,9 @@ static inline __attribute__((always_inline)) void check_stream_set_value_flags(C
         stream->value_objects[node] = value->object;
         stream->value_categories[node] = (uint8_t)value->category;
         stream->value_constants[node] = (uint8_t)value->constant_kind;
-        uint32_t row = stream->payload_rows[node];
+        // A first write (CheckStream.zero_columns) has no row yet: it reads none, so that no page of the column is mapped
+        // but where a row is written.
+        uint32_t row = stream->zero_columns ? 0 : stream->payload_rows[node];
         row = row != 0 && row <= stream->payload_count ? row : 0;
         if (row == 0 && check_stream_value_rest(value))
         {
@@ -2574,10 +2576,64 @@ static void check_graph_guarded_node(TypeTable* types, const CheckGraph* graph, 
     check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, guards);
 }
 
+// Whether node `node` is a discard of an rvalue that check_graph_discard takes, with that rvalue in `value`: a cast to void,
+// a statement's value as the reader gives it (check_input_expression_terminator), of a valid rvalue without an overload set
+// that is no array, function, vector or complex value, outside a constant evaluation and FP_ENV_ACCESS, in a graph without
+// overload candidates. Its action then reads nothing else and makes no diagnostic (check_action_compute through
+// check_action_cast): the operand's conversion is none, and the cast's checks of its target all pass for void.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per impure node.
+static inline __attribute__((always_inline)) bool check_graph_discard_taken(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckValue* value)
+{
+    bool taken = graph->ops[node] == CHECK_OP_CAST && graph->types != NULL && graph->types[node] == BUSTER_TYPE_VOID && graph->overload_candidate_count == 0 &&
+                 (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
+                 (graph->fp_environments == NULL || (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) == 0) && graph->operand0[node] != BUSTER_CHECK_NONE;
+    if (taken)
+    {
+        check_stream_value_to(stream, graph->operand0[node], value);
+        taken = type_is_valid(types, value->type) && value->overload_head == 0 && value->category == CHECK_RVALUE;
+    }
+    if (taken)
+    {
+        const uint8_t kind = check_action_kind(types, value->type);
+        taken = !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR &&
+                kind != BUSTER_TYPE_KIND_COMPLEX;
+    }
+    return taken;
+}
+
+// A discard's record (check_graph_discard_taken), without its action: what check_action_compute gives a cast to void of the
+// rvalue `value`, by the same steps, check_action_cast's conversion of it to void and its provenance, and the source flags.
+// On sqlite3.c's -c, a statement's discard is one node in eight, and its action's machinery (building the action, its
+// result's clearing and the dispatch) most of its time (#1050). The scalar path takes the action, the twin whose streams the
+// tests compare.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per discard.
+static inline __attribute__((always_inline)) void check_graph_discard(TypeTable* types, CheckStream* stream, uint32_t node, CheckValue* value)
+{
+    CheckActionResult result;
+    memset(&result, 0, sizeof(result));
+    result.conversions[0].type = value->type;
+    check_action_conversion(types, value, BUSTER_TYPE_VOID, BUSTER_CHECK_CONVERT_CAST, &result.conversions[0], node);
+    result.value = *value;
+    check_action_cast_provenance(&result.value, false, false, false, true, true);
+    result.value.flags = check_value_source_flags(CHECK_OP_CAST, result.value.flags);
+    check_graph_store(stream, node, &result);
+    stream->statistics.scalar_nodes += 1;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per impure node.
 static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
 {
-    check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, NULL);
+    (void)scalar;
+
+    CheckValue discarded;
+    if (!BUSTER_SCALAR_PATH(scalar) && check_graph_discard_taken(types, graph, stream, node, &discarded))
+    {
+        check_graph_discard(types, stream, node, &discarded);
+    }
+    else
+    {
+        check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, NULL);
+    }
 }
 
 // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
