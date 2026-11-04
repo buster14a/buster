@@ -7,10 +7,10 @@
 // moves or is duplicated; a comparison keeps referring to the same SSA values, including values read by observable
 // loads. SCCP/DCE subsequently remove the now-unused comparison, extensions and zero constants.
 //
-// The candidate scan is 64 bounded opcode/type bytes at a time, with an exact scalar twin. The dependent walk runs
-// only for equality/inequality tests of a literal zero, through copies and zero/sign extensions, to another ICMP.
+// The candidate scan is 64 bounded opcode/type bytes at a time, with an exact scalar twin. The dependent walks run
+// only for equality/inequality tests, through copies and zero/sign extensions, to a zero constant and another ICMP.
 // Both extensions preserve zero versus nonzero, including sext i1 (whose true value becomes -1). Truncations,
-// nonzero constants, floating comparisons and arbitrary boolean producers deliberately stop the walk. A bounded
+// nonzero constants, floating comparisons and arbitrary boolean producers deliberately stop the walks. A bounded
 // number of links prevents pathological copy chains from making this pass quadratic; longer chains remain intact.
 //
 // ir_truth_simplify mutates exclusively owned, already verified columns. No use lists or verified-analysis handles
@@ -23,6 +23,7 @@
 #define BUSTER_IR_TRUTH_BATCH 64u
 #define BUSTER_IR_TRUTH_LINK_LIMIT 32u
 
+_Static_assert(IR_PREDICATE_COUNT == 10, "new integer predicates need a truth-complement rule");
 static const uint8_t ir_truth_inverse[IR_PREDICATE_COUNT] = {
     [IR_EQ] = IR_NE,
     [IR_NE] = IR_EQ,
@@ -36,8 +37,26 @@ static const uint8_t ir_truth_inverse[IR_PREDICATE_COUNT] = {
     [IR_UGE] = IR_ULT,
 };
 
+static uint32_t ir_truth_unextend(const IrFunction* function, uint32_t value)
+{
+    const uint32_t count = function->instruction_count;
+    const uint8_t* const operations = function->op;
+    const uint32_t* const inputs = function->a;
+    for (uint32_t link = 0; value < count && link < BUSTER_IR_TRUTH_LINK_LIMIT; link += 1)
+    {
+        const uint32_t operation = operations[value];
+        if (operation != IR_COPY && operation != IR_ZEXT && operation != IR_SEXT)
+        {
+            break;
+        }
+        value = inputs[value];
+    }
+    return value;
+}
+
 static bool ir_truth_zero(const IrFunction* function, uint32_t value)
 {
+    value = ir_truth_unextend(function, value);
     bool zero = false;
     if (value < function->instruction_count && function->op[value] == IR_CONST)
     {
@@ -55,20 +74,9 @@ static bool ir_truth_rewrite(IrFunction* function, uint32_t root)
     {
         const uint32_t left = function->a[root];
         const uint32_t right = function->b[root];
-        uint32_t value = ir_truth_zero(function, right) ? left : ir_truth_zero(function, left) ? right : BUSTER_IR_NONE;
-        const uint32_t count = function->instruction_count;
-        const uint8_t* const operations = function->op;
-        const uint32_t* const inputs = function->a;
-        for (uint32_t link = 0; value < count && link < BUSTER_IR_TRUTH_LINK_LIMIT; link += 1)
-        {
-            const uint32_t operation = operations[value];
-            if (operation != IR_COPY && operation != IR_ZEXT && operation != IR_SEXT)
-            {
-                break;
-            }
-            value = inputs[value];
-        }
-        if (value < count && value != root && operations[value] == IR_ICMP && function->type[value] == IR_I1)
+        const uint32_t operand = ir_truth_zero(function, right) ? left : ir_truth_zero(function, left) ? right : BUSTER_IR_NONE;
+        const uint32_t value = ir_truth_unextend(function, operand);
+        if (value < function->instruction_count && value != root && function->op[value] == IR_ICMP && function->type[value] == IR_I1)
         {
             // Snapshot the definition before any store; the IR columns are disjoint but a and b name other values.
             const uint32_t inner_left = function->a[value];
