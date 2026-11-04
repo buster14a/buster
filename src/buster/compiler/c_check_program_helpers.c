@@ -196,14 +196,16 @@ static const CheckProgramHelperContract check_program_helper_contracts[CHECK_PRO
         .helper = "an x86 builtin whose instruction no Tier 0 row takes (c_builtin_x86_helpers.c), where the target has its features",
     },
     // A template's instructions are its author's: the assembler takes every form whatever the unit's target
-    // (check_asm_matches), as GNU as and clang's integrated assembler do, so a direct form would need no feature the
-    // compiler gates (no FEATURES), only its constraints' and clobbers' registers.
+    // (check_asm_matches), as GNU as and clang's integrated assembler do, so its direct form needs no feature the compiler
+    // gates (no FEATURES), only its constraints' and clobbers' registers: a statement whose records name its operands'
+    // alone, placed in its caller (check_asm_row).
     [CHECK_PROGRAM_HELPER_ASM] = {
         .name = "asm",
         .effects = BUSTER_CHECK_HELPER_READS | BUSTER_CHECK_HELPER_WRITES | BUSTER_CHECK_HELPER_ORDERS | BUSTER_CHECK_HELPER_BARRIER | BUSTER_CHECK_HELPER_FP_ENVIRONMENT |
                    BUSTER_CHECK_HELPER_FP_EXCEPTIONS | BUSTER_CHECK_HELPER_UNMODELED | BUSTER_CHECK_HELPER_MAY_TERMINATE,
         .requirements = BUSTER_CHECK_HELPER_FIXED,
-        .direct = NULL,
+        .direct = "a statement of general, XMM, memory and constant operands whose template's records name no register but its operands' and whose forms "
+                  "a Tier 0 row takes: an X86 entry in its caller, Tier 0's (a lowering the IR takes keeps the helper)",
         .helper = "an asm statement with instructions, its operands placed by their constraints in the helper's frame (docs/c-inline-assembly.md)",
     },
     [CHECK_PROGRAM_HELPER_UNMODELED] = {
