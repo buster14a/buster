@@ -305,6 +305,26 @@ static long double check_literal_half(const char* spelling, char** end)
     return result;
 }
 
+// glibc's binary128 reader, declared with the host compiler's type rather than depending on whether its system
+// headers expose _Float128. This is the libc symbol, not libquadmath's strtoflt128; no extra library is needed.
+extern __float128 check_literal_strtof128(const char* spelling, char** end) __asm__("strtof128");
+
+// q/Q is rounded in binary128 first (#1250). CheckLiteral and CheckValue still hold x87 values: accept only when
+// that storage preserves the rounded binary128 result exactly. Reading with strtold first would silently turn
+// 0.1Q and 1 + 2^-112 into different constants. Wider values remain explicitly unsupported until their whole path,
+// including folding and static storage, retains 113 significant bits. The rare format stays out of line.
+static __attribute__((noinline)) bool check_literal_quad(const char* spelling, char** end, long double* value)
+{
+    const __float128 quad = check_literal_strtof128(spelling, end);
+    const long double narrowed = (long double)quad;
+    const bool exact = (__float128)narrowed == quad;
+    if (exact)
+    {
+        *value = narrowed;
+    }
+    return exact;
+}
+
 // A number without an imaginary suffix, into `result`, which the caller zeroed.
 static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
 {
@@ -358,10 +378,16 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
                 type = BUSTER_TYPE_LONG_DOUBLE;
                 written -= 1;
             }
+            else if (written != 0 && (spelling[written - 1] == 'q' || spelling[written - 1] == 'Q'))
+            {
+                type = BUSTER_TYPE_FLOAT128;
+                written -= 1;
+            }
             spelling[written] = 0;
             char* end = spelling;
             errno = 0;
-            long double value;
+            long double value = 0;
+            bool represented = true;
             if (type == BUSTER_TYPE_FLOAT16)
             {
                 value = check_literal_half(spelling, &end);
@@ -374,6 +400,10 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             {
                 value = strtod(spelling, &end);
             }
+            else if (type == BUSTER_TYPE_FLOAT128)
+            {
+                represented = check_literal_quad(spelling, &end, &value);
+            }
             else
             {
                 value = strtold(spelling, &end);
@@ -382,7 +412,7 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             result->type = type;
             result->floating = value;
             result->real = true;
-            result->valid = separators && end != spelling && end == spelling + written;
+            result->valid = represented && separators && end != spelling && end == spelling + written;
             if (result->valid && isinf(value))
             {
                 result->range = CHECK_LITERAL_RANGE_OVERFLOW;
@@ -428,7 +458,7 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             suffix -= 1;
             break;
         }
-        if (c != 'f' && c != 'l' && c != 'u')
+        if (c != 'f' && c != 'l' && c != 'u' && c != 'q')
         {
             break;
         }
@@ -779,7 +809,7 @@ static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, ui
     bool valid = parts != NULL && count != 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        const CheckStringSpan span = check_literal_string_span(&parts[i]);
+        const CheckStringSpan span = check_literal_string_span(part);
         valid = span.valid && (span.encoding == CHECK_STRING_ORDINARY || encoding == CHECK_STRING_ORDINARY || span.encoding == encoding);
         if (span.encoding != CHECK_STRING_ORDINARY)
         {
