@@ -715,9 +715,83 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     arena_pop_to(&test->input, 0);
 }
 
+// The producer's row owners are assertions, not evidence. Corrupt them without
+// touching the allocation, and corrupt the predecessor's store without changing
+// its metadata: both must be refused even though the register assertion remains.
+static void tier1_code_certificate_carry(Tier1EmitTest* test, bool vector, bool pointer)
+{
+    Tier1CallFixture fixture = { 0 };
+    const bool created = tier1_call_carry_fixture(test, &fixture, TIER1_CALL_CARRY);
+    const IrDominance dominance = {
+        .enter = fixture.dominance_enter,
+        .leave = fixture.dominance_leave,
+        .block_count = created ? fixture.function.block_count : 0,
+    };
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = created && tier1_select_plan(&fixture.function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const Tier1EmitOptions options = {
+        .register_mask = tier1_liveness_register_mask(),
+        .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+        .vector = vector,
+        .certify = true,
+    };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.entry_rows != 0;
+    tier1_emit_test_expect(test, certified, "a carried call-save row and its register are independently certified");
+    uint32_t rows = 0;
+    uint32_t stores = 0;
+    for (uint32_t b = 1; certified && b < emitted.cfg_input.block_count; b += 1)
+    {
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            uint32_t* const row = emitted.entry_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + reg;
+            const uint32_t owner = *row;
+            if (owner != BUSTER_IR_NONE)
+            {
+                rows += 1;
+                *row = owner == 3 ? 2 : 3;
+                tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "a carried row naming another parameter is refused");
+                *row = fixture.function.instruction_count;
+                tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "a carried row's out-of-range owner is refused before indexing");
+                *row = owner;
+                const X86Instruction save = tier1_emit_call_save(&emitted, reg, false);
+                for (uint32_t r = 0; r < emitted.block_records[b]; r += 1)
+                {
+                    const X86Instruction record = emitted.code.records[r];
+                    if (record.form == save.form && record.mode == save.mode && record.rm == save.rm && record.displacement == save.displacement)
+                    {
+                        X86Instruction wrong = record;
+                        wrong.reg = (uint8_t)(record.reg == X86_REGISTER_RAX ? X86_REGISTER_RCX : X86_REGISTER_RAX);
+                        const bool refused = tier1_code_certificate_refuses(test, &plan, &emitted, r, wrong, UINT32_MAX);
+                        stores += 1;
+                        tier1_emit_test_expect(test, refused, "a carried row whose predecessor stored another register is refused");
+                    }
+                }
+            }
+        }
+    }
+    if (certified)
+    {
+        uint32_t* const saved = emitted.entry_rows;
+        emitted.entry_rows = 0;
+        tier1_emit_test_expect(test, tier1_code_certificate_refused(test, &plan, &emitted), "omitting carried-row assertions cannot certify a later reload");
+        emitted.entry_rows = saved;
+    }
+    tier1_emit_test_expect(test, rows != 0 && stores != 0, "carried-row mutants cover actual saved rows, not an empty metadata table");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0);
+    }
     for (uint32_t variant = 0; variant < 8; variant += 1)
     {
         tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0, &counts);

@@ -2657,6 +2657,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     emitted->origin_values = ok && certify ? ir_allocate(output, capacity + 1, 4, &ok) : 0;
     emitted->block_records = ok && certify ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     emitted->stub_records = ok && certify ? ir_allocate(output, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
+    const bool call_rows = emitted->prepared.call_save_mask != 0;
+    const uint64_t row_count = (uint64_t)blocks * BUSTER_TIER1_EMIT_GENERAL_REGISTERS;
+    emitted->entry_rows = ok && certify && call_rows ? ir_allocate(output, row_count, 4, &ok) : 0;
+    uint32_t* exit_rows = ok && call_rows ? ir_allocate(scratch, row_count, 4, &ok) : 0;
     emitted->dropped = ok && certify ? ir_allocate(output, (uint64_t)count + 1, 1, &ok) : 0;
     transitions.offsets = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 2, 4, &ok) : 0;
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
@@ -2807,11 +2811,12 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         block_first[b] = b == 0 ? 0 : buffer.count;
         const uint32_t entry = input->block_starts[b];
+        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+        const uint32_t only = degree == 1 ? input->predecessors[input->predecessor_offsets[b]] : UINT32_MAX;
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
-        if (input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] == 1)
+        if (only != UINT32_MAX)
         {
-            const uint32_t p = input->predecessors[input->predecessor_offsets[b]];
-            uint32_t e = input->successor_offsets[p];
+            uint32_t e = input->successor_offsets[only];
             while (input->successors[e] != b)
             {
                 e += 1;
@@ -2842,12 +2847,21 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         }
         const uint32_t first = b < added ? 0 : function->block_offsets[b - added];
         const uint32_t end = b < added ? 0 : function->block_offsets[b - added + 1];
-        // The calls' saves in this block (Tier1EmitSaves, #1116). No load is owed at a block's start, and no row is
-        // known there: every block starts with no rows, so its first call stores each value it saves. A row its one
-        // predecessor stored would still hold its value, but the code's certificate (#939) proves each block from its
-        // entry facts, which have each value in one place, the allocation's, and so can't know the row's.
+        // No load is owed at entry. Carry private call-save rows only from the sole predecessor already emitted.
+        // Joins and backward layout edges start unknown, so a loop cannot carry an earlier incarnation of a name.
+        // A carried-in name cannot be defined here: this block would then dominate its own sole predecessor.
+        // Edge moves use allocation slots, not call-save rows. With certify, publish these untrusted extra homes;
+        // each is proved from the predecessor's actual records, not from this carry heuristic (#1270).
         Tier1EmitSaves saves;
         tier1_emit_saves_reset(&saves, vector);
+        if (exit_rows != 0 && only < b)
+        {
+            memcpy(saves.rows, exit_rows + (uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, sizeof(saves.rows));
+        }
+        if (emitted->entry_rows != 0)
+        {
+            memcpy(emitted->entry_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, saves.rows, sizeof(saves.rows));
+        }
         for (uint32_t node = first; error == TIER1_EMIT_OK && node < end; node += 1)
         {
             const uint32_t op = function->op[node];
@@ -3211,6 +3225,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         if (error == TIER1_EMIT_OK && b < added && cfg->edge_placements[0] == TIER1_CFG_EDGE_PREDECESSOR)
         {
             error = tier1_emit_cfg_moves(emitted, 0, &buffer);
+        }
+        if (error == TIER1_EMIT_OK && exit_rows != 0)
+        {
+            memcpy(exit_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, saves.rows, sizeof(saves.rows));
         }
     }
     // The pending jumps' targets, now that every block and stub has its first record, and the labels'.

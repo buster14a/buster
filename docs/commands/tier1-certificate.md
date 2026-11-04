@@ -12,7 +12,10 @@ requirements. [Command index](README.md).
   `tier1_certificate_oracle.c`'s dense CFG fixpoint as the independent oracle
   and `tier1_certificate_interval.c` as the current interval allocator's
   fragment adapter. `test-tier1-allocation` runs the stream/mutation suites
-  and certificate-checks every successful allocation its fixtures make.
+  and certificate-checks every successful allocation its fixtures make. Its
+  multiple-home cases prove register and row facts independently, compare all
+  alias orders with the dense oracle, and reject stale rows on edges, joins and
+  loops (#1270).
 - `tier1_certificate_cfg.c` publishes the certificate of `tier1_cfg.c`'s CFG
   allocations: the source from the input, and the stream, entry facts and edges
   from the allocation, whose shape it bounds before reading through it.
@@ -34,7 +37,11 @@ requirements. [Command index](README.md).
   spills around calls: each must be refused. Its compare-exchange fixture keeps
   a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
   certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
-  its own cases too.
+  its own cases too. The carried-call-row fixture proves a value in both its
+  register and row, then corrupts the owner, predecessor store and supplied
+  assertions, with and without a frame pointer and through both emitter paths.
+  `test-tier1-emit` also requires zero repeat stores for a single earlier
+  predecessor, while joins and backward-layout predecessors still store.
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and
