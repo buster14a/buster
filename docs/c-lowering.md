@@ -1096,6 +1096,36 @@ Three more didn't pay:
   from 401 to 474, the fields' registers spilling what the value's copy had
   held.
 
+## Each node's class and facts by node (#1048)
+
+The expansion's head finds its node's class and facts through its value's
+type: the node's type, then the type tables (`check_lower_class`,
+`check_lower_facts`), a chain of dependent loads on every node. A pass in the
+preparation wrote each node's (`type_templates`' low 16 bits) 16 nodes at a
+time by a gather from the packed table, and a copy of the tasks' loop read them
+by node instead, beside the node's op. The stream writes every node's type in
+its column, payload rows' too (`check_stream_set_value`), so the column alone
+gives it. #1235's run at `c4aa3882`
+([run](https://github.com/buster14a/buster/actions/runs/41796225108/job/126464328680)),
+five rounds in turn on `sqlite3.c`, all three giving the base's object, with
+the pass gathering a payload row's type from the row (16) and with a payload
+row's node left to the table (32):
+
+| row | the base | 16 | 32 |
+| --- | ---: | ---: | ---: |
+| `lower` | 10.674 [10.577 to 10.715] | 10.939 [10.920 to 10.972] | 10.696 [10.679 to 10.772] |
+| `lower.prepare` | 1.170 [1.149 to 1.185] | 1.522 [1.500 to 1.553] | 1.295 [1.284 to 1.310] |
+| `lower.statements` | 6.915 [6.824 to 7.027] | 6.776 [6.754 to 6.819] | 6.803 [6.744 to 6.828] |
+
+The shorter chain took 0.11 to 0.14 ms off the statements, and the pass over
+the unit's 323,557 nodes cost as much: about 0.4 ns a node, its gather and its
+reads of two columns. So neither is kept. Two more of the same kind didn't pay
+on this session's Xeon, and weren't run on the 9700X: the operands'
+conversion tests taking their operand's class and facts by node too (mixed
+rounds), and each node's local resolved by a pass over its body's range of
+nodes once the body's locals are set (`lower.bodies` 0.7 ms higher, the
+statements unchanged).
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
