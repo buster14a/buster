@@ -2680,6 +2680,18 @@ static void check_action_fp_environment(const TypeTable* table, const CheckActio
     }
 }
 
+// Whether an action's operands hold a pointer, an array, a function or nullptr: pointer arithmetic or a pointer comparison
+// rather than arithmetic. check_action_compute asks it in those operators' cases alone, so that the others, most of the
+// checker's nodes, look no operand's kind up for it (#1050).
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
+static inline __attribute__((always_inline)) bool check_action_pointer_pair(const TypeTable* table, const CheckAction* action, uint32_t count)
+{
+    const uint8_t left_kind = count != 0 ? check_action_kind(table, action->operands[0].type) : BUSTER_TYPE_KIND_NONE;
+    const uint8_t right_kind = count >= 2 ? check_action_kind(table, action->operands[1].type) : BUSTER_TYPE_KIND_NONE;
+    return left_kind == BUSTER_TYPE_KIND_POINTER || right_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(left_kind) || type_kind_is_array(right_kind) ||
+           left_kind == BUSTER_TYPE_KIND_FUNCTION || right_kind == BUSTER_TYPE_KIND_FUNCTION || left_kind == BUSTER_TYPE_KIND_NULLPTR || right_kind == BUSTER_TYPE_KIND_NULLPTR;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_node_action, once per action.
 static inline __attribute__((always_inline)) void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
 {
@@ -2718,9 +2730,6 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
     }
     if (result->diagnostic == CHECK_DIAG_NONE && !check_vector_action(table, action, result))
     {
-        const uint8_t left_kind = count != 0 ? check_action_kind(table, action->operands[0].type) : BUSTER_TYPE_KIND_NONE;
-        const uint8_t right_kind = count >= 2 ? check_action_kind(table, action->operands[1].type) : BUSTER_TYPE_KIND_NONE;
-        const bool pointer_pair = left_kind == BUSTER_TYPE_KIND_POINTER || right_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(left_kind) || type_kind_is_array(right_kind) || left_kind == BUSTER_TYPE_KIND_FUNCTION || right_kind == BUSTER_TYPE_KIND_FUNCTION || left_kind == BUSTER_TYPE_KIND_NULLPTR || right_kind == BUSTER_TYPE_KIND_NULLPTR;
         switch (action->op)
         {
             case CHECK_OP_VALUE:
@@ -2751,7 +2760,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_BIT_XOR: check_action_arithmetic(table, action, result, common_hint, pending); break;
             case CHECK_OP_BIT_NOT:
             {
-                if (left_kind == BUSTER_TYPE_KIND_COMPLEX)
+                if (check_action_kind(table, action->operands[0].type) == BUSTER_TYPE_KIND_COMPLEX)
                 {
                     check_complex_conjugate(table, action, result);
                 }
@@ -2765,7 +2774,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_ADD:
             case CHECK_OP_SUBTRACT:
             {
-                if (pointer_pair)
+                if (check_action_pointer_pair(table, action, count))
                 {
                     check_action_pointer_arithmetic(table, action, result);
                 }
@@ -2781,7 +2790,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_EQUAL:
             case CHECK_OP_NOT_EQUAL:
             {
-                if (pointer_pair)
+                if (check_action_pointer_pair(table, action, count))
                 {
                     check_action_pointer_compare(table, action, result);
                 }
