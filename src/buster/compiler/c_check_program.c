@@ -3474,10 +3474,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
     uint32_t* label_positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    // The ranges the writer leaves out (CheckProgram.dropped_ranges), a token's room each, and per region whether one
-    // holds it, for a unit with regions.
-    uint64_t* dropped_ranges = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
-    uint8_t* dropped_regions = regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->region_count) : 0;
     // The label scan a constant condition's dead operand can need nests inside the run's traversal, on marks of its
     // own: each set of pushes is bounded by node_count. Only a unit with a statement expression can need it, so its
     // extra room is the regions' alone (#891).
@@ -3496,7 +3492,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
-            dropped_ranges != 0 && (!regions || dropped_regions != 0) &&
             stops != 0 && repeats != 0 && (!regions || region_first != 0) && region_next != 0 && openings != 0 && vla_next != 0 && (!assemblies || asm_statements != 0) &&
             (!variable || (vla_first != 0 && allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0)) &&
             (input->cleanup_count == 0 || cleanup_parents != 0);
@@ -3510,6 +3505,17 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     if (valid)
     {
         arena_discard(scratch);
+    }
+    // The ranges the writer leaves out (CheckProgram.dropped_ranges), a token's room each, and per region whether one
+    // holds it, for a unit with regions. Past the discard: the writer fills a prefix of the ranges, a few kilobytes,
+    // where room for a token's each before it kept 8 bytes a token of the scratch's earlier pages through the backend's
+    // peak (sqlite3.c's 5.7 MB, #628).
+    uint64_t* dropped_ranges = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
+    uint8_t* dropped_regions = regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->region_count) : 0;
+    valid = valid && dropped_ranges != 0 && (!regions || dropped_regions != 0);
+    if (!valid && program->status == CHECK_PROGRAM_OK)
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
     }
     uint32_t body_count = 0;
     if (valid)
