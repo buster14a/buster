@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// clang 23.1.1's library builtins (#148): the rows of its builtin table with attribute F, __builtin_X, which clang -O0
+// The pinned clang release's library builtins (#148): the rows of its builtin table with attribute F, __builtin_X, which clang -O0
 // compiles to a call of the C library's function X (__builtin_sin to sin, __builtin_printf to printf), or to an LLVM
 // intrinsic that computes what X returns (__builtin_fmax's llvm.maxnum, __builtin_floorl's llvm.floor, __builtin_abs's
 // llvm.abs, __builtin_frexp's llvm.frexp). c_builtin_library_calls.inc lists the ones this compiler compiles so, each
@@ -227,6 +227,12 @@ static __attribute__((unused)) uint32_t cbuiltin_library_libgcc(const char* name
     return result;
 }
 
+// The Clang release the plain library builtins are pinned to (#1131): 23.1.4, CI's reference, whose rows are 23.1.1's
+// too and whose GNU library builtins include strlcat and strlcpy. Clang 23.1.5's table drops them, so the oracle tests
+// compare `clang --version` with this release, report both versions when they differ, and skip only the plain names a
+// named release's table is known to classify differently (cbuiltin_library_table_differences).
+#define BUSTER_CLANG_REFERENCE_VERSION "23.1.4"
+
 // The plain library builtins (c_builtin_library_plain.inc): each name, its length and whether it is a builtin of GNU's
 // modes alone, in the names' order.
 typedef struct CBuiltinLibraryPlain CBuiltinLibraryPlain;
@@ -274,6 +280,33 @@ static __attribute__((unused)) const CBuiltinLibraryPlain* cbuiltin_library_plai
         {
             lower = middle + 1;
         }
+    }
+    return result;
+}
+
+// The plain names a named non-reference release's library-builtin table is known to classify differently from the
+// reference's: clang 23.1.5 drops 23.1.4's strlcat and strlcpy GNU rows. The oracle tests skip a mismatched answer
+// only when the found release is a row's version and the name that row's: a difference they can't attribute to a
+// known release's table stays a failure, since the same probe can't tell an unlisted release's table from a buster
+// bug.
+static const struct
+{
+    const char* version;
+    const char* name;
+} cbuiltin_library_table_differences[] = {
+    { "23.1.5", "strlcat" },
+    { "23.1.5", "strlcpy" },
+};
+
+// Whether `version`'s library-builtin table is known to classify `name` differently from the reference release's.
+static __attribute__((unused)) bool cbuiltin_library_table_differs(const char* version, const char* name, uint32_t length)
+{
+    bool result = false;
+    for (uint32_t i = 0; version != NULL && !result && i < sizeof(cbuiltin_library_table_differences) / sizeof(cbuiltin_library_table_differences[0]); i += 1)
+    {
+        const size_t spelling = strlen(cbuiltin_library_table_differences[i].name);
+        result = strcmp(version, cbuiltin_library_table_differences[i].version) == 0 && spelling == length &&
+                 memcmp(name, cbuiltin_library_table_differences[i].name, length) == 0;
     }
     return result;
 }

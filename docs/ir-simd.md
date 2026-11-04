@@ -139,12 +139,14 @@ masks through 64 bits, unused high mask bits, undefined selection alternatives,
 step/value budgets. The original straight-line executor remains an independent
 consumer; the shared interpreter is not routed through it.
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c`
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c`
 drives real C through the checker, typed producer, both adapters and both text
 parsers. This explicit mode also requires a function with vectors to promote by
 both SSA promoters (#141), counting them, as a function whose only SIMD values
 are masks must (#179): `mask-builtins.c`'s four functions of the `_k*` builtins
-at every width, one of them a loop. `test-ir-simd` runs a function of each
+at every width, one of them a loop. `bmi-builtins.c`'s four functions lower the
+scalar BMI builtins of both widths, one of them in a loop, and an elementwise
+deposit of a vector to the IR's `intrinsic` (#141). `test-ir-simd` runs a function of each
 vector width through a vector slot, an addition, compares and a selection,
 lowered, promoted and optimized by both paths, on the shared interpreter. Without `--simd`, source-corpus acceptance continues to
 require promotion. Source preparation retains each function's selected
@@ -197,6 +199,24 @@ mask's bits (zero-extended to `i32` for `m8` and `m16`, `i64` for `m64`), a
 shift by the mask's bits or more the zero mask, and a test's flag an `icmp eq`
 with 0 of the operation whose zero sets it (`ktest`'s `a & b` or `~a & b`,
 `kortest`'s `a | b` or its complement), zero-extended to `i32`.
+
+## Scalar x86 builtins (#141)
+
+An `X86` row of an `unsigned int` or `unsigned long`, of two operands of its
+class, is decoded by `ir_simd_typed_intrinsic`: one register-direct record of
+BMI2's `pdep`, `pext` or `bzhi` or BMI1's `bextr` at the class's width, its
+`reg` `INTEGER_RESULT` and its `vvvv` and `rm` `INTEGER(0)` and `INTEGER(1)` in
+either order, refused as `IR_SIMD_TYPED_TARGET` without its feature. These are
+the front end's `GENERAL` rows (`__builtin_ia32_pdep_si` and `_di`,
+`_pext_*`, `_bzhi_*`, `__builtin_ia32_bextr_u32` and `_u64`, whose `swap`
+places `bzhi`'s and `bextr`'s source in `rm`) and the elementwise deposits' and
+extractions' (`__builtin_elementwise_pdep` and `_pext`,
+`check_lower_vector_deposit`, one row per element). `ir_typed_intrinsic` makes
+the IR's `intrinsic` of the operands the record places: its `a` the source
+(`vvvv`'s for `pdep` and `pext`, `rm`'s for `bzhi` and `bextr`), its `b` the
+mask, index or control. Tier 1 selects each as its one VEX instruction
+(`TIER1_RULE_INTRINSIC`), whose three registers are its own; its emission's
+target allow-list refuses one for a target without the feature.
 
 The consumers take a function without vectors (`ir_function_has_vectors`, 64
 instructions at a time on the vector path, with a scalar twin): a vector type

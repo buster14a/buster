@@ -359,6 +359,8 @@ struct CheckTier1Report
     uint32_t stages[CHECK_TIER1_STAGE_COUNT];
     uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
     uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
+    // The refused calls by kind (CheckTier1CallKind), a call counted under each kind it has (#1116).
+    uint32_t calls[CHECK_TIER1_CALL_KIND_COUNT];
     // The counts of Tier 1's bodies, summed.
     uint64_t records;
     uint64_t spill_stores;
@@ -545,6 +547,9 @@ struct CheckProgramLanes
     // In a command of several units' flow (#905, c_checker_units.c), the rounds of the units' run, the link's merge,
     // check and write. Null elsewhere.
     struct CheckUnitsFlow* units_flow;
+    // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
+    // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
+    struct CheckUnitsLane* units_lane;
     // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first part, as
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
@@ -3516,6 +3521,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             lanes->tier1_report.operations[operation] += 1;
         }
+        for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+        {
+            lanes->tier1_report.calls[k] += (outcome.call_kinds >> k) & 1;
+        }
         if (stage == CHECK_TIER1_EMISSION && outcome.emission_error != 0 && outcome.emission_error < BUSTER_CHECK_TIER1_OPERATIONS)
         {
             lanes->tier1_report.emission[outcome.emission_error] += 1;
@@ -3680,6 +3689,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             for (uint32_t a = 0; a < code->asm_atom_count; a += 1)
             {
                 descriptors[code->asm_atoms[a]] = code->asm_sections[a];
+                valid = valid && link_set_atom_section(link, code->asm_atoms[a], code->asm_sections[a].name);
             }
             // A prioritized constructor's or destructor's entry (#147) is in .init_array.N or .fini_array.N, as clang's
             // object has it (TargetLoweringObjectFileELF's getStaticCtorSection), of its array's type and flags.
@@ -3692,11 +3702,13 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 const int length = valid ? snprintf(name, 24, "%s.%u", object_class_sections[class].name, (unsigned)link->priorities.priority[p]) : 0;
                 descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = name, .length = (uint64_t)length }, .type = object_class_sections[class].type,
                                                          .flags = object_class_sections[class].flags };
+                valid = valid && link_set_atom_section(link, atom, descriptors[atom].name);
             }
             code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
             for (uint32_t a = 0; a < code->unit_atom_count; a += 1)
             {
                 descriptors[code->unit_atoms[a]] = code->unit_sections[a];
+                valid = valid && link_set_atom_section(link, code->unit_atoms[a], code->unit_sections[a].name);
             }
             *table = descriptors;
         }
@@ -3770,6 +3782,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                     }
                 }
                 descriptors[atom] = descriptor;
+                valid = valid && link_set_atom_section(link, atom, descriptor.name);
             }
         }
         // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
@@ -3792,6 +3805,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 memcpy(spelled + prefix + 1, link->names.bytes[name], link->names.length[name]);
                 descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = spelled, .length = prefix + 1 + link->names.length[name] }, .type = format->type,
                                                          .flags = format->flags, .entry_size = format->entry_size };
+                valid = valid && link_set_atom_section(link, atom, descriptors[atom].name);
             }
             if (valid && format != NULL)
             {

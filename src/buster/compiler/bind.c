@@ -588,6 +588,9 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     memcpy(atoms->alignment_log2 + atom_first, from->atoms.alignment_log2 + begin.atoms, atom_count);
     memcpy(atoms->size + atom_first, from->atoms.size + begin.atoms, atom_count * sizeof(uint64_t));
     memcpy(atoms->fixup_count + atom_first, from->atoms.fixup_count + begin.atoms, atom_count * sizeof(uint32_t));
+    // A runtime atom's section isn't one of the program's, and the snapshot doesn't keep its name: no __start_ or
+    // __stop_ reference can bound it (the runtime's sections' names aren't C identifiers).
+    memset(atoms->section + atom_first, 0, atom_count * sizeof(*atoms->section));
     memset(atoms->address + atom_first, 0, atom_count * sizeof(uint64_t));
     for (uint32_t i = 0; i < atom_count; i += 16)
     {
@@ -956,6 +959,14 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const RuntimeNames* names = &runtime->global_names;
     LinkSymbols* symbols = &link->symbols;
     const NameId name = symbols->name[symbol];
+    // A __start_NAME or __stop_NAME whose NAME is a section of the link's atoms: the linker defines it at that
+    // section's bounds (executable_reference), as GNU ld and lld define them, and writes it NOTYPE, GLOBAL and
+    // PROTECTED in the symbol tables. One whose section is missing is an ordinary name: a weak reference to nothing,
+    // or an undefined reference.
+    // A library's or archive member's definition of the name resolves the reference as it resolves any other; the
+    // linker defines its own only for a reference that stays undefined (GNU ld's `undefined' rule).
+    const String8 suffix = link_bound_suffix(link, name, 0);
+    const bool bound = suffix.length != 0 && link_section_exists(link, suffix);
     const uint32_t entry = runtime_find_global_name(names, link->names.bytes[name], link->names.length[name], link->names.hash[name]);
     const SymbolId definition = entry != 0 ? names->definition[entry - 1] : 0;
     // A definition in an atom of crtendS.o or crtn.o (crtend.o or crtn.o), whose pieces bind_begin found current: the
@@ -1018,6 +1029,11 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
             const uint32_t index = export - 1 - runtime->libc.exports.count - runtime->loader.exports.count;
             bind_import(bind, symbols, symbol, &runtime->gcc_s.exports, index);
         }
+    }
+    else if (bound)
+    {
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_LINKER;
+        symbols->flags[symbol] = (uint8_t)(BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_PROTECTED);
     }
     else if (weak)
     {
@@ -1268,6 +1284,21 @@ static void bind_shared_exports(Bind* bind, const Link* link)
                 exports[export_count] = symbol;
                 export_count += 1;
             }
+        }
+    }
+    // The bounds the linker defines (bind_resolve_symbol) are a shared library's exports too, as GNU ld's and lld's
+    // __start_ and __stop_ are in .dynsym; the pass above's `defined` doesn't take a linker-defined symbol (it has no
+    // atom), so the few of them go after it in symbol order.
+    for (SymbolId symbol = 1; symbol < count; symbol += 1)
+    {
+        const NameId name = link->symbols.name[symbol];
+        const String8 suffix = source_column[symbol] == BUSTER_LINK_SOURCE_LINKER && atom_column[symbol] == 0 && name != 0 ?
+                               link_bound_suffix(link, name, 0) : (String8){ 0 };
+        const bool exported = suffix.length != 0 && link_section_exists(link, suffix);
+        if (exported && export_count < bind->capacity)
+        {
+            exports[export_count] = symbol;
+            export_count += 1;
         }
     }
     bind->export_count = export_count;

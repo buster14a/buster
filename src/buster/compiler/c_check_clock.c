@@ -17,6 +17,7 @@
 // lanes their time is one stage, `lanes`, the lanes' span, since the stages of a thread don't add up across threads.
 // docs/compile-time.md has the stages and the 9700X's numbers.
 
+#include <sys/prctl.h>
 #include <sys/resource.h>
 
 #include "c_check_clock_rss.c"
@@ -413,6 +414,8 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-process\tlanes-asked\t%u\n", stage_clock->lanes_asked);
         fprintf(stream, "time-process\tlanes\t%u\n", stage_clock->lanes);
     }
+    // Whether transparent huge pages were off for the process (#1109, arena_page_policy), or as the system has them.
+    fprintf(stream, "time-process\thuge-pages\t%s\n", prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1 ? "off" : "system");
     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
     fprintf(stream, "time-process\tstage-system-status\t%s\n", stage_clock->usage_available ? "available" : "unavailable");

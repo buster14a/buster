@@ -529,6 +529,16 @@ expect_line "$GITHUB_OUTPUT" 'window=closed' 'a dry run never waits for the wind
 expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'the cycle pins main'"'"'s head'
 expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'and hands over a valid empty list of pending dispatches'
 
+# An earlier schedule's step on time, at 16:10 (there for hours-late scheduled starts): it harvests and reports, and
+# pins, dispatches and waits for nothing, in run mode too.
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9150 NIGHTLY_NOW=$(madrid '2026-11-03 16:10') run_coordinator "$work/early" prepare run
+expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' 'a step before 22:00 writes nothing'
+expect_no_match "$work/early/ledger.tsv" $'^cycle\t2026-11-04\t' 'nor pins the cycle'
+expect_match "$work/early/report.md" 'No plan: it is before 22:00 Europe/Madrid' 'and its report says why'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'and it does not wait for the window'
+expect_line "$GITHUB_OUTPUT" 'snapshot=' 'with no snapshot to hand over'
+
 # Run mode before the window: branches and dispatches of the hosted preparations, and the wait for the window.
 : > "$fixtures/calls.log"
 GITHUB_RUN_ID=9200 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') run_coordinator "$work/prepare" prepare run

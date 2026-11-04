@@ -89,7 +89,7 @@ static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     way->failure = NULL;
     way->unsupported = false;
-    bool valid = check_program_select_mode(&selected, full, data, mode, scalar, output, scratch);
+    bool valid = check_program_select_mode(&selected, full, data, mode, scalar, false, output, scratch);
     way->failure = way->failure == NULL && !valid ? "the selection failed" : way->failure;
     bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, BUSTER_SCALAR_PATH(scalar), code_output,
                                                bytes, scratch, NULL, NULL, false, false);
