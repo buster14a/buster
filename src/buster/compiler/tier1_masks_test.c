@@ -94,6 +94,29 @@ struct Tier1MasksTest
     uint32_t builtin_attempts;
     uint32_t builtin_rows;
     uint32_t builtin_native;
+    // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
+    // copies renamed into a live value's register; and of each, those the code's certificate refused.
+    uint32_t row_reloads;
+    uint32_t row_reloads_refused;
+    uint32_t row_stagings;
+    uint32_t row_stagings_refused;
+    // Claimed placements whose roles share a register Tier 0's placement keeps apart, and whose opmask register named by
+    // number is k0 (tier1_masks_test_claim_mutants), each with the row's records placed by it; and those refused.
+    uint32_t row_roles;
+    uint32_t row_roles_refused;
+    uint32_t row_k0;
+    uint32_t row_k0_refused;
+    // The rows whose first operand is read in its own register up to the result's first write (#1283's split), and their
+    // claims of it corrupted (the split cleared, its early register made the result's), and those refused.
+    uint32_t row_splits;
+    uint32_t row_split_mutants;
+    uint32_t row_split_refused;
+    // Among the roles sharing a register, the temporaries claimed in a live operand's register.
+    uint32_t row_overlaps;
+    uint32_t row_overlaps_refused;
+    // The vectors' moves of ymm and zmm registers narrowed to xmm ones (#1284), and those refused.
+    uint32_t vector_moves;
+    uint32_t vector_moves_refused;
 };
 
 typedef struct Tier1MasksFixture Tier1MasksFixture;
@@ -1520,6 +1543,388 @@ static bool tier1_masks_test_interpret(Tier1MasksTest* test, const IrFunction* f
 }
 
 // One fixture by one path: planned, emitted, its allocation checked, and where the host can, run on every input.
+// Whether the code's certificate refuses the code as it is now.
+static bool tier1_masks_test_refused(Tier1MasksTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+{
+    Tier1CertEmittedStats stats = { 0 };
+    return tier1_certificate_emitted_check(plan, emitted, &test->output, &test->scratch, 0, &stats) >= TIER1_CERT_EMITTED_REFUSED;
+}
+
+// The general registers record `record`'s fields name (Tier 0's fields of a placed record: its register fields, a memory
+// operand's base and index), each renamed `from` to `to` where `rename`.
+static uint32_t tier1_masks_test_general(X86Instruction* record, bool rename, uint8_t from, uint8_t to)
+{
+    const Tier0Fields fields = tier0_operation_fields(record);
+    uint32_t named = 0;
+    for (uint32_t k = 0; k < fields.count; k += 1)
+    {
+        const uint8_t class = fields.classes[k];
+        const bool general = class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+        named |= general ? 1u << (*fields.bytes[k] & 15) : 0;
+        *fields.bytes[k] = general && rename && *fields.bytes[k] == from ? to : *fields.bytes[k];
+    }
+    return named;
+}
+
+// The roles a row's template names (#1284): VECTOR(j)'s bit j, SCRATCH(k)'s 16 + k, MASK_SCRATCH(k)'s 20 + k and the
+// opmask register k's by number 24 + k.
+static uint32_t tier1_masks_test_roles(const Tier0Operation* row)
+{
+    uint32_t roles = 0;
+    for (uint32_t r = 0; r < row->record_count; r += 1)
+    {
+        X86Instruction record = row->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        for (uint32_t k = 0; k < fields.count; k += 1)
+        {
+            const uint8_t role = *fields.bytes[k];
+            const uint8_t class = fields.classes[k];
+            const bool vector = class == BUSTER_X86_CLASS_XMM || class == BUSTER_X86_CLASS_YMM || class == BUSTER_X86_CLASS_ZMM;
+            const bool general = class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+            const bool mask = class == BUSTER_X86_CLASS_OPMASK;
+            roles |= vector && role >= BUSTER_TIER0_ROLE && role < BUSTER_TIER0_ROLE_VECTOR(BUSTER_TIER0_OPERATION_VECTORS) ? 1u << (role & 15) : 0;
+            roles |= general && role >= BUSTER_TIER0_ROLE_SCRATCH(0) && role < BUSTER_TIER0_ROLE_SCRATCH(BUSTER_TIER0_SCRATCH) ? 1u << (16 + (role & 3)) : 0;
+            roles |= mask && role >= BUSTER_TIER0_ROLE_MASK_SCRATCH(0) && role < BUSTER_TIER0_ROLE_MASK_SCRATCH(BUSTER_TIER0_SCRATCH) ? 1u << (20 + (role & 3)) : 0;
+            roles |= mask && role < 8 ? 1u << (24 + role) : 0;
+        }
+        roles |= fields.is4 ? 1u << (((uint32_t)record.immediate >> 4) & 15) : 0;
+        const uint32_t decoration = record.decorations & BUSTER_TIER0_DECORATION_ROLE;
+        const uint32_t index = record.decorations & BUSTER_X86_DECORATION_MASK;
+        roles |= decoration == BUSTER_TIER0_DECORATION_MASK_SCRATCH(0) ? 1u << (20 + (index & 3)) : 0;
+        roles |= decoration == 0 && index != 0 ? 1u << (24 + index) : 0;
+    }
+    return roles;
+}
+
+// Machine row node `node`'s claimed placement corrupted (#1284), its records [first, first + the row's) placed again by the
+// corrupted claim as the certificate places them (tier1_cert_emitted_row_place), so that only the claim's own checks can
+// refuse it: each non-operand role (SCRATCH(k), MASK_SCRATCH(k), a VECTOR(j) no vector operand has) made the result's
+// register; the result made the register of an operand of its class that Tier 0's own placement doesn't give it
+// (tier0_operation_placement, tier0_operation_mask_place: its oracle); and each opmask register the row names by number,
+// k1 to k7, made k0, which in a decoration is no mask. Each must be refused; everything is put back after.
+static void tier1_masks_test_claim_mutants(Tier1MasksTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t node, uint32_t first)
+{
+    const IrFunction* function = plan->function;
+    const Tier0Operation* row = &function->rows[(uint32_t)plan->patterns[node].immediate];
+    X86Instruction* records = emitted->code.records;
+    Tier1RowPlacement* claimed = &emitted->row_placements[node];
+    const Tier1RowPlacement original = *claimed;
+    const bool fits = row->record_count <= BUSTER_TIER0_OPERATION_RECORDS && first + row->record_count <= emitted->code.count;
+    X86Instruction saved[BUSTER_TIER0_OPERATION_RECORDS];
+    for (uint32_t r = 0; fits && r < row->record_count; r += 1)
+    {
+        saved[r] = records[first + r];
+    }
+    // Tier 0's placement of the row with its operands at the bottom of each stack, its registers apart.
+    uint32_t integers = 0;
+    uint32_t floatings = 0;
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        integers += tier0_stack(row->operand_classes[j]) == 1 ? 1 : 0;
+        floatings += tier0_stack(row->operand_classes[j]) == 2 ? 1 : 0;
+    }
+    Tier0Placement tier0 = tier0_operation_placement(row, (int32_t)integers, (int32_t)floatings);
+    const Tier0MaskPlan mask_plan = tier0_operation_mask_plan(row, tier0_operation_masks(row).operands);
+    tier0_operation_mask_place(row, &mask_plan, &tier0);
+    const uint32_t roles = tier1_masks_test_roles(row);
+    const uint32_t result = row->result_class;
+    uint32_t vector_operands = 0;
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        vector_operands |= tier0_class_vector(row->operand_classes[j]) ? 1u << j : 0;
+    }
+    // VECTOR(j)'s uses (#1283): the result's VECTOR(0) holds its register from the row's entry where it is the first
+    // operand's role there, else from its first write; a temporary VECTOR(j) from its first write to its last naming.
+    const Tier1SelectRowVectors facts = tier1_select_row_vectors(row);
+    const bool split = original.split != 0;
+    const uint32_t result_start = (vector_operands & 1) != 0 && !split ? 0 : facts.first_write[0];
+    test->row_splits += split;
+    // Mutant m: 0 to 15 VECTOR(j) onto the result, 16 to 19 SCRATCH(k) or MASK_SCRATCH(k), 20 to 27 the result onto operand
+    // j, 28 to 34 opmask k (1 to 7) by number made k0; 35 and 36 a split's claim corrupted, its split cleared or its early
+    // register made the result's; 37 to 52 a temporary VECTOR(j), written before a vector operand's last naming, onto that
+    // operand's register (only the certificate's rule on the roles' uses refuses it: the operand is where the row reads it
+    // first, and the temporary's write overwrites it before its last read).
+    for (uint32_t m = 0; fits && m < 53; m += 1)
+    {
+        Tier1RowPlacement claim = original;
+        bool k0 = false;
+        bool split_mutant = false;
+        bool overlap = false;
+        bool mutated = false;
+        // A temporary onto the result: where its uses reach past the result's first write (one that ends before it is done
+        // with the register, which the result may take).
+        const bool overlapping = m < 16 && (result_start == 0 || facts.last_named[m] > result_start);
+        if (m < 16 && overlapping && ((roles >> m) & 1) != 0 && ((vector_operands >> m) & 1) == 0 && (tier0_class_floating(result) || (tier0_class_vector(result) && m != 0)))
+        {
+            claim.vectors[m] = tier0_class_floating(result) ? claim.floating_result : claim.vectors[0];
+            mutated = claim.vectors[m] != original.vectors[m];
+        }
+        else if (m >= 16 && m < 20 && tier0_class_integer(result) && ((roles >> m) & 1) != 0)
+        {
+            claim.scratch[m - 16] = claim.integer_result;
+            mutated = claim.scratch[m - 16] != original.scratch[m - 16];
+        }
+        else if (m >= 16 && m < 20 && tier0_class_mask(result) && ((roles >> (m + 4)) & 1) != 0)
+        {
+            claim.mask_scratch[m - 16] = claim.mask_result;
+            mutated = claim.mask_scratch[m - 16] != original.mask_scratch[m - 16];
+        }
+        else if (m >= 20 && m < 28 && m - 20 < row->operand_count)
+        {
+            const uint32_t j = m - 20;
+            const uint32_t class = row->operand_classes[j];
+            if (tier0_class_integer(result) && tier0_class_integer(class) && tier0.operands[j] != tier0.integer_result)
+            {
+                claim.integer_result = claim.operands[j];
+                mutated = claim.integer_result != original.integer_result;
+            }
+            else if (tier0_class_floating(result) && tier0_class_floating(class) && tier0.operands[j] != tier0.floating_result)
+            {
+                claim.floating_result = claim.operands[j];
+                mutated = claim.floating_result != original.floating_result;
+            }
+            else if (tier0_class_mask(result) && tier0_class_mask(class) && tier0.masks[j] != tier0.mask_result)
+            {
+                claim.mask_result = claim.masks[j];
+                mutated = claim.mask_result != original.mask_result;
+            }
+        }
+        else if (m >= 28 && m < 35 && ((roles >> (24 + m - 27)) & 1) != 0)
+        {
+            claim.renamed[m - 27] = 0;
+            k0 = true;
+            mutated = true;
+        }
+        else if ((m == 35 || m == 36) && split && claim.early != claim.vectors[0])
+        {
+            // The first operand read where VECTOR(0)'s later value is, before it is written: the split cleared, or its
+            // early register claimed the result's.
+            claim.split = m == 35 ? 0 : claim.split;
+            claim.position = m == 35 ? 0 : claim.position;
+            claim.early = m == 35 ? 0 : claim.vectors[0];
+            split_mutant = true;
+            mutated = true;
+        }
+        else if (m >= 37 && m - 37 < 16 && m - 37 != 0 && ((roles >> (m - 37)) & 1) != 0 && ((vector_operands >> (m - 37)) & 1) == 0 && facts.first_write[m - 37] != 0)
+        {
+            const uint32_t t = m - 37;
+            // The first vector operand (but a split's first, read elsewhere) whose last naming comes after t's first write.
+            uint32_t live = UINT32_MAX;
+            for (uint32_t j = 0; live == UINT32_MAX && j < row->operand_count && j < 16; j += 1)
+            {
+                live = ((vector_operands >> j) & 1) != 0 && !(j == 0 && split) && facts.last_named[j] > facts.first_write[t] ? j : live;
+            }
+            claim.vectors[t] = live != UINT32_MAX ? claim.vectors[live] : claim.vectors[t];
+            mutated = live != UINT32_MAX && claim.vectors[t] != original.vectors[t];
+            overlap = mutated;
+        }
+        bool placed = mutated;
+        for (uint32_t r = 0; placed && r < row->record_count; r += 1)
+        {
+            uint64_t named = 0;
+            uint64_t registers = 0;
+            uint32_t masks = 0;
+            placed = tier1_cert_emitted_row_place(row->records[r], r, &claim, &records[first + r], &named, &registers, &masks);
+        }
+        if (placed)
+        {
+            *claimed = claim;
+            const bool refused = tier1_masks_test_refused(test, plan, emitted);
+            test->row_roles += k0 || split_mutant ? 0 : 1;
+            test->row_roles_refused += !k0 && !split_mutant && refused;
+            test->row_k0 += k0 ? 1 : 0;
+            test->row_k0_refused += k0 && refused;
+            test->row_split_mutants += split_mutant ? 1 : 0;
+            test->row_split_refused += split_mutant && refused;
+            test->row_overlaps += overlap ? 1 : 0;
+            test->row_overlaps_refused += overlap && refused;
+            tier1_masks_test_expect(test, refused, k0             ? "a machine row's opmask register named by number, claimed k0, is refused (#1284)"
+                                                   : split_mutant ? "a machine row's first operand claimed where VECTOR(0)'s later value is, before its first write, is refused (#1284)"
+                                                                  : "a machine row's roles claimed in one register while both hold their values are refused (#1284)");
+        }
+        *claimed = original;
+        for (uint32_t r = 0; mutated && r < row->record_count; r += 1)
+        {
+            records[first + r] = saved[r];
+        }
+    }
+}
+
+// The certificate's rule on VECTOR roles sharing a register (#1283, tier1_cert_emitted_row_before), on the template
+// `vpaddd V2, V0, V1; vpaddd V0, V2, V1` by its own facts (tier1_select_row_vectors): the operand V1 and the temporary V2
+// may share the result V0's register, each last read in the record whose pure write makes V0; V1 and V2 may not, V2
+// written before V1's last read; nor V1 and V0 where V0's first write merges, or where that record's destination can't
+// be one of its sources. Whether each answer is the expected one.
+static bool tier1_masks_test_row_occupancy(void)
+{
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    row.record_count = 2;
+    row.records[0] = (X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(2), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
+    row.records[1] = (X86Instruction){ .form = X86_FORM_VPADDD_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(2), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
+    const Tier1SelectRowVectors facts = tier1_select_row_vectors(&row);
+    const Tier1CertEmittedRole operand = { .operand = 1, .file = 1, .vector = 1, .start = 0, .end = facts.last_named[1] };
+    const Tier1CertEmittedRole temporary = { .operand = UINT32_MAX, .file = 1, .vector = 2, .start = facts.first_write[2], .end = facts.last_named[2] };
+    const Tier1CertEmittedRole result = { .operand = UINT32_MAX, .file = 1, .vector = 0, .result = true, .start = facts.first_write[0], .end = 3 };
+    Tier1SelectRowVectors merging = facts;
+    merging.pure &= ~1u;
+    Tier1SelectRowVectors exclusive = facts;
+    exclusive.exclusive |= 1u << 1;
+    const bool shapes = facts.first_write[2] == 1 && facts.first_write[0] == 2 && facts.last_named[1] == 2 && facts.last_named[2] == 2 && (facts.pure & 5) == 5 && facts.exclusive == 0;
+    const bool operand_then_result = tier1_cert_emitted_row_before(&row, &facts, operand, result);
+    const bool temporary_then_result = tier1_cert_emitted_row_before(&row, &facts, temporary, result);
+    const bool operand_temporary = tier1_cert_emitted_row_before(&row, &facts, operand, temporary) || tier1_cert_emitted_row_before(&row, &facts, temporary, operand);
+    const bool merged = tier1_cert_emitted_row_before(&row, &merging, operand, result);
+    const bool excluded = tier1_cert_emitted_row_before(&row, &exclusive, operand, result);
+    return shapes && operand_then_result && temporary_then_result && !operand_temporary && !merged && !excluded;
+}
+
+// The code's certificate refuses a corrupted machine row (#1284). For each row of the function: each borrowed opmask
+// register's reload after it (its node's kmov from the frame) made its register's move into itself, the mask the row
+// borrowed the register from lost; and each of its staging copies into a general register renamed to a register that
+// holds a value live across the row, through the row's records, its result's move and its claimed placement
+// (Tier1RowPlacement), so that the row computes as it did but overwrites the live value. Each must be refused; everything
+// is put back after.
+static void tier1_masks_test_row_mutants(Tier1MasksTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t base = 2 * (emitted->cfg_input.block_count - function->block_count);
+    X86Instruction* records = emitted->code.records;
+    for (uint32_t node = 0; emitted->row_placements != 0 && node < function->instruction_count; node += 1)
+    {
+        const uint32_t index = (uint32_t)plan->patterns[node].immediate;
+        const bool row = !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ROW && index < function->row_count;
+        const uint32_t own = tier1_origin(TIER1_ORIGIN_NODE, node);
+        const uint32_t staging = tier1_origin(TIER1_ORIGIN_MOVE, base + 2 * node + 1);
+        uint32_t first = 0;
+        while (row && first < emitted->code.count && emitted->origins[first] != own)
+        {
+            first += 1;
+        }
+        uint32_t end = first;
+        while (row && end < emitted->code.count && emitted->origins[end] == own)
+        {
+            end += 1;
+        }
+        const uint32_t rows_end = row && first < emitted->code.count ? first + function->rows[index].record_count : end;
+        for (uint32_t r = rows_end; row && r < end; r += 1)
+        {
+            const X86Instruction record = records[r];
+            for (uint32_t width = 1; width <= 8; width *= 2)
+            {
+                const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+                if (record.form == forms->load && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register)
+                {
+                    records[r] = (X86Instruction){ .form = forms->move, .reg = record.reg, .rm = record.reg };
+                    const bool refused = tier1_masks_test_refused(test, plan, emitted);
+                    records[r] = record;
+                    test->row_reloads += 1;
+                    test->row_reloads_refused += refused;
+                    tier1_masks_test_expect(test, refused, "a machine row's borrowed opmask register left without its reload is refused (#1284)");
+                }
+            }
+        }
+        if (row && first < emitted->code.count)
+        {
+            tier1_masks_test_claim_mutants(test, plan, emitted, node, first);
+        }
+        // The row's staging copies, the moves at its definition phase right before its records.
+        uint32_t staging_first = first;
+        while (row && staging_first > 0 && staging_first <= emitted->code.count && emitted->origins[staging_first - 1] == staging)
+        {
+            staging_first -= 1;
+        }
+        uint32_t named = 0;
+        for (uint32_t r = staging_first; row && r < end; r += 1)
+        {
+            X86Instruction record = records[r];
+            named |= tier1_masks_test_general(&record, false, 0, 0);
+        }
+        for (uint32_t s = staging_first; row && s < first; s += 1)
+        {
+            const X86Instruction copy = records[s];
+            if (copy.form == X86_FORM_MOV_R64_RM64 && copy.mode == BUSTER_X86_REGISTER_DIRECT && copy.reg < 16 && copy.rm < 16 && copy.reg != copy.rm)
+            {
+                // A general register holding a value across the row, at its definition phase and at the next node's use,
+                // that the row's records and moves don't name.
+                uint8_t to = UINT8_MAX;
+                for (uint32_t v = 0; to == UINT8_MAX && v < emitted->cfg_input.value_count; v += 1)
+                {
+                    uint32_t where = 0;
+                    uint8_t kind = 0;
+                    uint32_t after = 0;
+                    uint8_t after_kind = 0;
+                    const bool general = emitted->cfg_input.classes[v] == BUSTER_TIER1_ALLOCATE_GPR && emitted->value_nodes[v] != node;
+                    const bool held = general && tier1_cfg_location(&emitted->cfg, v, base + 2 * node + 1, &where, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER && where < 16 &&
+                                      tier1_cfg_location(&emitted->cfg, v, base + 2 * node + 2, &after, &after_kind) && after_kind == BUSTER_TIER1_ALLOCATE_REGISTER && after == where;
+                    to = held && where != X86_REGISTER_RSP && ((named >> where) & 1) == 0 ? (uint8_t)where : UINT8_MAX;
+                }
+                if (to != UINT8_MAX)
+                {
+                    X86Instruction saved[BUSTER_TIER1_EMIT_ROW_RECORDS + 64];
+                    const uint32_t count = end - s < BUSTER_ARRAY_LENGTH(saved) ? end - s : 0;
+                    const Tier1RowPlacement placement = emitted->row_placements[node];
+                    Tier1RowPlacement* claimed = &emitted->row_placements[node];
+                    for (uint32_t r = 0; r < count; r += 1)
+                    {
+                        saved[r] = records[s + r];
+                        tier1_masks_test_general(&records[s + r], true, copy.reg, to);
+                    }
+                    for (uint32_t j = 0; j < BUSTER_TIER0_OPERATION_OPERANDS; j += 1)
+                    {
+                        claimed->operands[j] = claimed->operands[j] == copy.reg ? to : claimed->operands[j];
+                    }
+                    for (uint32_t k = 0; k < BUSTER_TIER0_SCRATCH; k += 1)
+                    {
+                        claimed->scratch[k] = claimed->scratch[k] == copy.reg ? to : claimed->scratch[k];
+                    }
+                    claimed->integer_result = claimed->integer_result == copy.reg ? to : claimed->integer_result;
+                    const bool refused = count != 0 && tier1_masks_test_refused(test, plan, emitted);
+                    for (uint32_t r = 0; r < count; r += 1)
+                    {
+                        records[s + r] = saved[r];
+                    }
+                    *claimed = placement;
+                    test->row_stagings += count != 0;
+                    test->row_stagings_refused += refused;
+                    tier1_masks_test_expect(test, count == 0 || refused, "a machine row's staged operand overwriting a live register is refused (#1284)");
+                }
+            }
+        }
+    }
+    // The vectors' moves (#1284): each reload of a ymm or zmm register's value, and each of its moves between registers (an
+    // edge's or a fragment's), narrowed to its xmm register's, which leaves the register's upper bytes as they were. Its
+    // stores are left as they are: a narrowed one may store again into a slot that holds the value already. A call's saves
+    // of the widest vector's bytes, of whatever value the register holds, are no value's moves.
+    static const uint16_t wide_forms[][2] = {
+        { X86_FORM_VMOVDQA64_Y_YM256, X86_FORM_VMOVDQA64_X_XM128 },
+        { X86_FORM_VMOVDQA64_Z_ZM512, X86_FORM_VMOVDQA64_X_XM128 },
+        { X86_FORM_VMOVDQU32_Y_YM256, X86_FORM_VMOVDQU32_X_XM128 },
+        { X86_FORM_VMOVDQU32_Z_ZM512, X86_FORM_VMOVDQU32_X_XM128 },
+    };
+    for (uint32_t r = 0; r < emitted->code.count; r += 1)
+    {
+        const X86Instruction record = records[r];
+        const Tier1Origin kind = (Tier1Origin)(emitted->origins[r] >> BUSTER_TIER1_ORIGIN_SHIFT);
+        const uint32_t value = emitted->origin_values[r];
+        const bool wide = value < function->instruction_count && emitted->prepared.sizes[value] > 16;
+        for (uint32_t k = 0; wide && (kind == TIER1_ORIGIN_MOVE || kind == TIER1_ORIGIN_EDGE) && k < BUSTER_ARRAY_LENGTH(wide_forms); k += 1)
+        {
+            if (record.form == wide_forms[k][0] && record.reg < 16 && (record.mode != BUSTER_X86_REGISTER_DIRECT || record.rm < 16))
+            {
+                records[r].form = wide_forms[k][1];
+                const bool refused = tier1_masks_test_refused(test, plan, emitted);
+                records[r] = record;
+                test->vector_moves += 1;
+                test->vector_moves_refused += refused;
+                tier1_masks_test_expect(test, refused, "a vector's move narrowed to its xmm register's is refused (#1284)");
+            }
+        }
+    }
+    // The emitted code, as it was, still certified.
+    tier1_masks_test_expect(test, emitted->row_placements == 0 || !tier1_masks_test_refused(test, plan, emitted), "the machine rows' code, put back, is certified");
+}
+
 static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool vector, bool rematerialize, const uint8_t* inputs,
                                   const uint64_t* counts, const uint8_t* expected)
 {
@@ -1552,6 +1957,10 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         }
         tier1_masks_test_expect(test, vector ? !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans : ir_scan_vector_paths == scans,
                                 "selection's and the CFG consumer's scans for vectors take the requested path: none the vector path on a scalar run");
+    }
+    if (ok)
+    {
+        tier1_masks_test_row_mutants(test, &plan, &emitted);
     }
     if (ok)
     {
@@ -2182,6 +2591,10 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             }
             Tier1CfgCheck check;
             ok = ok && tier1_masks_test_expect(test, tier1_cfg_verify(&emitted[f].cfg_input, &emitted[f].cfg, &test->scratch, &check), "the CFG checker accepts the typed program's allocation");
+            if (ok)
+            {
+                tier1_masks_test_row_mutants(test, &plan, &emitted[f]);
+            }
         }
         if (ok)
         {
@@ -2523,6 +2936,17 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
                test.typed_programs, test.typed_runs, test.typed_machine);
         printf("test-tier1-masks: the front end's opmask rows: %u through Tier 0 natively (%u runs), the IR's interpreter, SSA, the optimizer and Tier 1\n", test.builtin_rows, test.builtin_native);
+        tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
+                                "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
+        tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,
+                                "the machine rows' and vectors' mutants include reloads left out, staged operands overwriting live registers, roles sharing a register, opmask registers made k0, splits and narrowed "
+                                "moves (#1284)");
+        printf("test-tier1-masks: machine rows' code certified, %u of their claims with a split; mutants refused: borrowed opmask registers' reloads left out %u of %u, staged operands overwriting a live register %u of %u, "
+               "claimed roles sharing a register while both hold their values %u of %u (temporaries over a live operand %u of %u), opmask registers named by number claimed k0 %u of %u, splits corrupted %u of %u, "
+               "vectors' moves narrowed to xmm %u of %u\n",
+               test.row_splits, test.row_reloads_refused, test.row_reloads, test.row_stagings_refused, test.row_stagings, test.row_roles_refused, test.row_roles, test.row_overlaps_refused, test.row_overlaps,
+               test.row_k0_refused, test.row_k0,
+               test.row_split_refused, test.row_split_mutants, test.vector_moves_refused, test.vector_moves);
         printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls, %" PRIu64 " through frame objects, %" PRIu64 " general values recomputed beside them; %u refusals (seed=%" PRIu64 ")\n",
                test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.frame_accesses,
                test.recomputed, test.refused, seed);

@@ -565,8 +565,11 @@ signedness, a float's or a double's, a vector's container of its bytes (`v4i32`,
 meaning; an SSE carrier's `f32` or `f64`, below), a mask's of its bytes, and
 `void` for a row of no result (a masked store's). A row call is as opaque to the passes as a call of an unknown function,
 which reads and writes memory: SSA promotion and SCCP, dead code and CFG cleanup
-keep it where it is, and GVN, LICM, SROA and the inliner refuse a function with a
-row, as they refuse every SIMD function (`ir_function_has_simd`); the interpreter
+keep it where it is, and GVN and LICM refuse a function with a row, as they refuse
+every SIMD function (`ir_function_has_simd`), and so does SROA without #1282's
+`simd` option; the inliner clones a callee's rows with it, rebasing its row calls'
+`IrCall.row`, a row call staying a call ([the inlining guide](ir-inlining.md)'s
+"SIMD callees and by-value vectors"); the interpreter
 refuses one too, having no model of x86 records (Tier 1's native code is its
 oracle, against Tier 0's). The verifier checks each row call's descriptor against
 its row (`ir_row_call_valid`): no symbol, no ABI records and no variadic

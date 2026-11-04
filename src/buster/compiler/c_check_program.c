@@ -275,6 +275,11 @@ struct CheckProgram
     // hold, and BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function is naked when that
     // declaration is at or before its definition, as clang takes it (check_program_asm_naked).
     uint32_t* object_naked;
+    // Per object, whether a declaration of the function has GNU's always_inline attribute (BUSTER_CHECK_PROGRAM_INLINE_ALWAYS)
+    // or noinline (BUSTER_CHECK_PROGRAM_INLINE_NEVER), not ignored; null in a unit without either. --tier1's inliner
+    // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
+    // the second: the x86 intrinsics' wrappers.
+    uint8_t* object_inline;
     // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
     // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
     // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
@@ -478,6 +483,11 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE 4u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS 8u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE 16u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE 32u
+// CheckProgram.object_inline's bits.
+#define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
+#define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
 // Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
 // attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
@@ -497,7 +507,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
                                  BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
                              kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS :
                                  0;
-        bits |= attribute->ignored ? 0 : bit;
+        const uint32_t inlining = kind == CHECK_ATTRIBUTE_ALWAYS_INLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE : kind == CHECK_ATTRIBUTE_NOINLINE ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining;
     }
     return bits;
 }
@@ -3127,6 +3138,25 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
             check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
+        }
+        const uint32_t inlining = function_attributes & (BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE | BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE);
+        if (inlining != 0)
+        {
+            // The column comes with the unit's first such declaration, as object_naked's.
+            if (program->object_inline == 0 && room)
+            {
+                program->object_inline = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_inline != 0;
+                if (room)
+                {
+                    memset(program->object_inline, 0, (uint64_t)count + 1);
+                }
+            }
+            if (room)
+            {
+                program->object_inline[object] |= (uint8_t)(((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_ALWAYS : 0) |
+                                                            ((inlining & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NOINLINE) != 0 ? BUSTER_CHECK_PROGRAM_INLINE_NEVER : 0));
+            }
         }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
         {
