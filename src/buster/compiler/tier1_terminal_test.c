@@ -324,7 +324,10 @@ static void tier1_terminal_execute(Tier1EmitTest* test, Tier1TerminalShape shape
         sigaddset(&signals, SIGILL);
         sigaddset(&signals, SIGSEGV);
         sigaddset(&signals, SIGBUS);
-        const bool ready = setrlimit(RLIMIT_CORE, &cores) == 0 && prctl(PR_SET_PDEATHSIG, SIGKILL) == 0 && getppid() == owner &&
+        // RLIMIT_CORE alone does not contain a trap: the kernel ignores it when core_pattern pipes to a handler, as the
+        // hosted Ubuntu runners' systemd-coredump does, and the trapped child cannot be reaped until that handler has
+        // taken its dump, a wait that can outlast the deadline under load. A child that is not dumpable never starts one.
+        const bool ready = setrlimit(RLIMIT_CORE, &cores) == 0 && prctl(PR_SET_DUMPABLE, 0) == 0 && prctl(PR_SET_PDEATHSIG, SIGKILL) == 0 && getppid() == owner &&
             signal(SIGALRM, SIG_DFL) != SIG_ERR && signal(SIGILL, SIG_DFL) != SIG_ERR && signal(SIGSEGV, SIG_DFL) != SIG_ERR && signal(SIGBUS, SIG_DFL) != SIG_ERR && sigprocmask(SIG_UNBLOCK, &signals, 0) == 0;
         if (ready)
         {
@@ -373,8 +376,8 @@ static void tier1_terminal_execute(Tier1EmitTest* test, Tier1TerminalShape shape
     }
     if (entry)
     {
-        const bool expected = persistent ? survived && observed->finished == 0 : finished && (shape == TIER1_TERMINAL_RETURN ? WIFEXITED(status) && WEXITSTATUS(status) == 0 && observed->finished == BUSTER_TIER1_TERMINAL_MARKER && observed->result == BUSTER_TIER1_TERMINAL_RETURN : WIFSIGNALED(status) && WTERMSIG(status) == SIGILL && observed->finished == 0);
-        tier1_emit_test_expect(test, expected && observed->entered == BUSTER_TIER1_TERMINAL_MARKER, "terminal child returns exact bits, raises SIGILL or remains alive after readiness as specified");
+        const bool expected = persistent ? survived && observed->finished == 0 : finished && (shape == TIER1_TERMINAL_RETURN ? WIFEXITED(status) && WEXITSTATUS(status) == 0 && observed->finished == BUSTER_TIER1_TERMINAL_MARKER && observed->result == BUSTER_TIER1_TERMINAL_RETURN : WIFSIGNALED(status) && WTERMSIG(status) == SIGILL && !WCOREDUMP(status) && observed->finished == 0);
+        tier1_emit_test_expect(test, expected && observed->entered == BUSTER_TIER1_TERMINAL_MARKER, "terminal child returns exact bits, dies of SIGILL without a core dump or remains alive after readiness as specified");
         tier1_emit_test_expect(test, calls ? observed->calls == 1 && observed->ready == BUSTER_TIER1_TERMINAL_MARKER && observed->alignment == 8 : observed->calls == 0, "terminal helper runs exactly once with SysV alignment before trapping or entering its isolated sink");
     }
     if (child > 0 && !finished)
