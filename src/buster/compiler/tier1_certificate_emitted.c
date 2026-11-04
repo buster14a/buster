@@ -2502,9 +2502,28 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         kernel.definition_location = vector_result || floating_result ? tier1_cert_emitted_vector(build, result_reg, width) : mask_result ? tier1_cert_emitted_mask(result_reg, width) : tier1_cert_emitted_gpr(result_reg, width);
         valid = kernel.definition_location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
     }
+    // A vector row of no records (a zero-record shuffle's: its result is its wider operand, in that operand's register)
+    // writes nothing: its result's move (tier1_emit_cfg_row's, zero-extended for an SSE carrier) is its definition, at the
+    // move's destination. Defining it in the operand's register would kill the operand, which may live past the node
+    // (#1282's inlined intrinsics: two widenings of one vector).
+    uint32_t viewed = 0;
+    if (valid && value != BUSTER_TIER1_CFG_NONE && vector_result && row->record_count == 0 && end > r)
+    {
+        const X86Instruction move = emitted->code.records[r];
+        const uint8_t destination = move.reg;
+        const X86Instruction expected = row->result_bytes < 16 ? tier1_select_carrier_move(destination, result_reg, row->result_bytes)
+                                                               : tier1_select_register_record(tier1_select_vector_forms(row->result_bytes)->move, destination, result_reg);
+        const uint32_t location = destination < 32 ? tier1_cert_emitted_vector(build, destination, tier1_cert_emitted_width(emitted, value)) : BUSTER_CERT_NONE;
+        if (location != BUSTER_CERT_NONE && tier1_cert_emitted_exactly(move, expected))
+        {
+            valid = tier1_cert_emitted_take_reference(build, r, 0);
+            kernel.definition_location = location;
+            viewed = 1;
+        }
+    }
     valid = valid && tier1_cert_emitted_originals(build, node, &kernel, placed, row->record_count);
     // The result's move and the borrowed registers' reloads.
-    for (uint32_t at = r + (valid ? row->record_count : 0); valid && at < end; at += 1)
+    for (uint32_t at = r + (valid ? row->record_count + viewed : 0); valid && at < end; at += 1)
     {
         valid = tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
     }
