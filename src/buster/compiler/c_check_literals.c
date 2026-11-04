@@ -197,7 +197,7 @@ static inline __attribute__((always_inline)) void check_literal_integer(const ui
     uint64_t value = 0;
     uint32_t digits = 0;
     bool valid = length != 0;
-    bool previous_digit = false;
+    bool previous_digit = true;
     while (position < length)
     {
         const uint8_t c = bytes[position];
@@ -305,25 +305,7 @@ static long double check_literal_half(const char* spelling, char** end)
     return result;
 }
 
-// glibc's binary128 reader, declared with the host compiler's type rather than depending on whether its system
-// headers expose _Float128. This is the libc symbol, not libquadmath's strtoflt128; no extra library is needed.
-extern __float128 check_literal_strtof128(const char* spelling, char** end) __asm__("strtof128");
-
-// q/Q is rounded in binary128 first (#1250). CheckLiteral and CheckValue still hold x87 values: accept only when
-// that storage preserves the rounded binary128 result exactly. Reading with strtold first would silently turn
-// 0.1Q and 1 + 2^-112 into different constants. Wider values remain explicitly unsupported until their whole path,
-// including folding and static storage, retains 113 significant bits. The rare format stays out of line.
-static __attribute__((noinline)) bool check_literal_quad(const char* spelling, char** end, long double* value)
-{
-    const __float128 quad = check_literal_strtof128(spelling, end);
-    const long double narrowed = (long double)quad;
-    const bool exact = (__float128)narrowed == quad;
-    if (exact)
-    {
-        *value = narrowed;
-    }
-    return exact;
-}
+#include "c_check_literal_quad.c"
 
 // A number without an imaginary suffix, into `result`, which the caller zeroed.
 static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
@@ -809,7 +791,7 @@ static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, ui
     bool valid = parts != NULL && count != 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        const CheckStringSpan span = check_literal_string_span(part);
+        const CheckStringSpan span = check_literal_string_span(&parts[i]);
         valid = span.valid && (span.encoding == CHECK_STRING_ORDINARY || encoding == CHECK_STRING_ORDINARY || span.encoding == encoding);
         if (span.encoding != CHECK_STRING_ORDINARY)
         {
