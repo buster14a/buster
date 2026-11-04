@@ -176,6 +176,7 @@ struct Tier1CertEmittedStats
 // A call's steps at most: a copy of each part of its arguments (2 each), a load of each register part, the hidden
 // pointer, and a store of each result part.
 #define BUSTER_CERT_EMITTED_STEPS (2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS + BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS + 3)
+_Static_assert(BUSTER_CERT_EMITTED_STEPS <= UINT8_MAX, "a call's steps count in a byte (Tier1CertEmittedBuild.call_step_count)");
 
 typedef enum Tier1CertEmittedStepKind
 {
@@ -281,9 +282,14 @@ struct Tier1CertEmittedBuild
     Tier1CertEmittedStep* entry_steps;
     uint32_t entry_count;
     uint32_t entry_next;
+    // Each call node's steps (tier1_cert_emitted_call_steps), computed once, by node: its steps (null for none), how many,
+    // and how many of them come before its call.
+    Tier1CertEmittedStep** call_steps;
+    uint8_t* call_step_count;
+    uint8_t* call_step_before;
     // The steps of the call node being decoded (`step_node`, BUSTER_IR_NONE for none), the first `step_before` of them
     // before its call, and the next to decode.
-    Tier1CertEmittedStep steps[BUSTER_CERT_EMITTED_STEPS];
+    const Tier1CertEmittedStep* steps;
     uint32_t step_count;
     uint32_t step_before;
     uint32_t step_next;
@@ -1189,11 +1195,9 @@ static void tier1_cert_emitted_step_values(const Tier1CertEmittedStep* steps, ui
 // copy put it: an ORIGINAL of their own right before the call's, as many as they are.
 static bool tier1_cert_emitted_wholes(Tier1CertEmittedBuild* build, uint32_t node)
 {
-    Tier1CertEmittedStep steps[BUSTER_CERT_EMITTED_STEPS];
-    uint32_t step_count = 0;
-    uint32_t before = 0;
-    uint32_t pseudos = 0;
-    bool valid = tier1_cert_emitted_call_steps(build, node, build->call_first[node], steps, &step_count, &before, &pseudos);
+    const Tier1CertEmittedStep* steps = build->call_steps[node];
+    const uint32_t step_count = build->call_step_count[node];
+    bool valid = true;
     for (uint32_t k = 0; valid && k < step_count; k += 1)
     {
         Tier1CertEmittedKernel kernel = {
@@ -1242,11 +1246,8 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     // The by-value aggregates' parts (#789, #1284), each read where its steps leave it: a register part in its argument
     // register, one in a stack slot in its slot, a whole aggregate's bytes in its slots; the hidden pointer in rdi. And the
     // result parts, which the call defines in their registers.
-    Tier1CertEmittedStep steps[BUSTER_CERT_EMITTED_STEPS];
-    uint32_t step_count = 0;
-    uint32_t before = 0;
-    uint32_t pseudos = 0;
-    valid = valid && tier1_cert_emitted_call_steps(build, node, build->call_first[node], steps, &step_count, &before, &pseudos);
+    const Tier1CertEmittedStep* steps = build->call_steps[node];
+    const uint32_t step_count = build->call_step_count[node];
     for (uint32_t k = 0; valid && k < step_count; k += 1)
     {
         const Tier1CertEmittedStep step = steps[k];
@@ -2518,9 +2519,10 @@ static bool tier1_cert_emitted_steps_begin(Tier1CertEmittedBuild* build, uint32_
     bool valid = true;
     if (build->step_node != node)
     {
-        uint32_t pseudos = 0;
         valid = build->step_node == BUSTER_IR_NONE || build->step_next == build->step_count;
-        valid = valid && tier1_cert_emitted_call_steps(build, node, build->call_first[node], build->steps, &build->step_count, &build->step_before, &pseudos);
+        build->steps = build->call_steps[node];
+        build->step_count = build->call_step_count[node];
+        build->step_before = build->call_step_before[node];
         build->step_node = node;
         build->step_next = 0;
     }
@@ -2869,15 +2871,30 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
     build.step_node = BUSTER_IR_NONE;
     uint32_t value_total = build.result_parts + 2;
     build.call_first = valid ? arena_push_array(scratch, (uint64_t)count + 1, 4, 4) : 0;
-    valid = valid && (build.call_first != 0 || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    build.call_steps = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(Tier1CertEmittedStep*), _Alignof(Tier1CertEmittedStep*)) : 0;
+    build.call_step_count = valid ? arena_push(scratch, (uint64_t)count + 1, 1) : 0;
+    build.call_step_before = valid ? arena_push(scratch, (uint64_t)count + 1, 1) : 0;
+    const bool step_arrays = build.call_first != 0 && build.call_steps != 0 && build.call_step_count != 0 && build.call_step_before != 0;
+    valid = valid && (step_arrays || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    // Each call's steps, computed once, kept where it has any (a call of no by-value aggregate has none).
     for (uint32_t node = 0; valid && node < count; node += 1)
     {
         build.call_first[node] = value_total;
+        Tier1CertEmittedStep computed[BUSTER_CERT_EMITTED_STEPS];
         uint32_t step_count = 0;
         uint32_t before = 0;
         uint32_t pseudos = 0;
         const bool calls = !plan->covered[node] && tier1_select_function_call(function, node);
-        valid = !calls || tier1_cert_emitted_call_steps(&build, node, value_total, build.steps, &step_count, &before, &pseudos) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_KERNEL, UINT32_MAX);
+        valid = !calls || tier1_cert_emitted_call_steps(&build, node, value_total, computed, &step_count, &before, &pseudos) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_KERNEL, UINT32_MAX);
+        Tier1CertEmittedStep* kept = valid && step_count != 0 ? arena_push_array(scratch, step_count, sizeof(Tier1CertEmittedStep), _Alignof(Tier1CertEmittedStep)) : 0;
+        valid = valid && (step_count == 0 || kept != 0 || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+        if (valid && step_count != 0)
+        {
+            memcpy(kept, computed, (uint64_t)step_count * sizeof(Tier1CertEmittedStep));
+        }
+        build.call_steps[node] = kept;
+        build.call_step_count[node] = (uint8_t)step_count;
+        build.call_step_before[node] = (uint8_t)before;
         value_total += pseudos;
     }
     // The entry's steps: its by-value aggregate parameters' copies.
@@ -3093,13 +3110,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* p
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
-            uint32_t step_count = 0;
-            uint32_t before = 0;
-            uint32_t pseudos = 0;
-            if (!plan->covered[node] && tier1_select_function_call(function, node) && tier1_cert_emitted_call_steps(&build, node, build.call_first[node], build.steps, &step_count, &before, &pseudos))
-            {
-                tier1_cert_emitted_step_values(build.steps, step_count, cert_values);
-            }
+            tier1_cert_emitted_step_values(build.call_steps[node], build.call_step_count[node], cert_values);
         }
         memset(build.references, 0xff, ((uint64_t)records + 1) * 4);
         memset(build.branch_of, 0xff, ((uint64_t)records + 1) * 4);
