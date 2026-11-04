@@ -672,6 +672,56 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
     return status;
 }
 
+// An intrinsic's value (#141), of an I32's or an I64's operands (ir.c's rule) as the x86 instructions give it: mulhu
+// an I64's alone, the product of two 64-bit values fitting 128 bits; pdep and pext bit by bit along the mask; bzhi's
+// index and bextr's start and length their control's low byte and second byte, an index or a length past the width
+// keeping every bit and a start past it none.
+static unsigned __int128 ir_interpreter_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
+{
+    const uint64_t all = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    unsigned __int128 result = 0;
+    switch (operation)
+    {
+        case BUSTER_IR_INTRINSIC_MULHU: result = ((unsigned __int128)a * b) >> 64; break;
+        case BUSTER_IR_INTRINSIC_PDEP:
+        case BUSTER_IR_INTRINSIC_PEXT:
+        {
+            uint64_t value = 0;
+            uint32_t k = 0;
+            for (uint32_t bit = 0; bit < bits; bit += 1)
+            {
+                if (((b >> bit) & 1) != 0)
+                {
+                    if (operation == BUSTER_IR_INTRINSIC_PDEP)
+                    {
+                        value |= ((a >> k) & 1) << bit;
+                    }
+                    else
+                    {
+                        value |= ((a >> bit) & 1) << k;
+                    }
+                    k += 1;
+                }
+            }
+            result = value;
+        } break;
+        case BUSTER_IR_INTRINSIC_BZHI:
+        {
+            const uint32_t index = (uint32_t)(b & 0xff);
+            result = index >= bits ? a & all : a & ((UINT64_C(1) << index) - 1);
+        } break;
+        case BUSTER_IR_INTRINSIC_BEXTR:
+        {
+            const uint32_t start = (uint32_t)(b & 0xff);
+            const uint32_t length = (uint32_t)((b >> 8) & 0xff);
+            const uint64_t field = start >= bits ? 0 : (a & all) >> start;
+            result = length >= bits ? field : field & ((UINT64_C(1) << length) - 1);
+        } break;
+        default: break;
+    }
+    return result;
+}
+
 static InterpreterStatus ir_interpreter_operation(const IrFunction* function, uint32_t instruction, InterpreterValue av, InterpreterValue bv, InterpreterValue* value)
 {
     const uint8_t op = function->op[instruction];
@@ -699,8 +749,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     case IR_ADD: result = left + right; break;
     case IR_SUB: result = left - right; break;
     case IR_MUL: result = left * right; break;
-    // An I64's alone (ir.c's row): the product of two 64-bit values fits 128 bits.
-    case IR_MULHU: result = (left * right) >> bits; break;
+    case IR_INTRINSIC: result = ir_interpreter_intrinsic(function->c[instruction], bits, (uint64_t)left, (uint64_t)right); break;
     case IR_AND: result = left & right; break;
     case IR_OR: result = left | right; break;
     case IR_XOR: result = left ^ right; break;

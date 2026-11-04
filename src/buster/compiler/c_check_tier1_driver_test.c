@@ -2688,6 +2688,80 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
                                   check_test_tier1_zmm_other_source, "-march=x86-64-v4", host);
 }
 
+// The x86 builtins' bit manipulations' fixture (#141): BMI2's pdep, pext and bzhi and BMI1's bextr of unsigned ints and
+// longs, the IR's intrinsics, alone, with values live across them, a result into an operand's register and results fed
+// into each other, on the other unit's random values, a bzhi's index and a bextr's start and length within the width
+// and past it.
+static const char check_test_tier1_bmi_header[] =
+    "#include <stdio.h>\n"
+    "unsigned a_pdep32(unsigned a, unsigned m);\n"
+    "unsigned long long a_pdep64(unsigned long long a, unsigned long long m);\n"
+    "unsigned a_pext32(unsigned a, unsigned m);\n"
+    "unsigned long long a_pext64(unsigned long long a, unsigned long long m);\n"
+    "unsigned a_bzhi32(unsigned a, unsigned n);\n"
+    "unsigned long long a_bzhi64(unsigned long long a, unsigned long long n);\n"
+    "unsigned a_bextr32(unsigned a, unsigned c);\n"
+    "unsigned long long a_bextr64(unsigned long long a, unsigned long long c);\n"
+    "unsigned long long a_chain(unsigned long long a, unsigned long long m, unsigned n);\n";
+
+static const char check_test_tier1_bmi_source[] =
+    "#include \"tier1-bmi.h\"\n"
+    "unsigned a_pdep32(unsigned a, unsigned m) { return __builtin_ia32_pdep_si(a, m); }\n"
+    "unsigned long long a_pdep64(unsigned long long a, unsigned long long m) { return __builtin_ia32_pdep_di(a, m); }\n"
+    "unsigned a_pext32(unsigned a, unsigned m) { return __builtin_ia32_pext_si(a, m); }\n"
+    "unsigned long long a_pext64(unsigned long long a, unsigned long long m) { return __builtin_ia32_pext_di(a, m); }\n"
+    "unsigned a_bzhi32(unsigned a, unsigned n) { return __builtin_ia32_bzhi_si(a, n); }\n"
+    "unsigned long long a_bzhi64(unsigned long long a, unsigned long long n) { return __builtin_ia32_bzhi_di(a, n); }\n"
+    "unsigned a_bextr32(unsigned a, unsigned c) { return __builtin_ia32_bextr_u32(a, c); }\n"
+    "unsigned long long a_bextr64(unsigned long long a, unsigned long long c) { return __builtin_ia32_bextr_u64(a, c); }\n"
+    "unsigned long long a_chain(unsigned long long a, unsigned long long m, unsigned n)\n"
+    "{\n"
+    "    unsigned long long d = __builtin_ia32_pdep_di(a, m);\n"
+    "    unsigned long long e = __builtin_ia32_pext_di(d ^ a, m | a);\n"
+    "    unsigned long long z = __builtin_ia32_bzhi_di(e + d, n);\n"
+    "    unsigned x = __builtin_ia32_pext_si((unsigned)z, (unsigned)m) + __builtin_ia32_pdep_si((unsigned)a, (unsigned)(m >> 7));\n"
+    "    m = __builtin_ia32_bextr_u64(m, n | (n << 8));\n"
+    "    return d * 3 + e * 5 + z * 7 + x + m + __builtin_ia32_bextr_u64(a ^ z, (n & 0x3f) | ((n & 0x1f) << 8));\n"
+    "}\n";
+
+static const char check_test_tier1_bmi_other_source[] =
+    "#include \"tier1-bmi.h\"\n"
+    "static unsigned long long state = 0x9e3779b97f4a7c15ull;\n"
+    "static unsigned long long next(void) { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long hash = 0;\n"
+    "    for (int i = 0; i < 2048; i += 1)\n"
+    "    {\n"
+    "        unsigned long long a = next(), m = next(), c = next();\n"
+    "        unsigned n = (unsigned)(c & 0xff);\n"
+    "        if ((i & 3) != 0) n &= 0x3f;\n"
+    "        unsigned long long control = (i & 1) != 0 ? (c & 0xffff) : (c & 0x3f3f);\n"
+    "        hash = hash * 31 + a_pdep32((unsigned)a, (unsigned)m);\n"
+    "        hash = hash * 31 + a_pdep64(a, m);\n"
+    "        hash = hash * 31 + a_pext32((unsigned)a, (unsigned)m);\n"
+    "        hash = hash * 31 + a_pext64(a, m);\n"
+    "        hash = hash * 31 + a_bzhi32((unsigned)a, n);\n"
+    "        hash = hash * 31 + a_bzhi64(a, n | (c & ~0xffull));\n"
+    "        hash = hash * 31 + a_bextr32((unsigned)a, (unsigned)control);\n"
+    "        hash = hash * 31 + a_bextr64(a, control);\n"
+    "        hash = hash * 31 + a_chain(a, m, n);\n"
+    "        if (i < 2) printf(\"%llx %x %llx %x %llx\\n\", a, a_pdep32((unsigned)a, (unsigned)m), a_pext64(a, m), a_bzhi32((unsigned)a, n), a_chain(a, m, n));\n"
+    "    }\n"
+    "    printf(\"%llx\\n\", hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds, by x86-64-v3's BMI1 and BMI2, run where the host has them.
+static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v3 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
+    const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-bmi", "x86 builtins' bit manipulations'", check_test_tier1_bmi_header, check_test_tier1_bmi_source,
+                                  check_test_tier1_bmi_other_source, "-march=x86-64-v3", host);
+}
+
 // The convention's rarer shapes' fixture (#141).
 static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
