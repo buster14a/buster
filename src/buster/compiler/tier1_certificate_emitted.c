@@ -23,7 +23,9 @@
 //   its bytes say, at the width its form has; a recomputation is a constant's edit only where tier1_rematerialize writes
 //   exactly that record (and its reference) for the value its origin names. A node's records are one ORIGINAL: its
 //   operands read where the allocation has them at its use phase, every register and frame byte its records write
-//   killed, its definition where the allocation's interval starts. A call's sequence is checked against what the IR says
+//   killed, its definition where the allocation's interval starts. A register its records give back as they found it is
+//   not killed: the first record copies it whole into another register, the last copies it back, and nothing between
+//   writes the copy, leaves the node or calls (the compare-exchange's rax, kept in r11 around its lock cmpxchg). A call's sequence is checked against what the IR says
 //   it is (its target, al, the result's extension into its register), its arguments read in their ABI registers.
 // - Control: each block's tail (its jumps and its edges' moves) is walked for each successor; every path must reach the
 //   successor's first record through that edge's moves alone, or reach a successor whose only predecessor it is, whose
@@ -690,8 +692,31 @@ static bool tier1_cert_emitted_original(Tier1CertEmittedBuild* build, uint32_t n
     return room;
 }
 
+// The general register that a node's records [0, count) give back as it was (its resource bit, or 0 for none): the first
+// record copies it whole into another general register, the last copies that back into it, and no record between them
+// writes the copy or leaves the node (a form x86_semantics.c doesn't cover writes every resource, so it does both).
+// TIER1_RULE_ATOMIC_RMW's compare-exchange keeps rax so in the scratch register around its lock cmpxchg (#1059), and the
+// allocation may keep a value in rax across it. The caller excludes a node that calls, whose callee may change the copy.
+static uint64_t tier1_cert_emitted_kept(const X86Instruction* records, uint32_t count)
+{
+    const X86Instruction save = count >= 2 ? records[0] : (X86Instruction){ 0 };
+    const X86Instruction copy = { .form = X86_FORM_MOV_R64_RM64, .reg = save.reg, .rm = save.rm };
+    const X86Instruction back = { .form = X86_FORM_MOV_R64_RM64, .reg = save.rm, .rm = save.reg };
+    bool kept = count >= 2 && save.reg < 16 && save.rm < 16 && save.reg != save.rm && save.reg != X86_REGISTER_RSP && save.rm != X86_REGISTER_RSP &&
+                memcmp(&save, &copy, sizeof(save)) == 0 && memcmp(&records[count - 1], &back, sizeof(back)) == 0;
+    for (uint32_t r = 1; kept && r + 1 < count; r += 1)
+    {
+        uint64_t read = 0;
+        uint64_t written = 0;
+        x86_instruction_effects_scalar(&records[r], &read, &written);
+        kept = (written & (BUSTER_X86_RESOURCE_GPR(save.reg) | BUSTER_X86_RESOURCE_CONTROL | BUSTER_X86_RESOURCE_CALL)) == 0;
+    }
+    return kept ? BUSTER_X86_RESOURCE_GPR(save.rm) : 0;
+}
+
 // Node `node`'s ORIGINALs, its records [first, first + count) its kernel's: its uses in eights, then every register and
-// frame range its records write, killed in eights, then its definition.
+// frame range its records write, killed in eights (but a register they give back as it was, tier1_cert_emitted_kept),
+// then its definition.
 static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t node, const Tier1CertEmittedKernel* kernel, const X86Instruction* records, uint32_t count)
 {
     uint64_t writes = 0;
@@ -742,6 +767,8 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
                   BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R11) | BUSTER_X86_RESOURCE_LOWER_VECTORS;
         masks |= 0xff00;
     }
+    // A register the records give back as it was keeps its value; the copy they kept it in is killed.
+    writes &= kernel->call ? ~UINT64_C(0) : ~tier1_cert_emitted_kept(records, count);
     for (uint32_t at = 0; valid && at < kernel->outgoing; at += BUSTER_CERT_MAX_WIDTH)
     {
         const uint32_t width = kernel->outgoing - at < BUSTER_CERT_MAX_WIDTH ? kernel->outgoing - at : BUSTER_CERT_MAX_WIDTH;
