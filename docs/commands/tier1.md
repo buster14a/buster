@@ -37,7 +37,8 @@ requirements. [Command index](README.md).
   allocated in the opmask class by the CFG consumer, which moves and spills them
   at their widths and saves them around calls; and vectors (#141), in the vector
   class at their widths, passed and returned by value as aggregates in a vector
-  register whole. Run
+  register whole; at a target without AVX512VL (x86-64-v3), by VEX forms in xmm0 to
+  xmm15, machine rows' roles below 16 too (#1281). Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
   natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
