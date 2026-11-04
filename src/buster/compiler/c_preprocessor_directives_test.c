@@ -770,7 +770,7 @@ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
     },
     {
         .name = "separator at mantissa end",
-        .source = "#if 1'.0\n#endif\n",
+        .source = "#if 1'e2\n#endif\n",
         .standard = "c23",
         .diagnostic = ":1:6: error: digit separator cannot appear at end of digit sequence\n",
     },
