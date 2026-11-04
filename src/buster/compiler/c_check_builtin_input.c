@@ -202,6 +202,11 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     {
         check_input_annotation_evidence(reader, end, token, evidence);
     }
+    if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        check_input_alloc_token_evidence(reader, keyword < token ? keyword + 2 : token, token, NULL, 0, 0, evidence);
+    }
     if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING && count == 1 && evidence->nan_payload_known && !evidence->nan_payload_utf8)
     {
         check_input_cfstring_literal(reader, evidence, token);

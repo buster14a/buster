@@ -47,6 +47,9 @@ struct CheckBuiltinCall
     // Whether that literal is a UTF-8 one (u8"..."), which the CFString builtins refuse, and its first token.
     bool nan_payload_utf8;
     uint32_t nan_payload_token;
+    // __builtin_infer_alloc_token's token, where its arguments give one (check_input_alloc_token_evidence, #148).
+    bool alloc_token_known;
+    uint64_t alloc_token;
     // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
     // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
     uint32_t function_objects[4];
@@ -2125,6 +2128,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .string_known = witness != NULL && witness->nan_payload_known,
             .string_cast = witness != NULL && witness->nan_payload_cast,
             .string_utf8 = witness != NULL && witness->nan_payload_utf8,
+            .alloc_token_known = witness != NULL && witness->alloc_token_known,
+            .alloc_token = witness != NULL ? witness->alloc_token : 0,
             .function_objects = witness != NULL ? witness->function_objects : NULL,
             .function_object_count = witness != NULL ? witness->function_object_count : 0,
             .string_bytes = witness != NULL ? witness->nan_payload : NULL,

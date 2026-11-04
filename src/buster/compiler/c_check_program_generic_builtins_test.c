@@ -300,6 +300,28 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: zos_va_start with fixed args", .source = "void f(int n)\n{\nchar* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
         { .name = "generic: zos_va_copy of one", .source = "void f(char** a)\n{\n__builtin_zos_va_copy(a);\n}\n", .rejected = true },
         { .name = "generic: zos_va_end's value", .source = "int f(char** a)\n{\nreturn __builtin_zos_va_end(a);\n}\n", .rejected = true },
+        // infer_alloc_token (#148): a size_t of arguments that never run, an integer constant expression of the type a
+        // sizeof among them gives (through groupings and + - * / << >>, or a variable's initializer), LLVM's SipHash of
+        // its name without tag keywords, past half the tokens for a type holding a pointer (uintptr_t's typedef chain
+        // too, a member's included); no constant where no type is inferred.
+        { .name = "generic: infer_alloc_token", .source =
+          "typedef unsigned long uintptr_t;\ntypedef uintptr_t handle;\nstruct S { int a; char* p; };\nstruct W { handle h; };\n"
+          "struct Q { int a[3]; long b; };\ntypedef struct { short s; } TS;\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(int)) == 2689373973731826898u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(struct S)) == 9965185003513084084u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(char*) * 4) == 11473864704255292954u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(3 + sizeof(TS)) == 2947234827507279461u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(struct W)) > 9223372036854775807u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(uintptr_t)) > 9223372036854775807u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(struct Q)) == 6602487442970685230u, \"\");\n"
+          "_Static_assert(sizeof(__builtin_infer_alloc_token(1)) == 8, \"\");\nenum { E = __builtin_infer_alloc_token(sizeof(int[4])) != 0 };\n"
+          "unsigned long f(int i)\n{\nunsigned long s = sizeof(struct Q) * 2;\nstatic unsigned long t = __builtin_infer_alloc_token(sizeof(_Bool));\n"
+          "return __builtin_infer_alloc_token(i++, sizeof(char)) + __builtin_infer_alloc_token(s) + __builtin_infer_alloc_token(i) + t;\n}\n" },
+        { .name = "generic: infer_alloc_token of none", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token();\n}\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of void", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token((void)0);\n}\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of no type", .source = "_Static_assert(__builtin_infer_alloc_token(1) == 0, \"\");\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of a cast", .source = "_Static_assert(__builtin_infer_alloc_token((unsigned long)sizeof(int)) != 1, \"\");\n", .rejected = true },
+        { .name = "generic: infer_alloc_token's static", .source = "void f(void)\n{\nstatic unsigned long t = __builtin_infer_alloc_token(3);\n}\n", .rejected = true },
         // __builtin_invoke(f, a...) is the call f(a...) in C (#148): of a function, a pointer to one and a member of one,
         // with a prototype's conversions and a variadic one's promotions; its errors are the call's.
         { .name = "generic: invoke", .source =
@@ -609,6 +631,25 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "copy_end(&copy, ap); mix((unsigned long long)(take(&copy) * 4)); mix((unsigned)__builtin_va_arg(copy, short));\n"
         "mix((unsigned long long)(copy - (char*)slots)); return (int)(h ^ (h >> 32)); }\n",
         "generic-microsoft-va-arg", clang);
+    // __builtin_infer_alloc_token (#148) against clang's build: the tokens of scalars, pointers, arrays, function pointers,
+    // records with and without pointers (through members, nested records and uintptr_t's typedefs), typedef-named and
+    // nested records, an atomic and a qualified type, by sizeof's type or its expression's, through arithmetic and a
+    // variable's initializer, and the fallback 0 of no type; arguments never run. (An unnamed record's name holds its file's
+    // path, which differs between this build's source and clang's.)
+    check_test_program_source(test,
+        "typedef unsigned long uintptr_t; typedef uintptr_t handle; static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "struct I; struct P { struct I* p; }; struct Q { int a[3]; long b; }; typedef struct { char c; } T; enum E { E0 }; union U { int a; float b; };\n"
+        "struct R { struct R* next; }; struct W { handle u; }; struct O { struct N { int x; } n; struct { char c; } a; }; struct V { struct Q q[2]; struct W w; };\n"
+        "int tested(int n) { int i = n; unsigned long s = sizeof(struct Q) * 2; h = (unsigned)n; mix(__builtin_infer_alloc_token(i++));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(struct I*))); mix(__builtin_infer_alloc_token(sizeof(struct P))); mix(__builtin_infer_alloc_token(s));\n"
+        "mix(__builtin_infer_alloc_token(3 + sizeof(T))); mix(__builtin_infer_alloc_token(sizeof(enum E))); mix(__builtin_infer_alloc_token(sizeof(union U)));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(struct R))); mix(__builtin_infer_alloc_token(sizeof(uintptr_t))); mix(__builtin_infer_alloc_token(sizeof(struct W)));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(int[4]))); mix(__builtin_infer_alloc_token(sizeof(int (*)(int)))); mix(__builtin_infer_alloc_token(sizeof(const char*)));\n"
+        "mix(__builtin_infer_alloc_token(sizeof i)); mix(__builtin_infer_alloc_token(4, sizeof(double))); mix(__builtin_infer_alloc_token(sizeof(_Atomic(int))));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(volatile int))); mix(__builtin_infer_alloc_token(sizeof(struct N)));\n"
+        "mix(__builtin_infer_alloc_token(n * sizeof(struct V) << 1)); mix(__builtin_infer_alloc_token((sizeof(struct V) / 2) - 1)); mix((unsigned)i);\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-infer-alloc-token", clang);
     // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
     // evaluated once, as the call's.
     check_test_program_source(test,

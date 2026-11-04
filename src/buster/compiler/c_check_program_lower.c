@@ -7655,6 +7655,11 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
+    else if (runtime == CBUILTIN_INFER_ALLOC_TOKEN)
+    {
+        // A call whose arguments give no type (#148): the AllocToken pass's fallback token, 0; its arguments never run.
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+    }
     else if (runtime == CBUILTIN_ADDRESSOF || runtime == CBUILTIN_FUNCTION_START)
     {
         // Its operand's address, as the & operator's: a local's makes it addressed.

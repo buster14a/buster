@@ -14,6 +14,10 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     const uint32_t first = keyword + 2;
     const uint32_t end = check_constant_punctuation(reader->parser, first, closing, PARSE_KIND_COMMA);
     check_input_builtin_evidence(reader, first, end, &evidence);
+    if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
+    {
+        check_input_alloc_token_evidence(reader, first, closing, input->queries, input->first, input->end, &evidence);
+    }
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < closing)
     {
         check_input_annotation_evidence(reader, end, closing, &evidence);
@@ -60,6 +64,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .string_cast = evidence.nan_payload_cast, .string_utf8 = evidence.nan_payload_utf8, .function_objects = evidence.function_objects,
             .function_object_count = evidence.function_object_count,
             .ns_constant_string = constant_string ? check_input_ns_constant_string(reader) : 0,
+            .alloc_token_known = evidence.alloc_token_known, .alloc_token = evidence.alloc_token,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

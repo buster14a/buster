@@ -1729,6 +1729,43 @@ A miscellaneous builtin's argument of the other signedness of a `char`
 pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
 an ordinary call's.
 
+`__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
+arguments never run. It is clang 23's allocation token: the reader works it
+out from the arguments' syntax, in the walk and in the constant evaluator
+alike (`c_check_alloc_token_input.c`).
+
+- **The type.** clang's `inferPossibleType` gives it. The first argument
+  that gives one decides.
+  - The argument's first `sizeof` (not `_Alignof`) in source order that
+    nothing but groupings and binary `+ - * / << >>` hold gives its
+    operand's type. That is the leftmost one clang's walk reaches.
+  - A variable's name alone gives its initializer's.
+  - An explicit cast stops the search, as clang's `IgnoreParenImpCasts`
+    keeps casts.
+- **The name.** The type's canonical name as clang prints it with
+  `SuppressTagKeyword`: `S`, `char *`, `int[4]`, `int (*)(int)`, `bool` in
+  C23. A typedef-named record prints the typedef's name. An unnamed record is
+  `(unnamed struct at FILE:LINE:COL)`, qualified by the records around it
+  (`O::(unnamed struct at …)`), as clang qualifies one but not a named one.
+  The type printer's `BUSTER_TYPE_PRINT_NO_TAG_KEYWORD` drops the keywords.
+- **The token.** LLVM's `getStableSipHash` of the name, SipHash-2-4 under
+  LLVM's fixed key, modulo half of the 64-bit token space. A type holding a
+  pointer takes the upper half, as `TypeHashPointerSplit`, the default mode,
+  gives it. Holding means a pointer member, array element, atomic value or
+  nested record, or a `uintptr_t` through typedefs. For `uintptr_t`, the type
+  table keeps no typedef sugar, so the reader looks at the `sizeof`'s operand
+  and at each record body's members.
+- **Constness.** With a type, the token is an integer constant expression.
+  Without one, or for an incomplete record without a pointer, there is no
+  constant, as clang's evaluator gives none, and the code's value is 0, the
+  AllocToken pass's fallback token.
+- **Arguments.** They may be anything but `void`. `__has_constexpr_builtin`
+  answers 1, as clang's does.
+- **Limits.** `-falloc-token-max` and `-falloc-token-mode` aren't options
+  here. An unnamed enumeration's name, and more than 31 arguments, are
+  refused. A body on a deferred lane that names an unnamed record is read
+  again in source order, as source-location builtins' bodies are.
+
 `__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;

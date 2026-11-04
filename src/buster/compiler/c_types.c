@@ -608,8 +608,11 @@ struct TypeNames
     uint32_t anonymous_count;
 };
 
-// The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool).
+// The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
+// BUSTER_TYPE_PRINT_NO_TAG_KEYWORD prints a tag's name without its keyword, as clang's SuppressTagKeyword does (an
+// unnamed tag's row, `(unnamed struct at file:line:col)`, then carries its kind itself).
 #define BUSTER_TYPE_PRINT_C23 0x01
+#define BUSTER_TYPE_PRINT_NO_TAG_KEYWORD 0x02
 
 // At most how many bytes type_initialize pushes from its arena for `capacity`, and how many the index arena needs to
 // grow to the largest index those types can use.
@@ -5566,16 +5569,20 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         const String8 spelling = printer->names != 0 && printer->names->anonymous != 0 &&
                                  table->types.index[index] < printer->names->anonymous_count ?
                                  printer->names->anonymous[table->types.index[index]] : (String8){ 0 };
+        const bool keyword = (printer->options & BUSTER_TYPE_PRINT_NO_TAG_KEYWORD) == 0;
         if (name != 0 && printer->names != 0 && name < printer->names->count)
         {
-            type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
+            if (keyword)
+            {
+                type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
+            }
             type_print_bytes(printer, (const char*)printer->names->bytes[name], printer->names->lengths[name]);
         }
         else if (spelling.length != 0)
         {
             // A `(unnamed at file:line:col)` row keeps the keyword; a typedef's own name replaces it, as clang's
             // `T` does for the record it names (#992).
-            if (spelling.length != 0 && *spelling.pointer == '(')
+            if (spelling.length != 0 && *spelling.pointer == '(' && keyword)
             {
                 type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
             }

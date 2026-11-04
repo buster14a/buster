@@ -7866,6 +7866,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ZOS_VA_START, "__builtin_zos_va_start", false, true, false },
         { CBUILTIN_ZOS_VA_END, "__builtin_zos_va_end", false, true, false },
         { CBUILTIN_ZOS_VA_COPY, "__builtin_zos_va_copy", false, true, false },
+        { CBUILTIN_INFER_ALLOC_TOKEN, "__builtin_infer_alloc_token", false, true, true },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |

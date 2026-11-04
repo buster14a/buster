@@ -3703,6 +3703,9 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 // Declaration-time ICEs and type queries use the same semantic actions as expression graphs. The helper uses
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
 // Resolve names in source order before visiting the expression's postorder, preserving binding-event ordering.
+// __builtin_infer_alloc_token's token, which both the walk's and the constant evaluator's calls read (#148).
+static void check_input_alloc_token_evidence(CheckInputReader* reader, uint32_t first, uint32_t closing, const TypeId* queries, uint32_t query_first,
+                                             uint32_t query_end, CheckBuiltinCall* evidence);
 #include "c_check_builtin_evidence.c"
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
@@ -8927,6 +8930,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 
 #include "c_check_binding.c"
 #include "c_check_packed_input.c"
+#include "c_check_alloc_token_input.c"
 #include "c_check_x86_input.c"
 #include "c_check_naked_input.c"
 
