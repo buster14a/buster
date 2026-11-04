@@ -956,6 +956,17 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "__attribute__((unavailable)) typeof((D, 1)) z;\nint a = (E), b __attribute__((unavailable)) = sizeof(typeof((E, 1)));\n",
         "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\ntypeof((E, 1)) x;\n",
         "enum { D __attribute__((deprecated(\"old\"))) = 2 };\ntypeof((D, 1)) y;\n",
+        // A marked declarator's parameter lists take its mark: named and unnamed parameters, a definition's, an attribute
+        // after the declarator, a function pointer's, a nested list, a block's prototype; unmarked, the uses keep theirs.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "__attribute__((unavailable)) int f(T x);\n__attribute__((unavailable)) int g(T);\n"
+        "__attribute__((unavailable)) int h(T x) { return x; }\n__attribute__((deprecated)) int i(D x);\n"
+        "__attribute__((unavailable)) int j(D);\nint k(T x) __attribute__((unavailable));\n"
+        "__attribute__((deprecated)) int (*fp)(D x);\n__attribute__((deprecated)) int m(int (*q)(D));\n"
+        "void n(void) { __attribute__((deprecated)) int p(D x); __attribute__((unavailable)) int (*r)(T); (void)r; }\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\nint f(T x);\nint g(T);\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nint i(D x);\nint (*fp)(D x);\nvoid n(void) { int p(D); }\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((deprecated)) int f(T x);\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

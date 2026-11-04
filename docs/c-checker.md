@@ -5593,8 +5593,10 @@ arguments against the function. The checker now gives these as clang does.
   and a block's earlier one does mark a later file-scope redeclaration. As clang's
   context rules have it, a deprecated context drops a deprecated use's
   warning and an unavailable one an unavailable use's error too: the body of
-  a function itself marked (by any declaration before its body) and a marked
-  declaration's declarator and initializer (`check_input_availability_contexts`).
+  a function itself marked (by any declaration before its body), a marked
+  declaration's declarator and initializer, and a marked declarator's
+  parameter lists at any scope (a prototype's, a definition's, a function
+  pointer's, named parameters or not; `check_input_availability_contexts`).
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
@@ -6058,6 +6060,9 @@ arguments against the function. The checker now gives these as clang does.
     no error (a designator's, or a value's by its position). Nor does an overloadable function's call that
     resolves to a deprecated overload, which clang warns of (it doesn't at an
     address taken through the overload set, and neither does the checker).
+    A struct member's own mark isn't its specifiers' and parameter lists'
+    context (`int (*m)(D) __attribute__((deprecated));` in a struct warns of
+    `D`), which clang drops: the member marks aren't the uses' pass's.
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations.
   - An argument count of a supported attribute is checked as its arguments are

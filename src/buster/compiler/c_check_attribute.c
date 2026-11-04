@@ -5877,9 +5877,10 @@ static void check_input_availability_fill(const CheckInputReader* reader, uint8_
 
 // Each token's availability context (#147, CheckInput.availability_contexts), for the uses of the unit's marked members
 // (check_input_member_uses): the body of a function that a deprecated or unavailable attribute marks by a declaration up
-// to its definition's, and a declaration's declarator and initializer where one marks it there or before, as clang's
-// ShouldDiagnoseAvailabilityInContext reads a use's context (its delayed diagnostics drop those in a deprecated
-// declaration's declarator and initializer). Nested contexts give their tokens both bits.
+// to its definition's, a declaration's declarator and initializer where one marks it there or before, and a marked
+// declarator's parameter lists, as clang's ShouldDiagnoseAvailabilityInContext reads a use's context (its delayed
+// diagnostics drop those in a deprecated declaration's declarator, parameters and initializer). Nested contexts give
+// their tokens both bits.
 static void check_input_availability_contexts(CheckInputReader* reader, const uint32_t* marks, const uint32_t* chain)
 {
     const Parser* parser = reader->parser;
@@ -5905,6 +5906,27 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
             if (initialized != BUSTER_CHECK_NONE)
             {
                 check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, t), t, t, initialized);
+            }
+            // A marked declarator's parameter lists, at any scope, as clang reads their uses in the declaration's context:
+            // those after its name, past its groups' `)` and its array bounds (a function pointer's, a function's that
+            // returns one), nested lists within them.
+            const uint32_t key = kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] != 0 ? check_input_deprecated_key(reader, t) : count;
+            bool suffix = key < count && marks[key] != 0 && marks[key] - 1 <= t;
+            for (uint32_t at = t + 1; suffix && at < count;)
+            {
+                const uint8_t next = parser->tokens.kinds[at];
+                const uint8_t next_role = parser->tree.roles[at];
+                const uint32_t closer = parser->tree.parents[at];
+                // A function declarator's parentheses and a call's are one role to the two parsers.
+                const bool list = next == PARSE_KIND_L_PAREN && (next_role == PARSE_ROLE_OPEN_FUNCTION || next_role == PARSE_ROLE_OPEN_CALL) && closer < count &&
+                                  closer > at;
+                const bool bound = next == PARSE_KIND_L_SQUARE && closer < count && closer > at;
+                if (list)
+                {
+                    check_input_availability_fill(reader, contexts, marks, chain, key, t, at, closer + 1);
+                }
+                suffix = list || bound || (next == PARSE_KIND_R_PAREN && next_role == PARSE_ROLE_CLOSE_GROUP);
+                at = list || bound ? closer + 1 : at + 1;
             }
         }
         reader->output->availability_contexts = contexts;
