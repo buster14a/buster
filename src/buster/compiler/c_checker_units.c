@@ -1791,6 +1791,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_no_rematerialize = command->tier1_no_rematerialize,
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
+            .tier1_no_inline = command->tier1_no_inline,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
             .helper_reporting = command->helper_report != NULL,
             .units_lane = lane,
@@ -1859,6 +1860,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->machine_rows, unit_report->machine_rows, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->row_moves, unit_report->row_moves, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };

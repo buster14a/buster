@@ -251,8 +251,10 @@ anywhere, a vector constant or a `vconst`, `vcmp` or `vselect`, in its
 instructions, parameters, calls and slots. `ssa_ir_promote` and its twin promote
 mask slots as any other (the SSA core compares types alone, `ssa.c`'s codes now
 past the IR's mask types), and `ir_optimize`'s SCCP, dead code and CFG cleanup
-take masks (`ir_optimize_prepare`'s `masks`); GVN, LICM, SROA and the inliner
-don't model them and still refuse. Tier 1 selects the bitcasts as `kmov`s
+take masks (`ir_optimize_prepare`'s `masks`); GVN and LICM don't model them and
+still refuse, and so does SROA without #1282's `simd` option. The inliner
+clones them with its callees (#1282, [the inlining guide](ir-inlining.md)'s
+"SIMD callees and by-value vectors"). Tier 1 selects the bitcasts as `kmov`s
 ([the selection guide](tier1-selection.md)'s "AVX-512's masks").
 
 With `--tier1 -march=x86-64-v4`, a C function of `_k*` builtins compiles by Tier
@@ -271,8 +273,8 @@ The tests:
   without each with the result untouched, and twelve mutations of each row
   (decorations, memory, a register by number, widths, classes, a test's condition, an unwritten
   register, a record too many, an immediate) refused; and a function of masks
-  alone through both SSA paths and SCCP/DCE/CFG, refused by GVN, LICM, SROA and
-  the inliner.
+  alone through both SSA paths and SCCP/DCE/CFG, refused by GVN, LICM and SROA
+  (without `simd`), and taken by the inliner.
 - `test-ir` checks the bitcast rule's pairs both ways, accepted and refused, and
   `test-ir-interpreter` their values at each width.
 - `test-tier1-masks` takes Tier 0's random mask programs (`tier0_mask_test.c`'s
