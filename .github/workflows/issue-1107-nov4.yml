@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Temporary workbench, excluded from the implementation branch.
+# Temporary workbench only; never part of the implementation PR.
+# Completed validation: https://github.com/buster14a/buster/actions/runs/41861194002
+# Tested tree e7e58919c109a2491e0a0f279cef2c1ac55b575b is published without byte changes
+# as b94b017c5c777a59634da321b85fe92e41faef52 on agent/1107-contextual-semantic-diagnostics.
 name: Issue 1107 November 4 workbench
 on:
   push:
@@ -11,90 +14,8 @@ concurrency:
   group: issue-1107-nov4
   cancel-in-progress: true
 jobs:
-  validate:
+  complete:
+    if: ${{ false }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        sanitizer: [none, address]
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_DEBUG_INFO: '0'
-      BUSTER_SANITIZER: ${{ matrix.sanitizer }}
-      ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1:halt_on_error=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-      - name: Prepare clean implementation tree
-        run: |
-          mkdir -p "$RUNNER_TEMP/validation"
-          base64 -d .issue-1107/implementation.patch.xz.b64 | xz -d > "$RUNNER_TEMP/validation/implementation.patch"
-          cp -r .issue-1107/iterations "$RUNNER_TEMP/iterations"
-          git checkout --detach 441db2428d2bd8d28503037b28c1b3740fe4b25a
-          git apply --check "$RUNNER_TEMP/validation/implementation.patch"
-          git apply "$RUNNER_TEMP/validation/implementation.patch"
-          for patch in "$RUNNER_TEMP/iterations/"*.patch; do git apply "$patch"; done
-          git diff --check
-          git add -N src/buster/compiler/c_check_semantic_diagnostic.c
-          git diff > "$RUNNER_TEMP/validation/combined.patch"
-      - name: Install qualified compiler
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build checker
-        run: ./build.sh --config Debug --jobs 4 > "$RUNNER_TEMP/validation/build.txt" 2>&1
-      - name: Exact semantic diagnostics, valid twins and parser recovery
-        run: ./build/compiler test-checker --semantic-diagnostics --clang clang > "$RUNNER_TEMP/validation/semantic.txt" 2>&1
-      - name: Full checker and driver regression partitions
-        if: matrix.sanitizer == 'none'
-        run: |
-          for part in 1 2 3 4; do printf '== Checker part %s of 4\n"$BUSTER_COMPILER" test-checker --seed 133 --part %s/4\n' "$part" "$part"; done > "$RUNNER_TEMP/regressions.tests"
-          for part in 1 2 3 4; do printf '== Driver part %s of 4\n"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part %s/4\n' "$part" "$part"; done >> "$RUNNER_TEMP/regressions.tests"
-          ./build/compiler parallel --jobs 4 --timeout 900 "$RUNNER_TEMP/regressions.tests" > "$RUNNER_TEMP/validation/regressions.txt" 2>&1
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: issue-1107-validation-${{ matrix.sanitizer }}
-          path: ${{ runner.temp }}/validation
-          retention-days: 3
-  publish:
-    needs: validate
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          fetch-depth: 0
-      - name: Publish only the tested implementation
-        run: |
-          mkdir -p "$RUNNER_TEMP/publication"
-          base64 -d .issue-1107/implementation.patch.xz.b64 | xz -d > "$RUNNER_TEMP/implementation.patch"
-          cp -r .issue-1107/iterations "$RUNNER_TEMP/iterations"
-          git switch --detach 441db2428d2bd8d28503037b28c1b3740fe4b25a
-          git apply "$RUNNER_TEMP/implementation.patch"
-          for patch in "$RUNNER_TEMP/iterations/"*.patch; do git apply "$patch"; done
-          git diff --check
-          git switch -c agent/1107-clang-semantic-diagnostics
-          git config user.name 'David Gonzalez Martin'
-          git config user.email 'davidgmbb@gmail.com'
-          sh .githooks/enable-sign-off.sh --maintainer-session
-          git add src/buster/compiler docs/commands/checker.md
-          git commit -m 'fix(checker): report common semantic constraints with context' -m 'Preserve diagnostic causes and converted case values, render common semantic errors with names and types, and retain static-assert requirements and decoded messages. Share the renderer between the driver and corpus without changing publication order. Check exact Clang columns/messages, valid twins and parser recovery on both paths. Fixes #1107.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
-          tested_tree=$(git rev-parse 'HEAD^{tree}')
-          git rebase 692510699dc5f0fb6c28d1296975a84c61b020e9
-          test "$(git rev-parse 'HEAD^{tree}')" = "$tested_tree"
-          git log -1 --format=fuller > "$RUNNER_TEMP/publication/commit.txt"
-          git log -1 --format=%B | git interpret-trailers --parse > "$RUNNER_TEMP/publication/trailers.txt"
-          test "$(cat "$RUNNER_TEMP/publication/trailers.txt")" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
-          git diff --stat HEAD^ > "$RUNNER_TEMP/publication/stat.txt"
-          git diff HEAD^ > "$RUNNER_TEMP/publication/implementation.patch"
-          git push origin HEAD:refs/heads/agent/1107-clang-semantic-diagnostics
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: issue-1107-publication
-          path: ${{ runner.temp }}/publication
-          retention-days: 3
+      - run: echo 'The validated implementation has already been published.'
