@@ -1052,6 +1052,10 @@ static int c_testsuite_self_test(CTestsuite* suite)
         children[scenario] = valid ? fork() : -1;
         if (children[scenario] == 0)
         {
+            // The symbols case invokes real cc, readelf and clang commands. A one-second watchdog can
+            // expire while these tools are descheduled on a busy hosted runner. Keep the deliberate
+            // one-second limits on the refusal/timeout cases, but give the symbols cross-check room.
+            suite->compile_timeout = scenario == 5 ? 5 : 1;
             // The suite's results are shared with the workers that write them (a MAP_SHARED mapping), and so with the
             // other scenarios' processes: each scenario's go in a mapping of its own.
             CTestsuiteResult* results = mmap(0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
