@@ -375,6 +375,8 @@ struct CheckInputReport
     // An attribute's argument a message names, from 1 (CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS's); two calling conventions
     // (CHECK_INPUT_ATTRIBUTE_CONVENTIONS's, the one asked for in the low byte); or 0.
     uint32_t detail;
+    // The value a message prints (CHECK_ARGUMENT_TOO_LARGE's), or 0.
+    uint64_t value;
     // The type a message names (CHECK_INPUT_VECTOR_ELEMENT's), and its typedef specifier's declaration
     // (check_input_typedef_spelling), or 0.
     TypeId type;
@@ -3859,6 +3861,14 @@ static const CheckConstexprValue* check_input_constexpr_find(const CheckInputRea
 #include "c_check_cleanup_input.c"
 #include "c_check_overload_input.c"
 
+// Whether a generic attribute is a GPU kernel's size, whose integer arguments are evaluated where it is read (#147).
+static bool check_input_kernel_sizes(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    return check_input_attribute_equal(name, "reqd_work_group_size") || check_input_attribute_equal(name, "work_group_size_hint") ||
+           check_input_attribute_equal(name, "amdgpu_flat_work_group_size") || check_input_attribute_equal(name, "amdgpu_waves_per_eu");
+}
+
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
 {
     if (!check_input_attribute_starts(reader->parser, *cursor, end))
@@ -3894,12 +3904,45 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 check_input_attribute_constant_error(reader, &parsed, attribute, 0, attribute->argument_first, attribute->argument_end);
             }
         }
+        else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 1 && attribute->argument_count <= 3 &&
+                 check_input_kernel_sizes(reader, attribute))
+        {
+            // The GPU kernels' sizes (#147): each argument's (CheckInputAttribute.constants).
+            attribute->argument_values = arena_push_array(reader->arena, attribute->argument_count, sizeof(int64_t), 8);
+            reader->output->resource |= attribute->argument_values == NULL;
+            uint32_t first = attribute->argument_first;
+            for (uint32_t argument = 0; attribute->argument_values != NULL && argument < attribute->argument_count; argument += 1)
+            {
+                uint32_t stop = first;
+                while (stop < attribute->argument_end && reader->parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+                {
+                    stop = check_input_attribute_after_group(reader->parser, stop, attribute->argument_end);
+                }
+                int64_t value = 0;
+                bool wide = false;
+                const bool constant = check_input_constant_u32(reader, first, stop, &value, &wide);
+                attribute->argument_values[argument] = value;
+                attribute->constants |= constant ? (uint8_t)(1u << argument) : 0u;
+                attribute->wide |= constant && wide ? (uint8_t)(1u << argument) : 0u;
+                first = stop + 1;
+            }
+        }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count == 1)
         {
             // A generic attribute's integer argument its handler checks (#147, CheckInputAttribute.constant_argument).
             const String8 name = check_input_attribute_name(reader, attribute->name);
-            if (check_input_attribute_equal(name, "xray_log_args") || check_input_attribute_equal(name, "nonblocking") ||
-                check_input_attribute_equal(name, "nonallocating"))
+            const bool u32 = check_input_attribute_equal(name, "intel_reqd_sub_group_size") || check_input_attribute_equal(name, "amdgpu_num_sgpr") ||
+                             check_input_attribute_equal(name, "amdgpu_num_vgpr");
+            if (u32)
+            {
+                int64_t value = 0;
+                bool wide = false;
+                attribute->constant_argument = check_input_constant_u32(reader, attribute->argument_first, attribute->argument_end, &value, &wide);
+                attribute->value = value;
+                attribute->wide = attribute->constant_argument && wide ? 1u : 0u;
+            }
+            else if (check_input_attribute_equal(name, "xray_log_args") || check_input_attribute_equal(name, "nonblocking") ||
+                     check_input_attribute_equal(name, "nonallocating"))
             {
                 int64_t value = 0;
                 attribute->constant_argument = check_input_constant_ice(reader, attribute->argument_first, attribute->argument_end, &value);

@@ -17,7 +17,9 @@
 // x86-64 hasn't (other targets', the GPU kernels', pcs's arguments), the conventions on tags and bit-fields, and a variadic
 // function's vectorcall and regcall. Then the retain-ownership attributes (cf_, ns_ and os_) in their places, and the
 // handlers of debug information's, the function effects', C++'s and others' attributes (check_input_attribute_handled), with
-// C23's type attributes on declarations.
+// C23's type attributes on declarations. Then the GPU kernels' attributes on a function no kernel's convention makes one
+// (check_input_attribute_kernels), their sizes' errors (zero, negative, non-constant and wider than 32 bits), and the
+// places clang's Expr::getExprLoc gives an argument's error (check_input_expression_location).
 
 static void check_test_driver_attribute_arguments(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -897,6 +899,65 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void h(int *p __attribute__((model(\"x\"))));\n",
         "void g(void) { int y __attribute__((model(\"x\"))); }\n",
         "int x __attribute__((model));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, 2, 3)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(0, 2, 3)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(0, 0, 0)));\n",
+        "int n; void f(void) __attribute__((reqd_work_group_size(n, 2, 3)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, -2, 3)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, 2, 3), work_group_size_hint(1, 1, 1)));\n",
+        "void f(void) __attribute__((work_group_size_hint(1, 1, 1), reqd_work_group_size(1, 2, 3)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(2, 1)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(0, 1)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(1, 2)));\n",
+        "int n; void f(void) __attribute__((amdgpu_flat_work_group_size(1, n)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(2, 1)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(2)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(2, 0)));\n",
+        "void f(void) __attribute__((amdgpu_num_sgpr(0)));\n",
+        "int n; void f(void) __attribute__((amdgpu_num_vgpr(n)));\n",
+        "void f(void) __attribute__((intel_reqd_sub_group_size(0)));\n",
+        "void f(void) __attribute__((intel_reqd_sub_group_size(8)));\n",
+        "int n; void f(void) __attribute__((intel_reqd_sub_group_size(n)));\n",
+        "void f(void) __attribute__((amdgpu_kernel, reqd_work_group_size(1, 2, 3)));\n",
+        "void f(void) __attribute__((device_kernel, amdgpu_waves_per_eu(1)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(1, 2), amdgpu_waves_per_eu(1)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(1), reqd_work_group_size(1,1,1)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, 2, 3))) {}\n",
+        "int x __attribute__((reqd_work_group_size(1, 2, 3)));\n",
+        "[[clang::reqd_work_group_size(1, 2, 3)]] void f(void);\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, 2)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(1, 2, 3)));\n",
+        "void f(void) __attribute__((amdgpu_kernel, amdgpu_num_sgpr(4), amdgpu_flat_work_group_size(1, 64)));\n",
+        "struct __attribute__((reqd_work_group_size(1, 1, 1))) S { int a; };\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(1.5, 2)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(-1)));\n",
+        "void f(void) __attribute__((work_group_size_hint(4294967296, 1, 1)));\n",
+        "void g(void) { int y __attribute__((reqd_work_group_size(1, 1, 1))); }\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, 4294967296, 1)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, -1, 1)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(1, 4294967296)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(-1, 2)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(4294967296)));\n",
+        "void f(void) __attribute__((amdgpu_waves_per_eu(1, -1)));\n",
+        "void f(void) __attribute__((amdgpu_num_sgpr(4294967296)));\n",
+        "void f(void) __attribute__((amdgpu_num_vgpr(-1)));\n",
+        "void f(void) __attribute__((intel_reqd_sub_group_size(4294967296)));\n",
+        "void f(void) __attribute__((intel_reqd_sub_group_size(-1)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(4294967295u, 1, 1)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(4294967295u, 4294967295u)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, 1L << 40, 1)));\n",
+        "int n; void f(void) __attribute__((reqd_work_group_size(1, n + 1, 1)));\n",
+        "void f(void) __attribute__((reqd_work_group_size(1, (4294967296), 1)));\n",
+        "void f(void) __attribute__((amdgpu_flat_work_group_size(1, 1L << 40)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, s.x, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, p->x, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, n++, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, sizeof(int) + n, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, 1 + 2 * n, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, n * 2 + 1, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, q->r.x, 1)));\n",
+        "int n, a[2], a2[2][2]; struct S { int x; } s, *p; struct Q { struct S r; } *q; int f(void); int *g(void);\nvoid h(void) __attribute__((reqd_work_group_size(1, n << 1 >> 2, 1)));\n",
+        "int n;\nvoid h(void) __attribute__((nonblocking(n + 1)));\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

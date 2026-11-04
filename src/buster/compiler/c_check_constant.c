@@ -4205,6 +4205,29 @@ static __attribute__((unused)) bool check_input_constant_ice(CheckInputReader* r
     return valid;
 }
 
+// An attribute's integer argument clang reads in 32 bits (#147, makeAttributeArgExpr's and checkUInt32Argument's): whether
+// it is an integer constant expression, with its value (*number); and whether that needs more than 32 bits at its type's
+// width (*wide, clang's isIntN(32)), *number then those bits as clang's err_ice_too_large prints them, unsigned (their
+// low 64).
+static __attribute__((unused)) bool check_input_constant_u32(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number, bool* wide)
+{
+    CheckValue value = { 0 };
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_const_rvalue(reader, end, &value) && check_input_integer_attribute(reader, &value) &&
+                       value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE &&
+                       check_action_integer_type(reader->types, value.type, &width, &is_signed);
+    const unsigned __int128 bits = valid ? value.integer & check_action_mask(width) : 0;
+    int64_t fitted = 0;
+    *wide = (bits >> 32) != 0;
+    *number = valid && !*wide && check_action_i64(reader->types, &value, &fitted) ? fitted : (int64_t)(uint64_t)bits;
+    if (valid)
+    {
+        check_input_constant_warning(reader, first, end, &value, true);
+    }
+    return valid;
+}
+
 static __attribute__((unused)) TypeId check_input_constant_type(CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     CheckValue unused = { 0 };

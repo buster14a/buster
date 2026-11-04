@@ -622,6 +622,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_NOMERGE_POINTER:
         case CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR:
         case CHECK_WARNING_EVENT_TYPE_ON_DECLARATION:
+        case CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -662,6 +663,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER ?
                 check_warning_text(scratch, "'%.*s%s%.*s' attribute is ignored because '%.*s' is not a function pointer", (int)scope.length, scope.pointer,
                                    scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, (int)variable.length, variable.pointer) :
+                event->kind == CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED ?
+                check_warning_text(scratch, "the '%.*s%s%.*s' attribute is deprecated; use 'amdgpu_waves_per_eu' instead", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
                 event->kind == CHECK_WARNING_EVENT_TYPE_ON_DECLARATION ?
                 check_warning_text(scratch, "applying attribute '%.*s%s%.*s' to a declaration is deprecated; apply it to the type instead", (int)scope.length,
                                    scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :

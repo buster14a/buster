@@ -5568,6 +5568,31 @@ arguments against the function. The checker now gives these as clang does.
   convention". A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.
 
+  The GPU kernels' attributes change nothing here but have their handlers'
+  checks, their arguments evaluated where the attributes are read (a tag's
+  subjects are reached from the constant evaluator): `reqd_work_group_size`'s
+  and `work_group_size_hint`'s three sizes ("requires parameter N to be an
+  integer constant"; a negative one's "requires a non-negative integral
+  compile time constant expression", which goes on; "must be greater than 0"
+  where some but not all are 0), `intel_reqd_sub_group_size`'s,
+  `amdgpu_flat_work_group_size`'s and `amdgpu_waves_per_eu`'s ("argument is
+  invalid: max must be 0 since min is 0", "min must not be greater than
+  max"), and `amdgpu_num_sgpr`'s and `amdgpu_num_vgpr`'s, with their
+  `-Wdeprecated-declarations` warning. An argument wider than 32 bits at its
+  type's width is clang's "integer constant expression evaluates to value V
+  that cannot be represented in a 32-bit unsigned integer type"
+  (`check_input_constant_u32`). On a function no kernel's convention makes one,
+  the first of the OpenCL group is "attribute 'X' can only be applied to an
+  OpenCL kernel function" and then the first of AMDGPU's "'X' attribute only
+  applies to kernel functions", at the function's name and after the
+  attributes' own diagnostics (`check_input_attribute_kernels`). An error clang
+  places at an argument's expression is at its `Expr::getExprLoc`
+  (`check_input_expression_location`, from the parse tree's root of it): a
+  binary operator's at the operator, a member access at the member's name, a
+  postfix operator's at it, a subscript's at its base's, any other at its
+  first token. The checker stops at a declaration's first attribute error,
+  where clang goes on to the next declaration's.
+
   The rest stay refused by name: `selectany` (a COMDAT),
   `no_caller_saved_registers` (a calling convention), and the attributes
   whose handlers clang has its own (`pass_object_size`, `ms_struct`,

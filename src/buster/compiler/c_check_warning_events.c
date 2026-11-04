@@ -173,6 +173,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR,
     // A C23 type attribute that slides from a declaration to its specifiers (#147, -Wdeprecated-attributes), at it.
     CHECK_WARNING_EVENT_TYPE_ON_DECLARATION,
+    // AMDGPU's num_sgpr and num_vgpr (#147, -Wdeprecated-declarations), at the attribute.
+    CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

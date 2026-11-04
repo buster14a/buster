@@ -218,10 +218,14 @@ struct CheckInputAttribute
     // as BUSTER_CHECK_COUNT_* and the bound.
     uint8_t count_check;
     uint32_t count_bound;
-    // A generic attribute's integer argument (xray_log_args's, the function effects'), evaluated where its attributes are
-    // read (check_input_read_attributes), not where its handler checks it, which a tag's subjects reach from the constant
-    // evaluator: whether it is an integer constant, its value in `value`.
+    // A generic attribute's integer arguments (xray_log_args's, the function effects', the GPU kernels' sizes), evaluated
+    // where its attributes are read (check_input_read_attributes), not where its handler checks them, which a tag's subjects
+    // reach from the constant evaluator: whether the first is an integer constant (its value in `value`), and bit N of
+    // `constants` the Nth's (its value in `argument_values`). Bit N of `wide` is where the GPU kernels' Nth (bit 0 the
+    // first's) needs more than 32 bits (check_input_constant_u32), its value then those bits as clang prints them.
     bool constant_argument;
+    uint8_t constants;
+    uint8_t wide;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -510,6 +514,22 @@ typedef enum CheckAttributeArgumentError
     // argument that is no integer constant, "X attribute requires an integer constant" (its name alone), at it.
     CHECK_ARGUMENT_INVALID_ON_DECLARATION,
     CHECK_ARGUMENT_EFFECT_CONSTANT,
+    // The GPU kernels' (check_input_attribute_handled): "'X' attribute requires a non-negative integral compile time
+    // constant expression" at the argument's expression (check_input_expression_location); "'X' attribute must be greater
+    // than 0" at the attribute; AMDGPU's "'X' attribute requires parameter N to be an integer constant" (the applied
+    // attribute's name, N from 0) at the attribute, and "'X' attribute argument is invalid: max must be 0 since min is 0"
+    // (or "min must not be greater than max") there; a kernel's attribute on another function, "attribute 'X' can only be
+    // applied to an OpenCL kernel function" or "'X' attribute only applies to kernel functions", at the function's name
+    // (check_input_attribute_kernels); an argument of more than 32 bits, "integer constant expression evaluates to value V
+    // that cannot be represented in a 32-bit unsigned integer type" (CheckInputReport.value), at its expression.
+    CHECK_ARGUMENT_NON_NEGATIVE,
+    CHECK_ARGUMENT_GREATER_ZERO,
+    CHECK_ARGUMENT_PARAMETER_INTEGER_APPLIED,
+    CHECK_ARGUMENT_INVALID_MAX_ZERO,
+    CHECK_ARGUMENT_INVALID_MIN_MAX,
+    CHECK_ARGUMENT_OPENCL_KERNEL,
+    CHECK_ARGUMENT_KERNEL_ONLY,
+    CHECK_ARGUMENT_TOO_LARGE,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -529,6 +549,53 @@ static void check_input_attribute_argument_error(CheckInputReader* reader, Check
         {
             reader->output->reports[before].attribute = attribute->first;
         }
+    }
+}
+
+// clang's Expr::getExprLoc of the expression from `first` to `end` (#147), where some handlers report an argument: a
+// binary operator's (an assignment's and a comma's too) at its operator, a member access at the member's name, a postfix
+// increment or decrement at its operator, a subscript at its base's, and any other (a conditional, a call, a cast, a
+// prefix operator, a parenthesized expression, a primary one) at its first token. Its root is the token whose parent is
+// outside it.
+static uint32_t check_input_expression_location(const Parser* parser, uint32_t first, uint32_t end)
+{
+    uint32_t result = first;
+    uint32_t last = end;
+    bool searching = first < end && end <= parser->tokens.count;
+    while (searching)
+    {
+        uint32_t root = BUSTER_CHECK_NONE;
+        for (uint32_t token = first; root == BUSTER_CHECK_NONE && token < last; token += 1)
+        {
+            const uint32_t parent = parser->tree.parents[token];
+            root = parent < first || parent >= last ? token : BUSTER_CHECK_NONE;
+        }
+        const uint8_t role = root != BUSTER_CHECK_NONE ? parser->tree.roles[root] : PARSE_ROLE_NONE;
+        uint32_t opener = BUSTER_CHECK_NONE;
+        for (uint32_t token = first; role == PARSE_ROLE_CLOSE_SUBSCRIPT && opener == BUSTER_CHECK_NONE && token < root; token += 1)
+        {
+            opener = parser->tree.parents[token] == root && parser->tree.roles[token] == PARSE_ROLE_OPEN_SUBSCRIPT ? token : BUSTER_CHECK_NONE;
+        }
+        const bool binary = role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_RELATIONAL ||
+                            role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_XOR || role == PARSE_ROLE_BITWISE_OR ||
+                            role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA;
+        result = binary || role == PARSE_ROLE_POSTFIX ? root : role == PARSE_ROLE_MEMBER_OPERATOR && root + 1 < last ? root + 1 : first;
+        searching = opener != BUSTER_CHECK_NONE && opener > first;
+        last = opener;
+    }
+    return result;
+}
+
+// An argument of more than 32 bits (CheckInputAttribute.wide), clang's err_ice_too_large at its expression, from `first`
+// to `end`, printing `value`: the declaration's first attribute error.
+static void check_input_attribute_too_large(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, uint32_t first, uint32_t end,
+                                            int64_t value)
+{
+    const uint32_t before = reader->output->report_count;
+    check_input_attribute_argument_error(reader, attributes, attribute, check_input_expression_location(reader->parser, first, end), CHECK_ARGUMENT_TOO_LARGE, 0);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].value = (uint64_t)value;
     }
 }
 
@@ -2198,6 +2265,9 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "btf_type_tag", "swift_attr", "no_field_protection", "vec_type_hint", "allocating", "blocking", "nonallocating", "nonblocking",
         "cfi_unchecked_callee", "overflow_behavior", "init_priority", "always_destroy", "no_destroy", "nomerge", "abi_tag", "matrix_type",
         "xray_log_args", "personality", "function_return", "zero_call_used_regs", "model",
+        // The GPU kernels' sizes and registers, of kernels alone (check_input_attribute_kernels).
+        "reqd_work_group_size", "work_group_size_hint", "intel_reqd_sub_group_size", "amdgpu_flat_work_group_size", "amdgpu_waves_per_eu",
+        "amdgpu_num_sgpr", "amdgpu_num_vgpr",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -3762,7 +3832,125 @@ static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAt
     {
         if (!attribute->constant_argument)
         {
-            check_input_attribute_argument_error(reader, attributes, attribute, attribute->argument_first, CHECK_ARGUMENT_EFFECT_CONSTANT, 0);
+            const uint32_t location = check_input_expression_location(parser, attribute->argument_first, attribute->argument_end);
+            check_input_attribute_argument_error(reader, attributes, attribute, location, CHECK_ARGUMENT_EFFECT_CONSTANT, 0);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "reqd_work_group_size") || check_input_attribute_equal(spelled, "work_group_size_hint"))
+    {
+        // clang's handleWorkGroupSize: each a non-negative integer constant of 32 bits ("parameter N", from 0; each error at
+        // the argument's expression), and none 0 unless all are.
+        uint32_t token = attribute->argument_first;
+        uint32_t zeros = 0;
+        for (uint32_t i = 0; valid && i < attribute->argument_count && i < 3; i += 1)
+        {
+            uint32_t stop = token;
+            while (stop < attribute->argument_end && parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+            {
+                stop = check_input_attribute_after_group(parser, stop, attribute->argument_end);
+            }
+            const uint32_t location = check_input_expression_location(parser, token, stop);
+            const bool constant = ((attribute->constants >> i) & 1u) != 0 && attribute->argument_values != NULL;
+            const int64_t number = constant ? attribute->argument_values[i] : 0;
+            if (!constant)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, location, CHECK_ARGUMENT_PARAMETER_INTEGER, i);
+                valid = false;
+            }
+            else if (((attribute->wide >> i) & 1u) != 0)
+            {
+                check_input_attribute_too_large(reader, attributes, attribute, token, stop, number);
+                valid = false;
+            }
+            else if (number < 0)
+            {
+                // clang's makeAttributeArgExpr goes on past it, which the kernel's check follows.
+                const uint32_t before = reader->output->report_count;
+                check_input_report_argument(reader, location, CHECK_INPUT_ATTRIBUTE_ARGUMENT, CHECK_ARGUMENT_NON_NEGATIVE);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].attribute = attribute->first;
+                }
+            }
+            zeros += constant && number == 0 ? 1u : 0u;
+            token = stop + 1;
+        }
+        if (valid && zeros != 0 && zeros != 3)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_GREATER_ZERO, 0);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "intel_reqd_sub_group_size") && attribute->argument_count == 1)
+    {
+        // (checkUInt32Argument's error is at the attribute.)
+        if (!attribute->constant_argument)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_AN_INTEGER_CONSTANT, 0);
+            valid = false;
+        }
+        else if (attribute->wide != 0)
+        {
+            check_input_attribute_too_large(reader, attributes, attribute, attribute->argument_first, attribute->argument_end, attribute->value);
+            valid = false;
+        }
+        else if ((uint32_t)attribute->value == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_GREATER_ZERO, 0);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "amdgpu_flat_work_group_size") || check_input_attribute_equal(spelled, "amdgpu_waves_per_eu"))
+    {
+        // SemaAMDGPU's checks: each an integer constant (as 32 bits unsigned), then a 0 minimum's maximum 0, and a minimum no
+        // greater than the maximum (waves_per_eu's of a maximum given and not 0).
+        const bool flat = check_input_attribute_equal(spelled, "amdgpu_flat_work_group_size");
+        uint32_t token = attribute->argument_first;
+        uint32_t limits[2] = { 0, 0 };
+        for (uint32_t i = 0; valid && i < attribute->argument_count && i < 2; i += 1)
+        {
+            uint32_t stop = token;
+            while (stop < attribute->argument_end && parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+            {
+                stop = check_input_attribute_after_group(parser, stop, attribute->argument_end);
+            }
+            const bool constant = ((attribute->constants >> i) & 1u) != 0 && attribute->argument_values != NULL;
+            limits[i] = constant ? (uint32_t)attribute->argument_values[i] : 0;
+            if (!constant)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER_APPLIED, i);
+                valid = false;
+            }
+            else if (((attribute->wide >> i) & 1u) != 0)
+            {
+                check_input_attribute_too_large(reader, attributes, attribute, token, stop, attribute->argument_values[i]);
+                valid = false;
+            }
+            token = stop + 1;
+        }
+        if (valid && limits[0] == 0 && limits[1] != 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_INVALID_MAX_ZERO, 0);
+            valid = false;
+        }
+        else if (valid && (flat || limits[1] != 0) && limits[0] > limits[1])
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_INVALID_MIN_MAX, 0);
+            valid = false;
+        }
+    }
+    else if ((check_input_attribute_equal(spelled, "amdgpu_num_sgpr") || check_input_attribute_equal(spelled, "amdgpu_num_vgpr")) && attribute->argument_count == 1)
+    {
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_DECLARATIONS, CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED);
+        if (!attribute->constant_argument)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_AN_INTEGER_CONSTANT, 0);
+            valid = false;
+        }
+        else if (attribute->wide != 0)
+        {
+            check_input_attribute_too_large(reader, attributes, attribute, attribute->argument_first, attribute->argument_end, attribute->value);
             valid = false;
         }
     }
@@ -3780,6 +3968,52 @@ static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAt
         }
     }
     return valid;
+}
+
+// A function's GPU kernel attributes where it has no kernel's convention (amdgpu_kernel, device_kernel, nvptx_kernel), as
+// clang's ProcessDeclAttributeList ends (#147): the first of reqd_work_group_size, work_group_size_hint, vec_type_hint and
+// intel_reqd_sub_group_size, "attribute 'X' can only be applied to an OpenCL kernel function"; then the first of AMDGPU's
+// flat_work_group_size, waves_per_eu, num_sgpr and num_vgpr, "'X' attribute only applies to kernel functions"; each at the
+// function's name (`name`), in that order of their names, not of the attributes.
+static void check_input_attribute_kernels(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name)
+{
+    static const char* const groups[2][4] = {
+        { "reqd_work_group_size", "work_group_size_hint", "vec_type_hint", "intel_reqd_sub_group_size" },
+        { "amdgpu_flat_work_group_size", "amdgpu_waves_per_eu", "amdgpu_num_sgpr", "amdgpu_num_vgpr" },
+    };
+    bool kernel = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        kernel |= check_input_attribute_kernel(reader, attributes->records + i);
+    }
+    bool reported = false;
+    for (uint32_t group = 0; !kernel && attributes != NULL && group < 2; group += 1)
+    {
+        const CheckInputAttribute* found = NULL;
+        for (uint32_t n = 0; found == NULL && n < 4; n += 1)
+        {
+            for (uint32_t i = 0; found == NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored;
+                found = generic && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), groups[group][n]) ? attribute : NULL;
+            }
+        }
+        const uint32_t before = reader->output->report_count;
+        if (found != NULL)
+        {
+            check_input_report_argument(reader, name, CHECK_INPUT_ATTRIBUTE_ARGUMENT, group == 0 ? CHECK_ARGUMENT_OPENCL_KERNEL : CHECK_ARGUMENT_KERNEL_ONLY);
+            attributes->error = attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? CHECK_ATTRIBUTE_ERROR_ARGUMENTS : attributes->error;
+        }
+        // (Published after the attributes' own diagnostics, as clang gives it once they are applied.)
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].attribute = found->first;
+            reader->output->reports[before].repeated = reported;
+            reader->output->reports[before].sort = attributes->records[attributes->count - 1].end + 1;
+        }
+        reported |= found != NULL;
+    }
 }
 
 // The retain-ownership attributes (#147): consumed (cf_, ns_, os_), the returns' (cf_returns_retained and the others) and
@@ -4109,6 +4343,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         {
             valid = check_input_thread_attribute(reader, attribute, declaration, type);
         }
+    }
+    // A kernel's attributes on a function of no GPU kernel's convention (#147, clang's ProcessDeclAttributeList's end).
+    if (valid && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0 && name < parser->tokens.count)
+    {
+        check_input_attribute_kernels(reader, attributes, name);
     }
     // optnone takes over always_inline and minsize, wherever they are: clang's warning at each, with a note at optnone.
     for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
