@@ -371,3 +371,46 @@ static void asm_partition_append(AsmParser* parser, uint32_t id)
         }
     }
 }
+
+// Whether a section holds bytes, as GNU as's seg_not_empty_p sees them: an instruction or data, not only labels, fill
+// or alignment.
+static bool asm_section_holds(const AsmParser* parser, uint32_t section)
+{
+    bool result = false;
+    for (uint32_t i = 0; section != 0 && !result && i < parser->fragment_count; i += 1)
+    {
+        const AsmFragment* fragment = &parser->fragments[i];
+        result = fragment->section == section &&
+                 (fragment->kind == ASM_INSTRUCTION || fragment->kind == ASM_ULEB || fragment->kind == ASM_SLEB ||
+                  ((fragment->kind == ASM_VALUE || fragment->kind == ASM_BYTES) && fragment->size != 0));
+    }
+    return result;
+}
+
+// A debug section the assembler writes, as GNU as makes it when the source has none: the line table's .debug_line, and
+// CFI's .debug_frame (#1115), of no flags, and DWARF 5's .debug_line_str of merged strings.
+static uint32_t asm_debug_section(AsmParser* parser, const char* name, bool strings)
+{
+    const String8 spelling = { .pointer = (char*)name, .length = strlen(name) };
+    uint32_t id = asm_find_section(parser, spelling);
+    if (id == 0 && parser->section_count >= parser->section_capacity)
+    {
+        asm_fail(parser, 0, "section capacity exhausted");
+    }
+    else if (id == 0)
+    {
+        id = parser->section_count++;
+        parser->sections[id] = (AsmSection){
+            .object = {
+                .name = spelling,
+                .type = SHT_PROGBITS,
+                .flags = strings ? SHF_MERGE | SHF_STRINGS : 0,
+                .entry_size = strings ? 1 : 0,
+            },
+            .class = strings ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA,
+            .declared = true,
+        };
+        asm_section_index(parser, id);
+    }
+    return id;
+}

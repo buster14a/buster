@@ -433,49 +433,6 @@ static void asm_line_loc(AsmParser* parser, uint32_t location, uint32_t end)
     }
 }
 
-// Whether a section holds bytes, as GNU as's seg_not_empty_p sees them: an instruction or data, not only labels, fill
-// or alignment.
-static bool asm_line_holds(const AsmParser* parser, uint32_t section)
-{
-    bool result = false;
-    for (uint32_t i = 0; section != 0 && !result && i < parser->fragment_count; i += 1)
-    {
-        const AsmFragment* fragment = &parser->fragments[i];
-        result = fragment->section == section &&
-                 (fragment->kind == ASM_INSTRUCTION || fragment->kind == ASM_ULEB || fragment->kind == ASM_SLEB ||
-                  ((fragment->kind == ASM_VALUE || fragment->kind == ASM_BYTES) && fragment->size != 0));
-    }
-    return result;
-}
-
-// A debug section the table writes, as GNU as makes it when the source has none: .debug_line of no flags, and DWARF
-// 5's .debug_line_str of merged strings.
-static uint32_t asm_line_section(AsmParser* parser, const char* name, bool strings)
-{
-    const String8 spelling = { .pointer = (char*)name, .length = strlen(name) };
-    uint32_t id = asm_find_section(parser, spelling);
-    if (id == 0 && parser->section_count >= parser->section_capacity)
-    {
-        asm_fail(parser, 0, "section capacity exhausted");
-    }
-    else if (id == 0)
-    {
-        id = parser->section_count++;
-        parser->sections[id] = (AsmSection){
-            .object = {
-                .name = spelling,
-                .type = SHT_PROGBITS,
-                .flags = strings ? SHF_MERGE | SHF_STRINGS : 0,
-                .entry_size = strings ? 1 : 0,
-            },
-            .class = strings ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA,
-            .declared = true,
-        };
-        asm_section_index(parser, id);
-    }
-    return id;
-}
-
 // A line string of .debug_line_str: its label, then its bytes and a terminating zero.
 static uint32_t asm_line_string(AsmParser* parser, String8 text)
 {
@@ -503,9 +460,9 @@ static uint32_t asm_line_string(AsmParser* parser, String8 text)
 static void asm_line_finish(AsmParser* parser)
 {
     const uint32_t info = asm_find_section(parser, BUSTER_S8(".debug_info"));
-    const bool described = asm_line_holds(parser, info);
+    const bool described = asm_section_holds(parser, info);
     const uint32_t existing = asm_find_section(parser, BUSTER_S8(".debug_line"));
-    const bool written = asm_line_holds(parser, existing);
+    const bool written = asm_section_holds(parser, existing);
     if (parser->line_row_count != 0 && !described)
     {
         asm_fail(parser, 0, "line rows without a .debug_info, for which GNU as writes its own DWARF, are unsupported");
@@ -541,7 +498,7 @@ static void asm_line_finish(AsmParser* parser)
         {
             // GNU as appends each directory's and file's name to .debug_line_str, after the source's own strings.
             parser->line_strings = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, files + directories);
-            parser->section = asm_line_section(parser, ".debug_line_str", true);
+            parser->section = asm_debug_section(parser, ".debug_line_str", true);
             for (uint32_t i = 0; parser->line_strings != 0 && i < directories && parser->result.error == 0; i += 1)
             {
                 parser->line_strings[i] = asm_line_string(parser, parser->line_directories[i]);
@@ -557,7 +514,7 @@ static void asm_line_finish(AsmParser* parser)
         }
         if (parser->result.error == 0)
         {
-            parser->line_section = asm_line_section(parser, ".debug_line", false);
+            parser->line_section = asm_debug_section(parser, ".debug_line", false);
             parser->section = parser->line_section;
             parser->line_fragment = asm_fragment(parser, ASM_BYTES, 0);
         }

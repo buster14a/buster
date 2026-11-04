@@ -432,14 +432,23 @@ table unless a relocation needs the symbol itself, such as certain string-pool
 references. Ordinary named locals remain visible.
 
 CFI emits `.eh_frame` with GNU-as-compatible CIE/FDE bytes and PC32 relocations.
+`.cfi_sections` before the first procedure chooses `.eh_frame`, `.debug_frame`
+or both; GCC and Clang write `.cfi_sections .debug_frame` for `-g` without
+unwind tables (#1115). `.debug_frame` follows GNU as's form: CIEs of version 1
+without augmentation (id `0xffffffff`), shared between FDEs as in `.eh_frame`,
+FDEs of an ABS32 relocation of their CIE's offset and 64-bit addresses (ABS64),
+and every entry padded to 8 bytes with `DW_CFA_nop`. It is written after the
+line table's sections, as GNU as's `cfi_finish` runs after its `dwarf2_finish`.
 Supported rules are `def_cfa`, `def_cfa_register`, `def_cfa_offset`,
 `adjust_cfa_offset`, `offset`, `rel_offset`, `val_offset`, `register`, `restore`,
 `undefined`, `same_value`, `remember_state`, `restore_state` and `escape` (each
 with the `.cfi_` prefix). Registers may be DWARF numbers or supported x86 names.
 The default x86-64 initial CFA/return-address rules can be suppressed by `simple`.
-`return_column`, `signal_frame` and `.cfi_sections .eh_frame` are supported.
-Personality/LSDA augmentation, `.debug_frame`/SFrame output and procedures that
-cross sections are diagnosed. Unsupported CFI is never silently discarded.
+`return_column` and `signal_frame` are supported. Personality/LSDA augmentation,
+SFrame output, `.cfi_sections` after the first procedure (which GNU as applies
+to the procedures after it), a `.debug_frame` of the source's own bytes beside
+CFI's (which GNU as appends to) and procedures that cross sections are
+diagnosed. Unsupported CFI is never silently discarded.
 
 ### Line table (`.file N`, `.loc`)
 
@@ -1160,9 +1169,10 @@ named failure here rather than one a user meets. The programs are original
   compiles at `-O3 -march=x86-64-v4` to AVX-512's gathers.
 
 GCC and Clang (Clang with `-fno-integrated-as`, as in the corpus above) compile
-each at `-O0`, `-O2`, `-O2 -fPIC`, `-O3 -march=x86-64-v4`, and `-O0` and `-O2`
-with `-g`, in AT&T and Intel syntax, with `-fcf-protection=none` and
-`-fcommon`: 120 sources. Every variant names its `-march` (`x86-64` but for
+each at `-O0`, `-O2`, `-O2 -fPIC`, `-O3 -march=x86-64-v4`, `-O0` and `-O2`
+with `-g`, and `-O2 -g -fno-asynchronous-unwind-tables` (whose CFI is
+`.debug_frame`), in AT&T and Intel syntax, with `-fcf-protection=none` and
+`-fcommon`: 140 sources. Every variant names its `-march` (`x86-64` but for
 `-O3`), its debug information (`-g0` or `-g`) and `-fPIE` or `-fPIC`: a
 compiler's defaults may be others (Ubuntu 26.04's GCC 15 writes AVX's
 instructions at `-O2` without one). Each source must

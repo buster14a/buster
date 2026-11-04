@@ -18,8 +18,9 @@ requirements. [Command index](README.md).
   round-trips every admitted form in Intel and AT&T syntax (against GNU as with
   `--cross-check`), and links/runs fixtures. With `--cross-check` it also
   assembles GCC's and Clang's `-S` output of `examples/assembler/program-*.c`
-  (`assembler_programs_test.c`, #1115: 120 sources, at `-O0`, `-O2`, `-O2 -fPIC`,
-  `-O3 -march=x86-64-v4`, and `-O0` and `-O2` with `-g`, in both syntaxes),
+  (`assembler_programs_test.c`, #1115: 140 sources, at `-O0`, `-O2`, `-O2 -fPIC`,
+  `-O3 -march=x86-64-v4`, `-O0` and `-O2` with `-g`, and `-O2 -g` without unwind
+  tables, in both syntaxes),
   compares each object with GNU
   as's, and runs the program linked from it against GNU as's; on a GNU as that
   pads code unlike binutils 2.47, its padding is taken as ours first. It also

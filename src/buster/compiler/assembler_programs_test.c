@@ -256,6 +256,24 @@ static const char asm_test_line_label_fixture[] =
     ".section .text.b,\"ax\",@progbits\n.loc 0 9 0\nret\n.section .debug_info,\"\",@progbits\n.long 0\n.section .debug_line,\"\",@progbits\n.Lline0:\n"
     ".section .debug_info\n.long .Lline0\n";
 
+// GNU as's .debug_frame, which GCC and Clang write for -g without unwind tables (#1115): CIEs of version 1 without
+// augmentation, shared between FDEs, whose addresses are 64-bit relocations, every entry padded to 8 bytes; a simple
+// procedure's CIE, a signal frame's and another return column's, advances of each width, saved state, an escape, and
+// a second code section.
+static const char asm_test_debug_frame_fixture[] =
+    ".cfi_sections .debug_frame\n.text\n.globl f\nf:\n.cfi_startproc\npushq %rbp\n.cfi_def_cfa_offset 16\n.cfi_offset 6, -16\nmovq %rsp, %rbp\n"
+    ".cfi_def_cfa_register 6\n.skip 70\n.cfi_remember_state\npopq %rbp\n.cfi_def_cfa 7, 8\n.skip 300\n.cfi_restore_state\n.skip 70000\nleave\n"
+    ".cfi_def_cfa 7, 8\nret\n.cfi_endproc\ng:\n.cfi_startproc\nret\n.cfi_endproc\n.section .text.other,\"ax\",@progbits\nh:\n"
+    ".cfi_startproc simple\n.cfi_signal_frame\n.cfi_def_cfa 7, 8\nnop\n.cfi_escape 0x2e, 0x10\nret\n.cfi_endproc\nk:\n.cfi_startproc\n"
+    ".cfi_return_column 17\nnop\n.cfi_undefined 3\nret\n.cfi_endproc\nm:\n.cfi_startproc\nret\n.cfi_endproc\n";
+// Both sections, .eh_frame's first; and no section: an empty .cfi_sections writes neither, and .debug_frame without
+// procedures is not written.
+static const char asm_test_both_frames_fixture[] =
+    ".cfi_sections .eh_frame, .debug_frame\n.text\nf:\n.cfi_startproc\npushq %rbx\n.cfi_def_cfa_offset 16\n.cfi_offset 3, -16\npopq %rbx\n"
+    ".cfi_def_cfa_offset 8\nret\n.cfi_endproc\ng:\n.cfi_startproc\nret\n.cfi_endproc\n";
+static const char asm_test_no_frames_fixture[] = ".cfi_sections\n.text\nf:\n.cfi_startproc\npushq %rbx\n.cfi_def_cfa_offset 16\npopq %rbx\nret\n.cfi_endproc\n";
+static const char asm_test_unused_frames_fixture[] = ".cfi_sections .debug_frame\n.text\nf: ret\n";
+
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
     static const struct
@@ -282,6 +300,10 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_string_fixture, X86_ARCH_BASELINE },
         { asm_test_vmovq_fixture, X86_ARCH_V4 },
         { asm_test_gather_fixture, X86_ARCH_V4 },
+        { asm_test_debug_frame_fixture, X86_ARCH_BASELINE },
+        { asm_test_both_frames_fixture, X86_ARCH_BASELINE },
+        { asm_test_no_frames_fixture, X86_ARCH_BASELINE },
+        { asm_test_unused_frames_fixture, X86_ARCH_BASELINE },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -317,7 +339,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // 0`'s directory, where GNU as takes its working directory. Of string instructions' operands: a destination of
     // another segment than ES, a register of another size than the suffix's, mixed address sizes, Intel's without a
     // size, and, deliberately, AT&T's without one (where GNU as warns and takes 32 bits) and RDI's memory as the source
-    // (where it warns and takes the instruction's own).
+    // (where it warns and takes the instruction's own). Of .cfi_sections: a trailing comma, names without a comma, and,
+    // deliberately, .sframe, a choice after the first procedure (which GNU as applies to the procedures after it), and
+    // a .debug_frame of the source's own bytes beside CFI's (which GNU as appends to).
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",
@@ -370,6 +394,11 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".data\n.base64 \"AA==AAAA\"\n",
         ".data\n.base64 label\n",
         ".data\n.long a - b\n.text\na: nop\n.section .rodata\nb: .byte 0\n",
+        ".cfi_sections .debug_frame,\n",
+        ".cfi_sections .debug_frame .eh_frame\n",
+        ".cfi_sections .sframe\n",
+        ".text\nf: .cfi_startproc\nret\n.cfi_endproc\n.cfi_sections .debug_frame\n",
+        ".cfi_sections .debug_frame\n.section .debug_frame,\"\",@progbits\n.byte 1\n.text\nf: .cfi_startproc\nret\n.cfi_endproc\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
@@ -498,9 +527,9 @@ typedef struct AsmProgramVariant AsmProgramVariant;
 struct AsmProgramVariant
 {
     const char* name;
-    // Each variant names its -march: a compiler's default may be another (Ubuntu 26.04's GCC 15 writes AVX's at -O2); and
-    // its debug information, -g0 or -g.
-    const char* flags[4];
+    // Each variant names its -march: a compiler's default may be another (Ubuntu 26.04's GCC 15 writes AVX's at -O2); its
+    // debug information, -g0 or -g; and any other option.
+    const char* flags[5];
     X86Architecture architecture;
 };
 
@@ -727,6 +756,8 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
         // -g's DWARF (#1115): the line table GNU as makes of .loc, GCC's view numbers and its location lists.
         { .name = "O0-g", .flags = { "-O0", "-march=x86-64", "-fPIE", "-g" }, .architecture = X86_ARCH_BASELINE },
         { .name = "O2-g", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g" }, .architecture = X86_ARCH_BASELINE },
+        // Without unwind tables, -g's CFI is GNU as's .debug_frame (`.cfi_sections .debug_frame`).
+        { .name = "O2-g-frame", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g", "-fno-asynchronous-unwind-tables" }, .architecture = X86_ARCH_BASELINE },
     };
     static const char* const targets[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=x86-64-v4" };
     // The x86-64-v4 programs run where the host has every feature of x86-64-v4, not only AVX-512's: clang's code for it
@@ -783,22 +814,19 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                     char* const reference_output = paths[6];
                     char* const program_output = paths[7];
                     char* const error_path = paths[8];
-                    char* generate[] = {
-                        (char*)compilers[compiler],
-                        (char*)chosen->flags[0],
-                        (char*)chosen->flags[1],
-                        (char*)chosen->flags[2],
-                        (char*)chosen->flags[3],
-                        (char*)syntaxes[syntax],
-                        "-fcf-protection=none",
-                        "-fcommon",
-                        "-S",
-                        source_path,
-                        "-o",
-                        assembly,
-                        compiler == 1 ? "-fno-integrated-as" : 0,
-                        0,
-                    };
+                    // The compiler's arguments: the variant's flags it gives, then the corpus's.
+                    char* generate[16] = { (char*)compilers[compiler] };
+                    uint32_t argument = 1;
+                    for (uint32_t flag = 0; flag < BUSTER_ARRAY_LENGTH(chosen->flags); flag += 1)
+                    {
+                        generate[argument] = (char*)chosen->flags[flag];
+                        argument += chosen->flags[flag] != 0;
+                    }
+                    char* const common_arguments[] = { (char*)syntaxes[syntax], "-fcf-protection=none", "-fcommon", "-S", source_path, "-o", assembly, compiler == 1 ? "-fno-integrated-as" : 0 };
+                    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(common_arguments); i += 1)
+                    {
+                        generate[argument + i] = common_arguments[i];
+                    }
                     okay = okay && asm_test_tool(generate, assembly, program_output, error_path) == 0;
                     const String8 source = okay ? object_test_read_file(&files, assembly) : (String8){ 0 };
                     okay = okay && source.pointer != 0 && source.length != 0;

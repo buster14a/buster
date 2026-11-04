@@ -269,6 +269,9 @@ struct AsmCfiProcedure
     uint32_t return_column;
     uint32_t initial_count;
     uint32_t relocation;
+    // Its .debug_frame FDE's (#1115): the offset of its CIE pointer, the 64-bit address after it, and its CIE's.
+    uint32_t debug_relocation;
+    uint32_t debug_cie;
     bool simple;
     bool signal;
 };
@@ -373,6 +376,13 @@ struct AsmParser
     uint32_t procedure_count;
     uint32_t cfi_depth;
     bool cfi_active;
+    // .cfi_sections' choice (#1115): .eh_frame unless it names others, and .debug_frame; the .debug_frame section, the
+    // label at its start, which its FDEs' CIE pointers are relocated against, and the fragment its bytes fill.
+    bool cfi_no_eh_frame;
+    bool cfi_debug_frame;
+    uint32_t cfi_debug_section;
+    uint32_t cfi_debug_label;
+    uint32_t cfi_debug_fragment;
     bool prefix;
     // asm_assemble_code's source: code another function's records hold, which takes no directive but the syntax's.
     bool code;
@@ -3750,6 +3760,7 @@ static void asm_parse(AsmParser* parser)
     asm_place_commons(parser);
     asm_resolve_aliases(parser);
     asm_line_finish(parser);
+    asm_cfi_finish(parser);
     if (parser->cfi_active)
     {
         asm_fail(parser, parser->source.length, "missing .cfi_endproc");
@@ -4801,7 +4812,7 @@ static void asm_emit(AsmParser* parser)
             // A section's atom each, and a global common's (#147's representation).
             .atoms = parser->section_count + parser->common_count,
             .symbols = parser->symbol_count,
-            .fixups = parser->fragment_count + parser->instruction_count * 2 + parser->line_fixup_count,
+            .fixups = parser->fragment_count + parser->instruction_count * 2 + parser->line_fixup_count + parser->procedure_count * 2,
             .wide_addends = parser->fragment_count + parser->instruction_count * 2,
     };
     if (!link_initialize(link, parser->arena, parser->arena, capacity))
@@ -5116,10 +5127,18 @@ static void asm_emit(AsmParser* parser)
             }
         }
     }
-    for (uint32_t i = 0; i < parser->procedure_count && parser->result.error == 0; i += 1)
+    for (uint32_t i = 0; !parser->cfi_no_eh_frame && i < parser->procedure_count && parser->result.error == 0; i += 1)
     {
         const AsmCfiProcedure* procedure = &parser->procedures[i];
         link_add_fixup(link, parser->sections[BUSTER_LINK_CLASS_EH_FRAME].atom, procedure->relocation, BUSTER_LINK_FIXUP_PC32, parser->symbols[procedure->symbol].link, 0);
+    }
+    // .debug_frame's, each FDE's in GNU as's order: its CIE's offset in the section, then its first address.
+    for (uint32_t i = 0; parser->cfi_debug_section != 0 && i < parser->procedure_count && parser->result.error == 0; i += 1)
+    {
+        const AsmCfiProcedure* procedure = &parser->procedures[i];
+        const AtomId atom = parser->sections[parser->cfi_debug_section].atom;
+        link_add_fixup(link, atom, procedure->debug_relocation, BUSTER_LINK_FIXUP_ABS32, parser->symbols[parser->cfi_debug_label].link, procedure->debug_cie);
+        link_add_fixup(link, atom, procedure->debug_relocation + 4, BUSTER_LINK_FIXUP_ABS64, parser->symbols[procedure->symbol].link, 0);
     }
     // The line table's (asm_line_emit): its set addresses' and line strings' relocations, in their order.
     for (uint32_t i = 0; i < parser->line_fixup_count && parser->result.error == 0; i += 1)
