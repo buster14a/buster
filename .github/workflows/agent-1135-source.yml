@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Temporary branch-only source transfer for #1135; removed before the final PR.
+# Temporary branch-only oracle for #1135; removed before the final PR.
 name: Issue 1135 source snapshot
 on:
   push:
@@ -10,16 +10,36 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Archive tracked sources, without credentials or Git state
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-1135-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: buster-1135-source
-          path: ${{ runner.temp }}/buster-1135-source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+      - name: Install the repository oracle
+        run: bash tools/ci/setup-hosted.sh
+      - name: Observe original pragma fixtures
+        shell: bash
+        run: |
+          set -uo pipefail
+          clang --version
+          cases=(
+          '#pragma weak f\nint f(void){return 7;}\nint main(void){return f()!=7;}'
+          'int f(void){return 7;}\n#pragma weak f\nint main(void){return f()!=7;}'
+          '#pragma weak absent\nint main(void){return 0;}'
+          '#pragma weak f\nstatic int f(void){return 7;}\nint main(void){return f()!=7;}'
+          '#pragma weak a = b\nint b(void){return 7;}\nint main(void){return a()!=7;}'
+          'int b(void){return 7;}\n#pragma weak a = b\nint main(void){return a()!=7;}'
+          'int a(void);\n#pragma weak a = b\nint b(void){return 7;}\nint main(void){return a()!=7;}'
+          'int a(void){return 2;}\n#pragma weak a = b\nint b(void){return 7;}\nint main(void){return a();}'
+          '#define a other\n#pragma weak a = b\nint b(void){return 7;}\n#undef a\nint main(void){return a()!=7;}'
+          '#pragma redefine_extname f renamed\nint f(void){return 7;}\nint main(void){return f()!=7;}'
+          'int f(void){return 7;}\n#pragma redefine_extname f renamed\nint main(void){return f()!=7;}'
+          'int f(void);\nint g(void){return f();}\n#pragma redefine_extname f renamed\nint f(void){return 7;}'
+          '#pragma redefine_extname f renamed\nstatic int f(void){return 7;}\nint main(void){return f()!=7;}'
+          '#define f other\n#pragma redefine_extname f renamed\n#undef f\nint f(void){return 7;}'
+          '#pragma GCC target("avx2")\nint f(void){return 7;}\n#pragma GCC push_options\n#pragma GCC pop_options'
+          'int b;\n#pragma weak a = b\nint main(void){return a;}'
+          'extern int b;\n#pragma weak a = b\nint main(void){return a;}'
+          'int f(void){return 7;}\nint main(void){\n#pragma weak f\nreturn f()!=7;}')
+          mkdir -p "$RUNNER_TEMP/pragma-oracle"
+          for i in "${!cases[@]}"; do p="$RUNNER_TEMP/pragma-oracle/$i"; printf '\n===== CASE %s =====\n' "$i"; printf '%b\n' "${cases[$i]}" | tee "$p.c"; clang -Wall -Wextra -S -emit-llvm -o "$p.ll" "$p.c" 2>&1; test ! -f "$p.ll" || cat "$p.ll"; done
