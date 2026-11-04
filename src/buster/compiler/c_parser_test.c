@@ -3690,6 +3690,87 @@ static __attribute__((unused)) uint32_t parse_test_check_probe(const ParseTestPr
 // a run stops at the first that fails, so in a child whose address space may grow a page less than a run reached, the
 // last fails, and the child's peak is what the run had before it; a page less than that, the one before fails; and so
 // on, a run each, down to the first.
+// Whether a parse of `tokens` declarations puts its diagnostics where the address space says (#1279's review): in the
+// tokens' arena where it is unbounded, and under a finite RLIMIT_AS in an arena of their own sized by the tokens
+// converted, not by the tokens' bound, twice the output's, which would map 12 bytes more for each token of a large unit
+// than it can use. Its meanings are in the tokens' arena either way. Run in a child, which may lower its limit.
+static bool parse_test_diagnostic_place(uint32_t declarations, bool limited)
+{
+    bool result = true;
+    if (limited)
+    {
+        struct rlimit space;
+        const uint64_t base = parse_test_status_bytes("VmSize:");
+        result = base != 0 && getrlimit(RLIMIT_AS, &space) == 0 && base + (1ull << 40) <= space.rlim_max;
+        space.rlim_cur = base + (1ull << 40);
+        result = result && setrlimit(RLIMIT_AS, &space) == 0;
+    }
+    const uint64_t bytes = (uint64_t)declarations * 8 + 1;
+    char* source = result ? malloc(bytes) : 0;
+    for (uint32_t i = 0; source != 0 && i < declarations; i += 1)
+    {
+        memcpy(source + (uint64_t)i * 8, "int x;\n ", 8);
+    }
+    InternTable table = { 0 };
+    Preprocessor pp = { 0 };
+    Parser parser = { 0 };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parsing = { 0 };
+    result = source != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parsing, options.language) &&
+             pp_run_source(&pp, "diagnostic-place.c", (const uint8_t*)source, (uint32_t)(bytes - 1));
+    // Repeated `int x;` is valid C (tentative definitions), so the parse succeeds without a diagnostic.
+    result = result && parse_translation_unit(&parser, &pp) && parser.diagnostic_count == 0 && parser.tokens.count == 3 * declarations;
+    const uint8_t* diagnostics = (const uint8_t*)parser.diagnostics;
+    const Arena* own = &parser.columns[8];
+    const Arena* tokens = &parser.columns[0];
+    const bool in_tokens = diagnostics >= tokens->base && diagnostics < tokens->base + tokens->capacity;
+    const bool in_own = own->base != 0 && diagnostics >= own->base && diagnostics < own->base + own->capacity;
+    const uint64_t needed = ((uint64_t)parser.tokens.count + 16 + 2 * BUSTER_PARSE_TOKEN_PADDING) * sizeof(ParseDiagnostic) + 64;
+    const bool meanings = parser.meanings.meanings >= tokens->base && parser.meanings.meanings < tokens->base + tokens->capacity;
+    result = result && diagnostics != 0 && meanings && parser.diagnostic_capacity == parser.tokens.count + 16 &&
+             (limited ? in_own && !in_tokens && own->requested_capacity == needed : in_tokens && !in_own);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&table);
+    free(source);
+    return result;
+}
+
+// parse_test_diagnostic_place in a child each, unbounded and limited: a small unit and a large one (786,432 tokens).
+static uint32_t parse_test_diagnostic_places(void)
+{
+    uint32_t failures = 0;
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+    printf("parser: the diagnostics' place under RLIMIT_AS isn't checked under a sanitizer, whose shadow takes the address space\n");
+#else
+    static const uint32_t sizes[] = { 1, 1u << 18 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        for (uint32_t limited = 0; limited < 2; limited += 1)
+        {
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                _exit(parse_test_diagnostic_place(sizes[i], limited != 0) ? 0 : 1);
+            }
+            int status = 0;
+            pid_t waited = child;
+            while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
+            {
+            }
+            const bool passed = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            if (!passed)
+            {
+                parse_test_report("parser: %u declarations %s: the diagnostics aren't where the address space puts them\n", sizes[i],
+                                  limited != 0 ? "under a finite RLIMIT_AS" : "without a limit");
+            }
+            failures += !passed;
+        }
+    }
+#endif
+    return failures;
+}
+
 static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
@@ -4033,6 +4114,7 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             failures += parse_test_check_postorder_self(&arena);
             failures += parse_test_workspace_budget();
+            failures += parse_test_diagnostic_places();
             failures += parse_test_check_k6_tables();
             failures += parse_test_check_handoff(options.language, seed);
             failures += parse_test_check_snippets(directory, clang);
