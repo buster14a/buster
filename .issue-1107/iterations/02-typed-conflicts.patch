@@ -1,0 +1,99 @@
+--- a/docs/commands/checker.md
++++ b/docs/commands/checker.md
+@@ -80,6 +80,10 @@
+   `--program-library` selects the library builtins' tables, constant folds and programs alone
+   (`c_check_program_library_test.c`).
+   `--transitions` selects the memoized transitions' fixtures, classes, static words and table limits alone (`c_check_transitions_test.c`).
++  `--semantic-diagnostics` selects #1107's common semantic-error catalogue: exact Clang messages and columns,
++  valid twins and a later syntax error, through both corpus paths and both driver paths. The default constraint
++  suite includes it too. `c_check_semantic_diagnostic.c` spells the retained names, types, converted case values
++  and decoded static-assert messages only on failure; corrected carets leave publication order unchanged.
+   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
+   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
+   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -222,6 +222,7 @@
+     CHECK_INPUT_CONTINUE,
+     CHECK_INPUT_INCOMPLETE_TENTATIVE,
+     CHECK_INPUT_ENUMERATOR_REDEFINITION,
++    CHECK_INPUT_CONFLICTING_TYPES,
+ } CheckInputMessage;
+ 
+ static const char* const check_input_messages[] =
+@@ -340,6 +341,7 @@
+     "'continue' statement not in loop statement",
+     "tentative definition has incomplete type",
+     "redefinition of enumerator",
++    "conflicting types",
+ };
+ 
+ // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
+@@ -7119,7 +7121,9 @@
+         if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) ||
+             check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
+         {
+-            check_input_report_subject(reader, token, CHECK_INPUT_REDECLARATION, previous);
++            const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
++                                              CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
++            check_input_report_subject(reader, token, message, previous);
+         }
+         else
+         {
+@@ -7167,7 +7171,9 @@
+                 (reader->definition_origins[token] && reader->definition_origins[previous]) ||
+                 check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
+             {
+-                check_input_report_subject(reader, token, CHECK_INPUT_REDECLARATION, previous);
++                const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
++                                                  CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
++                check_input_report_subject(reader, token, message, previous);
+             }
+             else
+             {
+--- a/src/buster/compiler/c_check_repair.c
++++ b/src/buster/compiler/c_check_repair.c
+@@ -436,10 +436,11 @@
+         result = (report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && !label_address) ||
+                  ((report->message == CHECK_INPUT_LITERAL || report->message == CHECK_INPUT_WIDE_LITERAL) &&
+                   (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING)) ||
+-                 (report->message == CHECK_INPUT_REDECLARATION && ((kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_LABEL)) ||
++                 ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) &&
++                  ((kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_LABEL)) ||
++                 (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) ||
+                  // The source reader proves the absence of an enclosing loop/switch from the original control
+                  // headers. Appending closing braces cannot create such an enclosing statement around this use.
+-                 (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) ||
+                  (role == PARSE_ROLE_RETURN && ((report->message == CHECK_INPUT_BREAK && kind == PARSE_KIND_BREAK) ||
+                                                (report->message == CHECK_INPUT_CONTINUE && kind == PARSE_KIND_CONTINUE))) ||
+                  (report->message == CHECK_INPUT_DECLARATION && asm_name) ||
+--- a/src/buster/compiler/c_check_semantic_diagnostic.c
++++ b/src/buster/compiler/c_check_semantic_diagnostic.c
+@@ -55,7 +55,7 @@
+     {
+         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
+     }
+-    else if (report->message == CHECK_INPUT_REDECLARATION && token < count && name.length != 0)
++    else if ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) && token < count && name.length != 0)
+     {
+         const uint32_t previous = report->subject - 1;
+         const uint8_t kind = input->declaration_kinds[token];
+@@ -73,7 +73,7 @@
+                                             linkage == 1 ? "static" : "non-static", (int)name.length, name.pointer,
+                                             prior_linkage == 1 ? "static" : "non-static");
+             }
+-            else if (kind == C_BINDING_FUNCTION)
++            else if (report->message == CHECK_INPUT_CONFLICTING_TYPES)
+             {
+                 result = check_warning_text(scratch, "conflicting types for '%.*s'", (int)name.length, name.pointer);
+             }
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -62,6 +62,7 @@
+         case CHECK_INPUT_CONTINUE: result = "'continue' statement not in loop statement"; break;
+         case CHECK_INPUT_INCOMPLETE_TENTATIVE: result = "tentative definition has incomplete type"; break;
+         case CHECK_INPUT_ENUMERATOR_REDEFINITION: result = "redefinition of enumerator"; break;
++        case CHECK_INPUT_CONFLICTING_TYPES: result = "conflicting types"; break;
+         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
+         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
+         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
