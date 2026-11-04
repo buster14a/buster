@@ -667,7 +667,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 | `flt-rounds` | floating environment, barrier | none | none |
 | `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
 | `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
-| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | none |
+| `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | a statement of register, memory and constant operands whose records name no register but its operands' and whose forms a Tier 0 row takes: an `X86` entry in its caller (`check_asm_row`, [the inline assembly guide](c-inline-assembly.md)'s "Placed in the caller") |
 | `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
 
 A helper's physical effects are `x86_semantics.c`'s, read from its records
@@ -858,7 +858,8 @@ planned where 144 were); SQLite 3.50.4 has none, and its object is unchanged.
 line of the totals over its units (`helpers`, with `units`, `refused`: units the
 lowering refused an operation by name, `direct`: the lowered code's direct
 forms, an atomic access's marked `LOAD`, `STORE` or `SET`, a read/modify/write's
-`ATOMIC_RMW` or `ATOMIC_CAS` and a fence's `FENCE` (but a seq_cst store's own), `helper`: the
+`ATOMIC_RMW` or `ATOMIC_CAS`, a fence's `FENCE` (but a seq_cst store's own) and an
+asm statement's `X86` entry in its caller, `helper`: the
 lowered code's call sites of a helper,
 an explicit builtin's, an implicit `_Atomic` access's, a generic form's and an
 asm statement's alike, and `planned`: helpers emitted) and a line per family
@@ -922,12 +923,78 @@ each, and Tier 1's selection tests keep a load from folding past a fence of any
 order, an atomic load or a read/modify/write, and an atomic load from folding at
 all.
 
-**Pending** (#1059): the other read/modify/writes (compare-exchange, and the
-bitwise, minimum and maximum fetch operations: `lock cmpxchg`, a `lock` form
-where the result is unused, or a compare-exchange loop), C's volatile
-accesses carried to the IR as such, the asm statements' operations placed in
-their callers (slice 4), and the paired 9700X measurements of helper calls,
-save and reload traffic, code size, compile time and runtime.
+**Paired measurements** (#1059). `--helper-forms=LIST` gives every operation
+of the listed families (`fence`, `atomic-access`, `atomic-rmw`, `asm`, or
+`all`) its helper's call where it has a direct form
+(`CheckProgramOptions.helper_forms`, read by the `check_program_direct_*`
+predicates the planner and the lowering ask alike, and by the asm planner): the
+code the compiler made before #1059, of the same compiler, for paired runs. An
+implicit `_Atomic` object's accesses have no helper to take and stay the typed
+stream's. `measure-helpers` (`helpers_measure.c`) builds each program four
+ways, by Tier 0 and by `--tier1`, each as it lowers it and with
+`--helper-forms=all`. Its programs are the primitives' kernels, single-threaded
+loops of a concurrent program's operations (reference counts by `lock xadd`, an
+uncontended spin lock's acquire exchange and release store, a sequence lock's
+acquire and release accesses and fences, flags by `fetch_or`, `fetch_and` and
+`xor_fetch`, a running maximum by a weak compare-exchange, and inline asm's
+`bswap`, `roll` and `leaq`), and speedtest1, whose SQLite's relaxed
+`AtomicLoad` and `AtomicStore` (38 of them, its VDBE loop's interrupt test among
+them) are its direct forms. For each object it reports the families' direct
+forms and helper calls, its executable bytes, and Tier 1's spill and call stores
+and loads (the save and reload traffic: Tier 0 saves the values live across
+every call); every build's output must be the first's; then it times each
+source's `-c` compile and each program's run in rotating rounds, as
+`measure-tier1-programs` times its programs. The 9700X job runs it where the
+direct forms' admission, the helpers' planning or the measurement changes (the
+`helpers` gate), and on the daily and dispatched runs.
+
+On the 9700X ([buster-performance's
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/helpers-direct-1059-2026-11-04),
+#1264's run 41764205497, `znver5`, medians of 11 runs and 5 compiles), every
+direct form is faster than its helper by both tiers. Run time, helpers / direct:
+
+| Program | Tier 0 | `--tier1` |
+| --- | ---: | ---: |
+| `sequence` (fences, acquire and release accesses) | 46.8 | 101.6 |
+| `lock` (acquire exchange, release store) | 4.37 | 4.84 |
+| `swaps` (inline asm) | 3.06 | 1.00 (helpers either way) |
+| `counts` (`lock xadd`) | 1.12 | 1.12 |
+| `maximum` (weak compare-exchange) | 1.07 | 1.65 |
+| `flags` (compare-exchange fetch loops) | 1.03 | 1.05 |
+| speedtest1 (38 relaxed accesses) | 1.00 | 1.02 |
+
+A helper strengthens every order to `seq_cst`, so the runs measure that as well
+as the call: a release or acquire fence is no instruction where its helper is an
+`mfence`, and a release store is a `mov` where its helper is an `xchg`. The
+fetch loops gain least, since each iteration is a `lock cmpxchg` either way:
+Tier 0's direct loop runs more instructions than the helper's leaf (510 M against
+465 M) but takes 3% fewer cycles. So no family keeps its helper for want of a
+gain. Every range of 11 runs is apart from its pair's, except two: speedtest1 by
+Tier 0, and `swaps` by `--tier1`, which runs the same code either way.
+
+The objects' facts:
+- **Helper calls.** The primitives' helpers builds make 25 calls where the
+  direct ones make none (Tier 1's make 4: the asm statements keep their helpers
+  under `--tier1`). speedtest1's make 38 where the direct ones make none.
+- **Code size.** The primitives' text is 2,275 bytes against 2,947 by Tier 0,
+  and 1,875 against 2,579 by `--tier1`. speedtest1's is 687 bytes smaller by
+  Tier 0 and 2,346 by `--tier1` (1,415,994).
+- **Save and reload traffic.** The primitives' Tier 1 code has 5 call stores
+  and 5 loads, where the helpers' has 27 of each. speedtest1's has 47 fewer of
+  each, and 14 fewer spill stores and 16 fewer spill loads.
+- **Run time.** speedtest1 by `--tier1` runs 1.6% faster, in time and in
+  cycles (203.5 against 206.9 ms), and by Tier 0 the same.
+- **Compile time.** speedtest1's `-c` is unchanged: 112.4 against 113.7 ms by
+  Tier 0, and 464.7 against 464.8 by `--tier1`. Instructions are equal to
+  within 0.03%.
+- **The primitives' compile.** At 2 ms its times follow the rotation's order,
+  not the compile's cost: a helpers build runs right after its direct build in
+  4 of the 5 rounds, and takes the same time in the round where it runs first.
+
+**Pending** (#1059): C's volatile accesses carried to the IR as such
+([the IR's guide](ir.md)'s "Effects through the consumers"), asm statements of
+fixed registers, labels, the x87's operands or flag outputs in their callers
+(each keeps its helper), and Tier 1's IR for an asm statement's row.
 
 ## Atomic and terminal helper calls
 

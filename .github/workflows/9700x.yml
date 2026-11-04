@@ -119,6 +119,7 @@ jobs:
       files: ${{ steps.files.outputs.files }}
       compile_time: ${{ steps.files.outputs.compile_time }}
       tier1_programs: ${{ steps.files.outputs.tier1_programs }}
+      helpers: ${{ steps.files.outputs.helpers }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
@@ -2078,6 +2079,30 @@ jobs:
           clang --version | head -1
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler measure-tier1-programs --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+
+      - name: Time the direct forms against their helpers by both tiers
+        # #1059's paired measurements: the primitives' kernels (reference counts, a spin lock, a sequence lock, flags, a
+        # running maximum, inline asm) and speedtest1, each built by this compiler's Tier 0 and --tier1 as it lowers them
+        # and with --helper-forms=all, which gives every operation of a direct form its helper's call. Every build's output
+        # must be the first's; then each source's -c compile in each of 5 rounds and each program's run in each of 11, in an
+        # order that rotates by round, as whole processes on one CPU with their user cycles and instructions, beside each
+        # object's helper calls, executable bytes and Tier 1's spill and call stores and loads
+        # (docs/c-builtins-integration.md has the results). Where `changes` doesn't rule it out (the direct forms' and the
+        # helpers' planning, and the measurement: `helpers`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.helpers != 'false'
+        timeout-minutes: 5
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          # SQLite 3.53.2's test/speedtest1.c (#136's), by its hash, as measure-tier1-programs' step takes it.
+          inputs="$RUNNER_TEMP/helpers-programs"
+          mkdir -p "$inputs"
+          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
+          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" | sha256sum --check
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler measure-helpers --runs 11 --compiles 5 --sqlite "$sqlite" --speedtest "$inputs" --directory /tmp
 
       - name: Benchmark the verified Tier 1 optimization passes
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')

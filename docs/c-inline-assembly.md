@@ -4,15 +4,17 @@ The C driver's lowering compiles GNU C's `asm` statements (#147's "Inline
 assembly" item). `c_check_program_asm.c` plans each statement, `assembler.c`'s
 `asm_assemble_code` assembles its template into records, and
 `c_check_program_lower.c`'s `check_lower_asm` lowers the statement's operands.
-Tier 0 doesn't change: it sees an ordinary call. A naked function's statements
+A statement of plain register, memory and constant operands is placed in its
+caller, as one of Tier 0's machine operations (#1059: "Placed in the caller",
+below); any other is an ordinary call of a helper. A naked function's statements
 are its whole code instead, and the names templates define and refer to become
 symbols of the unit's object or executable.
 
 ## The shape: a helper per statement
 
-A statement whose template assembles to instructions becomes a per-unit helper,
-a leaf function made of its own records, which the statement's code calls
-through Tier 0's `CALL`. That is the shape of the atomic, fence and
+A statement whose template assembles to instructions, and which isn't placed in
+its caller (below), becomes a per-unit helper, a leaf function made of its own
+records, which the statement's code calls through Tier 0's `CALL`. That is the shape of the atomic, fence and
 floating-environment helpers (`c_check_program_helpers.c`), and
 `check_program_emit` publishes the asm helpers with theirs: a local function
 each, named `.Lbuster_asm_N` after its statement, sized, encoded and given its
@@ -42,18 +44,95 @@ none, an output is evaluated as its object's address, which the template leaves
 as it was, and an input as its value, which is dropped. A volatile output isn't
 held, since clang's code loads and stores it.
 
-Why a call rather than records in Tier 0's own code:
+Why a call, for what isn't placed in the caller:
 
-- The template's registers stay out of Tier 0's depth registers and homes, and
-  out of both of its paths. Tier 0 already saves the values live across a call.
+- The template's fixed registers, clobbers and the x87's stack stay out of Tier
+  0's depth registers and homes, and out of both of its paths. Tier 0 already
+  saves the values live across a call.
 - A helper has its own frame and unwind entry, whatever its template does.
-- The cost is a call and a ret per statement run, and nothing for the barriers.
+- The cost is a call and a ret per statement run, its operand block's stores and
+  loads, and nothing for the barriers.
 
-What differs from clang: rsp inside the template is the helper's, not the
+What differs from clang: rsp inside a helper's template is the helper's, not the
 function's. It is 16-byte aligned there, as clang -O0's function bodies have it.
 A template can't reach the function's frame, which Tier 0 lays out otherwise than
-clang anyway. Moving a helper's records into its caller's code would be a
-follow-up, if a measurement shows the call matters.
+clang anyway.
+
+## Placed in the caller (#1059)
+
+A statement whose template's records Tier 0's rows can take is no helper and no
+call: its records are a row of the typed stream's `X86` entry
+(`Tier0Operation`), which names its registers by role, as an x86 builtin's does,
+and which Tier 0 places among the caller's values at the statement's place
+(`check_asm_row`, `check_lower_asm`). Its operands are the entry's, in clang's
+order of evaluation, the order a helper's operand block is filled in: each
+output's address, a `+` register output's value loaded through it, then each
+input's value (a matching input's converted to its output's type, a narrower
+integer zero-extended) or a memory input's address. In the template:
+
+- a general register operand is its value's operand, `INTEGER(j)`, and an XMM
+  one of a `float` or a `double` `FLOATING(j)`; a memory operand's base is its
+  address's operand; a constant is the immediate it prints;
+- a register output is its `+` value's operand or its matching input's, or else
+  a scratch register (`SCRATCH(k)`, or the floating stack's free `VECTOR(k)`),
+  which no operand is in, as an early clobber needs (and as an output that
+  shares no register asks no more of);
+- after the template, the row stores each register output through its
+  address, at its width (`mov` of 1, 2, 4 or 8 bytes, `movss`, `movsd`), in
+  order.
+
+The entry's result is `VOID`. Tier 0 places the operands in its depth registers
+and the scratch ones past them, so the values live below them, in depth
+registers, homes and deep slots, are no register the row touches. The function
+reserves its vectors' slots only for a `VECTOR` value
+(`tier0_vector_slots`), so a placed statement's function keeps its frame's
+size. `bswap %0` of a `+r` `unsigned` is `mov ecx, [rax]; bswap ecx; mov [rax],
+ecx` after its address; `__asm__ volatile("mfence\n\tlfence\n\tsfence\n\tpause")`
+in a function of nothing else is those four instructions and its `ret`.
+
+A row reads and writes its operands, its scratch registers, the flags and
+memory, and nothing else Tier 0 keeps (`tier0_operation_valid`). So a statement
+is placed only where its records name no register but its operands', once the
+roles replace them, and every form is one a row takes, by `x86_semantics.c`'s
+effects: a VEX, EVEX or SSE form of named operands, or a general-purpose one
+(`tier0_operation_general_effects`) without implicit registers (mul's rdx, a
+shift's cl, cpuid's, rdtsc's, syscall's), the stack (push, pop, leave),
+control flow (a branch, a jump or call through a register, a return, a trap),
+the direction flag (cld, std) or the x87's state, and covered: a form the tables
+don't cover (clflush, ldmxcsr) has the conservative record of every register.
+`lfence`, `sfence`, `pause` and the data prefetches have rows of their own
+there (#1059), beside `mfence`'s.
+
+To find the literal registers, the template is assembled a second time for the
+row, its operands in registers of `check_asm_row_registers` (none rax, whose
+accumulator forms name it implicitly) and xmm1 to xmm15. A literal register is
+then one no role maps: an extended statement's template writes one `%%rax`, so
+it takes no `%%`, nor a syntax switch, which Intel's bare names would need. A
+high byte register (`%h0`), an /is4 operand, a YMM or ZMM register, MMX's and the
+segment registers are refused too; the opmask registers by number are a row's
+as they are. The clobbers are then the records': `cc` and `memory` need
+nothing, as Tier 0 keeps no flags and no memory values across an entry, and a
+register clobber names one the records don't write.
+
+The operands it takes are a general register's of any of the sixteen (`r`,
+`q`, `g` where it isn't a constant: not a fixed register, `Q`'s or `R`'s smaller
+class, or an explicit register variable's), an XMM register's of a `float` or a
+`double` (`x` and `v`, not fixed), memory (`m`, `o`, `V`), and constants; at
+most 8 operands and 8 records with the stores, 4 scratch registers. A template
+with a label, a branch or a symbol, an asm goto, the x87's operands and flag
+outputs keep their helpers. A statement the planner doesn't place keeps its
+exact helper: nothing changes for it.
+
+The template's rsp is its function's, but no placed template names it: rsp is
+no operand's register and no literal is placed. A placed statement changes
+neither the frame nor its unwind entry, which `unwind_tier0_frame` reads from
+the function's records as it reads Tier 0's own. Placement is Tier 0's alone:
+Tier 1's IR has no operation for a placed statement's row (`ir_simd_typed_row`
+decodes only the vector and mask rows of the x86 builtins), so a lowering the IR
+takes keeps every statement's helper (`CheckProgramOptions.asm_helpers`): the
+C driver's `--tier1` and the IR's source tools (`test-ir-source`,
+`test-tier1-cfg-source`), whose functions call it as before. `--helper-report`
+counts each placed statement as the `asm` family's direct form.
 
 ## Naked-function checking
 
@@ -537,6 +616,10 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 
 The planning, the substitution and the helper's records are scalar, a statement
 at a time. The assembler's lexer, parser and matcher run by the checker's path.
+A statement placed in its caller assembles its template a second time, in the
+row's registers (`check_asm_row`); one placed costs that assembly, and saves the
+helper's whole function (its sizing, encoding, unwind entry and emission) and
+its call's operand block.
 A unit has few statements: each of `main.c`'s units has 58, of which 30 make
 helpers. On the 9700X, pinned to CPU 2, `-c` of 1,000 functions of four
 statements each (registers with a modifier, a barrier, cpuid's fixed registers,
@@ -572,6 +655,19 @@ has the commands, the logs and the default path's numbers against main.
 - `test-checker` compiles programs of each shape with both of the checker's
   paths and runs them against clang -O0's build of the same source
   (`c_check_program_asm_test.c`):
+  - statements placed in their callers (#1059): values live across them in
+    depth registers and homes, in a loop and under an expression 18 values deep
+    (the deep slots); tied operands (`+`, a matching input narrower than its
+    output) and early clobbers (an output written before the inputs are read,
+    two at once); narrow outputs (a byte from `%b`, a `bool` from `setz`); memory
+    operands under locked forms, an array element whose index has a side effect,
+    and a memory input; the flags changed inside a condition's chain and between
+    a loop's compares; XMM operands with floating values live across; fences,
+    pause and prefetches in a loop. The placement test plans each statement by
+    both paths into the same rows, checks their records, roles and stores, and
+    the statements that keep their helpers: fixed registers, a literal register,
+    a branch, a syntax switch, more records than a row takes, an x87 operand,
+    ldmxcsr (uncovered), an explicit register variable and `Q`'s class;
   - barriers;
   - registers, matching inputs, early clobbers, constants and modifiers;
   - named operands;
@@ -677,11 +773,24 @@ has the commands, the logs and the default path's numbers against main.
   clang's too: its `.L` and numeric labels are the assembler's temporary
   symbols, its undefined `.globl` declaration and `.set` absolute are left out,
   and its `.hidden` label has its visibility as clang's object gives it.
+- `test-checker-driver` reads a placed statement's instructions from its
+  function's own records in `-c`'s object, with no call, by both paths, and
+  `--tier1`'s calls of the statements' helpers in Tier 1's code of the function;
+  and runs an executable whose callee between two placed statements counts its
+  stack by glibc's `backtrace` through the function's unwind entry, one frame
+  more than main's, by both paths and with `--tier1`.
+- `test-tier0` checks which general-purpose forms a row takes and refuses.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the
   branch columns, the references, each refusal, and the arenas after a failure.
   `--cross-check` compares the newly admitted instructions with GNU as.
 
 ## Pending
+
+What placement in the caller doesn't take yet (#1059), each keeping its helper:
+fixed registers and explicit register variables (cpuid, rdtsc, syscall, a
+compare-exchange's `"a"`), which a row's roles can't name; templates of labels
+and branches; the x87's operands and flag outputs; and Tier 1, whose IR has no
+operation for a row it doesn't decode, so that its lowering keeps the helpers.
 
 What the lowering still refuses of what GCC and clang take:
 

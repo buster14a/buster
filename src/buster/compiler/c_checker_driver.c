@@ -2951,8 +2951,10 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
-    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report).
+    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), and
+    // --helper-forms' families, whose operations take their helpers (CheckProgramOptions.helper_forms).
     CheckHelperReport* helper_report;
+    uint32_t helper_forms;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
@@ -3332,6 +3334,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .scalar = scalar,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
+                        .asm_helpers = lanes != NULL && lanes->tier1,
+                        .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                     });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
@@ -3741,6 +3745,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
     lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
     bool invalid_lanes = false;
+    bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
     // function Tier 0 compiled with the step that refused it, on standard error; --tier1-no-rematerialize compiles Tier
@@ -3916,6 +3921,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             helper_report = true;
         }
+        else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
+        {
+            // #1059's paired measurements: the families, by --helper-report's names (or `all`), whose operations take
+            // their helpers where they have a direct form.
+            const uint32_t forms = check_helper_forms_parse(arguments[i] + 15);
+            if (forms == 0)
+            {
+                fprintf(stderr, "error: --helper-forms= takes a comma-separated list of fence, atomic-access, atomic-rmw and asm, or all\n");
+            }
+            invalid_helper_forms |= forms == 0;
+            lanes.helper_forms = forms;
+        }
         else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
         {
             lanes.tier1_no_rematerialize = true;
@@ -4072,7 +4089,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
@@ -4135,6 +4152,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
         .helper_report = &lanes.helper_report,
+        .helper_forms = lanes.helper_forms,
     };
     if (worker_budget.dry_run)
     {
@@ -4165,7 +4183,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
