@@ -519,6 +519,8 @@ static const Tier1CertEmittedVectorMove tier1_cert_emitted_vector_moves[] = {
     { X86_FORM_VMOVDQU32_ZM512_Z, 64, false, false, true, 32 },
     { X86_FORM_VMOVDQU64_Z_ZM512, 64, true, true, true, 32 },
     { X86_FORM_VMOVDQU64_ZM512_Z, 64, false, false, true, 32 },
+    // An 8-byte SSE carrier's copy (#1280, tier1_select_carrier_move), the rest of its destination zeroed.
+    { X86_FORM_VMOVQ_X_XM64_EVEX, 8, true, true, false, 32 },
 };
 
 static const Tier1CertEmittedVectorMove* tier1_cert_emitted_vector_move(uint16_t form)
@@ -547,8 +549,12 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
     const bool load32 = form == X86_FORM_MOV_R32_RM32;
     const bool store64 = form == X86_FORM_MOV_RM64_R64;
     const bool store32 = form == X86_FORM_MOV_RM32_R32;
-    const Tier1CertEmittedVectorMove* vector = tier1_cert_emitted_vector_move(form);
-    if ((load64 || load32 || store64 || store32) && (direct || memory) && record.reg < 16)
+    const bool general = (load64 || load32 || store64 || store32) && (direct || memory) && record.reg < 16;
+    const Tier1CertEmittedVectorMove* vector = general ? 0 : tier1_cert_emitted_vector_move(form);
+    // A 4-byte SSE carrier's copy (#1280, tier1_select_carrier_move): vinsertps of the source's element 0 into element 0,
+    // elements 1 to 3 zeroed (immediate 0x0e), the source its vvvv too: a 4-byte move, the rest of its destination zeroed.
+    const bool insert = form == X86_FORM_VINSERTPS_X_X_XM32_IMM8_EVEX && direct && record.immediate == 0x0e && record.vvvv == record.rm && record.reg < 32 && record.rm < 32;
+    if (general)
     {
         const uint32_t width = load64 || store64 ? 8 : 4;
         const uint32_t rm = direct ? (record.rm < 16 ? tier1_cert_emitted_gpr(record.rm, width) : BUSTER_CERT_NONE) : tier1_cert_emitted_memory(build, record, width);
@@ -557,12 +563,17 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
     }
     else if (vector != 0 && ((direct && vector->direct) || (memory && vector->memory)) && record.reg < vector->registers && (!direct || record.rm < vector->registers))
     {
-        // The vector class's (#1284): a floating value's movaps and movss or movsd, a vector's vmovdqa64 and vmovdqu32, a
-        // part's movsd, movups, vmovdqu or vmovdqu64 (#789), at their forms' widths. A load from memory zeroes the rest of
+        // The vector class's (#1284): a floating value's movaps and movss or movsd, a vector's vmovdqa64 and vmovdqu32, an
+        // SSE carrier's vmovq (#1280), a part's movsd, movups, vmovdqu or vmovdqu64 (#789), at their forms' widths. A load from memory zeroes the rest of
         // an xmm register (its scalar view's write extent), and in a wide function every write kills the whole register.
         const uint32_t rm = direct ? tier1_cert_emitted_vector(build, record.rm, vector->width) : tier1_cert_emitted_memory(build, record, vector->width);
         a = vector->load ? tier1_cert_emitted_vector(build, record.reg, vector->width) : rm;
         b = vector->load ? rm : tier1_cert_emitted_vector(build, record.reg, vector->width);
+    }
+    else if (insert)
+    {
+        a = tier1_cert_emitted_vector(build, record.reg, 4);
+        b = tier1_cert_emitted_vector(build, record.rm, 4);
     }
     else
     {
@@ -587,8 +598,9 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
             }
         }
     }
-    // A move's fields but its registers, its mode and a memory operand's displacement are zero.
-    const bool exact = record.immediate == 0 && record.index == 0 && record.vvvv == 0 && record.decorations == 0 && (!direct || record.displacement == 0);
+    // A move's fields but its registers, its mode and a memory operand's displacement are zero (but a carrier's vinsertps'
+    // immediate and vvvv, checked above).
+    const bool exact = (insert || (record.immediate == 0 && record.vvvv == 0)) && record.index == 0 && record.decorations == 0 && (!direct || record.displacement == 0);
     bool valid = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE && exact;
     if (valid)
     {

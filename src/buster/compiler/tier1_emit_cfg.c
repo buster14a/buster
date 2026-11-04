@@ -2206,6 +2206,12 @@ static uint8_t tier1_emit_cfg_take(uint32_t* free)
 // 0's). A move into place never overwrites another's source: its destination is free or a vector role's.
 // `sources` are the operands' registers at the node's use phase, as a kernel's holes are, before its definition phase's
 // moves, which may take an operand's register for the definition or store an operand live past the node into its slot.
+// An SSE carrier (#1280: a vector of 4 or 8 bytes, an f32 or f64 in the IR) has zeros past its bytes in its role's
+// register, as Tier 0's operand has them (its reload's vmovd or vmovq), which rows rely on: each carrier operand moves
+// into its role zero-extended (tier1_select_carrier_move), whatever made its value, a parameter or a call's result
+// (whose upper lanes the convention leaves undefined) among them. A row's carrier result moves into its destination
+// zero-extended too, at no cost (it replaces a whole register's copy; a zero-record shuffle's result is its wider
+// operand), so that a carrier a row, a load or a constant makes has zeros past its bytes in its own register.
 static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, const uint8_t* sources, uint32_t node, uint32_t use, Tier1EmitBuffer* buffer)
 {
     const IrFunction* function = plan->function;
@@ -2380,7 +2386,12 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         const bool writes = ((written >> j) & 1) != 0 || alias;
         if (tier0_class_vector(class))
         {
-            records[count++] = tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j])->move, (uint8_t)(placement.vector + j), (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION));
+            // An SSE carrier (#1280) zero-extended into its role: its value's register may hold anything past its bytes
+            // (a parameter's or a call result's, whose upper lanes the convention leaves undefined).
+            const uint8_t role = (uint8_t)(placement.vector + j);
+            const uint8_t own = (uint8_t)(location - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
+            records[count++] = row->operand_bytes[j] < 16 ? tier1_select_carrier_move(role, own, row->operand_bytes[j]) :
+                                                            tier1_select_register_record(tier1_select_vector_forms(row->operand_bytes[j])->move, role, own);
         }
         else if (tier0_class_floating(class))
         {
@@ -2445,7 +2456,9 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
     }
     if (error == TIER1_EMIT_OK && result_moves)
     {
-        records[count++] = tier0_class_vector(result_class)   ? tier1_select_register_record(tier1_select_vector_forms(row->result_bytes)->move, (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION), result_register) :
+        const uint8_t vector_destination = (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION);
+        records[count++] = tier0_class_vector(result_class) && row->result_bytes < 16 ? tier1_select_carrier_move(vector_destination, result_register, row->result_bytes) :
+                           tier0_class_vector(result_class)   ? tier1_select_register_record(tier1_select_vector_forms(row->result_bytes)->move, vector_destination, result_register) :
                            tier0_class_floating(result_class) ? tier1_select_register_record(tier1_select_vector_forms(16)->move, (uint8_t)(destination - BUSTER_TIER1_EMIT_VECTOR_LOCATION), result_register) :
                            tier0_class_mask(result_class)     ? tier1_select_register_record(tier1_select_mask_forms(row->result_bytes)->move, (uint8_t)(destination - BUSTER_TIER1_EMIT_MASK_LOCATION), result_register) :
                                                                 tier1_select_move(tier0_class_bytes(result_class) == 8 ? 8 : 4, destination, result_register);

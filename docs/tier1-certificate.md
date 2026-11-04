@@ -542,7 +542,10 @@ The decoding:
   8-byte use fails. So are a vector's `vmovdqa64` and `vmovdqu32` of 16, 32 and
   64 bytes and an aggregate part's `movups`, `vmovdqu` and `vmovdqu64` (#1284):
   a ymm or zmm value moved through its xmm register is a 16-byte value, and its
-  wider use fails. A recomputation is a constant's edit only where
+  wider use fails. An SSE carrier's copies (#1280, `tier1_select_carrier_move`)
+  are its 8 bytes' `vmovq` and its 4 bytes' `vinsertps` of element 0 with the
+  others zeroed (immediate `0x0e`, its source in vvvv too); any other immediate
+  is no move. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
   value its origin names.
 - **Nodes.** Each node's records are regenerated from the allocation's
@@ -699,9 +702,9 @@ Since #1284, `main.c` with `./build.sh`'s znver5 flags certifies 1082 of its
 labels and variadic definitions, and the c-testsuite subset 284 of 297 (231
 before), the rest switch tables, a VLA, long doubles and variadic
 definitions; none refused. `test-checker-driver --executable`'s Tier 1
-fixtures check their counts: the machine rows', the vectors', the 64-byte
-arguments', the rarer aggregate shapes' and the thread-locals' code all
-certified, the by-value aggregates' but its variadic definition's, the wide
+fixtures check their counts: the machine rows', the SSE carriers', the
+vectors', the 64-byte arguments', the rarer aggregate shapes' and the
+thread-locals' code all certified, the by-value aggregates' but its variadic definition's, the wide
 values' but its long doubles' and its variadic definition's.
 
 **Cost.** `benchmark-tier1-code-certificate [--only emit|decode|check|certify]
