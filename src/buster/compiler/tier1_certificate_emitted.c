@@ -25,8 +25,9 @@
 //   operands read where the allocation has them at its use phase, every register and frame byte its records write
 //   killed, its definition where the allocation's interval starts. A register its records give back as they found it is
 //   not killed: the first record copies it whole into another register, the last copies it back, and nothing between
-//   writes the copy, leaves the node or calls (the compare-exchange's rax, kept in r11 around its lock cmpxchg). A call's sequence is checked against what the IR says
-//   it is (its target, al, the result's extension into its register), its arguments read in their ABI registers.
+//   writes the copy, leaves the node or calls (the compare-exchange's rax, kept in r11 around its lock cmpxchg). A
+//   call's sequence is checked against what the IR says it is (its target, al, the result's extension into its
+//   register), its arguments read in their ABI registers.
 // - Control: each block's tail (its jumps and its edges' moves) is walked for each successor; every path must reach the
 //   successor's first record through that edge's moves alone, or reach a successor whose only predecessor it is, whose
 //   first records are that edge's moves. Every branch target is a block's or a stub's start.
