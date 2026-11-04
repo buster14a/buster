@@ -22,9 +22,11 @@ requirements. [Command index](README.md).
   unwind tables so, one EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
   frame against the analyzer and actual Tier 0 code, a frame pointer's and
-  realigned frames' among it, with native GDB/perf consumers. A missing perf
+  realigned frames' among it, with native GDB/perf consumers. A missing perf,
+  or one whose `perf --version` fails,
   is probed once before the fixtures and each sampled section prints
-  `skipped: needs perf, not found on PATH`; a present perf's wrong samples
+  `skipped: needs perf, not found on PATH` (or
+  `--version exited with status N`); a present perf's wrong samples
   still fail. `benchmark-unwind` charges
   analysis/emission to the existing Tier 0, sizing and encoding chain,
   including per-function arena cleanup, and the driver's published frame

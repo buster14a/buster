@@ -220,8 +220,9 @@ static bool test_tool_drain(int fd, char* text, size_t capacity, size_t* length)
 }
 
 // Runs `command --version`, its standard output and errors into `text`, and waits for it: 0 when it ran to the end and
-// exited 0, -1 when it couldn't start (*error says why), -2 when it ran but didn't exit 0 and -3 when it didn't end
-// within test_tool_run_seconds, in which case it was killed and reaped. `text` holds as much of what it wrote as
+// exited 0, -1 when it couldn't start (*error says why), -2 when it ran but didn't exit 0 (*error is its exit status, or
+// 128 plus the signal that ended it) and -3 when it didn't end within test_tool_run_seconds, in which case it was
+// killed and reaped. `text` holds as much of what it wrote as
 // `capacity` keeps.
 static int test_tool_run_version(const char* command, char* text, size_t capacity, int* error)
 {
@@ -302,6 +303,7 @@ static int test_tool_run_version(const char* command, char* text, size_t capacit
             if (exited)
             {
                 result = WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -2;
+                *error = WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 0;
             }
             else
             {
@@ -377,9 +379,16 @@ static TestTool test_tool_probe(const char* name, const char* command, const uin
         tool.timed_out = true;
         snprintf(tool.unavailable, sizeof(tool.unavailable), "didn't end within %u s", test_tool_run_seconds);
     }
+    else if (ran == -2)
+    {
+        // A tool that starts but can't report its version (a wrapper saying the running kernel has no perf) is no more
+        // usable than a missing one, minimum or not: its consumers would only fail opaquely.
+        tool.failed = true;
+        snprintf(tool.unavailable, sizeof(tool.unavailable), "--version exited with status %d", error);
+    }
     else
     {
-        tool.version_parsed = ran == 0 && test_tool_parse_version(text, tool.version, &tool.version_count);
+        tool.version_parsed = test_tool_parse_version(text, tool.version, &tool.version_count);
         if (tool.version_parsed)
         {
             test_tool_format_version(tool.version, tool.version_count, tool.version_text, sizeof(tool.version_text));
@@ -389,7 +398,7 @@ static TestTool test_tool_probe(const char* name, const char* command, const uin
             snprintf(tool.unavailable, sizeof(tool.unavailable), "version unreadable");
         }
     }
-    tool.available = tool.found && !tool.timed_out && (tool.minimum_count == 0 || (tool.version_parsed && test_tool_compare(tool.version, tool.version_count, tool.minimum, tool.minimum_count) >= 0));
+    tool.available = tool.found && !tool.timed_out && !tool.failed && (tool.minimum_count == 0 || (tool.version_parsed && test_tool_compare(tool.version, tool.version_count, tool.minimum, tool.minimum_count) >= 0));
     return tool;
 }
 
@@ -415,11 +424,7 @@ static void test_tool_skip_to(FILE* stream, const TestTool* tool, const char* se
                 fprintf(stream, i == 0 ? "%u" : ".%u", tool->minimum[i]);
             }
         }
-        if (!tool->found)
-        {
-            fprintf(stream, ", %s", tool->unavailable);
-        }
-        else if (tool->timed_out)
+        if (!tool->found || tool->timed_out || tool->failed)
         {
             fprintf(stream, ", %s", tool->unavailable);
         }
@@ -592,6 +597,19 @@ static uint32_t test_tool_test(void)
         target_written = close(target_descriptor) == 0 && target_written;
     }
     test_tool_check(target_written, "the target-prefixed tool is written", &failures, &checks);
+    // A tool that starts but whose --version fails, as a perf wrapper does on a kernel without its perf: unavailable
+    // even where no minimum is asked, since its consumers would fail opaquely.
+    char failing_path[4200];
+    snprintf(failing_path, sizeof(failing_path), "%s/buster-test-tool-XXXXXX", temporary);
+    const int failing_descriptor = mkstemp(failing_path);
+    const char failing_script[] = "#!/bin/sh\nprintf 'WARNING: perf not found for kernel 6.18.44\\n'\nexit 2\n";
+    bool failing_written = failing_descriptor >= 0 && write(failing_descriptor, failing_script, sizeof(failing_script) - 1) == (ssize_t)(sizeof(failing_script) - 1) &&
+                           fchmod(failing_descriptor, 0755) == 0;
+    if (failing_descriptor >= 0)
+    {
+        failing_written = close(failing_descriptor) == 0 && failing_written;
+    }
+    test_tool_check(failing_written, "the failing tool is written", &failures, &checks);
     const uint32_t minimum_fifteen[] = { 15 };
     const uint32_t minimum_sixteen[] = { 16 };
     const uint32_t minimum_seventeen[] = { 17 };
@@ -609,6 +627,18 @@ static uint32_t test_tool_test(void)
     const TestTool unreadable = quiet_written ? test_tool_probe("quiet", unreadable_path, minimum_sixteen, 1) : missing;
     test_tool_check(quiet_written && unreadable.found && !unreadable.version_parsed && !unreadable.available && strcmp(unreadable.unavailable, "version unreadable") == 0,
                     "a tool without a version can't meet one", &failures, &checks);
+    TestTool failing = { 0 };
+    TestTool failing_minimum = { 0 };
+    if (failing_written)
+    {
+        failing = test_tool_probe("perf", failing_path, 0, 0);
+        failing_minimum = test_tool_probe("perf", failing_path, minimum_sixteen, 1);
+    }
+    test_tool_check(failing_written && failing.found && failing.failed && !failing.version_parsed && !test_tool_available(&failing) &&
+                        strcmp(failing.unavailable, "--version exited with status 2") == 0,
+                    "a tool whose --version fails is unavailable without a minimum", &failures, &checks);
+    test_tool_check(failing_written && failing_minimum.found && failing_minimum.failed && !test_tool_available(&failing_minimum),
+                    "a tool whose --version fails is unavailable with a minimum, though its output holds digits", &failures, &checks);
     TestTool hanging = { 0 };
     if (hanging_written)
     {
@@ -693,6 +723,10 @@ static uint32_t test_tool_test(void)
     {
         test_tool_check_skip(&unreadable, "test unreadable", "test unreadable: skipped: needs quiet >= 16, found version unreadable\n", &failures, &checks);
     }
+    if (failing_written)
+    {
+        test_tool_check_skip(&failing, "test failing", "test failing: skipped: needs perf, --version exited with status 2\n", &failures, &checks);
+    }
     if (hanging_written)
     {
         test_tool_check_skip(&hanging, "test hanging", "test hanging: skipped: needs gcc >= 16, didn't end within 1 s\n", &failures, &checks);
@@ -732,6 +766,10 @@ static uint32_t test_tool_test(void)
     if (target_descriptor >= 0)
     {
         unlink(target_path);
+    }
+    if (failing_descriptor >= 0)
+    {
+        unlink(failing_path);
     }
     unlink(pid_path);
     printf("test tools: %u checks, %u failed\n", checks, failures);

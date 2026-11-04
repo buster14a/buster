@@ -23,7 +23,9 @@ dotted run with the most components after the line's first `)`, or before its
 doesn't hide it — and compares it with a minimum; `test_tool_available`
 says whether the tool may be used; `test_tool_skip` prints
 `SECTION: skipped: needs NAME >= V, found W`, or `not found on PATH`, or
-`found version unreadable`, or `didn't end within N s`, a deadline whose kill
+`found version unreadable`, or `--version exited with status N` (a tool that
+starts but can't report its version is unavailable even without a minimum), or
+`didn't end within N s`, a deadline whose kill
 takes the whole group so a wrapper's subprocesses die with it. A skipped section is
 not a correctness failure, so the rest of the command still runs and its real
 failures still fail; a tool
@@ -33,10 +35,10 @@ probe before their sections: perf in `test-unwind --cross-check` and
 version) in `test-calling-convention --cross-check` and `test-x86-target`, and
 binutils 2.46 or later's `as` in `test-x86-target` and `as`/`objdump` in
 `test-x86-disassembler --objdump` and `--file` (2.47 is the qualified 9700X
-version), whose whole oracle is then unavailable and whose exit status is 77
+version), plus `objcopy` for `--objdump`'s reassembly, whose whole oracle is then unavailable and whose exit status is 77
 (the runner's skip code).
 `./build/compiler test-tool` checks the helper's parsing, comparison, missing
-tool, unreadable version, hanging tool and skip text without the real tools;
+tool, unreadable version, failing `--version`, hanging tool and skip text without the real tools;
 extra arguments are a usage error.
 
 ## The parallel runner

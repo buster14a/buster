@@ -941,11 +941,13 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     uint64_t failures = 0;
     uint64_t checked = 0;
     // The objdump paths need binutils 2.46's forms and listings (2.47 is the qualified 9700X version): as reassembles
-    // the catalogue's operands and objdump decodes them. Probe each once; a missing or older one skips those sections
-    // and leaves the rest's failures to fail the command.
+    // the catalogue's operands and objdump decodes them, and objcopy (any version: only -O binary -j .text) extracts the
+    // reassembled bytes. Probe each once; a missing or older one skips those sections and leaves the rest's failures to
+    // fail the command. The raw --file oracle runs objdump alone.
     const uint32_t minimum[] = { 2, 46 };
     TestTool as_tool = { 0 };
     TestTool objdump_tool = { 0 };
+    TestTool objcopy_tool = { 0 };
     bool oracle_ready = false;
     bool raw_ready = false;
     bool skipped = false;
@@ -953,7 +955,11 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     {
         as_tool = test_tool_probe("as", "as", minimum, 2);
         objdump_tool = test_tool_probe("objdump", "objdump", minimum, 2);
-        oracle_ready = oracle && test_tool_available(&as_tool) && test_tool_available(&objdump_tool);
+        if (oracle)
+        {
+            objcopy_tool = test_tool_probe("objcopy", "objcopy", 0, 0);
+        }
+        oracle_ready = oracle && test_tool_available(&as_tool) && test_tool_available(&objdump_tool) && test_tool_available(&objcopy_tool);
         raw_ready = raw != 0 && test_tool_available(&objdump_tool);
     }
     if (oracle && !oracle_ready)
@@ -965,6 +971,10 @@ static int run_x86_disassembler_tests(int argc, char** argv)
         if (!test_tool_available(&objdump_tool))
         {
             test_tool_skip(&objdump_tool, "disassembler GNU objdump oracle");
+        }
+        if (!test_tool_available(&objcopy_tool))
+        {
+            test_tool_skip(&objcopy_tool, "disassembler GNU objdump oracle");
         }
         skipped = true;
     }
