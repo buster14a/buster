@@ -98,7 +98,7 @@ static bool check_lower_batch_proof(const CheckValue* value, CheckOp op)
 
 // These nodes only schedule one checked operand. Their operation-specific helpers own all conversions,
 // truth tests and effects; unrelated expression classes and operands need not be loaded first.
-static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWriter* writer, uint32_t node, bool address)
+static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWriter* writer, uint32_t node, bool address, bool marked)
 {
     const CheckStream* stream = writer->program->stream;
     const CheckGraph* graph = &writer->program->input->graph;
@@ -108,7 +108,7 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const bool plain = (wrapper || truth) && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE;
     if (plain)
     {
-        writer->token = graph->tokens[node];
+        writer->token = marked ? node | BUSTER_CHECK_LOWER_TOKEN_NODE : graph->tokens[node];
         if (wrapper)
         {
             check_lower_operand(writer, node, 0, op == CHECK_OP_SELECT && address, op == CHECK_OP_SELECT ? 0 : check_stream_type(stream, node));
