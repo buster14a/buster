@@ -5189,7 +5189,22 @@ change, it refused such a declaration by name.
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
-  arguments, to the statement's end (`check_input_loop_statement_end`).
+  arguments, to the statement's end (`check_input_loop_statement_end`). The
+  callee is its name through parentheses and the prefix `*`, `&` and `+`
+  (`(f)()`, `(*f)()`, `(&f)()`), as clang's `getCalleeDecl` finds it
+  (`check_input_callee_name`).
+- **Selections in statement attributes.** clang's `CallExprFinder` and
+  `HasSideEffects` visit a `_Generic`'s or a `__builtin_choose_expr`'s
+  selected arm alone, so a call or a side effect in another arm, or in
+  `_Generic`'s controlling expression, counts for none of `nomerge`,
+  `noinline`, `always_inline` and `assume` (`check_input_unselected`). An
+  assumption's argument is evaluated where it is read, and the evaluator
+  records the arm it takes (`CheckInputReader.selection_arms`). A statement
+  with a selection is checked once the reader's selections are read
+  (`check_input_statement_defer` and `check_input_statement_deferred`), with
+  its callees' declarations as the bindings resolved them: a speculative
+  evaluation as the statement is read would append binding events out of
+  their order.
   MSVC's `forceinline` and `forceinline_calls` are ignored off its ABI with
   "'X' attribute ignored", at the statement or, on a function, at the
   attribute after its subject's check. An asm statement's C23 attributes are

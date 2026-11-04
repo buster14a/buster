@@ -1360,6 +1360,19 @@ struct CheckInputReader
     uint32_t* fallthrough_tokens;
     uint32_t fallthrough_count;
     uint32_t fallthrough_capacity;
+    // The statement attributes' checks of a statement with a _Generic or __builtin_choose_expr in it (#147: nomerge's, and
+    // clang's statement noinline's and always_inline's), whose calls are its selections' selected arms' alone: recorded
+    // as the statement is read (check_input_statement_defer), and made once the selections are read
+    // (check_input_statement_deferred).
+    struct CheckInputDeferredStatement* deferred_statements;
+    uint32_t deferred_statement_count;
+    uint32_t deferred_statement_capacity;
+    // While an assumption's argument is evaluated (#147, check_input_assume_effects): the arm each selection's evaluation
+    // takes, two words (its first token, and the one past its last) per token from selection_arm_base to selection_arm_end
+    // (past the last), by the selection's `)`; 0, 0 for none.
+    uint32_t* selection_arms;
+    uint32_t selection_arm_base;
+    uint32_t selection_arm_end;
     uint32_t kr_diagnostic_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
@@ -10695,6 +10708,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 || BUSTER_SCALAR_PATH(parser->options.scalar))
                 {
                     check_input_selections(&reader);
+                }
+                if (reader.deferred_statement_count != 0 && !input->resource)
+                {
+                    check_input_statement_deferred(&reader);
                 }
                 if (complete_translation_unit && input->report_count == input->diagnostic_report_count)
                 {

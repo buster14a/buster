@@ -218,22 +218,134 @@ static bool check_input_statement_attribute_names(CheckInputReader* reader, uint
     return result;
 }
 
+// The arm of the selection (a _Generic or a __builtin_choose_expr) at `keyword` whose `)` is `close` that its evaluation
+// takes (#147), from *arm_first to *arm_end (past its last): the evaluator's record of it while an assumption's argument
+// is evaluated (CheckInputReader.selection_arms), or, once the selections are read (`selected`), the arm that holds the
+// root the reader selected (CheckInputReader.selected_tokens): a _Generic's association's expression after its colon, a
+// __builtin_choose_expr's second or third operand. False where neither says.
+static bool check_input_selected_arm(const CheckInputReader* reader, uint32_t keyword, uint32_t close, bool selected, uint32_t* arm_first, uint32_t* arm_end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t* arms = reader->selection_arms;
+    const uint32_t at = close - reader->selection_arm_base;
+    const bool recorded = arms != NULL && close >= reader->selection_arm_base && close < reader->selection_arm_end && arms[2 * at + 1] != 0;
+    const uint32_t chosen = !recorded && selected && reader->selected_tokens != NULL ? reader->selected_tokens[close] : BUSTER_CHECK_NONE;
+    const uint32_t root = chosen != BUSTER_CHECK_NONE ? chosen & ~CHECK_INPUT_SOURCE_SELECTION : BUSTER_CHECK_NONE;
+    bool result = recorded;
+    *arm_first = recorded ? arms[2 * at] : 0;
+    *arm_end = recorded ? arms[2 * at + 1] : 0;
+    const bool generic = parser->tokens.names[keyword] == C_NAME_GENERIC;
+    const uint32_t separator = root != BUSTER_CHECK_NONE ? check_constant_punctuation(parser, keyword + 2, close, PARSE_KIND_COMMA) : close;
+    uint32_t item = separator + 1;
+    while (!result && item < close)
+    {
+        const uint32_t colon = generic ? check_constant_punctuation(parser, item, close, PARSE_KIND_COLON) : item - 1;
+        const uint32_t after = colon < close ? check_constant_punctuation(parser, colon + 1, close, PARSE_KIND_COMMA) : close;
+        result = colon + 1 <= root && root < after;
+        *arm_first = result ? colon + 1 : 0;
+        *arm_end = result ? after : 0;
+        item = after + 1;
+    }
+    return result;
+}
+
+// The tokens from `first` to `end` that an evaluation of them doesn't reach through their selections (#147): each
+// _Generic's and __builtin_choose_expr's but its selected arm's (check_input_selected_arm), its controlling expression's
+// among them, as clang's EvaluatedExprVisitor and HasSideEffects visit a selection's result alone. In `skipped`, a byte
+// per token from `first`; a selection whose arm isn't known skips nothing.
+static void check_input_unselected(const CheckInputReader* reader, uint32_t first, uint32_t end, bool selected, uint8_t* skipped)
+{
+    const Parser* parser = reader->parser;
+    memset(skipped, 0, end - first);
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        const uint32_t name = parser->tokens.names[token];
+        const bool selection = skipped[token - first] == 0 && (name == C_NAME_GENERIC || name == C_NAME_BUILTIN_CHOOSE_EXPR) && token + 1 < end &&
+                               parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_KEYWORD && parser->tree.parents[token + 1] < end;
+        const uint32_t close = selection ? parser->tree.parents[token + 1] : end;
+        uint32_t arm_first = 0;
+        uint32_t arm_end = 0;
+        if (selection && check_input_selected_arm(reader, token, close, selected, &arm_first, &arm_end))
+        {
+            for (uint32_t i = token; i <= close; i += 1)
+            {
+                skipped[i - first] |= i < arm_first || i >= arm_end;
+            }
+        }
+    }
+}
+
+// Whether a statement's tokens, from `statement` to `end`, hold a _Generic or a __builtin_choose_expr.
+static bool check_input_statement_selects(const CheckInputReader* reader, uint32_t statement, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    bool result = false;
+    for (uint32_t token = statement; !result && token + 1 < end; token += 1)
+    {
+        const uint32_t name = parser->tokens.names[token];
+        result = (name == C_NAME_GENERIC || name == C_NAME_BUILTIN_CHOOSE_EXPR) && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_KEYWORD;
+    }
+    return result;
+}
+
+// The name a call's callee refers to (#147, as clang's getReferencedDeclOfCallee finds it): the identifier that the
+// tokens before the call's `(` at `call`, after `first`, are, through the parentheses around it and the prefix *, & and +
+// before it (`f()`, `(f)()`, `(*f)()`, `(&f)()`); BUSTER_CHECK_NONE where the callee is no such name.
+static uint32_t check_input_callee_name(const CheckInputReader* reader, uint32_t first, uint32_t call)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t last = call > first ? call - 1 : BUSTER_CHECK_NONE;
+    uint32_t begin = last != BUSTER_CHECK_NONE && parser->tokens.kinds[last] == PARSE_KIND_IDENTIFIER ? last : BUSTER_CHECK_NONE;
+    uint32_t end = call;
+    if (last != BUSTER_CHECK_NONE && parser->tokens.kinds[last] == PARSE_KIND_R_PAREN && parser->tree.roles[last] == PARSE_ROLE_CLOSE_GROUP)
+    {
+        // The group's `(`, back from its `)` (a `(`'s parent is its `)`).
+        uint32_t open = last;
+        while (open > first && !(parser->tokens.kinds[open - 1] == PARSE_KIND_L_PAREN && parser->tree.parents[open - 1] == last))
+        {
+            open -= 1;
+        }
+        begin = open > first ? open - 1 : BUSTER_CHECK_NONE;
+    }
+    bool unwrapping = begin != BUSTER_CHECK_NONE;
+    while (unwrapping && begin + 1 < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[begin];
+        const bool group = kind == PARSE_KIND_L_PAREN && parser->tree.roles[begin] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[begin] == end - 1;
+        const bool prefix = (kind == PARSE_KIND_STAR || kind == PARSE_KIND_AMP || kind == PARSE_KIND_PLUS) && parser->tree.roles[begin] == PARSE_ROLE_PREFIX;
+        begin += group || prefix ? 1 : 0;
+        end -= group ? 1 : 0;
+        unwrapping = group || prefix;
+    }
+    const uint32_t result = begin != BUSTER_CHECK_NONE && begin + 1 == end && parser->tokens.kinds[begin] == PARSE_KIND_IDENTIFIER ? begin : BUSTER_CHECK_NONE;
+    return result;
+}
+
 // Whether an assumption (from `first` to `end`, which the evaluator read) has clang's (potential) side effects (#147,
 // HasSideEffects): a volatile object's read (`flags`, the evaluator's), an increment, a decrement or an assignment, or a
-// call of other than a function declared const or pure (its declaration's attributes); an operand of sizeof, _Alignof
-// or typeof isn't evaluated.
+// call of other than a function declared const or pure (its declaration's attributes, through its callee's parentheses:
+// check_input_callee_name); an operand of sizeof, _Alignof or typeof and a selection's unselected arms aren't evaluated
+// (check_input_unselected, by the arms the argument's evaluation recorded).
 static bool check_input_assume_effects(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t flags)
 {
     const Parser* parser = reader->parser;
+    const uint64_t mark = reader->scratch->length;
+    uint8_t* skipped = end > first ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, end - first) : NULL;
+    reader->output->resource |= end > first && skipped == NULL;
+    if (skipped != NULL)
+    {
+        check_input_unselected(reader, first, end, false, skipped);
+    }
     bool result = (flags & BUSTER_CHECK_VOLATILE_PART) != 0;
     uint32_t token = first;
-    while (!result && token < end)
+    while (!result && skipped != NULL && token < end)
     {
         const uint8_t kind = parser->tokens.kinds[token];
         const uint8_t role = parser->tree.roles[token];
         const bool unevaluated = (kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_TYPEOF) && token + 1 < end && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN &&
                                  parser->tree.parents[token + 1] > token + 1 && parser->tree.parents[token + 1] < end;
-        const uint32_t callee = role == PARSE_ROLE_OPEN_CALL && token > first && parser->tokens.kinds[token - 1] == PARSE_KIND_IDENTIFIER ? token - 1 : BUSTER_CHECK_NONE;
+        const bool reached = skipped[token - first] == 0;
+        const uint32_t callee = reached && role == PARSE_ROLE_OPEN_CALL ? check_input_callee_name(reader, first, token) : BUSTER_CHECK_NONE;
         const uint32_t declaration = callee != BUSTER_CHECK_NONE && reader->output->declarations != NULL ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
         const CheckInputAttributes* attributes = declaration < parser->tokens.count ? check_input_attributes_at(reader->output, declaration) : NULL;
         bool pure = false;
@@ -250,16 +362,18 @@ static bool check_input_assume_effects(CheckInputReader* reader, uint32_t first,
                                   (token + 1 < end && (parser->tokens.kinds[token + 1] == PARSE_KIND_L_SQUARE || parser->tokens.kinds[token + 1] == PARSE_KIND_ARROW));
         const bool volatile_name = (named != 0 && (type_qualifiers(named) & BUSTER_TYPE_VOLATILE) != 0) ||
                                    (pointer && dereferenced && (type_qualifiers(reader->types->types.base[type_index(bare)]) & BUSTER_TYPE_VOLATILE) != 0);
-        result = kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS || role == PARSE_ROLE_ASSIGN || (role == PARSE_ROLE_OPEN_CALL && !pure) || volatile_name;
+        result = reached && (kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS || role == PARSE_ROLE_ASSIGN || (role == PARSE_ROLE_OPEN_CALL && !pure) || volatile_name);
         token = unevaluated ? parser->tree.parents[token + 1] + 1 : token + 1;
     }
+    arena_pop_to(reader->scratch, mark);
     return result;
 }
 
 // A statement's next call from `token` up to its `end` (#147, as clang's CallExprFinder, an EvaluatedExprVisitor, finds
 // them): a call's `(` (not a declarator's parameters') or an asm statement's, outside sizeof's, _Alignof's and typeof's
-// operands and GNU attributes' arguments; `end` for none.
-static uint32_t check_input_statement_call(const CheckInputReader* reader, uint32_t token, uint32_t end)
+// operands, GNU attributes' arguments and the tokens `unselected` marks (if any), a byte per token from `base`, a
+// selection's unselected arms (check_input_unselected); `end` for none.
+static uint32_t check_input_statement_call(const CheckInputReader* reader, uint32_t token, uint32_t end, const uint8_t* unselected, uint32_t base)
 {
     const Parser* parser = reader->parser;
     uint32_t result = end;
@@ -272,17 +386,84 @@ static uint32_t check_input_statement_call(const CheckInputReader* reader, uint3
                              parser->tree.parents[at + 1] < end;
         const bool skipped = kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATTRIBUTE;
         const bool declarator = at > 0 && reader->declaration_kinds[at - 1] != 0;
-        result = (role == PARSE_ROLE_OPEN_CALL && !declarator) || role == PARSE_ROLE_OPEN_ASM ? at : end;
-        at = skipped && grouped ? parser->tree.parents[at + 1] + 1 : skipped && kind != PARSE_KIND_ATTRIBUTE ? reader->ends[at] + 1 : at + 1;
+        const bool reached = unselected == NULL || unselected[at - base] == 0;
+        result = reached && ((role == PARSE_ROLE_OPEN_CALL && !declarator) || role == PARSE_ROLE_OPEN_ASM) ? at : end;
+        at = reached && skipped && grouped ? parser->tree.parents[at + 1] + 1 : reached && skipped && kind != PARSE_KIND_ATTRIBUTE ? reader->ends[at] + 1 : at + 1;
     }
     return result;
 }
 
-// Whether the statement at `statement` evaluates a call or is or holds an asm statement (check_input_statement_call).
-static bool check_input_statement_calls(const CheckInputReader* reader, uint32_t statement)
+// The unselected arms' marks (check_input_unselected) of a statement's tokens, from `statement` to `end`, once the
+// selections are read, in the scratch arena, which the caller pops; null where it can't hold them (CheckInput.resource).
+static uint8_t* check_input_statement_unselected(CheckInputReader* reader, uint32_t statement, uint32_t end)
 {
+    uint8_t* result = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)(end - statement) + 1);
+    reader->output->resource |= result == NULL;
+    if (result != NULL)
+    {
+        check_input_unselected(reader, statement, end, true, result);
+    }
+    return result;
+}
+
+// A statement attribute's check that waits for the selections (#147, CheckInputReader.deferred_statements): a copy of
+// the attribute, the statement's first token, and the check (CheckInputDeferredCheck).
+typedef enum CheckInputDeferredCheck
+{
+    CHECK_INPUT_DEFERRED_NOMERGE,
+    CHECK_INPUT_DEFERRED_NOINLINE,
+    CHECK_INPUT_DEFERRED_ALWAYS_INLINE,
+} CheckInputDeferredCheck;
+typedef struct CheckInputDeferredStatement CheckInputDeferredStatement;
+struct CheckInputDeferredStatement
+{
+    CheckInputAttribute attribute;
+    uint32_t statement;
+    uint8_t check;
+};
+
+// Records a statement attribute's check for check_input_statement_deferred, in the reader's arena, which grows the list
+// by doubling.
+static void check_input_statement_defer(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t statement, CheckInputDeferredCheck check)
+{
+    if (reader->deferred_statement_count == reader->deferred_statement_capacity)
+    {
+        const uint32_t capacity = reader->deferred_statement_capacity == 0 ? 8 :
+                                  reader->deferred_statement_capacity <= UINT32_MAX / 2 ? reader->deferred_statement_capacity * 2 : 0;
+        CheckInputDeferredStatement* grown = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputDeferredStatement, capacity) : NULL;
+        reader->output->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (reader->deferred_statement_count != 0)
+            {
+                memcpy(grown, reader->deferred_statements, (uint64_t)reader->deferred_statement_count * sizeof(*grown));
+            }
+            reader->deferred_statements = grown;
+            reader->deferred_statement_capacity = capacity;
+        }
+    }
+    if (reader->deferred_statement_count < reader->deferred_statement_capacity)
+    {
+        reader->deferred_statements[reader->deferred_statement_count++] = (CheckInputDeferredStatement)
+        {
+            .attribute = *attribute,
+            .statement = statement,
+            .check = (uint8_t)check,
+        };
+    }
+}
+
+// Whether the statement at `statement` evaluates a call or is or holds an asm statement (check_input_statement_call), its
+// selections' selected arms' alone once they are read (`selected`).
+static bool check_input_statement_calls(CheckInputReader* reader, uint32_t statement, bool selected)
+{
+    const uint64_t mark = reader->scratch->length;
     const uint32_t end = check_input_loop_statement_end(reader, statement);
-    return check_input_statement_call(reader, statement, end) < end;
+    const uint8_t* unselected = selected ? check_input_statement_unselected(reader, statement, end) : NULL;
+    // Without the marks (a resource failure), as if it had one: no warning.
+    const bool result = (selected && unselected == NULL) || check_input_statement_call(reader, statement, end, unselected, statement) < end;
+    arena_pop_to(reader->scratch, mark);
+    return result;
 }
 
 // Whether a statement's noinline or always_inline is clang's statement attribute (#147, isStmtNoInline and
@@ -317,28 +498,36 @@ static uint32_t check_input_inline_conflict(CheckInputReader* reader, uint32_t d
 }
 
 // clang's statement noinline (`noinline`) or always_inline (`attribute` at `statement`, #147, CheckStmtInlineAttr): with no call in the
-// statement nomerge's warning; else, at each call of a function its name finds where the statement starts, which
+// statement nomerge's warning; else, at each call of a function its callee's name finds where the statement starts
+// (check_input_callee_name: through parentheses, `*` and `&`, as clang's getCalleeDecl), which
 // check_input_inline_conflict gives an overridden attribute, "statement attribute 'X' has higher precedence than function
-// attribute 'Y'" (-Wignored-attributes) at the statement, with a note at that declaration's first token.
-static void check_input_statement_inline_calls(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t statement, bool noinline)
+// attribute 'Y'" (-Wignored-attributes) at the statement, with a note at that declaration's first token. The calls are
+// those the statement evaluates (check_input_statement_call), a selection's selected arm's alone.
+static void check_input_statement_inline_calls(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t statement, bool noinline, bool selected)
 {
     const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint64_t mark = reader->scratch->length;
     const uint32_t end = check_input_loop_statement_end(reader, statement);
+    const uint8_t* unselected = selected ? check_input_statement_unselected(reader, statement, end) : NULL;
     const CheckInputAttributeKind other = noinline ? CHECK_ATTRIBUTE_ALWAYS_INLINE : CHECK_ATTRIBUTE_NOINLINE;
-    uint32_t call = check_input_statement_call(reader, statement, end);
-    if (call == end)
+    const bool scanned = !selected || unselected != NULL;
+    uint32_t call = scanned ? check_input_statement_call(reader, statement, end, unselected, statement) : end;
+    if (scanned && call == end)
     {
         check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NO_CALLS, statement,
                                              BUSTER_CHECK_WARNING_NO_SOURCE);
     }
     const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
-    for (; call < end; call = check_input_statement_call(reader, call + 1, end))
+    for (; call < end; call = check_input_statement_call(reader, call + 1, end, unselected, statement))
     {
-        const uint32_t callee = parser->tree.roles[call] == PARSE_ROLE_OPEN_CALL && call > statement && parser->tokens.kinds[call - 1] == PARSE_KIND_IDENTIFIER ?
-                                call - 1 : BUSTER_CHECK_NONE;
-        const uint32_t handle = callee != BUSTER_CHECK_NONE ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[callee]) : 0;
+        // The function the callee's name finds where the statement is: its binding as it is read, or, once the selections
+        // are read, the declaration the bindings resolved its use to.
+        const uint32_t callee = parser->tree.roles[call] == PARSE_ROLE_OPEN_CALL ? check_input_callee_name(reader, statement, call) : BUSTER_CHECK_NONE;
+        const uint32_t handle = callee != BUSTER_CHECK_NONE && !selected ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[callee]) : 0;
+        const uint32_t resolved = callee != BUSTER_CHECK_NONE && selected ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
         const uint32_t declaration = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_FUNCTION ? reader->bindings.declaration[handle - 1] :
-                                                                                                             BUSTER_CHECK_NONE;
+                                     resolved < count && reader->declaration_kinds[resolved] == C_BINDING_FUNCTION ? resolved : BUSTER_CHECK_NONE;
         const uint32_t conflict = declaration != BUSTER_CHECK_NONE ? check_input_inline_conflict(reader, declaration, other) : 0;
         if (conflict != 0)
         {
@@ -364,6 +553,28 @@ static void check_input_statement_inline_calls(CheckInputReader* reader, const C
             check_input_warning_event(reader, &event, &note, 1);
         }
     }
+    arena_pop_to(reader->scratch, mark);
+}
+
+// The statement attributes' checks that waited for the selections (#147, check_input_statement_defer): each as at its
+// statement, with its selections' selected arms' calls alone (clang's CallExprFinder visits a selection's result), and
+// its callees' declarations as the bindings resolved them. In the order they were recorded, the statements' order.
+static void check_input_statement_deferred(CheckInputReader* reader)
+{
+    for (uint32_t i = 0; i < reader->deferred_statement_count; i += 1)
+    {
+        const CheckInputDeferredStatement* item = reader->deferred_statements + i;
+        if (item->check == CHECK_INPUT_DEFERRED_NOMERGE && !check_input_statement_calls(reader, item->statement, true))
+        {
+            check_input_attribute_named_event_at(reader, &item->attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NO_CALLS, item->statement,
+                                                 BUSTER_CHECK_WARNING_NO_SOURCE);
+        }
+        else if (item->check != CHECK_INPUT_DEFERRED_NOMERGE)
+        {
+            check_input_statement_inline_calls(reader, &item->attribute, item->statement, item->check == CHECK_INPUT_DEFERRED_NOINLINE, true);
+        }
+    }
+    reader->deferred_statement_count = 0;
 }
 
 // A statement's attributes, as clang's Sema takes them, after their reading (check_input_read_attributes) took each: a null
@@ -483,6 +694,16 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                                  c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0 ? token : BUSTER_CHECK_NONE;
                 }
                 CheckValue value = { 0 };
+                // The arms its selections' evaluation takes, for its side effects' scan (check_input_assume_effects).
+                const uint32_t span = attribute->argument_end > attribute->argument_first ? attribute->argument_end - attribute->argument_first : 0;
+                reader->selection_arms = undeclared == BUSTER_CHECK_NONE && span != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, 2 * (uint64_t)span) : NULL;
+                reader->output->resource |= undeclared == BUSTER_CHECK_NONE && span != 0 && reader->selection_arms == NULL;
+                reader->selection_arm_base = attribute->argument_first;
+                reader->selection_arm_end = reader->selection_arms != NULL ? attribute->argument_end : attribute->argument_first;
+                if (reader->selection_arms != NULL)
+                {
+                    memset(reader->selection_arms, 0, 2 * (uint64_t)span * sizeof(uint32_t));
+                }
                 const bool evaluated = undeclared == BUSTER_CHECK_NONE && check_input_evaluate(reader, attribute->argument_first, attribute->argument_end, &value);
                 const uint8_t value_kind = evaluated ? type_kind(reader->types, type_strip_aligned(reader->types, value.type)) : 0;
                 if (undeclared != BUSTER_CHECK_NONE)
@@ -507,6 +728,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                     check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_ASSUME, CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS, attribute->argument_first,
                                                          BUSTER_CHECK_WARNING_NO_SOURCE);
                 }
+                reader->selection_arms = NULL;
             }
             valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
             attribute->ignored = true;
@@ -577,8 +799,16 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         }
         else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->keyword && statement < reader->parser->tokens.count)
         {
-            // clang's statement spellings, which change nothing at -O0 (check_input_statement_inline_calls).
-            check_input_statement_inline_calls(reader, attribute, statement, kind == CHECK_ATTRIBUTE_NOINLINE);
+            // clang's statement spellings, which change nothing at -O0 (check_input_statement_inline_calls), after the
+            // selections where the statement has one.
+            if (check_input_statement_selects(reader, statement, check_input_loop_statement_end(reader, statement)))
+            {
+                check_input_statement_defer(reader, attribute, statement, kind == CHECK_ATTRIBUTE_NOINLINE ? CHECK_INPUT_DEFERRED_NOINLINE : CHECK_INPUT_DEFERRED_ALWAYS_INLINE);
+            }
+            else
+            {
+                check_input_statement_inline_calls(reader, attribute, statement, kind == CHECK_ATTRIBUTE_NOINLINE, false);
+            }
             attribute->ignored = true;
         }
         else if ((msvc_noinline || msvc_force) && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
@@ -588,7 +818,14 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         }
         else if (msvc_noinline && statement < reader->parser->tokens.count)
         {
-            check_input_statement_inline_calls(reader, attribute, statement, true);
+            if (check_input_statement_selects(reader, statement, check_input_loop_statement_end(reader, statement)))
+            {
+                check_input_statement_defer(reader, attribute, statement, CHECK_INPUT_DEFERRED_NOINLINE);
+            }
+            else
+            {
+                check_input_statement_inline_calls(reader, attribute, statement, true, false);
+            }
             attribute->ignored = true;
         }
         else if (msvc_force && statement < reader->parser->tokens.count)
@@ -598,7 +835,14 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                                                  BUSTER_CHECK_WARNING_NO_SOURCE);
             attribute->ignored = true;
         }
-        else if (kind == CHECK_ATTRIBUTE_NOMERGE && statement < reader->parser->tokens.count && !check_input_statement_calls(reader, statement))
+        else if (kind == CHECK_ATTRIBUTE_NOMERGE && statement < reader->parser->tokens.count &&
+                 check_input_statement_selects(reader, statement, check_input_loop_statement_end(reader, statement)))
+        {
+            // Its calls are its selections' selected arms' alone, once they are read (check_input_statement_deferred).
+            check_input_statement_defer(reader, attribute, statement, CHECK_INPUT_DEFERRED_NOMERGE);
+            attribute->ignored = true;
+        }
+        else if (kind == CHECK_ATTRIBUTE_NOMERGE && statement < reader->parser->tokens.count && !check_input_statement_calls(reader, statement, false))
         {
             check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NO_CALLS, statement,
                                                  BUSTER_CHECK_WARNING_NO_SOURCE);
