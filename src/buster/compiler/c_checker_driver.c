@@ -84,6 +84,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_WEAK_LINKAGE: result = "weak declaration cannot have internal linkage"; break;
         case CHECK_INPUT_ALIAS_DEFINITION: result = "definition cannot also be an alias"; break;
         case CHECK_INPUT_IFUNC_DEFINITION: result = "definition cannot also be an ifunc"; break;
+        case CHECK_INPUT_ALIAS_TENTATIVE: result = "alias definition after tentative definition"; break;
         case CHECK_INPUT_WEAKREF_LINKAGE: result = "weakref declaration must have internal linkage"; break;
         case CHECK_INPUT_WEAKREF_CONTEXT: result = "weakref declaration must be in a global context"; break;
         case CHECK_INPUT_WEAKREF_ALIAS: result = "weakref declaration must also have an alias attribute"; break;
@@ -1850,6 +1851,19 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                         (int)attribute.length, attribute.pointer);
                                 }
                             }
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)
+                        {
+                            // A variable's alias after a tentative definition (#147), named, with its note at the last one.
+                            const uint32_t name = parser->tokens.names[token];
+                            const uint32_t previous = input->reports[index].note_token;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = "previous definition is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                        "alias definition of '%.*s' after tentative definition", (int)intern_length(pp->table, name),
+                                                        intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)

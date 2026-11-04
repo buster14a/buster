@@ -256,14 +256,127 @@ static bool check_input_assume_effects(CheckInputReader* reader, uint32_t first,
     return result;
 }
 
+// A statement's next call from `token` up to its `end` (#147, as clang's CallExprFinder, an EvaluatedExprVisitor, finds
+// them): a call's `(` (not a declarator's parameters') or an asm statement's, outside sizeof's, _Alignof's and typeof's
+// operands and GNU attributes' arguments; `end` for none.
+static uint32_t check_input_statement_call(const CheckInputReader* reader, uint32_t token, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = end;
+    uint32_t at = token;
+    while (result == end && at < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[at];
+        const uint8_t role = parser->tree.roles[at];
+        const bool grouped = at + 1 < end && parser->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN && parser->tree.parents[at + 1] > at + 1 &&
+                             parser->tree.parents[at + 1] < end;
+        const bool skipped = kind == PARSE_KIND_SIZEOF || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATTRIBUTE;
+        const bool declarator = at > 0 && reader->declaration_kinds[at - 1] != 0;
+        result = (role == PARSE_ROLE_OPEN_CALL && !declarator) || role == PARSE_ROLE_OPEN_ASM ? at : end;
+        at = skipped && grouped ? parser->tree.parents[at + 1] + 1 : skipped && kind != PARSE_KIND_ATTRIBUTE ? reader->ends[at] + 1 : at + 1;
+    }
+    return result;
+}
+
+// Whether the statement at `statement` evaluates a call or is or holds an asm statement (check_input_statement_call).
+static bool check_input_statement_calls(const CheckInputReader* reader, uint32_t statement)
+{
+    const uint32_t end = check_input_loop_statement_end(reader, statement);
+    return check_input_statement_call(reader, statement, end) < end;
+}
+
+// Whether a statement's noinline or always_inline is clang's statement attribute (#147, isStmtNoInline and
+// isClangAlwaysInline): clang::'s (msvc::noinline is a generic attribute's: check_input_statement_attribute_kinds); GNU's
+// spellings (gnu:: among them) are a function's alone.
+static bool check_input_statement_inline(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const bool scoped = attribute->standard && attribute->first != attribute->name_token;
+    const String8 scope = scoped ? check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]) : (String8){ 0 };
+    return check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
+}
+
+// The function attribute a statement's noinline or always_inline overrides on a callee (#147, CheckStmtInlineAttr):
+// `other` (always_inline for noinline, noinline for always_inline) or flatten on any of the function's declarations up
+// to `declaration`, its visible one: 1 for `other`, 2 for flatten, 0 for neither. A scan of the unit's declarations
+// before it, made for such a statement's calls alone.
+static uint32_t check_input_inline_conflict(CheckInputReader* reader, uint32_t declaration, CheckInputAttributeKind other)
+{
+    const uint32_t key = reader->objects[declaration];
+    uint32_t result = 0;
+    for (uint32_t t = 0; key != 0 && result != 1 && t <= declaration; t += 1)
+    {
+        const CheckInputAttributes* attributes = reader->declaration_kinds[t] == C_BINDING_FUNCTION && reader->objects[t] == key ?
+                                                 check_input_attributes_at(reader->output, t) : NULL;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            result = attribute->ignored ? result : attribute->kind == other ? 1 : attribute->kind == CHECK_ATTRIBUTE_FLATTEN && result == 0 ? 2 : result;
+        }
+    }
+    return result;
+}
+
+// clang's statement noinline (`noinline`) or always_inline (`attribute` at `statement`, #147, CheckStmtInlineAttr): with no call in the
+// statement nomerge's warning; else, at each call of a function its name finds where the statement starts, which
+// check_input_inline_conflict gives an overridden attribute, "statement attribute 'X' has higher precedence than function
+// attribute 'Y'" (-Wignored-attributes) at the statement, with a note at that declaration's first token.
+static void check_input_statement_inline_calls(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t statement, bool noinline)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t end = check_input_loop_statement_end(reader, statement);
+    const CheckInputAttributeKind other = noinline ? CHECK_ATTRIBUTE_ALWAYS_INLINE : CHECK_ATTRIBUTE_NOINLINE;
+    uint32_t call = check_input_statement_call(reader, statement, end);
+    if (call == end)
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NO_CALLS, statement,
+                                             BUSTER_CHECK_WARNING_NO_SOURCE);
+    }
+    const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+    for (; call < end; call = check_input_statement_call(reader, call + 1, end))
+    {
+        const uint32_t callee = parser->tree.roles[call] == PARSE_ROLE_OPEN_CALL && call > statement && parser->tokens.kinds[call - 1] == PARSE_KIND_IDENTIFIER ?
+                                call - 1 : BUSTER_CHECK_NONE;
+        const uint32_t handle = callee != BUSTER_CHECK_NONE ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[callee]) : 0;
+        const uint32_t declaration = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_FUNCTION ? reader->bindings.declaration[handle - 1] :
+                                                                                                             BUSTER_CHECK_NONE;
+        const uint32_t conflict = declaration != BUSTER_CHECK_NONE ? check_input_inline_conflict(reader, declaration, other) : 0;
+        if (conflict != 0)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                .kind = conflict == 2 ? CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN : noinline ? CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE :
+                                                                                       CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
+                .token = statement,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = statement,
+                .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+            };
+            const CheckWarningNote note =
+            {
+                .kind = CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE,
+                .token = check_input_declaration_begin(parser, declaration),
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .name = 0, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, &note, 1);
+        }
+    }
+}
+
 // A statement's attributes, as clang's Sema takes them, after their reading (check_input_read_attributes) took each: a null
 // statement's fallthrough (`empty`), and a return's musttail (`returns`) are the statement's; GNU's noinline and
-// always_inline clang ignores on a statement (with a warning, which isn't modeled), and nomerge and suppress on any; musttail elsewhere, fallthrough on a
-// statement that isn't empty, and every other attribute are clang's errors, the first one's reported. The musttail's
-// first token, or BUSTER_CHECK_NONE, in `*musttail`. Whether they are valid.
-static bool check_input_statement_attribute_kinds(CheckInputReader* reader, CheckInputAttributes* attributes, bool empty, bool returns, uint8_t next,
+// always_inline clang ignores on a statement with -Wignored-attributes' warning at it (its first token, `statement`),
+// clang's are checked (check_input_statement_inline_calls), and nomerge and suppress are ignored on any, a nomerge with
+// the warning where it evaluates no call (check_input_statement_calls); musttail elsewhere, fallthrough on a statement that isn't empty, and every other
+// attribute are clang's errors, the first one's reported. The musttail's first token, or BUSTER_CHECK_NONE, in
+// `*musttail`. Whether they are valid.
+static bool check_input_statement_attribute_kinds(CheckInputReader* reader, CheckInputAttributes* attributes, bool empty, bool returns, uint32_t statement,
                                                    uint32_t* musttail)
 {
+    const uint8_t next = statement < reader->parser->tokens.count ? reader->parser->tokens.kinds[statement] : PARSE_KIND_SEMI;
     bool valid = true;
     *musttail = BUSTER_CHECK_NONE;
     uint32_t aligned = BUSTER_CHECK_NONE;
@@ -273,6 +386,11 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         const CheckInputAttributeKind kind = attribute->kind;
         const String8 generic = kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
         const bool code_align = check_input_attribute_equal(generic, "code_align");
+        // msvc::noinline, clang's statement noinline's other spelling, and msvc::forceinline and forceinline_calls.
+        const bool msvc = attribute->standard && attribute->first != attribute->name_token &&
+                          check_input_attribute_equal(check_input_attribute_name(reader, reader->parser->tokens.names[attribute->first]), "msvc");
+        const bool msvc_noinline = msvc && check_input_attribute_equal(generic, "noinline");
+        const bool msvc_force = msvc && (check_input_attribute_equal(generic, "forceinline") || check_input_attribute_equal(generic, "forceinline_calls"));
         const bool unroll = check_input_attribute_equal(generic, "opencl_unroll_hint");
         const bool loop = next == PARSE_KIND_FOR || next == PARSE_KIND_WHILE || next == PARSE_KIND_DO;
         const uint32_t reported = reader->output->report_count;
@@ -449,14 +567,47 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                 check_input_report(reader, attribute->first, CHECK_INPUT_FALLTHROUGH_STATEMENT);
             }
         }
-        else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->standard && !attribute->keyword)
+        else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->keyword && !check_input_statement_inline(reader, attribute))
         {
+            // GNU's spellings, a function's alone, which clang ignores on a statement with its warning there.
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                                                 kind == CHECK_ATTRIBUTE_NOINLINE ? CHECK_WARNING_EVENT_NOINLINE_STATEMENT : CHECK_WARNING_EVENT_ALWAYS_INLINE_STATEMENT,
+                                                 statement, BUSTER_CHECK_WARNING_NO_SOURCE);
+            attribute->ignored = true;
+        }
+        else if ((kind == CHECK_ATTRIBUTE_NOINLINE || kind == CHECK_ATTRIBUTE_ALWAYS_INLINE) && !attribute->keyword && statement < reader->parser->tokens.count)
+        {
+            // clang's statement spellings, which change nothing at -O0 (check_input_statement_inline_calls).
+            check_input_statement_inline_calls(reader, attribute, statement, kind == CHECK_ATTRIBUTE_NOINLINE);
+            attribute->ignored = true;
+        }
+        else if ((msvc_noinline || msvc_force) && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+        {
+            check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            valid = false;
+        }
+        else if (msvc_noinline && statement < reader->parser->tokens.count)
+        {
+            check_input_statement_inline_calls(reader, attribute, statement, true);
+            attribute->ignored = true;
+        }
+        else if (msvc_force && statement < reader->parser->tokens.count)
+        {
+            // MSVC's forceinline and forceinline_calls, which clang ignores off its ABI with its warning at the statement.
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED, statement,
+                                                 BUSTER_CHECK_WARNING_NO_SOURCE);
+            attribute->ignored = true;
+        }
+        else if (kind == CHECK_ATTRIBUTE_NOMERGE && statement < reader->parser->tokens.count && !check_input_statement_calls(reader, statement))
+        {
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NO_CALLS, statement,
+                                                 BUSTER_CHECK_WARNING_NO_SOURCE);
             attribute->ignored = true;
         }
         else if (kind == CHECK_ATTRIBUTE_NOMERGE || kind == CHECK_ATTRIBUTE_SUPPRESS)
         {
             // clang's nomerge keeps the statement's calls from merging, which -O0's code never does, and suppress is the
-            // static analyzer's (clang warns of a nomerge without a call, which isn't modeled).
+            // static analyzer's.
             attribute->ignored = true;
         }
         else
@@ -466,6 +617,36 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         }
     }
     return valid;
+}
+
+// The C23 attributes of an asm statement, from `first` to `end` (#147): each item's "'X' attribute ignored", at its first
+// token (its scope's), named as clang names it, unknown ones too.
+static void check_input_asm_statement_attributes(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t token = first;
+    while (token + 1 < end)
+    {
+        const bool list = parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE && parser->tokens.kinds[token + 1] == PARSE_KIND_L_SQUARE;
+        const uint32_t close = list ? parser->tree.parents[token + 1] : token;
+        uint32_t item = token + 2;
+        while (list && item < close && close < end)
+        {
+            const bool scoped = item + 3 < close && parser->tokens.kinds[item + 1] == PARSE_KIND_COLON && parser->tokens.kinds[item + 2] == PARSE_KIND_COLON;
+            const uint32_t name = scoped ? item + 3 : item;
+            if (parser->tokens.kinds[item] != PARSE_KIND_COMMA && name < close)
+            {
+                const CheckInputAttribute attribute = { .first = item, .name_token = name, .name = parser->tokens.names[name], .standard = true };
+                check_input_attribute_named_event_at(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED, item,
+                                                     BUSTER_CHECK_WARNING_NO_SOURCE);
+            }
+            // Past its name and arguments to the next item's comma.
+            uint32_t next = parser->tokens.kinds[item] == PARSE_KIND_COMMA ? item : name + 1;
+            next = next < close && parser->tokens.kinds[next] == PARSE_KIND_L_PAREN && parser->tree.parents[next] < close ? parser->tree.parents[next] + 1 : next;
+            item = next + 1;
+        }
+        token = list ? close + 2 : token + 1;
+    }
 }
 
 // A block item's attributes before a statement rather than a declaration, read as the statement's (their tokens then
@@ -480,7 +661,13 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const uint32_t after = check_input_skip_attributes(parser, first, count);
+    // (An asm statement's keyword, which an asm label's attribute reading would take, ends them.)
+    const uint32_t skipped = check_input_skip_attributes(parser, first, count);
+    uint32_t after = first;
+    while (after < skipped && parser->tokens.kinds[after] != PARSE_KIND_ASM)
+    {
+        after += 1;
+    }
     const uint8_t next = after < count ? parser->tokens.kinds[after] : PARSE_KIND_SEMI;
     const bool label = first != 0 && parser->tree.roles[first - 1] == PARSE_ROLE_LABEL && parser->tokens.kinds[first] == PARSE_KIND_ATTRIBUTE;
     const bool body = reader->function_body < count;
@@ -518,6 +705,16 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     {
         check_input_report(reader, first, CHECK_INPUT_DECLARATION);
     }
+    else if (body && next == PARSE_KIND_ASM)
+    {
+        // An asm statement's C23 attributes (#147, clang's ParseStatementOrDeclarationAfterAttributes): each is ignored with
+        // -Wignored-attributes' warning at its first token, read no further (the parser refuses GNU ones there).
+        check_input_asm_statement_attributes(reader, first, after);
+        for (uint32_t token = first; token < after; token += 1)
+        {
+            reader->ignored[token] = true;
+        }
+    }
     else if (body && (empty || keyword || expression))
     {
         uint32_t cursor = first;
@@ -526,7 +723,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
         reader->statement_attributes = false;
         uint32_t musttail = BUSTER_CHECK_NONE;
-        valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, next, &musttail);
+        valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);
         bool fallthrough = false;
         for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
         {

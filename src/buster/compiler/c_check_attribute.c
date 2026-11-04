@@ -2566,8 +2566,9 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // Other targets' vector types, aliases of their builtins, statements' hints (check_input_statement_attribute_kinds),
         // and Blocks' byref variables, whose checks in C on x86-64 are check_input_attribute_annotations'.
         "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
-        // A bit-field's preferred type, whose type check_input_attribute_annotations checks.
-        "preferred_type",
+        // A bit-field's preferred type, whose type check_input_attribute_annotations checks; MSVC's forceinline and
+        // forceinline_calls, which it ignores off MSVC's ABI.
+        "preferred_type", "forceinline", "forceinline_calls",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -4508,6 +4509,11 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
             check_input_attribute_noted_event(reader, attribute, CHECK_WARNING_EVENT_SPAN_ONLY, CHECK_WARNING_NOTE_SPAN_REASON, reason);
             attribute->ignored = true;
         }
+    }
+    else if (check_input_attribute_equal(spelled, "forceinline") || check_input_attribute_equal(spelled, "forceinline_calls"))
+    {
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+        attribute->ignored = true;
     }
     else if (check_input_attribute_equal(spelled, "vec_type_hint") && attribute->argument_type != 0 && !check_input_vec_type_hint(types, attribute->argument_type))
     {

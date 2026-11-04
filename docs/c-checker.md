@@ -3140,11 +3140,14 @@ What the lowering covers past scalars (#145's programs):
   linkage, in a block, without a target or on a typedef. A static variable's
   alias or weakref is no tentative definition, and an alias, ifunc or weakref
   target defines its entity for later redeclarations, functions' and
-  variables'. Refused by name: an alias whose thread-local storage isn't its
-  definition's, and an alias variable that the unit also defines tentatively
-  (before it clang's error "alias definition of 'w' after tentative
-  definition", which the reader doesn't make; after it clang takes the
-  declaration as the alias's). Not modeled: clang's warnings at them (an alias
+  variables'. A variable's alias right after a tentative definition (the
+  previous declaration one, as clang's `getActingDefinition` requires) is
+  clang's "alias definition of 'w' after tentative definition" at its name,
+  with "previous definition is here" at the last one
+  (`check_input_alias_tentative`). Refused by name: an alias whose
+  thread-local storage isn't its definition's, and at `-c` an alias variable
+  the unit defines tentatively after it (clang takes the declaration as the
+  alias's). Not modeled: clang's warnings at them (an alias
   of a weak alias, a section on an alias, different types, an ifunc on a
   variable, which is ignored), and the redefinition's own message (the
   generic "conflicting declaration"). `__has_attribute` and
@@ -5060,6 +5063,31 @@ change, it refused such a declaration by name.
   name, but a member's "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
+- **Statement attributes' handlers.** As clang's SemaStmtAttr takes them
+  (`check_input_statement_attribute_kinds`), each with -Wignored-attributes'
+  warning at the statement's first token: GNU's `noinline` and
+  `always_inline` (`gnu::`'s too), a function's alone, "attribute is ignored
+  on this statement as it only applies to functions; use
+  '[[clang::noinline]]' on statements"; clang's (and `msvc::noinline`), its
+  `CheckStmtInlineAttr`'s (`check_input_statement_inline_calls`): a statement
+  without a call, and at each call of a function any of whose declarations up
+  to the visible one has the attribute it overrides (`always_inline` for
+  `noinline`, `noinline` for `always_inline`) or `flatten`, "statement
+  attribute 'X' has higher precedence than function attribute 'Y'" with
+  "conflicting attribute is here" at that declaration's first token;
+  `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
+  because there exists no call expression inside the statement". The calls
+  are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
+  `(` (not a declarator's parameters') or an asm statement's, outside
+  `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
+  arguments, to the statement's end (`check_input_loop_statement_end`).
+  MSVC's `forceinline` and `forceinline_calls` are ignored off its ABI with
+  "'X' attribute ignored", at the statement or, on a function, at the
+  attribute after its subject's check. An asm statement's C23 attributes are
+  each "'X' attribute ignored" at its first token, unknown ones too, and read
+  no further (`check_input_asm_statement_attributes`); its GNU ones, but a
+  label's, are the parser's "an attribute list cannot appear here" at the
+  first (clang's `ProhibitAttributes`).
 - **Differences left.**
   - Several `__clang__` scopes in one declaration's attributes: clang gives
     its parser's warnings first, then its unknown-attribute ones; the

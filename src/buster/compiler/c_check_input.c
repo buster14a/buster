@@ -56,6 +56,9 @@ typedef enum CheckInputMessage
     // subject).
     CHECK_INPUT_ALIAS_DEFINITION,
     CHECK_INPUT_IFUNC_DEFINITION,
+    // A variable's alias after a tentative definition of it (#147, clang's checkNewAttributesAfterDef): "alias definition
+    // of 'x' after tentative definition", at its name, with the note "previous definition is here" at the last one.
+    CHECK_INPUT_ALIAS_TENTATIVE,
     // GNU's weakref attribute (#147): on a declaration with external linkage, at the attribute; in a block, or without a
     // target (its argument, or an alias attribute beside it), naming the declaration; and on a typedef.
     CHECK_INPUT_WEAKREF_LINKAGE,
@@ -251,6 +254,7 @@ static const char* const check_input_messages[] =
     "weak declaration cannot have internal linkage",
     "definition cannot also be an alias",
     "definition cannot also be an ifunc",
+    "alias definition after tentative definition",
     "weakref declaration must have internal linkage",
     "weakref declaration must be in a global context",
     "weakref declaration must also have an alias attribute",
@@ -7002,6 +7006,34 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
     }
 }
 
+// A variable's alias (`token`, its name) right after a tentative definition of the variable (`previous`; #147, clang's
+// checkNewAttributesAfterDef, whose getDefinition finds no definition but the previous declaration's acting one): its
+// error, with its note at the last tentative definition before it. One after a definition is a conflicting declaration
+// already. A scan back over the unit's declarations of the same variable, made for such an alias's alone.
+static void check_input_alias_tentative(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    const bool alias = reader->declaration_kinds[token] == C_BINDING_OBJECT && check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE) &&
+                       check_input_attribute_alias_definition(check_input_attributes_at(reader->output, token));
+    uint32_t tentative = BUSTER_CHECK_NONE;
+    bool defined = false;
+    for (uint32_t t = alias ? token : 0; !defined && t-- > 0;)
+    {
+        const bool same = reader->objects[t] == reader->objects[token] && reader->declaration_kinds[t] == C_BINDING_OBJECT;
+        defined = same && check_input_bit(reader->declaration_bits, t, BUSTER_CHECK_BITS_DEFINED);
+        tentative = tentative == BUSTER_CHECK_NONE && same && check_input_bit(reader->output->declaration_bits, t, BUSTER_CHECK_BITS_TENTATIVE) ? t : tentative;
+    }
+    if (tentative != BUSTER_CHECK_NONE && !defined)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, token, CHECK_INPUT_ALIAS_TENTATIVE);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = tentative;
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+        }
+    }
+}
+
 static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
     const uint32_t name = reader->parser->tokens.names[token];
@@ -7051,6 +7083,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         else
         {
             reader->objects[token] = reader->objects[previous];
+            check_input_alias_tentative(reader, token, previous);
             if (kind == C_BINDING_FUNCTION && reader->output->function_flags != NULL)
             {
                 reader->output->function_flags[token] |= reader->output->function_flags[previous] & (CHECK_INPUT_FUNCTION_EXTERNAL_DEFINITION | CHECK_INPUT_FUNCTION_NORETURN);

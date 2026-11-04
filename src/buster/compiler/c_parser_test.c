@@ -536,6 +536,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) __attribute__((vec_type_hint(int x)));\n", "1:47: expected ')'", 0 },
     { "int x __attribute__((aligned(int)));\n", "1:30: expected expression", 0 },
     { "void f(void) __attribute__((zzz(int)));\n", "1:33: expected expression", 0 },
+    // An asm statement's GNU attributes, which clang prohibits there (#147), but a label's.
+    { "void f(void) { __attribute__((nomerge)) asm(\"\"); }\n", "1:16: an attribute list cannot appear here", 0 },
+    { "void f(void) { L: __attribute__((unused)) asm(\"\"); }\n", "", 0 },
+    { "void f(int x) { if (x) __attribute__((cold)) __attribute__((nomerge)) asm(\"\"); }\n", "1:24: an attribute list cannot appear here", 0 },
     { "struct S { int x : 3 __attribute__((packed)) [4]; };\n", "1:45: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },

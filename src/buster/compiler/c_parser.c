@@ -3158,12 +3158,37 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
     }
 }
 
+// The first of the GNU attributes right before `i`, back over their groups' parentheses.
+static uint32_t parse_scalar_first_gnu_attribute(const ParseScalar* parser, uint32_t i)
+{
+    uint32_t result = i;
+    int64_t before = (int64_t)i - 1;
+    bool going = true;
+    while (going && before > 0 && parser->kinds[before] == PARSE_KIND_R_PAREN)
+    {
+        uint32_t open = 0;
+        do
+        {
+            open += parser->kinds[before] == PARSE_KIND_R_PAREN;
+            open -= parser->kinds[before] == PARSE_KIND_L_PAREN;
+            before -= 1;
+        } while (before > 0 && open != 0);
+        going = parser->kinds[before] == PARSE_KIND_ATTRIBUTE;
+        result = going ? (uint32_t)before : result;
+        before -= 1;
+    }
+    return result;
+}
+
 // The token after a block item's attributes (parse_scalar_block_attribute), which isn't another's: whether they start a
 // declaration or the statement they are of. `head` after a control head or a label, `attributes` GNU ones that are each a
-// statement's, `gnu` any GNU one.
+// statement's, `gnu` any GNU one. An asm statement's GNU attributes (not a label's) are clang's error at the first
+// (ParseStatementOrDeclarationAfterAttributes's ProhibitAttributes, #147).
 static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step, bool head, bool attributes, bool gnu)
 {
     const uint8_t kind = parser->kinds[i];
+    const ParseStatement* top = parse_statement_top(parser);
+    const bool label = top != 0 && top->state == PARSE_STATEMENT_WAITING && top->kind == PARSE_KIND_COLON;
     const bool statement = kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
                            kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK ||
                            kind == PARSE_KIND_RETURN || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE ||
@@ -3171,7 +3196,11 @@ static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, Pa
                            (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
     const bool expression = !gnu && kind != PARSE_KIND_R_BRACE && !parse_scalar_starts_declaration(parser, i, true);
     frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
-    if (kind == PARSE_KIND_R_BRACE && ((!head && attributes) || !gnu))
+    if (kind == PARSE_KIND_ASM && gnu && !label)
+    {
+        parse_scalar_error(parser, parse_scalar_first_gnu_attribute(parser, i), PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (kind == PARSE_KIND_R_BRACE && ((!head && attributes) || !gnu))
     {
         // A statement's attributes before a block's end, which clang's statement reader expects a statement after (C23's
         // after a label's name too).

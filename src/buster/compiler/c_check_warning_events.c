@@ -193,6 +193,14 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS,
     // vec_type_hint's second one of another type (#147, -Wignored-attributes), at it.
     CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS,
+    // nomerge on a statement that evaluates no call (#147, -Wignored-attributes), at the statement; GNU's noinline and
+    // always_inline there; and a statement's noinline or always_inline over a callee's always_inline, flatten or noinline.
+    CHECK_WARNING_EVENT_NO_CALLS,
+    CHECK_WARNING_EVENT_NOINLINE_STATEMENT,
+    CHECK_WARNING_EVENT_ALWAYS_INLINE_STATEMENT,
+    CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
+    CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
+    CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
