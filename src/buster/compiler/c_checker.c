@@ -2763,7 +2763,16 @@ static void check_graph_region_postorder(TypeTable* types, const CheckGraph* gra
                 {
                     open &= operands[i] == BUSTER_CHECK_NONE || operands[i] < begin || (marks[operands[i]] & BUSTER_CHECK_MARK_DONE) != 0;
                 }
-                if (open || count == 0)
+                // A discard whose operand is done is written at once (check_graph_discard), as the batch's actions read none
+                // of each other and it interns no type: the same records, and the same table.
+                CheckValue discarded;
+                if (open && check_graph_discard_taken(types, graph, stream, node, &discarded))
+                {
+                    check_graph_discard(types, stream, node, &discarded);
+                    marks[node] |= BUSTER_CHECK_MARK_DONE;
+                    node += 1;
+                }
+                else if (open || count == 0)
                 {
                     members[count++] = node;
                     node += 1;
