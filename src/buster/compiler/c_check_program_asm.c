@@ -1599,8 +1599,11 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
                 placed = class == BUSTER_X86_CLASS_OPMASK && reg < 8;
             }
         }
-        candidate.records[candidate.record_count] = record;
-        candidate.record_count += placed ? 1 : 0;
+        if (placed)
+        {
+            candidate.records[candidate.record_count] = record;
+            candidate.record_count += 1;
+        }
     }
     for (uint32_t k = 0; placed && k < statement->output_count; k += 1)
     {
@@ -1614,13 +1617,16 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
                                   : place->size == 4 ? X86_FORM_MOV_RM32_R32
                                                      : X86_FORM_MOV_RM64_R64;
             placed = candidate.record_count < BUSTER_TIER0_OPERATION_RECORDS && (floating ? place->size == 4 || place->size == 8 : place->size != 0);
-            candidate.records[candidate.record_count] = (X86Instruction){
-                .form = (uint16_t)form,
-                .reg = sources[k],
-                .rm = (uint8_t)BUSTER_TIER0_ROLE_INTEGER(addresses[k]),
-                .mode = BUSTER_X86_MEMORY_BASE,
-            };
-            candidate.record_count += placed ? 1 : 0;
+            if (placed)
+            {
+                candidate.records[candidate.record_count] = (X86Instruction){
+                    .form = (uint16_t)form,
+                    .reg = sources[k],
+                    .rm = (uint8_t)BUSTER_TIER0_ROLE_INTEGER(addresses[k]),
+                    .mode = BUSTER_X86_MEMORY_BASE,
+                };
+                candidate.record_count += 1;
+            }
         }
     }
     placed = placed && *valid && tier0_operation_valid(&candidate);
