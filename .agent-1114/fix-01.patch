@@ -1,0 +1,33 @@
+--- a/src/buster/compiler/c_check_debug.c
++++ b/src/buster/compiler/c_check_debug.c
+@@ -53,13 +53,6 @@
+ // to first[b] + counts[b]), their offsets ascending, each less than the function's code's bytes (`sizes`), and where its
+ // body's code starts, after its prologue (`bodies`). From the emission's output arena, with BUSTER_CHECK_DEBUG_SLACK
+ // rows' room past `count`.
+-typedef struct CheckDebugBinding CheckDebugBinding;
+-struct CheckDebugBinding
+-{
+-    uint32_t token;
+-    bool indirect;
+-};
+-
+ typedef struct CheckDebugValueSpan CheckDebugValueSpan;
+ struct CheckDebugValueSpan
+ {
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -289,6 +289,14 @@
+ #define BUSTER_CHECK_LOWER_TYPE_BIT_INT BUSTER_CHECK_LOWER_TYPE_KIND
+ 
+ #include "c_check_program_initializers.c"
++
++// Source declaration attached to a local home, retained only by the source-aware lowering.
++typedef struct CheckDebugBinding CheckDebugBinding;
++struct CheckDebugBinding
++{
++    uint32_t token;
++    bool indirect;
++};
+ 
+ typedef struct CheckProgramLowered CheckProgramLowered;
+ struct CheckProgramLowered
