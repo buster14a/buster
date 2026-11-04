@@ -529,6 +529,7 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, Chec
     const PPTokens* output = &reader->pp->output;
     const uint32_t unit = width / 8;
     const uint32_t shortest = width == 32 ? 8 : 16;
+    const bool scalar = reader->parser->options.scalar;
     uint32_t index = 0;
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
@@ -541,8 +542,22 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, Chec
         if (kinds[token] == PARSE_KIND_NUMBER && !short_number)
         {
             const uint64_t mark = reader->scratch->length;
+            const uint32_t location = output->locations[at];
+            const uint32_t stop = output->values[at];
+            // In the clean span its bytes are its spelling (check_literal_table_element), classified without a call.
+            const bool spanned = output->kinds[at] == C_TOKEN_NUMERIC_CONSTANT && stop > location && source->clean_end != 0 &&
+                                 location >= source->clean_begin && stop <= source->clean_end;
+            const uint8_t* bytes = spanned ? source->clean + (location - source->clean_begin) : NULL;
             uint32_t category = 0;
-            valid = check_literal_table_element(reader, source, token, width, true, NULL, NULL, &category);
+            if (spanned)
+            {
+                category = scalar ? check_literal_table_classify_scalar(bytes, stop - location, width, false, false, true) :
+                                    check_literal_table_classify(bytes, stop - location, width, false, false, true);
+            }
+            else
+            {
+                valid = check_literal_table_element(reader, source, token, width, true, NULL, NULL, &category);
+            }
             if (valid && category == BUSTER_CHECK_LITERAL_TABLE_ROUND)
             {
                 const uint8_t* spelling = NULL;
