@@ -15,7 +15,7 @@ static unsigned __int128 interpreter_value_mask(uint8_t type)
     return bits == 128 ? ~(unsigned __int128)0 : (((unsigned __int128)1 << bits) - 1);
 }
 
-static InterpreterValue interpreter_value_value(unsigned __int128 bits, uint8_t type)
+static InterpreterValue interpreter_value_from_integer(unsigned __int128 bits, uint8_t type)
 {
     bits &= interpreter_value_mask(type);
     const InterpreterValue result = {

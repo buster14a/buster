@@ -161,26 +161,33 @@ static void interpreter_test_conversions(InterpreterTestTally* tally, Arena* scr
         0,
         0,
     };
+    const long double extended = 11.0L;
+    uint64_t constants[2] = { 0 };
+    memcpy(constants, &extended, 10);
     const Tier0Function function = {
         .kinds = kinds,
         .classes = classes,
         .values = values,
         .count = 3,
+        .x87 = true,
+        .x87_constants = constants,
+        .x87_constant_count = 1,
     };
-    // Every class but long double (F80), the 128-bit integers (I128, U128) and vectors (VECTOR), which the interpreter
-    // refuses: a conversion to one and from one is invalid.
+    // Every scalar pair, including both words of I128/U128 and the ten meaningful bytes of F80. Vector and mask
+    // constants/conversions are not part of this scalar operation; their dedicated operations are tested separately.
     for (uint32_t from = BUSTER_TYPED_CLASS_I8; from < BUSTER_TYPED_CLASSES; from += 1)
     {
         classes[0] = (uint8_t)from;
-        values[0] = from == BUSTER_TYPED_CLASS_F32 ? 0x41300000ull : from == BUSTER_TYPED_CLASS_F64 ? 0x4026000000000000ull : 11;
+        values[0] = from == BUSTER_TYPED_CLASS_F32 ? 0x41300000ull : from == BUSTER_TYPED_CLASS_F64 ? 0x4026000000000000ull : from == BUSTER_TYPED_CLASS_F80 ? 0 : 11;
         for (uint32_t to = BUSTER_TYPED_CLASS_I8; to < BUSTER_TYPED_CLASSES; to += 1)
         {
             classes[1] = (uint8_t)to;
             classes[2] = (uint8_t)to;
-            const bool x87 = from >= BUSTER_TYPED_CLASS_F80 || to >= BUSTER_TYPED_CLASS_F80;
-            const uint64_t expected = to == BUSTER_TYPED_CLASS_F32 ? 0x41300000ull : to == BUSTER_TYPED_CLASS_F64 ? 0x4026000000000000ull : 11;
+            const bool unsupported = from >= BUSTER_TYPED_CLASS_VECTOR || to >= BUSTER_TYPED_CLASS_VECTOR;
+            const uint64_t expected_low = to == BUSTER_TYPED_CLASS_F32 ? 0x41300000ull : to == BUSTER_TYPED_CLASS_F64 ? 0x4026000000000000ull : to == BUSTER_TYPED_CLASS_F80 ? constants[0] : 11;
+            const uint64_t expected_high = to == BUSTER_TYPED_CLASS_F80 ? constants[1] : 0;
             const InterpreterResult result = interpreter_test_run(&function, scratch, 0);
-            interpreter_test_expect(tally, x87 ? result.status == INTERPRETER_INVALID : result.status == INTERPRETER_OK && result.value.low == expected,
+            interpreter_test_expect(tally, unsupported ? result.status == INTERPRETER_INVALID : result.status == INTERPRETER_OK && result.value.low == expected_low && result.value.high == expected_high,
                                     "every scalar conversion pair");
         }
     }

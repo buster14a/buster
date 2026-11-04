@@ -1435,7 +1435,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             }
             else if (tier0_class_int128(class))
             {
-                stack[top - 1] = interpreter_value_value(0 - interpreter_value_integer(stack[top - 1]), IR_I128);
+                stack[top - 1] = interpreter_value_from_integer(0 - interpreter_value_integer(stack[top - 1]), IR_I128);
             }
             else
             {
@@ -1443,7 +1443,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             }
             break;
         case BUSTER_TYPED_NOT:
-            stack[top - 1] = tier0_class_int128(class) ? interpreter_value_value(~interpreter_value_integer(stack[top - 1]), IR_I128) :
+            stack[top - 1] = tier0_class_int128(class) ? interpreter_value_from_integer(~interpreter_value_integer(stack[top - 1]), IR_I128) :
                             (InterpreterValue){ .low = interpreter_typed_normalize(class, ~stack[top - 1].low) };
             break;
         case BUSTER_TYPED_CONVERT:

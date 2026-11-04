@@ -118,6 +118,32 @@ static void interpreter_test_wide_integer(InterpreterTestTally* tally, Arena* sc
     interpreter_test_expect(tally, ran && result.value.low == 1, "wide: high-word-only condition takes the branch");
 }
 
+static void interpreter_test_wide_shift_count(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_SHL, BUSTER_TYPED_RETURN };
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    const uint8_t locals[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U128 };
+    const uint64_t values[] = { 0, 1, 0, 0 };
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = locals,
+        .local_count = 2,
+        .parameter_count = 2,
+    };
+    const SymbolId symbol = 1;
+    const InterpreterProgram program = { .functions = &function, .function_symbols = &symbol, .function_count = 1 };
+    InterpreterValue arguments[] = { { .low = 1 }, { .low = 63 } };
+    InterpreterResult result;
+    bool ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == (UINT64_C(1) << 63), "wide: small wide shift count works with a narrow left operand");
+    arguments[1] = (InterpreterValue){ .high = 1 };
+    ran = interpreter_typed_run(&program, 1, arguments, 2, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_ARITHMETIC, "wide: narrow shifts reject a nonzero high word in the count");
+}
+
 static void interpreter_test_wide_conversions(InterpreterTestTally* tally, Arena* scratch)
 {
     uint8_t kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_CONVERT, BUSTER_TYPED_RETURN };
@@ -232,9 +258,130 @@ static void interpreter_test_wide_calls(InterpreterTestTally* tally, Arena* scra
     interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: typed native calls marshal i128 and f80 and capture st0");
 }
 
+static void interpreter_test_wide_memory(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = { BUSTER_TYPED_GLOBAL, BUSTER_TYPED_SET_GLOBAL, BUSTER_TYPED_RETURN };
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80 };
+    const uint64_t values[] = { 2, 3, 0 };
+    const Tier0Function function = { .kinds = kinds, .classes = classes, .values = values, .count = BUSTER_ARRAY_LENGTH(kinds) };
+    const SymbolId symbol = 1;
+    const long double number = 0x1.123456789abcdefp+20L;
+    const InterpreterValue expected = interpreter_test_extended_bits(number);
+    uint8_t source[12];
+    uint8_t destination[12];
+    memset(source, 0xa5, sizeof(source));
+    memset(destination, 0x5a, sizeof(destination));
+    memcpy(source + 1, &expected, 10);
+    InterpreterBinding bindings[] = {
+        { .symbol = 2, .bytes = source + 1, .size = 10, .writable = false },
+        { .symbol = 3, .bytes = destination + 1, .size = 10, .writable = true },
+    };
+    const InterpreterProgram program = {
+        .functions = &function,
+        .function_symbols = &symbol,
+        .function_count = 1,
+        .bindings = bindings,
+        .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+    };
+    InterpreterResult result;
+    bool ran = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high &&
+                            memcmp(source + 1, destination + 1, 10) == 0 && destination[0] == 0x5a && destination[11] == 0x5a,
+                            "wide: unaligned F80 global access needs exactly ten bytes and preserves its neighbors");
+    bindings[1].size = 9;
+    memset(destination, 0x5a, sizeof(destination));
+    ran = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    bool untouched = true;
+    for (uint32_t i = 0; i < sizeof(destination); i += 1)
+    {
+        untouched &= destination[i] == 0x5a;
+    }
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_MEMORY && untouched, "wide: an undersized F80 destination is rejected before any byte is written");
+    bindings[0].size = 9;
+    bindings[1].size = 10;
+    ran = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_MEMORY && result.entry == 0, "wide: an undersized F80 source is rejected before reading");
+
+    const uint8_t local_kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CONST, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_LOAD, BUSTER_TYPED_RETURN };
+    const uint8_t local_classes[] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_U8 };
+    const uint8_t locals[] = { BUSTER_TYPED_CLASS_F80 };
+    uint64_t local_values[] = { 0, 0, 0, 9, 1, 0, 0 };
+    const uint64_t pool[] = { expected.low, expected.high };
+    const Tier0Function local = {
+        .kinds = local_kinds,
+        .classes = local_classes,
+        .values = local_values,
+        .count = BUSTER_ARRAY_LENGTH(local_kinds),
+        .local_classes = locals,
+        .local_count = 1,
+        .x87 = true,
+        .x87_constants = pool,
+        .x87_constant_count = 1,
+    };
+    result = interpreter_test_run(&local, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == (expected.high >> 8), "wide: a scalar F80 store defines its tenth meaningful byte");
+    local_values[3] = 10;
+    result = interpreter_test_run(&local, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_UNDEFINED, "wide: scalar F80 padding remains undefined");
+    local_values[3] = 16;
+    result = interpreter_test_run(&local, scratch, 0);
+    interpreter_test_expect(tally, result.status == INTERPRETER_MEMORY, "wide: scalar F80 storage has its exact sixteen-byte extent");
+}
+
+static __attribute__((noinline)) unsigned __int128 interpreter_test_wide_native_integer(unsigned __int128 a)
+{
+    const unsigned __int128 result = a + ((unsigned __int128)1 << 100) + 7;
+    return result;
+}
+
+static void interpreter_test_wide_integer_return(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN };
+    const uint8_t classes[] = { BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128 };
+    const uint64_t values[] = { 0, 0, 0 };
+    const SymbolId target = 2;
+    const uint32_t first = 0;
+    const uint32_t count = 1;
+    const uint8_t variadic = 0;
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = classes,
+        .local_count = 1,
+        .parameter_count = 1,
+        .call_targets = &target,
+        .call_first = &first,
+        .call_argument_counts = &count,
+        .call_variadic = &variadic,
+        .argument_classes = classes,
+        .call_count = 1,
+        .argument_count = 1,
+    };
+    const SymbolId symbol = 1;
+    const InterpreterNativeBinding native = { .symbol = 2, .address = (void*)interpreter_test_wide_native_integer };
+    const InterpreterProgram program = {
+        .functions = &function,
+        .function_symbols = &symbol,
+        .function_count = 1,
+        .natives = &native,
+        .native_count = 1,
+    };
+    const unsigned __int128 integer = ((unsigned __int128)UINT64_C(0x123456789abcdef0) << 64) | UINT64_MAX;
+    const InterpreterValue argument = interpreter_test_wide_bits(integer);
+    const InterpreterValue expected = interpreter_test_wide_bits(interpreter_test_wide_native_integer(integer));
+    InterpreterResult result;
+    const bool ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+    interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: typed native integer returns preserve both rax and rdx");
+}
+
 static void interpreter_test_wide(InterpreterTestTally* tally, Arena* scratch)
 {
     interpreter_test_wide_integer(tally, scratch);
+    interpreter_test_wide_shift_count(tally, scratch);
     interpreter_test_wide_conversions(tally, scratch);
     interpreter_test_wide_calls(tally, scratch);
+    interpreter_test_wide_memory(tally, scratch);
+    interpreter_test_wide_integer_return(tally, scratch);
 }

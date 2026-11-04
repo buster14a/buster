@@ -8,8 +8,8 @@
 // Execution verifies whole-function structure and reachable SSA dominance, then diagnoses undefined dynamic uses.
 // Unreachable uses impose no cross-block dominance requirement. Checked memory honors promised alignment; volatile transfers are ordered
 // byte accesses, including exactly ten bytes for f80. Input/program views and native extension slices outlive execution.
-// Layout: integer/float payload helpers; symbol lookup; frame preparation; scalar operations; ir_interpret.
-
+// Scalar payload helpers live in interpreter_value.c, shared with the typed front without IR lowering.
+// Layout: symbol lookup; frame preparation; scalar operations; ir_interpret.
 
 // A function and its symbol; `labels`, the producer's symbols of its labels in IrFunction.labels' order (label_count of
 // them), or null for a function whose labels' addresses nothing takes. A label's address is its labels entry's, which
@@ -288,7 +288,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
             memset(frame->defined, 0, (uint64_t)function->instruction_count + 1);
             for (uint32_t p = 0; p < count; p += 1)
             {
-                frame->arguments[p] = interpreter_value_value(interpreter_value_integer(arguments[p]), function->parameter_types[p]);
+                frame->arguments[p] = interpreter_value_from_integer(interpreter_value_integer(arguments[p]), function->parameter_types[p]);
             }
         }
         if (status == INTERPRETER_OK && simd)
@@ -806,7 +806,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     }
     if (status == INTERPRETER_OK && raw_result)
     {
-        *value = interpreter_value_value(result, type);
+        *value = interpreter_value_from_integer(result, type);
     }
     return status;
 }
@@ -1044,7 +1044,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         {
                             object[byte] = (uint8_t)(written >> (8 * byte));
                         }
-                        value = interpreter_value_value(old, type);
+                        value = interpreter_value_from_integer(old, type);
                     }
                 } break;
                 case IR_ALLOCA:
@@ -1097,7 +1097,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             }
                             if (!ir_vector_type(type))
                             {
-                                value = interpreter_value_value(interpreter_value_integer(value), type);
+                                value = interpreter_value_from_integer(interpreter_value_integer(value), type);
                             }
                         }
                         else
@@ -1344,7 +1344,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 }
                 else
                 {
-                    frame->values[i] = interpreter_value_value(interpreter_value_integer(value), type);
+                    frame->values[i] = interpreter_value_from_integer(interpreter_value_integer(value), type);
                 }
                 frame->defined[i] = defined;
             }

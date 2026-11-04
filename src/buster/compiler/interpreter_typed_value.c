@@ -49,12 +49,12 @@ static InterpreterValue interpreter_typed_convert_value(uint32_t to, uint32_t fr
     {
         unsigned __int128 converted = 0;
         *status = interpreter_value_float_integer(value, source_type, result_type, to_signed, &converted);
-        result = interpreter_value_value(converted, result_type);
+        result = interpreter_value_from_integer(converted, result_type);
     }
     else
     {
         const unsigned __int128 bits = from_signed ? (unsigned __int128)interpreter_value_signed(value, source_type) : interpreter_value_integer(value);
-        result = interpreter_value_value(bits, result_type);
+        result = interpreter_value_from_integer(bits, result_type);
     }
     result = interpreter_typed_value(to, result);
     return result;
@@ -169,7 +169,12 @@ static InterpreterValue interpreter_typed_binary_value(uint32_t kind, uint32_t c
             break;
         default: *status = INTERPRETER_INVALID; break;
         }
-        result = interpreter_value_value(bits, IR_I128);
+        result = interpreter_value_from_integer(bits, IR_I128);
+    }
+    else if ((kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR) && b.high != 0)
+    {
+        // A narrow left operand may have a wide shift count. Its high word cannot be discarded before validation.
+        *status = INTERPRETER_ARITHMETIC;
     }
     else
     {

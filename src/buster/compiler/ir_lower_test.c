@@ -925,6 +925,32 @@ static bool ir_lower_test_wide_run(const IrFunction* function, uint8_t* const* b
     return result.status == INTERPRETER_OK;
 }
 
+// Exercise the original typed columns too: comparing only lowered IR with a private fixture machine cannot check
+// the production typed oracle's independent execution or its object-backed/wide local storage (#176).
+static bool ir_lower_test_wide_typed_run(const Tier0Function* function, uint8_t* const* buffers, const uint64_t* sizes, uint32_t count, Arena* execution)
+{
+    const SymbolId symbol = 1;
+    InterpreterBinding bindings[4];
+    InterpreterValue arguments[4];
+    for (uint32_t b = 0; b < count; b += 1)
+    {
+        bindings[b] = (InterpreterBinding){ .symbol = 2 + b, .bytes = buffers[b], .size = sizes[b], .writable = true };
+        arguments[b] = (InterpreterValue){ .low = (uintptr_t)buffers[b] };
+    }
+    const InterpreterNativeBinding natives[2] = {
+        { .symbol = 8, .address = (void*)&tier0_test_x87_mix },
+        { .symbol = 9, .address = (void*)&tier0_test_x87_scale },
+    };
+    const InterpreterProgram program = { .functions = function, .function_symbols = &symbol, .function_count = 1, .bindings = bindings, .binding_count = count, .natives = natives, .native_count = 2 };
+    InterpreterResult result;
+    const bool ran = interpreter_typed_run(&program, 1, arguments, count, execution, 0, &result);
+    if (!ran)
+    {
+        fprintf(stderr, "  typed wide status %u, entry %u\n", result.status, result.entry);
+    }
+    return ran;
+}
+
 // Long double and the 128-bit integers (#131): Tier 0's own random programs of each class (tier0_x87_test.c and
 // tier0_int128_test.c, their inputs drawn as those tests draw them) lowered by both paths and promoted, then run by the
 // shared IR's interpreter, every output slot they write compared with their stack machines': the x87 programs' calls of C
@@ -988,6 +1014,14 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
                 same = memcmp(out + 16 * o, expected + 16 * o, tier0_class_bytes(wide->outputs[o])) == 0;
             }
             checked[0] += ir_lower_test_expect(tally, same, "a 128-bit program's outputs are its stack machine's", seed, p);
+            memset(out, 0xa5, sizeof(out));
+            const bool typed_ran = interpreted && ir_lower_test_wide_typed_run(&source, buffers, sizes, 3, &execution);
+            same = ir_lower_test_expect(tally, typed_ran, "the production typed interpreter runs a 128-bit program", seed, p);
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_INT128_OUTPUTS; o += 1)
+            {
+                same = memcmp(out + 16 * o, expected + 16 * o, tier0_class_bytes(wide->outputs[o])) == 0;
+            }
+            ir_lower_test_expect(tally, same, "typed 128-bit outputs match the independent stack machine", seed, p);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
@@ -1035,6 +1069,14 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
                 same = tier0_test_x87_same_output(x87->outputs[o], out + 16 * o, expected + 16 * o);
             }
             checked[1] += ir_lower_test_expect(tally, same, "a long double program's outputs are its stack machine's", seed, p);
+            memset(out, 0xa5, sizeof(out));
+            const bool typed_ran = interpreted && ir_lower_test_wide_typed_run(&long_double, buffers, sizes, 4, &execution);
+            same = ir_lower_test_expect(tally, typed_ran, "the production typed interpreter runs a long double program", seed, p);
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_X87_OUTPUTS; o += 1)
+            {
+                same = tier0_test_x87_same_output(x87->outputs[o], out + 16 * o, expected + 16 * o);
+            }
+            ir_lower_test_expect(tally, same, "typed long-double outputs match the independent stack machine", seed, p);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
