@@ -278,6 +278,41 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
             check_test_expect(test, unchanged, "payload and retained-record allocation failures restore arenas and publish no ignored range or table");
             rollback.capacity = capacity;
         }
+        // A floating table's scratch, refused at every 4 bytes past its length (#1210's review): its four columns
+        // (check_literal_table_floating: the tokens, the spellings, their lengths and the converted bitset of 129
+        // elements, with their alignment), then its first spellings. Each refusal is a resource failure that restores
+        // both arenas and publishes no ignored range or table.
+        const bool floating = strcmp(element, "float") == 0 || strcmp(element, "double") == 0;
+        const uint64_t columns = (uint64_t)129 * (sizeof(uint32_t) + sizeof(const uint8_t*) + sizeof(uint32_t)) + 3 * sizeof(uint64_t) + 64;
+        const uint64_t scratch_capacity = scratch.capacity;
+        uint32_t refusals = 0;
+        for (uint64_t room = 0; allocated && floating && room <= columns; room += 4)
+        {
+            CheckInput copy = input;
+            copy.literal_tables = NULL;
+            copy.literal_tables_last = NULL;
+            copy.literal_table_count = 0;
+            copy.resource = false;
+            rollback.length = 17;
+            reader.output = &copy;
+            reader.arena = &rollback;
+            reader.declared_types = input.declared_types;
+            reader.initializer_declarations = declarations;
+            reader.ignored = ignored;
+            reader.function_body = BUSTER_CHECK_NONE;
+            const uint64_t before = scratch.length;
+            scratch.capacity = before + room;
+            bool unchanged = !check_input_literal_table_prepare(&reader, begin - 1) && copy.resource && rollback.length == 17 &&
+                             scratch.length == before && copy.literal_tables == NULL && copy.literal_table_count == 0;
+            scratch.capacity = scratch_capacity;
+            for (uint32_t token = 0; unchanged && token <= parser.tokens.count; token += 1)
+            {
+                unchanged = ignored[token] == 0x9d;
+            }
+            refusals += unchanged;
+            check_test_expect(test, unchanged, "each floating scratch column's and spelling's allocation failure restores arenas and publishes no ignored range or table");
+        }
+        check_test_expect(test, !floating || refusals == columns / 4 + 1, "every floating scratch refusal was checked");
         arena_pop_to(&scratch, scratch_mark);
     }
     if (mapping != MAP_FAILED)
