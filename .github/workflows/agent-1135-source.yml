@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Temporary branch-only oracle for #1135; removed before the final PR.
+# Temporary branch-only validation for #1135; excluded from the final PR tree.
 name: Issue 1135 source snapshot
 on:
   push:
@@ -10,48 +10,48 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Install the repository oracle
-        run: bash tools/ci/setup-hosted.sh
-      - name: Observe original pragma fixtures, including expected rejections
+      - name: Apply the byte-verified implementation
         shell: bash
         run: |
-          set +e
-          set -uo pipefail
-          clang --version
-          cases=(
-          '#pragma redefine_extname f renamed\nint f(void){return 7;}\nint main(void){return f()!=7;}'
-          'int f(void){return 7;}\n#pragma redefine_extname f renamed\nint main(void){return f()!=7;}'
-          'int f(void);\nint g(void){return f();}\n#pragma redefine_extname f renamed\nint f(void){return 7;}'
-          '#pragma redefine_extname f renamed\nstatic int f(void){return 7;}\nint main(void){return f()!=7;}'
-          '#define f other\n#pragma redefine_extname f renamed\n#undef f\nint f(void){return 7;}'
-          '#pragma GCC target("avx2")\nint f(void){return 7;}\n#pragma GCC push_options\n#pragma GCC pop_options\n#pragma GCC reset_options'
-          'int b;\n#pragma weak a = b\nint main(void){return a;}'
-          'extern int b;\n#pragma weak a = b\nint main(void){return a;}'
-          'int f(void){return 7;}\nint main(void){\n#pragma weak f\nreturn f()!=7;}'
-          'int f(void);\n#pragma weak f\nint f(void){return 7;}'
-          'extern int x;\n#pragma weak x\nint main(void){return &x==0;}'
-          'int x=7;\n#pragma weak x\nint main(void){return x;}'
-          '#pragma redefine_extname f one\n#pragma redefine_extname f two\nint f(void){return 7;}'
-          '#pragma redefine_extname f one\nint f(void);\n#pragma redefine_extname f two\nint f(void){return 7;}'
-          'int f(void) __asm__("asm_name");\n#pragma redefine_extname f other\nint f(void){return 7;}'
-          '#pragma redefine_extname f renamed\nint f(void) __asm__("asm_name");\nint f(void){return 7;}'
-          '#pragma redefine_extname absent renamed\nint x;'
-          '#pragma weak f trailing\nint f(void){return 7;}'
-          '#pragma redefine_extname f renamed trailing\nint f(void){return 7;}'
-          '#pragma weak 1\nint x;'
-          '#pragma redefine_extname 1 two\nint x;'
-          '#define f g\n#pragma weak f\n#undef f\nint f(void){return 7;}'
-          'int f(void){return 1;}\n#pragma weak a = f\nint a(void);\nint main(void){return a();}'
-          'int f(void){return 1;}\n#pragma redefine_extname f renamed'
-          'extern int f(void);\nint main(void){\n#pragma redefine_extname f renamed\nreturn f();}'
-          'static int x=7;\n#pragma redefine_extname x renamed\nint f(void){return x;}'
-          '#pragma weak x\ntypedef int x;'
-          'static int f(void){return 7;}\n#pragma weak f\nint main(void){return f();}')
-          mkdir -p "$RUNNER_TEMP/pragma-oracle"
-          for i in "${!cases[@]}"; do p="$RUNNER_TEMP/pragma-oracle/$i"; printf '\n===== CASE %s =====\n' "$i"; printf '%b\n' "${cases[$i]}" | tee "$p.c"; clang -Wall -Wextra -S -emit-llvm -o "$p.ll" "$p.c" 2>&1; printf 'exit=%s\n' "$?"; test ! -f "$p.ll" || grep -E '^@|^define|^declare|^attributes' "$p.ll"; done
-          exit 0
+          set -euo pipefail
+          sed 's/qnSvqn7Svqn7prXy/qnSvqn7prXy/' .github/agent-1135.patch.gz.b64 | base64 -d | gzip -d > "$RUNNER_TEMP/1135.patch"
+          printf '%s  %s\n' '8c18785f7db7e4f8df0462766ff126b2cd2a14ccb4d0415f2e9e07da3ce77105' "$RUNNER_TEMP/1135.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/1135.patch"
+          git apply "$RUNNER_TEMP/1135.patch"
+          git diff --check
+      - name: Install pinned build and oracle tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/ci/setup-hosted.sh
+          bash tools/ci/setup-build-tools.sh "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Build baseline x86-64
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 ./build.sh --jobs 2 2>&1 | tee "$RUNNER_TEMP/1135-build.log"
+      - name: Checker semantic and arena regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/compiler test-checker --part 1/128 2>&1 | tee "$RUNNER_TEMP/1135-checker.log"
+      - name: Driver and object regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/compiler test-checker-driver --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/1135-driver.log"
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-1135-validation
+          path: |
+            ${{ runner.temp }}/1135.patch
+            ${{ runner.temp }}/1135-*.log
+          retention-days: 3
+          if-no-files-found: error
