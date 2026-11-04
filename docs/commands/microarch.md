@@ -52,13 +52,27 @@ traffic. It changes no host setting and needs no root. It needs
     `CSV.done` is written after both succeed. One that is unfinished runs again
     whole. Any fanout batches it measured lose their completion records first, so
     that they run inside the new measurement instead of being skipped under it.
+  - **Inputs.** Records are reused by their names alone, so
+    `results/HOST/identity.txt` binds the results to the inputs they were
+    measured with: the SHA-256 of every build in `bin/`, `self-main.i`, the
+    predefines, the corpus's `MANIFESTS.sha256` and `workloads.sh`. Every step
+    except `setup`, `build-commit` and `summarize` checks it first, and is
+    refused once a recorded input changed (a rebuilt checkout, another corpus or
+    workload options). Move the results away to measure the new inputs. A build
+    first seen, such as a `build-commit` one, is added. Results with no
+    `identity.txt` (from before it) are refused too.
   - **Catalogs.** `env` writes perf's lists of core events and metrics as
     `env/core-events.txt` and `env/metrics.txt`. The sweep's and the metrics'
     results are numbered by those lines, so a catalog is frozen once a result uses
     it. A perf that lists something else (after an upgrade, say) writes
     `NAME.live.txt` beside it and fails `env`; `KEEP_CATALOG=1` keeps measuring
     the frozen catalog, and new results (an empty `results/HOST`) take the new
-    list. A catalog that numbers no result follows perf's list.
+    list. A catalog that numbers no result follows perf's list. A `perf list`
+    that fails, or lists no entry, fails `env` and leaves the catalog as it was,
+    and `sweep` and `metrics` fail without a catalog rather than measure nothing.
+  - **Pinning.** Each held step pins itself to its CPU and fails if it can't;
+    `fanout` refuses a CPU that isn't a number below `CPU_SETSIZE`, and a copy
+    that can't be pinned fails its batch without running the command.
 - `hosts/zen4-7940hs.sh` and `hosts/zen5-9700x.sh` hold each host's hold
   functions, CPUs, dispatch width, the event names that differ between
   generations, and chunk sizes. A new host needs a profile like these.
@@ -87,7 +101,13 @@ compilers, a fake perf, a fake tcc and a two-commit fake checkout. It checks:
   to a shifted list of the same length, and that `sweep` refuses results numbered
   by another catalog;
 - that `summarize` passes a campaign without some steps and fails when a reducer
-  fails.
+  fails;
+- that `env` fails on a `perf list` that fails or lists nothing, and that
+  `sweep` and `metrics` fail without a catalog;
+- that a step whose CPU can't be pinned fails;
+- that after `setup` rebuilds the checkout, a step that measures the old results
+  is refused until they are moved away, that a `build-commit` build is added to
+  the inputs, and that results without `identity.txt` are refused.
 
 ```sh
 mkdir -p build/microarch
@@ -150,7 +170,7 @@ tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/
 
 | step | what | runs |
 | --- | --- | --- |
-| `env` | the host's settings, tools and hashes, and perf's catalogs (frozen once they number results; see Catalogs) | 1 |
+| `env` | the host's settings, tools and hashes, and perf's catalogs (frozen once they number results; a failed or empty `perf list` fails it; see Catalogs) | 1 |
 | `validate` | each build's object, `-E` output, default-lanes object and diagnostics, from fresh outputs; a failed command stops the step, and outputs that differ between builds fail it (diagnostics only warn with `VALIDATE_DIAGNOSTICS=warn`, for #1339) | 1 |
 | `time`, `time-self` | whole processes (wall, rusage), with `--time-stages` runs | 11 / 3 rotated rounds |
 | `groups`, `groups-self` | six perf stat groups of at most five counters: user and kernel cycles and instructions; top-down level 1; level 2 (with the frontend stall at `cmask` = width and microcoded ops); branches; frontend; memory | 5 / 2 per build and workload |

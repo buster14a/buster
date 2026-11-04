@@ -1042,7 +1042,10 @@ static int command_check(int argc, char** argv)
 // CPU at once, each pinned to its CPU ("{i}" in an argument becomes the copy's
 // index); the batch's wall time and the copies' summed rusage per round. Each
 // round's row is its completion record, OUT/logs/LABEL.rN.fanout, written after
-// every copy ends; OUT/fanout.tsv is rebuilt from the records.
+// every copy ends; OUT/fanout.tsv is rebuilt from the records. A list with a CPU
+// that isn't a number below CPU_SETSIZE runs nothing, and a copy that can't be
+// pinned to its CPU fails without running the command, so an unpinned copy is
+// never a sample.
 static int command_fanout(int argc, char** argv)
 {
     int result = 0;
@@ -1059,6 +1062,7 @@ static int command_fanout(int argc, char** argv)
         int rounds = atoi(argv[4]);
         int cpus[BUSTER_UARCH_MAX_CPUS];
         int cpu_count = 0;
+        bool cpus_valid = true;
         char cpu_list[BUSTER_UARCH_LINE_BYTES];
         format_into(cpu_list, sizeof(cpu_list), "%s", argv[5]);
         for (char* token = strtok(cpu_list, ","); token != NULL; token = strtok(NULL, ","))
@@ -1067,15 +1071,34 @@ static int command_fanout(int argc, char** argv)
             {
                 fail("too many CPUs");
             }
-            cpus[cpu_count] = atoi(token);
+            char* end = NULL;
+            long cpu = strtol(token, &end, 10);
+            if (end == token || *end != 0 || cpu < 0 || cpu >= CPU_SETSIZE)
+            {
+                fprintf(stderr, "uarch fanout: '%s' isn't a CPU number below %d\n", token, CPU_SETSIZE);
+                cpus_valid = false;
+            }
+            cpus[cpu_count] = (int)cpu;
             cpu_count += 1;
+        }
+        if (cpu_count == 0)
+        {
+            fprintf(stderr, "uarch fanout: no CPU listed\n");
+            cpus_valid = false;
         }
         int command_count = argc - separator - 1;
         char** command = &argv[separator + 1];
         char path[BUSTER_UARCH_PATH_BYTES];
         format_into(path, sizeof(path), "%s/logs", out);
-        make_directory(path);
-        for (int round = 0; round < rounds; round += 1)
+        if (cpus_valid)
+        {
+            make_directory(path);
+        }
+        else
+        {
+            result = 1;
+        }
+        for (int round = 0; round < rounds && cpus_valid; round += 1)
         {
             char log[BUSTER_UARCH_PATH_BYTES];
             char record[BUSTER_UARCH_PATH_BYTES];
@@ -1095,16 +1118,20 @@ static int command_fanout(int argc, char** argv)
                 children[k] = fork();
                 if (children[k] == 0)
                 {
-                    cpu_set_t set;
-                    CPU_ZERO(&set);
-                    CPU_SET(cpus[k], &set);
-                    sched_setaffinity(0, sizeof(set), &set);
-                    setenv("LC_ALL", "C", 1);
                     if (fd >= 0)
                     {
                         dup2(fd, 1);
                         dup2(fd, 2);
                     }
+                    cpu_set_t set;
+                    CPU_ZERO(&set);
+                    CPU_SET(cpus[k], &set);
+                    if (sched_setaffinity(0, sizeof(set), &set) != 0)
+                    {
+                        fprintf(stderr, "uarch fanout: copy %d can't be pinned to CPU %d: %s\n", k, cpus[k], strerror(errno));
+                        _exit(126);
+                    }
+                    setenv("LC_ALL", "C", 1);
                     char** child_argv = checked_realloc(NULL, (size_t)(command_count + 1) * sizeof(char*));
                     for (int a = 0; a < command_count; a += 1)
                     {
@@ -1143,12 +1170,19 @@ static int command_fanout(int argc, char** argv)
             {
                 close(fd);
             }
+            if (failed != 0)
+            {
+                fprintf(stderr, "uarch fanout: %s round %d: %d of %d copies failed (%s)\n", label, round, failed, cpu_count, log);
+            }
             char line[BUSTER_UARCH_LINE_BYTES];
             format_into(line, sizeof(line), "%s\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%ld\t%.0f\n", label, round, cpu_count, failed, wall, user, system, maxrss, minflt);
             write_text_atomic(record, line);
             result |= failed != 0;
         }
-        rebuild_table(out, "fanout.tsv", ".fanout", "label\tround\tworkers\tfailed\twall_ms\tuser_ms_sum\tsystem_ms_sum\tmaxrss_kb_max\tminflt_sum\n");
+        if (cpus_valid)
+        {
+            rebuild_table(out, "fanout.tsv", ".fanout", "label\tround\tworkers\tfailed\twall_ms\tuser_ms_sum\tsystem_ms_sum\tmaxrss_kb_max\tminflt_sum\n");
+        }
     }
     return result;
 }
@@ -2298,16 +2332,49 @@ static void test_resume(void)
             bad += strncmp(rows.items[i], "bad\t", 4) == 0 && strstr(rows.items[i], "\t3\t") != NULL;
         }
         expect(status == 1 && rows.count == 4 && bad == 2, "resume: one row per run, and the recorded failure reported again");
-        char* fan[] = { "uarch", "fanout", directory, "fan", "2", "0,0", "--", "true", NULL };
+        // Copies go to a CPU this process may use, whatever its affinity.
+        cpu_set_t allowed;
+        CPU_ZERO(&allowed);
+        int own_cpu = 0;
+        if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0)
+        {
+            while (own_cpu < CPU_SETSIZE - 1 && !CPU_ISSET(own_cpu, &allowed))
+            {
+                own_cpu += 1;
+            }
+        }
+        char own[32];
+        format_into(own, sizeof(own), "%d,%d", own_cpu, own_cpu);
+        char* fan[] = { "uarch", "fanout", directory, "fan", "2", own, "--", "true", NULL };
         status = command_fanout(8, fan);
         format_into(path, sizeof(path), "%s/logs/fan.r0.fanout", directory);
         unlink(path);
-        char* fan_again[] = { "uarch", "fanout", directory, "fan", "2", "0,0", "--", "true", NULL };
+        char* fan_again[] = { "uarch", "fanout", directory, "fan", "2", own, "--", "true", NULL };
         status |= command_fanout(8, fan_again);
         format_into(path, sizeof(path), "%s/fanout.tsv", directory);
         expect(status == 0 && read_table_rows(path).count == 2, "resume: fanout reruns an interrupted round once");
-        char* failing[] = { "uarch", "fanout", directory, "fail", "1", "0", "--", "false", NULL };
+        format_into(own, sizeof(own), "%d", own_cpu);
+        char* failing[] = { "uarch", "fanout", directory, "fail", "1", own, "--", "false", NULL };
         expect(command_fanout(8, failing) == 1, "resume: a failed fanout copy fails the command");
+        // The last CPU number of cpu_set_t, where no such CPU exists: the copy
+        // can't be pinned, and fails though its command would pass.
+        format_into(path, sizeof(path), "/sys/devices/system/cpu/cpu%d", CPU_SETSIZE - 1);
+        if (!file_exists(path))
+        {
+            char absent[32];
+            format_into(absent, sizeof(absent), "%d", CPU_SETSIZE - 1);
+            char* unpinned[] = { "uarch", "fanout", directory, "unpinned", "1", absent, "--", "true", NULL };
+            int unpinned_status = command_fanout(8, unpinned);
+            format_into(path, sizeof(path), "%s/logs/unpinned.r0.log", directory);
+            Strings log = read_lines(path);
+            expect(unpinned_status == 1 && log.count > 0 && strstr(log.items[0], "can't be pinned") != NULL, "fanout: a copy that can't be pinned to its CPU fails");
+        }
+        char too_large[32];
+        format_into(too_large, sizeof(too_large), "%d,%d", own_cpu, CPU_SETSIZE);
+        char* beyond[] = { "uarch", "fanout", directory, "beyond", "1", too_large, "--", "true", NULL };
+        char* not_number[] = { "uarch", "fanout", directory, "beyond", "1", "1x", "--", "true", NULL };
+        format_into(path, sizeof(path), "%s/logs/beyond.r0.log", directory);
+        expect(command_fanout(8, beyond) == 1 && command_fanout(8, not_number) == 1 && !file_exists(path), "fanout: a CPU beyond cpu_set_t or not a number runs nothing");
         char csv[BUSTER_UARCH_PATH_BYTES];
         format_into(csv, sizeof(csv), "%s/refused.csv", directory);
         write_text_atomic(csv, "# started on Wed Nov  4 20:56:07 2026\n\n");

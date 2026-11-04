@@ -47,10 +47,13 @@
 # its failed entries again. A build is reused only when its .commit file names the
 # commit asked for (build-commit) or the checkout's own (setup), and self-main.i only
 # when self-main.i.source names the checkout, preprocessor and predefines. A chunk
-# whose recorded entries aren't its catalog's lines fails the step. REPOSITORY
-# names the checkout (this one by default). Each step, or each chunk of one, takes
-# the host's lock or core grant itself, for that chunk alone; no step needs
-# another's output except summarize.
+# whose recorded entries aren't its catalog's lines fails the step.
+# results/HOST/identity.txt binds the results to their inputs (the builds, the self
+# input, the corpus, the workloads): a step that measures is refused once one of
+# them changed. A run that can't be pinned to its CPUs fails. REPOSITORY names the
+# checkout (this one by default). Each step, or each chunk of one, takes the host's
+# lock or core grant itself, for that chunk alone; no step needs another's output
+# except summarize.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repository=${REPOSITORY:-$(cd "$here/../.." && pwd)}
@@ -79,7 +82,8 @@ log() { printf '%s %s\n' "$(date -Is)" "$*" | tee -a "$OUT/run.log" >&2; }
 affinity_cpus()
 {
     local list part
-    list=$(taskset -pc $$ | sed 's/.*: //')
+    list=$(taskset -pc $$) || return 1
+    list=${list##*: }
     for part in ${list//,/ }; do
         if [[ $part == *-* ]]; then seq "${part%-*}" "${part#*-}"; else echo "$part"; fi
     done
@@ -88,8 +92,9 @@ affinity_cpus()
 # One CPU per physical core of this process's affinity, comma-separated.
 physical_cpus()
 {
-    local seen=" " cpu core out=""
-    for cpu in $(affinity_cpus); do
+    local seen=" " cpu core out="" cpus
+    cpus=$(affinity_cpus) || return 1
+    for cpu in $cpus; do
         core="$(cat "/sys/devices/system/cpu/cpu$cpu/topology/physical_package_id" 2>/dev/null):$(cat "/sys/devices/system/cpu/cpu$cpu/topology/core_id" 2>/dev/null)"
         if [[ $seen != *" $core "* ]]; then seen+="$core "; out+="${out:+,}$cpu"; fi
     done
@@ -502,7 +507,11 @@ inner()
     receipt >> "$OUT/holds.txt"
     cpu=$(single_cpu)
     log "inner $step $* (cpu $cpu)"
-    taskset -pc "$cpu" $$ > /dev/null
+    # An unpinned run is no sample.
+    if [[ -z $cpu ]] || ! taskset -pc "$cpu" $$ > /dev/null; then
+        log "inner $step $*: can't pin to CPU '$cpu'"
+        return 1
+    fi
     case $step in
         validate) inner_validate ;;
         time) inner_time ;;
@@ -531,6 +540,10 @@ inner_multi()
     local step=$1 cpus; shift
     receipt >> "$OUT/holds.txt"
     cpus=$(physical_cpus)
+    if [[ -z $cpus ]]; then
+        log "inner-multi $step: no CPU of this process's affinity"
+        return 1
+    fi
     log "inner-multi $step (cpus $cpus)"
     case $step in
         scaling) inner_scaling "$cpus" ;;
@@ -630,7 +643,10 @@ step_setup()
 freeze_catalog()
 {
     local name=$1 results=$2 status=0
-    if [[ ! -f $name.txt ]] || cmp -s "$name.live.txt" "$name.txt"; then
+    if [[ ! -s $name.live.txt ]]; then
+        log "env: perf listed no entry of ${name##*/}; ${name##*/}.txt is unchanged"
+        status=1
+    elif [[ ! -f $name.txt ]] || cmp -s "$name.live.txt" "$name.txt"; then
         mv -f "$name.live.txt" "$name.txt" || status=1
     elif ! compgen -G "$results" > /dev/null; then
         log "env: ${name##*/}.txt replaced by this perf's list; no results used it"
@@ -680,7 +696,7 @@ step_build_commit()
 
 step_env()
 {
-    local dir="$OUT/env" c status=0
+    local dir="$OUT/env" c status=0 listed
     mkdir -p "$dir"
     uname -a > "$dir/uname.txt"
     lscpu > "$dir/lscpu.txt"
@@ -711,15 +727,32 @@ step_env()
     { perf --version; clang --version | head -1; tcc -v 2>&1 | head -1; bash --version | head -1; } > "$dir/tools.txt"
     sha256sum bin/compiler-* self-main.i predefines-znver5.h "$here"/uarch.c "$here"/run.sh "$here"/workloads.sh "$profile" > "$dir/sha256.txt" 2>/dev/null
     sha256sum corpus/MANIFESTS.sha256 corpus/sqlite/sqlite3.c >> "$dir/sha256.txt"
-    perf list -j 2> /dev/null | gzip -9n > "$dir/perf-list.json.gz"
-    # perf lists tool and sensor names beside the core events; they don't count per thread.
-    perf list --raw-dump pmu 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v / | grep -v '^drm-' \
-        | grep -v -x -E 'core_wide|duration_time|has_pmem|num_cores|num_cpus|num_cpus_online|num_dies|num_packages|slots|smt_on|system_time|user_time' \
-        | sort -u > "$dir/core-events.live.txt"
-    perf list -j metrics 2>/dev/null | sed -n 's/.*"MetricName": "\([^"]*\)".*/\1/p' | sort -u > "$dir/metrics.live.txt"
-    freeze_catalog "$dir/core-events" "$OUT/sweep-*/sweep/*.event" || status=1
-    freeze_catalog "$dir/metrics" "$OUT/metrics-*/metrics/*.metric" || status=1
-    log "env: $(wc -l < "$dir/core-events.txt") core events, $(wc -l < "$dir/metrics.txt") metrics"
+    # perf's status is checked apart from the filters after it: a perf that fails
+    # lists nothing, and an empty list is no catalog.
+    if perf list -j > "$dir/perf-list.json" 2> /dev/null; then
+        gzip -9nf "$dir/perf-list.json" || status=1
+    else
+        log "env: perf list -j failed"
+        status=1
+    fi
+    if listed=$(perf list --raw-dump pmu 2> /dev/null); then
+        # perf lists tool and sensor names beside the core events; they don't count per thread.
+        tr ' ' '\n' <<< "$listed" | grep -v '^$' | grep -v / | grep -v '^drm-' \
+            | grep -v -x -E 'core_wide|duration_time|has_pmem|num_cores|num_cpus|num_cpus_online|num_dies|num_packages|slots|smt_on|system_time|user_time' \
+            | sort -u > "$dir/core-events.live.txt"
+        freeze_catalog "$dir/core-events" "$OUT/sweep-*/sweep/*.event" || status=1
+    else
+        log "env: perf list --raw-dump pmu failed; core-events.txt is unchanged"
+        status=1
+    fi
+    if listed=$(perf list -j metrics 2> /dev/null); then
+        sed -n 's/.*"MetricName": "\([^"]*\)".*/\1/p' <<< "$listed" | sort -u > "$dir/metrics.live.txt"
+        freeze_catalog "$dir/metrics" "$OUT/metrics-*/metrics/*.metric" || status=1
+    else
+        log "env: perf list -j metrics failed; metrics.txt is unchanged"
+        status=1
+    fi
+    log "env: $(cat "$dir/core-events.txt" 2> /dev/null | wc -l) core events, $(cat "$dir/metrics.txt" 2> /dev/null | wc -l) metrics"
     return $status
 }
 
@@ -753,9 +786,16 @@ run_chunks()
     done
 }
 
+# A sweep or metrics step without its catalog fails rather than measure nothing.
+need_catalog()
+{
+    [[ -s $OUT/env/$1.txt ]] || { log "$2: env/$1.txt is missing or empty (env writes it)"; return 1; }
+}
+
 step_sweep()
 {
     local v w n
+    need_catalog core-events sweep || return 1
     n=$(wc -l < "$OUT/env/core-events.txt")
     for v in $SWEEP_VARIANTS; do
         for w in ${SWEEP_WORKLOADS:-sq-c sq-syn}; do
@@ -767,10 +807,54 @@ step_sweep()
 step_metrics()
 {
     local w n
+    need_catalog metrics metrics || return 1
     n=$(wc -l < "$OUT/env/metrics.txt")
     for w in ${METRIC_WORKLOADS:-sq-c sq-syn}; do
         run_chunks metrics "$OUT/metrics-$NATIVE-$w" "$n" "$METRIC_CHUNK" "$NATIVE" "$w" || return 1
     done
+}
+
+# The inputs results/HOST is measured with, one "NAME SHA-256" line each: every
+# build in bin/, the self input and its predefines, the corpus's manifest, and the
+# workloads' command lines (workloads.sh).
+campaign_inputs()
+{
+    local file name hash
+    for file in bin/compiler-* self-main.i predefines-znver5.h corpus/MANIFESTS.sha256 "$here/workloads.sh"; do
+        [[ -f $file && $file != *.commit ]] || continue
+        name=${file##*/}
+        [[ $file == corpus/* ]] && name=corpus
+        hash=$(sha256sum < "$file") || return 1
+        echo "$name ${hash%% *}"
+    done
+}
+
+# Records are reused by their names alone, so results/HOST/identity.txt binds the
+# results to the inputs they were measured with. A step that measures runs only
+# while every recorded input is unchanged; an input first seen (a build-commit
+# build) is added. Results from before identity.txt can't be checked: refused too.
+check_campaign()
+{
+    local recorded=$OUT/identity.txt current name hash old added="" status=0
+    current=$(campaign_inputs) || return 1
+    if [[ ! -f $recorded ]] && compgen -G "$OUT/*" | grep -q -v -x -F "$OUT/run.log"; then
+        log "results/$HOST holds results but no identity.txt, so their inputs are unknown: move them away to measure"
+        return 1
+    fi
+    while read -r name hash; do
+        [[ -n $name ]] || continue
+        old=$(awk -v name="$name" '$1 == name { print $2 }' "$recorded" 2> /dev/null)
+        if [[ -z $old ]]; then
+            added+="$name $hash"$'\n'
+        elif [[ $old != "$hash" ]]; then
+            log "results/$HOST was measured with another $name ($old, now $hash): move the results away to measure these inputs"
+            status=1
+        fi
+    done <<< "$current"
+    if [[ $status -eq 0 && -n $added ]]; then
+        { cat "$recorded" 2> /dev/null; printf '%s' "$added"; } > "$recorded.tmp" && mv -f "$recorded.tmp" "$recorded" || status=1
+    fi
+    return $status
 }
 
 # Reduces whatever the campaign recorded: a step that didn't run is no failure, a
@@ -811,6 +895,13 @@ while [[ $# -gt 0 ]]; do
     step=$1
     shift
     log "step $step"
+    # Steps that prepare the run root or only read results don't measure.
+    if [[ $step != setup && $step != build-commit && $step != summarize ]] && ! check_campaign; then
+        log "step $step failed (status 1)"
+        failed=1
+        [[ ${KEEP_GOING:-0} == 1 ]] && continue
+        break
+    fi
     case $step in
         setup) step_setup ;;
         build-commit)

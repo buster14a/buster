@@ -22,7 +22,13 @@
 # - env keeps a catalog that numbers results when perf's list changes (a shifted
 #   list of the same length included) unless no result uses it, and sweep refuses
 #   results numbered by another catalog;
-# - summarize passes a campaign without some steps and fails when a reducer fails.
+# - summarize passes a campaign without some steps and fails when a reducer fails;
+# - env fails on a perf list that fails or lists nothing and writes no catalog
+#   from it, and sweep and metrics fail without a catalog;
+# - a step whose CPU can't be pinned fails;
+# - results/HOST is bound to its inputs: after setup rebuilds the checkout, a
+#   step that measures is refused until the results are moved away, a
+#   build-commit build is added, and results without identity.txt are refused.
 # uarch.c's own checks are `uarch test`.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -87,7 +93,8 @@ chmod +x "$work/fake/tcc"
 # fails when behaviour/perf says "script"; `report` prints one row. `stat` runs its
 # command and writes one counted line per event or metric; it exits 1, counted,
 # when its events name behaviour/stat-fail's word (a failed run, not a refusal).
-# `list` lists behaviour/events and behaviour/metrics.
+# `list` lists behaviour/events and behaviour/metrics, then fails when
+# behaviour/perf says "list".
 cat > "$work/fake/perf" <<'EOF'
 #!/usr/bin/env bash
 command=$1
@@ -116,7 +123,8 @@ case $command in
             echo
         elif [[ ${1:-} == -j && ${2:-} == metrics ]]; then
             cat "$FAKE_BEHAVIOUR/metrics" 2>/dev/null | sed 's/.*/    "MetricName": "&",/'
-        fi ;;
+        fi
+        if [[ $behaviour == list ]]; then exit 1; fi ;;
     stat)
         out=""
         spec=""
@@ -222,9 +230,9 @@ expect '[[ $(grep -c . "$results/profiles/a/lbr.tsv") -gt 3 ]]' "profiles: the r
 
 # Sweep and metrics chunks: a recorded failure isn't skipped as done.
 reset
-mkdir -p "$results/env"
-printf 'e1\ne2\ne3\n' > "$results/env/core-events.txt"
-printf 'm1\nm2\n' > "$results/env/metrics.txt"
+printf 'e1\ne2\ne3\n' > "$work/behaviour/events"
+printf 'm1\nm2\n' > "$work/behaviour/metrics"
+run env
 echo e2 > "$work/behaviour/stat-fail"
 SWEEP_WORKLOADS=sq-c run sweep
 expect '[[ $status -ne 0 ]]' "sweep: a failed event fails the step"
@@ -267,6 +275,31 @@ expect '[[ $status -eq 0 ]]' "sweep: resumes on the frozen catalog"
 cp "$results/env/core-events.live.txt" "$results/env/core-events.txt"
 SWEEP_WORKLOADS=sq-c run sweep
 expect '[[ $status -ne 0 ]] && grep -q "recorded entries aren'"'"'t core-events.txt'"'"'s lines" "$results/run.log"' "sweep: results numbered by another catalog are refused"
+
+# A perf list that fails, or lists nothing, is no catalog.
+reset
+printf 'e1\n' > "$work/behaviour/events"
+printf 'm1\n' > "$work/behaviour/metrics"
+echo list > "$work/behaviour/perf"
+run env
+expect '[[ $status -ne 0 && ! -f $results/env/core-events.txt && ! -f $results/env/metrics.txt ]]' "env: a failed perf list writes no catalog"
+KEEP_GOING=1 SWEEP_WORKLOADS=sq-c METRIC_WORKLOADS=sq-c run sweep metrics
+expect '[[ $status -ne 0 && $(grep -c "is missing or empty" "$results/run.log") -eq 2 ]]' "sweep, metrics: no catalog fails the step instead of measuring nothing"
+rm -f -- "$work/behaviour/perf"
+: > "$work/behaviour/events"
+run env
+expect '[[ $status -ne 0 && ! -f $results/env/core-events.txt && $(catalog metrics) == m1 ]]' "env: an empty list is no catalog"
+printf 'e1\n' > "$work/behaviour/events"
+run env
+expect '[[ $status -eq 0 && $(catalog core-events) == e1 ]]' "env: a list with entries is the catalog"
+echo list > "$work/behaviour/perf"
+run env
+expect '[[ $status -ne 0 && $(catalog core-events) == e1 ]]' "env: a failed perf list leaves the frozen catalog"
+
+# A run that can't be pinned to its CPU is no sample.
+reset
+SINGLE_CPU=99999 run time
+expect '[[ $status -ne 0 && ! -f $results/time/time.tsv ]] && grep -q "can'"'"'t pin to CPU" "$results/run.log"' "time: a step that can't pin its CPU fails"
 
 # summarize reduces what a partial campaign has, and fails when a reducer fails.
 reset
@@ -365,6 +398,27 @@ expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-znver4") == third && $(cat "$R
 echo fourth > "$repository/VERSION"
 setup
 expect '[[ $status -ne 0 && $("$ROOT/bin/compiler-znver4") == third ]]' "setup: a build of another dirty state is refused"
+
+# results/HOST is bound to the inputs it was measured with.
+echo third > "$repository/VERSION"
+run time
+expect '[[ $status -eq 0 ]] && grep -q "^compiler-znver4 " "$results/identity.txt" && grep -q "^self-main.i " "$results/identity.txt"' "time: results/HOST records its inputs"
+REPOSITORY=$repository run build-commit other "$second" znver4
+run time
+expect '[[ $status -eq 0 ]] && grep -q "^compiler-other-znver4 " "$results/identity.txt"' "time: a build first seen is added to the inputs"
+# Another state of the checkout, rebuilt as setup asks: the old results stay its.
+echo fifth > "$repository/VERSION"
+rm -f -- "$ROOT/bin/compiler-znver4" "$ROOT/bin/compiler-znver4.commit" "$ROOT/self-main.i"
+setup
+expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-znver4") == fifth ]]' "setup: builds the checkout's new state"
+run time
+expect '[[ $status -ne 0 ]] && grep -q "measured with another compiler-znver4" "$results/run.log"' "time: results measured with another build are refused"
+rm -rf -- "${results:?}"
+run time
+expect '[[ $status -eq 0 && -f $results/time/time.tsv ]]' "time: new results measure the new inputs"
+rm -f -- "$results/identity.txt"
+run time
+expect '[[ $status -ne 0 ]] && grep -q "no identity.txt" "$results/run.log"' "time: results without identity.txt are refused"
 
 echo "microarch test.sh: $checks checks, $failures failed"
 [[ $failures -eq 0 ]]
