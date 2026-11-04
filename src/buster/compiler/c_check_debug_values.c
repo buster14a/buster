@@ -100,6 +100,7 @@ struct CheckDebugValues
     uint32_t* enum_definitions;
     uint32_t* local_ids;
     uint32_t* scopes;
+    const uint32_t* ends;
     DebugWriter info;
     DebugWriter ranges;
     DebugWriter locations;
@@ -500,7 +501,8 @@ static void check_debug_values_write(CheckDebugValues* values)
             const bool block = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION;
             if (block)
             {
-                const uint32_t end = parser->ends[parser->tree.parents[token]];
+                const uint32_t parent = parser->tree.parents[token];
+                const uint32_t end = parent < input->token_count ? values->ends[parent] : input->token_count;
                 debug_uleb(&values->info, CHECK_DEBUG_BLOCK);
                 check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
                 check_debug_value_range(values, b, token, end, NULL, 0);
@@ -542,7 +544,11 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.enum_definitions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, table->types.count);
     values.local_ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.scopes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
-    bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.local_ids != NULL && values.scopes != NULL;
+    // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
+    // Reuse the bounded statement-end derivation without changing the already checked program's status.
+    CheckProgram traversal = *program;
+    values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
+    bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.local_ids != NULL && values.scopes != NULL && values.ends != NULL;
     if (valid)
     {
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
