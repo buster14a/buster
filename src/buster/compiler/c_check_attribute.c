@@ -5775,6 +5775,7 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
 }
 
 static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token, uint32_t end);
+static uint32_t check_input_enum_base_end(const Parser* parser, uint32_t tag, uint32_t colon, uint32_t end);
 
 // The declaration a deprecated or unavailable attribute's uses are counted by (#147): a tag's first declaration's name
 // for a tag keyword's attributes (at `token`) or a tag's name, its object's first declaration for a function's or a
@@ -5865,13 +5866,18 @@ static const CheckInputAttribute* check_input_availability_mark(const CheckInput
 // to `end` (past the last) that take it. A struct's, a union's or an enum's body among them takes it only with `tags`:
 // clang reads a member's or an enumerator's use in its own context, then its tag's parent's, which is a function whose
 // body holds it but no declarator whose bound, parameter list or initializer does.
-static void check_input_availability_fill(const CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t key,
-                                          uint32_t limit, uint32_t first, uint32_t end, bool tags)
+// The context bit (BUSTER_CHECK_CONTEXT_*) of a deprecated or unavailable record, or 0.
+static uint8_t check_input_availability_bit(const CheckInputAttribute* attribute)
 {
-    const Parser* parser = reader->parser;
+    const uint8_t result = attribute == NULL ? 0 : attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
+    return result;
+}
+
+// Gives the tokens from `first` to `end` (past the last) the context `bit`, but with `tags` only a struct's, a union's or
+// an enum's body among them (check_input_availability_fill).
+static void check_input_availability_fill_range(const Parser* parser, uint8_t* contexts, uint8_t bit, uint32_t first, uint32_t end, bool tags)
+{
     const uint32_t count = parser->tokens.count;
-    const CheckInputAttribute* attribute = check_input_availability_mark(reader, marks, chain, key, limit, UINT32_MAX);
-    const uint8_t bit = attribute == NULL ? 0 : attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
     for (uint32_t i = first; bit != 0 && i < end && i < count;)
     {
         const uint8_t role = parser->tree.roles[i];
@@ -5880,6 +5886,38 @@ static void check_input_availability_fill(const CheckInputReader* reader, uint8_
         contexts[i] |= own ? 0 : bit;
         i = own ? closer + 1 : i + 1;
     }
+}
+
+static void check_input_availability_fill(const CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t key,
+                                          uint32_t limit, uint32_t first, uint32_t end, bool tags)
+{
+    const uint8_t bit = check_input_availability_bit(check_input_availability_mark(reader, marks, chain, key, limit, UINT32_MAX));
+    check_input_availability_fill_range(reader->parser, contexts, bit, first, end, tags);
+}
+
+// A marked tag's own definition, from its keyword at `keyword` through its body (#147): a struct's, a union's or an
+// enum's body (an enum's base too) is its tag's context, which clang reads its members' and enumerators' uses in, and
+// its nested tags' too. The mark is the tag's worst: its declarations' up to the body, and an enum's attributes after it
+// (clang applies those before its enumerators' uses), but not a struct's, which come after its members'.
+static void check_input_availability_tag(const CheckInputReader* reader, uint8_t* contexts, const uint32_t* marks, const uint32_t* chain, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool is_enum = parser->tokens.kinds[keyword] == PARSE_KIND_ENUM;
+    const uint32_t name = check_input_skip_attributes(parser, keyword + 1, count);
+    const uint32_t after_name = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? name + 1 : name;
+    const uint32_t body = check_input_skip_attributes(parser, is_enum ? check_input_enum_base_end(parser, keyword, after_name, count) : after_name, count);
+    const uint8_t body_role = body < count ? parser->tree.roles[body] : PARSE_ROLE_NONE;
+    const uint32_t closer = body < count ? parser->tree.parents[body] : count;
+    const bool defined = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && (body_role == PARSE_ROLE_OPEN_STRUCT || body_role == PARSE_ROLE_OPEN_ENUM) &&
+                         closer < count && closer > body;
+    const uint32_t bound = defined && is_enum ? check_input_skip_attributes(parser, closer + 1, count) : body;
+    const uint32_t key = defined ? check_input_deprecated_key(reader, keyword) : count;
+    // A named tag's marks gather by its first declaration's; an anonymous one's are its keyword's.
+    const CheckInputAttribute* attribute = !defined ? NULL :
+                                           key < count ? check_input_availability_mark(reader, marks, chain, key, bound, bound) :
+                                           check_input_deprecated_record_before(check_input_attributes_at(reader->output, keyword), bound);
+    check_input_availability_fill_range(parser, contexts, check_input_availability_bit(attribute), keyword, closer + 1, true);
 }
 
 // Each token's availability context (#147, CheckInput.availability_contexts), for the uses of the unit's marked members
@@ -5917,6 +5955,10 @@ static void check_input_availability_contexts(CheckInputReader* reader, const ui
             if (initialized != BUSTER_CHECK_NONE)
             {
                 check_input_availability_fill(reader, contexts, marks, chain, check_input_deprecated_key(reader, t), t, t, initialized, false);
+            }
+            if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
+            {
+                check_input_availability_tag(reader, contexts, marks, chain, t);
             }
             // A marked declarator's parameter lists and array bounds, at any scope, as clang reads their uses in the
             // declaration's context: those after its name, past its groups' `)` (a function pointer's, a function's that
@@ -6031,7 +6073,9 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             }
             // An overloadable function's name is its overload set's, whose resolution clang checks otherwise.
             const bool overloaded = reader->output->overload_heads != NULL && reader->output->overload_heads[t] != 0;
-            const bool use = declared < count && declared != t && role != PARSE_ROLE_MEMBER && !overloaded &&
+            // A tag's definition's name (the parser's leaf before its `{`) is no use either.
+            const bool defines = role == PARSE_ROLE_LEAF_RIGHT && next == PARSE_KIND_L_BRACE;
+            const bool use = declared < count && declared != t && role != PARSE_ROLE_MEMBER && !overloaded && !defines &&
                              (tag ? next != PARSE_KIND_SEMI && next != PARSE_KIND_L_BRACE : reader->declaration_kinds[t] == 0);
             uint32_t key = use ? (tag ? declared : check_input_deprecated_key(reader, t)) : count;
             // An enumerator of a deprecated enum is deprecated by its enum (the note names the enum).

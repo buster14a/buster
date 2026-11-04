@@ -5601,7 +5601,11 @@ arguments against the function. The checker now gives these as clang does.
   `check_input_availability_contexts`). A struct's, a union's or an enum's
   body in a declarator's bound, parameter list or initializer keeps its own
   context, as clang reads a member's or an enumerator's use through its tag to
-  the tag's parent; in a function's body it takes the function's.
+  the tag's parent; in a function's body it takes the function's. A marked
+  tag's own definition is its body's context (and an enum's base's), nested
+  tags included: its mark is its declarations' up to the body, and an enum's
+  attributes after it, but not a struct's (`check_input_availability_tag`).
+  A tag definition's name is no use of the tag.
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
@@ -6072,7 +6076,10 @@ arguments against the function. The checker now gives these as clang does.
     address taken through the overload set, and neither does the checker).
     A struct member's own mark isn't its specifiers' and parameter lists'
     context (`int (*m)(D) __attribute__((deprecated));` in a struct warns of
-    `D`), which clang drops: the member marks aren't the uses' pass's.
+    `D`), which clang drops: the member marks aren't the uses' pass's. Nor
+    does a deprecated anonymous struct's use in its own declaration warn
+    (`struct __attribute__((deprecated)) { ... } x;`, clang's "'struct
+    (unnamed at ...)' is deprecated").
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations.
   - An argument count of a supported attribute is checked as its arguments are

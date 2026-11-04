@@ -1000,6 +1000,19 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "__attribute__((deprecated)) int j = sizeof(enum { B = sizeof(D) });\n"
         "__attribute__((deprecated)) void g(void) { struct { D m; } s; enum { C = sizeof(D) }; (void)s; }\n",
         "typedef int T __attribute__((unavailable(\"gone\")));\n__attribute__((unavailable)) void f(void) { struct { T m; } s; (void)s; }\n",
+        // A marked tag's own body is its context: a struct's, a union's, an enum's (and its base), a nested tag's, a tag
+        // marked by an earlier declaration, an anonymous enum, an enum's attribute after its body; a struct's after its
+        // body or a later declaration's isn't. Its definition's name is no use of it.
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "struct __attribute__((unavailable)) S { T m; };\nstruct __attribute__((deprecated)) R { D m; };\n"
+        "enum __attribute__((deprecated)) E { A = sizeof(D) };\nunion __attribute__((deprecated)) U { D m; };\n"
+        "struct __attribute__((deprecated)) N { struct { D n; } m; };\nenum __attribute__((deprecated)) { B = sizeof(D) };\n"
+        "enum __attribute__((deprecated)) F : D { C };\nenum G { H = sizeof(D) } __attribute__((deprecated));\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nstruct S { D m; } __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated)) R;\nstruct R { D m; };\nstruct Q { D m; };\nstruct __attribute__((deprecated)) Q;\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\nstruct __attribute__((deprecated)) S { T m; };\n",
+        "typedef int T __attribute__((unavailable(\"gone\")));\ntypedef int D __attribute__((deprecated(\"old\")));\n"
+        "struct S { T m; };\nenum E { A = sizeof(D) };\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"
