@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   validate:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -32,8 +32,13 @@ jobs:
           git diff --check
           mkdir -p "$RUNNER_TEMP/1114-tests"
           echo "TMPDIR=$RUNNER_TEMP/1114-tests" >> "$GITHUB_ENV"
-      - name: Install hosted correctness tools
-        run: bash tools/ci/setup-hosted.sh
+      - name: Install pinned correctness tools on the available disposable image
+        run: |
+          set -euo pipefail
+          # Same archive pins and tools as the hosted setup. No performance tooling or measurement is used here.
+          sed -e 's/test "$VERSION_ID" = 26.04/test "$VERSION_ID" = 24.04/' -e 's/zstd linux-perf qemu-user/zstd qemu-user/' -e '/^perf --version$/d' -e 's/kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 //' tools/ci/setup-hosted.sh > tools/ci/1114-setup-hosted.sh
+          bash tools/ci/1114-setup-hosted.sh
+          rm tools/ci/1114-setup-hosted.sh
       - name: Build
         run: ./build.sh --config Debug --jobs 4 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Focused debug regressions
