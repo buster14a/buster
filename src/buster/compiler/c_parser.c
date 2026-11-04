@@ -4141,7 +4141,9 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     const uint32_t flags = frame->flags;
     const bool attribute = (flags & BUSTER_PARSE_FRAME_ATTRIBUTE) != 0;
     const bool asm_operands = (flags & BUSTER_PARSE_FRAME_ASM) != 0;
-    const bool empty = (flags & BUSTER_PARSE_FRAME_EMPTY_OK) != 0;
+    // An omitted array bound ends only at `]`, not at another closer or a statement terminator (#1253).
+    const bool empty = (flags & BUSTER_PARSE_FRAME_EMPTY_OK) != 0 &&
+                       ((flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) == 0 || kind == PARSE_KIND_R_SQUARE);
     const uint8_t previous = parser->kinds[(int64_t)i - 1];
     // A GNU attribute's type argument (parse_scalar_type_argument_attribute), where a type name starts it.
     const bool type_argument = frame->role == PARSE_ROLE_OPEN_CALL && i == frame->opener + 1 && parse_scalar_gnu_attribute_group(parser, frame) &&
