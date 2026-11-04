@@ -196,7 +196,7 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR] < 16;
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_MASK] < 8;
     valid = valid && input->block_starts[0] == 0 && input->block_starts[input->block_count] == input->position_count;
-    valid = valid && input->fixed.count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.registers != 0 && input->fixed.classes != 0));
+    valid = valid && input->fixed.count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.classes != 0 && input->fixed.registers != 0));
     for (uint32_t r = 0; valid && r < input->fixed.count; r += 1)
     {
         valid = input->fixed.starts[r] < input->fixed.ends[r] && input->fixed.ends[r] <= input->position_count && input->fixed.classes[r] < BUSTER_TIER1_ALLOCATE_CLASSES;
@@ -633,7 +633,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
         const uint32_t blocks = input->block_count;
         const uint32_t values = input->value_count;
         // Each value's definition block, and whether it is used outside it (dense ids, ascending value order).
-        uint32_t* home = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        uint32_t* home = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
         uint32_t* dense = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
         uint32_t* dense_values = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
         bool ready = home != 0 && dense != 0 && dense_values != 0;
