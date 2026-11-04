@@ -212,6 +212,18 @@ definition. Its flags and edges:
   a constant condition never evaluates is never allocated, nor read. A constant
   `switch`'s cases that clang skips (`CodeGenFunction::EmitSwitchStmt`'s
   `FindCaseStatementsForValue`) are still written and selected.
+- **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
+  section, not a member, so no edge reaches the members nothing else does — a
+  static registry entry first — but GNU ld's bounds still cover them. After
+  each reachability pass the members of the input sections that a selected
+  reference's bound names are rooted as `used`, iterated to a fixpoint. A
+  reference's bound name is its linkage name: an asm label from any of its
+  declarations (`extern int begin[] __asm__("__start_reg")`), else its
+  identifier. Each object's bound section is found once before the fixpoint,
+  and each pass compares the placements against the needed objects' few. A unit
+  whose link is kept for a multi-unit command roots all of its named-section
+  members, since a bound of another unit's may name them, as a `-c` object's
+  members stand for any link's.
 
 The selected bodies, data and the symbols they need become the emission's view,
 in source order whatever order the traversal found them in. `--lower-all`
@@ -229,7 +241,12 @@ module), so that tools and the comparisons below read them alike.
 
 `c_check_program_batch.c` handles reached operation fragments before the general
 task loop expands them. The original
-scalar expression expansion remains the oracle (`--scalar`).
+scalar expression expansion remains the oracle (`--scalar`). Since #1048 no
+compile takes the fragments (`CheckLowerWriter.fragments`, which only their
+test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
+saved ("The vector path's fast paths" below), and none takes the leaf path
+either ("The leaf path and the runtimes' names"). The wrappers' and truth
+tests' path described here still runs.
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -276,8 +293,8 @@ to reached expressions, and counters belong to each writer's part and are
 merged in source order, without shared counters.
 
 With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
-evaluated expression occurrences, those handled by vector operation fragments,
-their percentage, and records classified; then the evaluated nodes and the
+evaluated expression occurrences, those handled by vector operation fragments
+(0 while no compile takes them), their percentage, and records classified; then the evaluated nodes and the
 entries #1048's node templates spliced (`templates` and `template-entries`)
 with their shares of the evaluated nodes and the entries (`template-share` and
 `entry-share`), which are 0 while no compile takes the templates. This counts
@@ -675,6 +692,530 @@ in the compile-time guide's older figure, which later splits compare with:
 The statements, the controls and the tasks' loops, are two thirds of the
 stage, and alone 1.7 times Tier 0's 4.874 ms in the same run: the node
 templates' target.
+
+## Lean steps in the tasks' loop (#1048)
+
+The measurements above rule out a separate pass over every node: #1197's and
+#1201's, scalar and AVX-512, cost more per node than the expansion they would
+replace. #1235 tried the other way around: make the loop's one visit of each
+node cheaper. Its commit `3828a06c` added `c_check_program_lean.c`:
+
+- **The step.** When the vector path's loop popped an EXPRESSION task of one of
+  the expansion's ordinary shapes, a lean step took the node: folded constants,
+  `VALUE` reads and addresses, casts, conversions, selections, `&x`, `*p`,
+  member accesses but bit-fields', the unary, truth and binary operators below
+  VECTOR, the comma, scalar assignment, and pointer arithmetic and subscripts.
+- **Exactness.** It pushed and wrote what `check_lower_expand` would, through
+  the same helpers and in the same order, testing only the expansion's cases
+  before its own.
+- **What it left out.** It read only the columns its case needed, never the
+  node's 96-byte `CheckValue`. It pushed operands inline. It continued with the
+  operand the node evaluates first instead of pushing and popping it.
+- **Everything else** went to the expansion, node by node.
+
+It took 91.35% of `sqlite3.c`'s evaluated nodes. The default compile's objects
+were the same as `--scalar`'s, which keeps the expansion, on all of these:
+
+- `sqlite3.c`, with #136's options and with the frozen corpus's pinned ones;
+- Lua 5.4.8's 34 units;
+- c-testsuite's subset of 220.
+
+callgrind counted the tasks' loop with what it calls (`check_lower_drain`) on
+`sqlite3.c`, on a baseline build with the steps forced on for the count. It
+fell from 124.4 M instructions to 110.2 M. This session's Xeon put the vector
+path's `lower.statements` 5% lower, at medians of 15 alternating runs.
+
+The 9700X ran the same base twice, main at `a4a2182a` merged with each head, in
+two separate runs of `measure-compile`'s medians of 11 on `sqlite3.c` with
+perf's counters of 11 compiles. The steps were on at `3fee64da`
+([run](https://github.com/buster14a/buster/actions/runs/41650771613/job/125972558973))
+and off at `2309a558`, which is the base's tree plus a source comment
+([run](https://github.com/buster14a/buster/actions/runs/41655565084/job/125989536872)):
+
+| row | steps on | steps off |
+| --- | ---: | ---: |
+| `lower` | 12.233 ms (12.172 to 12.307) | 12.378 ms (12.286 to 12.456) |
+| `lower.statements` | 8.217 ms (8.114 to 8.292) | 8.358 ms (8.228 to 8.465) |
+| `lower.bodies` | 1.522 ms | 1.490 ms |
+| Tier 0 | 4.876 ms | 4.797 ms |
+| the compile's user instructions | 1,181.1 M | 1,200.2 M |
+| the compile's user cycles | 525.7 M | 526.1 M |
+| the compile's user branch misses | 3.07 M | 3.09 M |
+
+The steps removed 19.2 M of the compile's instructions, 1.6%. The runs show no
+reliable reduction in its cycles (0.08%) or its branch misses (0.6%). The
+steps' `lower.statements` median was 0.14 ms lower. That is within the spread
+of main's own separate runs on earlier bases: 8.34, 8.49 and 8.53 ms in the two
+sections above. These are two runs on one input, not an interleaved A/B. So the
+steps aren't kept, and their code stays in #1235's history (`3828a06c`,
+`3fee64da`).
+
+Why fewer instructions didn't give fewer cycles, these counters don't say. The
+hypothesis that #1048's next step tests is that the loop on Zen 5 waits on each
+node's chain of dependent loads, which the steps kept:
+
+- the node's op and payload row;
+- its type, then its type's class and facts;
+- its object, then its local;
+- its operand, then the operand's type.
+
+The instructions the steps removed would then have run beside that chain.
+Samples of the lowering's load misses and their latency by line on the 9700X
+would confirm it or rule it out. If it holds, a step that pays has to shorten
+the chain each node waits on, or overlap the chains of several nodes.
+
+## The helper report outside the compile (#1048)
+
+#1188 had every compile count its lowered code's direct atomic forms for
+`--helper-report` (`check_helper_report_add`), a pass over every entry of every
+lowered function, timed in the lowering's stage. It took `lower.rest` on
+`sqlite3.c` from 0.07 to 0.87 ms on the 9700X (#1235's diagnostic run on main at
+`747ab617`) and 1.25 ms on this session's Xeon, where bisecting main found it.
+The emission now makes the report only where the command asks for it
+(`CheckProgramLanes.helper_reporting`, set by `--helper-report`). The objects
+are the same, and `--helper-report`'s counts too. `lower.rest` is 0.07 ms again
+on the Xeon. On the 9700X, #1235's run at `b20fcdbf` (main at `2fef25b0` merged
+with it, [run](https://github.com/buster14a/buster/actions/runs/41750312371/job/126317031501))
+gave 0.042 ms (0.034 to 0.050) in its `measure-compile` of the compile with
+`--check-transitions` and 0.048 ms (0.041 to 0.051) in the compile-time step's.
+
+The same run measured a change to the preparation: its first pass over the
+declaring tokens keeps each one's body and tests it for a local once, where
+it had tested it twice, and its reverse pass links the locals and keeps
+their `local_map` entries. On the Xeon, `lower.prepare` went from 2.138 to
+1.931 ms (15 alternating runs against main). The 9700X's two medians, 1.227 and
+1.206 ms, against 1.254 ms in the diagnostic run below, are separate runs and
+don't resolve a change of that size.
+
+## Where the lowering's cycles go on Zen 5 (#1048)
+
+A temporary step of #1235's 9700X job (`d72188fb`,
+[run](https://github.com/buster14a/buster/actions/runs/41743889750/job/126295817133))
+profiled `benchmark-lowering-source --passes 40` on `sqlite3.c`, a build with
+debug information, each pass a warm selection, lowering, Tier 0 and emission,
+the lowering about half of each pass's cycles. perf's top-down metrics put the
+slots at 29.5% retiring, 30.4% frontend-bound (17.8% latency, 12.3%
+bandwidth), 30.4% backend-bound (25.8% memory) and 9.3% bad speculation, at
+2.52 instructions a cycle. `check_lower_drain` had 19% of the cycles, 19% of
+the branch misses and 13% of the L1D misses; `check_lower_part` 7%, and 10% of
+the L1D misses. Inside the tasks' loop the three events fell on the same lines,
+where a node's data is first touched: the `ops[node]` test,
+`check_stream_value`'s columns, the expansion's first use of the value and the
+task's dispatch. That is skid's resolution, not a load's own address. No one
+limit dominates, and the warm passes weren't much faster than `-c`'s cold
+stage.
+
+## The statements' prefetch (#1048)
+
+#531 had the lowering prefetch, before each statement, the next statement's
+checked values and conversions, up to its last 64 nodes (`check_lower_prefetch`),
+when each value was a 96-byte record. #628 made the values columns. The
+statements row moves by about 0.4 ms between separate 9700X runs, more than
+the prefetch could be worth, so #1235's run at `c2e691e0`
+([run](https://github.com/buster14a/buster/actions/runs/41755115082/job/126335142288))
+ran variants of one build in turn, chosen by an environment variable the
+lowering read only for that run: three rounds, each a `measure-compile`
+(medians of 11) of every variant, on `sqlite3.c` with the compile-time step's
+options. Each cell is the median of the three rounds' medians, the rounds in
+brackets:
+
+| row | main's | no prefetch | the graph's columns too | every node | a sweep of loads |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `lower` | 12.345 | 11.988 [11.933 to 12.025] | 12.345 | 12.280 | 13.206 |
+| `lower.statements` | 8.427 [8.375 to 8.443] | 8.049 [8.005 to 8.103] | 8.407 | 8.352 | 7.662 |
+| `lower.bodies` | 1.425 | 1.416 | 1.431 | 1.446 | 3.045 |
+| Tier 0 | 4.804 | 4.818 | 4.806 | 4.809 | 4.805 |
+
+- **No prefetch.** Every round's statements row was lower without it than every
+  round's with it, by 0.38 ms in the medians. The prefetch's own work, two calls
+  a statement of a loop over seven ranges, now costs more than the misses it
+  hides, so the lowering no longer prefetches.
+- **More prefetching.** Adding the graph's `ops`, operands, tokens and member
+  offsets, two statements ahead, changed nothing; every node of a statement
+  instead of its last 64 gained 0.07 ms, less than leaving it out.
+- **A sweep of loads.** Before each statement's tasks, a loop loaded every
+  column the expansion reads of each of its nodes, and what they name: the
+  type's class and facts, the object's local, the payload row's type. It took
+  0.77 ms off the statements and cost 1.62 ms in the bodies' row, over
+  304,321 nodes: 5.3 ns a node. So the tasks' loop waits on its first touches
+  for about 9% of its time, and a pass that only touches the nodes in order
+  costs a fifth of what the loop costs per node (8.4 ms over about 290,000
+  nodes, 29 ns a node).
+
+On this session's container, every variant's object of `sqlite3.c` was main's,
+and with the sweep of loads the default compile's objects of `sqlite3.c`, Lua's
+units and c-testsuite's subset were `--scalar`'s; the run itself compared none.
+
+## The operands' overload tests (#1048)
+
+#1235's next run ([run at `cf254b58`](https://github.com/buster14a/buster/actions/runs/41760729792/job/126350645649))
+measured four cuts of the work the lowering does for every statement and
+operand in the same way, three rounds of each variant of one build, on the
+base without the statements' prefetch (sqlite3.c, the compile-time step's
+options; every variant's object was the base's, which the run checked too):
+
+| row | the base | one tasks' loop a body | no overload tests | common controls first | the three | the statement sweep |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lower` | 12.114 | 12.266 | 11.755 | 12.013 | 11.790 | 12.943 |
+| `lower.statements` | 8.189 [8.177 to 8.228] | 8.343 | 7.809 [7.806 to 7.869] | 8.052 [8.048 to 8.131] | 7.849 | 9.016 |
+
+- **The operands' overload tests.** Every operand's push read its value's
+  overload head (`check_stream_overload_head`: its payload row's index, and
+  the row where it has one) and looked its operand up among the selected
+  overloads' addresses (`check_program_overload_address`). An overload set's
+  head comes only from the overloadable attribute's sets
+  (`CheckInput.overload_heads`), so a unit without them
+  (`CheckLowerShared.overloads`) skips both. That took 0.38 ms off the
+  statements, every round.
+- **The common controls first.** An expression statement and a branch, most
+  of the controls, were the last case of `check_lower_control`'s chain of
+  kinds. Testing them first took 0.14 ms.
+- **One tasks' loop a body**, its controls pushed as tasks rather than a loop
+  entered for each statement, cost 0.15 ms, and isn't kept.
+- **The statement sweep** lowered a statement whose nodes were all of the
+  plainest shapes (reads of locals and globals, integer constants, casts,
+  the unary, truth and binary operators of the scalar classes, and stores to
+  a local or a global) by two passes over its nodes in postorder rather than
+  by the tasks: the first, from its root down, gave each operand its context
+  and its conversion's target, the second wrote each node's entries and then
+  its conversion. It took 12,267 statements and 33,836 nodes of `sqlite3.c`,
+  and cost 0.83 ms: each statement it didn't take was walked until a node of
+  another shape before the tasks lowered it, the duplicated work this issue's
+  pre-passes paid. Its code stays in #1235's history (`cf254b58`).
+
+## Plain calls and compact locals (#1048)
+
+The next run ([run at `7513c6f0`](https://github.com/buster14a/buster/actions/runs/41764265315/job/126362024774)),
+on the base with the overload and control cuts, measured two more, the same
+way (every variant's object was the base's):
+
+| row | the base | plain calls | compact locals | both |
+| --- | ---: | ---: | ---: | ---: |
+| `lower` | 11.639 [11.616 to 11.767] | 11.590 | 11.572 | 11.503 [11.490 to 11.521] |
+| `lower.prepare` | 1.187 | 1.189 | 1.244 | 1.245 |
+| `lower.statements` | 7.735 | 7.631 | 7.699 | 7.652 |
+| `lower.bodies` | 1.435 [1.434 to 1.477] | 1.446 | 1.330 [1.308 to 1.344] | 1.335 |
+
+- **Plain calls.** `check_lower_call_body` tested each parameter's and
+  argument's type with its helpers (`check_lower_call_passed`, the
+  aggregate's, the wide value's, the vector's and the atomic's tests), in
+  four loops. A call whose parameters and arguments are all plain scalars
+  (a class from I8 to F64 and none of the facts whose rules go elsewhere,
+  `check_lower_plain_scalar`), none a transparent union's, with such a
+  result or void, now passes those checks and records its arguments by their
+  packed classes and facts alone, on the vector path, which has the table;
+  the scalar path keeps the helpers.
+- **Compact locals.** Each body's locals were a list linked through every
+  token (`local_first`, `local_next`), which the body's walks followed a
+  dependent load at a time, twice. They are now a slice of one array in
+  token order (`CheckLowerShared.local_tokens`, with their objects in
+  `local_objects`), which the preparation builds in the passes over the
+  declaring tokens it made anyway: the first tests each for a local and
+  counts its body's, the second, in reverse, places each at its body's end.
+  The run's variant built the slices beside the lists, with a third pass,
+  which the preparation's row shows; the change leaves the lists out.
+
+Every round of the two together was below every round of the base: `lower`
+0.136 ms lower.
+
+## The vector path's fast paths (#1048)
+
+On the vector path, an expression task of a node other than a `VALUE` tried
+#624's leaf path (`check_lower_value`), its wrappers' and truth tests' path
+(`check_lower_plain`) and its fragments' path (`check_lower_batch_expression`)
+before the expansion, each of them reading its node's value again. #1235's
+run at `cc624eef`
+([run](https://github.com/buster14a/buster/actions/runs/41767977102/job/126373552471))
+left each out in turn, all three, and ran 3828a06c's lean steps (which leave
+the three out) interleaved this time, on the base with the plain calls and
+compact locals (every variant's object was the base's):
+
+| row | the base | no leaf path | no wrappers' path | no fragments | none of the three | the lean steps |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lower` | 11.780 [11.762 to 11.832] | 11.660 | 12.275 | 11.510 [11.418 to 11.579] | 11.576 | 11.799 |
+| `lower.statements` | 7.938 | 7.784 | 8.389 | 7.616 | 7.730 | 7.926 |
+
+- **The fragments** cost more than they save: without them every round was
+  lower, `lower` by 0.27 ms. No compile takes them now
+  (`CheckLowerWriter.fragments`); their test (`c_check_program_batch_test.c`)
+  still compares them with the expansion.
+- **The wrappers' and truth tests' path** saves 0.45 ms, and stays.
+- **The leaf path** cost 0.12 ms, every round; its own run on the base without
+  the fragments decided it (the next section).
+- **The lean steps**, interleaved with the base, didn't pay either: 7.926 ms of
+  statements against 7.938, and against 7.730 with the three paths left out,
+  which they also leave out. The separate runs' reading in "Lean steps in the
+  tasks' loop" stands.
+
+## The leaf path and the runtimes' names (#1048)
+
+The next run ([run at `c9a61be9`](https://github.com/buster14a/buster/actions/runs/41771038578/job/126383658074)),
+on the base without the fragments (every variant's object was the base's):
+
+| row | the base | no leaf path | the runtimes' names in the locals' pass | both |
+| --- | ---: | ---: | ---: | ---: |
+| `lower` | 11.452 [11.393 to 11.477] | 11.251 [11.244 to 11.273] | 11.422 | 11.158 [11.113 to 11.170] |
+| `lower.prepare` | 1.290 [1.288 to 1.291] | 1.282 | 1.269 [1.264 to 1.272] | 1.266 |
+| `lower.statements` | 7.522 | 7.456 | 7.547 | 7.294 |
+
+- **The leaf path** (`check_lower_value`) took a node other than a `VALUE`
+  whose value is a proven integer constant before the expansion, at the cost
+  of reading its value for every node it didn't take. No compile tries it now;
+  its test (`c_check_program_batch_test.c`) still calls it.
+- **The runtimes' names.** The preparation matched the declarations' names
+  with the runtime functions the unit spells in a pass of its own over the
+  declaring tokens (`check_lower_declared_runtimes`). The vector path now
+  matches them in the locals' first pass over the same tokens
+  (`check_lower_declared_runtime`, the per-token test both use), which loads
+  the same columns; the scalar path keeps its pass over every token, its
+  twin.
+
+Every round of the two together was below every round of the base: `lower`
+0.29 ms lower.
+
+A later run ([run at `1cb13f8a`](https://github.com/buster14a/buster/actions/runs/41779070832/job/126409052295))
+measured the runtimes' test with the linkage and the declaration's own token
+first, which the locals' test loads too, and the object and the name only for
+a declaration with external linkage: `lower.prepare` 1.192 ms against 1.260
+(every one of four rounds lower), and so it tests them. The same run's
+integer constants' fast path, which wrote a constant of a plain class first in
+`check_lower_constant` by its packed facts, didn't pay (`lower.statements`
+6.936 ms against 6.899), and isn't kept.
+
+## The tasks' loop's code (#1048)
+
+The loop's copies (`check_lower_drain_body`) inline the whole expansion, so
+the plain copy was 17 KB of code, of which the common nodes' cases are a
+fraction; #1235's diagnostic found the lowering a third frontend-bound. The
+expansion's cases of the ops past `CHECK_OP_SELECT` (the builtins,
+statement values, `va_arg`, VLAs' extents, the complex parts and bit casts)
+now run out of line, through a copy of the whole expansion of their own
+(`check_lower_expand_rare`), and every copy of the loop keeps the other ops'
+cases alone (`check_lower_expand_split`, whose assumption on the op lets
+clang leave those cases out): the plain copy is 14 KB.
+
+#1235's run at `e5b79666`
+([run](https://github.com/buster14a/buster/actions/runs/41774131348/job/126393324952))
+ran a split copy of the plain loop beside the plain one, in one build, five
+rounds in turn on `sqlite3.c` (the variant's object was the base's):
+
+| row | the base | the split copy |
+| --- | ---: | ---: |
+| `lower` | 10.920 [10.867 to 10.932] | 10.733 [10.714 to 10.767] |
+| `lower.statements` | 7.149 [6.997 to 7.162] | 6.878 [6.832 to 6.918] |
+
+Every round of the split copy was below every round of the base. On this
+session's Xeon, a build with the split alone took 4% off the statements in 7
+of 8 alternating rounds.
+
+The next run ([run at `0ce575ef`](https://github.com/buster14a/buster/actions/runs/41777114635/job/126402983237))
+took the plain copy's other cold paths out of line in a copy of its own, 10.4
+KB: an unsupported feature's report at each of the expansion's 11 refusals, a
+compound literal's first evaluation, and the handlers of the task kinds past
+`CONTROL` (the builtins', copies, fills, bit-fields' reads and stores,
+`va_arg`'s, VLA sizes, atomics, complex values). Five rounds in turn gave
+`lower.statements` 7.007 ms against the base's 6.970 (6.912 to 7.047), and
+`lower` 10.832 against 10.799: no gain, so it isn't kept.
+
+## The operands' push (#1048)
+
+An operand's push cost about 115 instructions on the baseline host (callgrind
+on `sqlite3.c`): `check_lower_operand`'s overload lookup, a tail call to
+`check_lower_expression`, its overload and count tests, its void context's
+loads (the op, the destination and its flags), `check_lower_convert`, and a
+`CheckLowerTask` built and packed. In a unit without overload sets the
+operand is now pushed in `check_lower_operand` itself, as
+`check_lower_expression` pushes it: the void context's tests only in a void
+context, the conversion's test in place, the `EXPRESSION` task packed
+directly. Its code is the operand function's, not the tasks' loop's, which
+inlines none of it.
+
+#1235's run at `4b9d236a`
+([run](https://github.com/buster14a/buster/actions/runs/41782206254/job/126419182825)),
+five rounds in turn on `sqlite3.c` (the variant's object was the base's):
+
+| row | the base | the push in place |
+| --- | ---: | ---: |
+| `lower` | 10.704 [10.658 to 10.764] | 10.543 [10.491 to 10.566] |
+| `lower.statements` | 6.963 [6.854 to 7.021] | 6.729 [6.685 to 6.822] |
+
+Every round of the push in place was below every round of the base. Copying
+the expansion's value at the two cases that take its address, so that clang
+could keep it in registers elsewhere, took 0.8 M of 207.4 M instructions on
+the baseline host (callgrind), and wasn't measured further.
+
+A `VALUE` task's read of a local or a global by its columns alone, in a copy
+of the loop 223 bytes longer (`check_lower_value_read`: no payload row, a
+plain class, none of the facts whose rules go elsewhere, no automatic
+compound literal), didn't pay either, interleaved this time
+([run at `02e4a889`](https://github.com/buster14a/buster/actions/runs/41784993695/job/126427989003)):
+`lower.statements` 6.848 ms against the base's 6.787, as #1205's leaf path's
+two separate runs found. A `VALUE` node costs about the same through the
+expansion, whose instructions aren't what it waits on.
+
+Two more didn't pay ([run at `0ac86c2e`](https://github.com/buster14a/buster/actions/runs/41787103822/job/126434576373),
+four rounds): `check_lower_expression`'s own pushes (the statements' roots
+among them) in place too, `lower.statements` 6.720 ms against 6.768 with
+rounds overlapping the base's; and a conversion between two plain scalars'
+types by their packed classes alone, in a copy of the loop, 6.833 ms.
+
+## The initializers' map, the bodies' copies and the writer's reloads (#1048)
+
+The preparation cleared `initializer_declarations`, a word for each of the
+graph's nodes (1.3 MB on `sqlite3.c`'s 323,557), before writing it at the
+initializers' nodes, and the expansion reads it only at `INITIALIZE` nodes.
+It is no longer cleared: a read (`check_lower_initializer_of`) takes a slot's
+token as the node's declaration only where `initializer_nodes` maps the token
+back to the node, which a stale slot's can't, since every token whose
+initializer is a node is among the declaring tokens that write the map
+(`check_program_declaring`). Filling every slot with another node's declaring
+token beforehand left `sqlite3.c`'s, Lua's and c-testsuite's objects the same.
+#1235's run at `ff461ce9`
+([run](https://github.com/buster14a/buster/actions/runs/41791985354/job/126450663310)),
+five rounds in turn on `sqlite3.c`:
+
+| row | the base | without the clearing |
+| --- | ---: | ---: |
+| `lower.prepare` | 1.196 [1.186 to 1.198] | 1.156 [1.154 to 1.167] |
+| `lower` | 10.611 [10.601 to 10.657] | 10.587 [10.514 to 10.609] |
+
+Every round of the preparation without it was below every round of the base.
+`sqlite3.c` has no variable-length array, so the token-indexed clearings of
+the arrays' identities and saved positions, which only such a unit takes,
+don't run there.
+
+Three more didn't pay:
+
+- **The bodies' short columns.** Each body's end copies about ten columns from
+  the writer to the output arena, most of a few bytes. Copying one of at most
+  64 bytes by a masked load and store instead of `memcpy`
+  ([run at `c4b2f341`](https://github.com/buster14a/buster/actions/runs/41789197103/job/126441581914))
+  put `lower.bodies` at 1.284 ms against 1.311, but its slowest round (1.296)
+  was above the base's fastest (1.295), and `lower`'s rounds overlapped.
+- **A restrict writer.** The build's `-fno-strict-aliasing` lets every store
+  to an entry's byte columns alias the writer, so the loop reloads its depth,
+  tasks, count, output and program after each, and reaches a node's op through
+  four dependent loads (`writer->program->input->graph.ops`). A copy of the
+  loop whose writer is `restrict` compiled to the same code: the writer is
+  passed to the out-of-line helpers on the loop's paths, so clang may not
+  assume that a pointer loaded from memory doesn't reach it.
+- **The value's fields alone.** The expansion builds the node's 96-byte
+  `CheckValue` on the stack (five fields and four overlapping zeroing
+  stores), as two of its cases take its address. A copy of the loop that read
+  only the seven fields it uses, and built the whole value at those two cases,
+  was 330 bytes shorter but took `lower.statements` 0.6 ms higher on this
+  session's Xeon in each of three alternating rounds: its stack accesses rose
+  from 401 to 474, the fields' registers spilling what the value's copy had
+  held.
+
+## Plain scalar locals and parameters (#1048)
+
+Each body's setup gives each of its parameters and locals a temporary or a
+frame object by about ten queries of the type table: its kind (through
+`type_strip_aligned`), whether it is an aggregate, of a memory class or of a
+runtime size, its class, a compound literal's vector, its alignment. On the
+vector path a plain scalar's (`check_lower_plain_scalar` by its packed class
+and facts, and neither an array's nor a function's), of no attribute's
+alignment and none past 8 bytes, now takes its temporary of its class
+directly, as those rules give it, and a prototype's plain scalar parameter
+too, whose type `check_lower_passed` takes. #1235's run at `ccb12c14`
+([run](https://github.com/buster14a/buster/actions/runs/41799729636/job/126476270330)),
+five rounds in turn on `sqlite3.c`, every variant giving the base's object:
+
+| row | the base | the locals' | the locals' and the parameters' |
+| --- | ---: | ---: | ---: |
+| `lower.bodies` | 1.292 [1.284 to 1.304] | 1.210 [1.203 to 1.220] | 1.197 [1.194 to 1.207] |
+| `lower` | 10.535 [10.519 to 10.553] | 10.482 [10.445 to 10.545] | 10.473 [10.468 to 10.489] |
+
+Every round of both variants' bodies was below every base round, and so were
+the second's `lower` rounds. `test-checker` passed with them, whose fixtures
+compare the vector path, which takes them, with the scalar one, which doesn't.
+
+The locals' walk still reads each local's declared type by its token, a word
+a few tokens apart for each local, which the statements before it have
+evicted. Writing the types in the preparation's slice of the bodies' locals
+instead, in its pass over their tokens, moved the miss rather than removing
+it ([run at `6f5156dc`](https://github.com/buster14a/buster/actions/runs/41805877539/job/126497206766)):
+`lower.bodies` 1.184 ms against 1.232, `lower.prepare` 1.258 against 1.157,
+`lower` 10.592 against 10.555.
+
+## The expansion's token (#1048)
+
+The expansion and the wrappers' path set the writer's token to their node's
+(`writer->token = graph->tokens[node]`) for every node, a read of the tokens'
+column, but only a failure (`check_lower_fail`) and the part's end
+(`CheckLowerPart.final_token`) read the token. They now keep the node, marked
+by the top bit (`BUSTER_CHECK_LOWER_TOKEN_NODE`: no unit has 2^31 nodes, and
+`BUSTER_CHECK_NONE` is none), and those two readers take its token
+(`check_lower_writer_token`). The fragments' test compares the writers' tokens
+so read. #1235's run at `5849a291`
+([run](https://github.com/buster14a/buster/actions/runs/41808837919/job/126505321530)),
+five rounds in turn on `sqlite3.c`, both giving the base's object:
+
+| row | the base | the node kept |
+| --- | ---: | ---: |
+| `lower` | 10.440 [10.389 to 10.537] | 10.367 [10.304 to 10.385] |
+| `lower.statements` | 6.857 [6.776 to 6.890] | 6.773 [6.649 to 6.807] |
+
+Every round of `lower` was below every base round; one round of the
+statements overlapped the base's.
+
+Four more of the operands' and the values' paths didn't pay on this
+session's Xeon, each in three alternating rounds against the base of one
+build, and weren't run on the 9700X:
+
+- **A branchless conversion push.** Writing an operand's `CONVERSION` task
+  whether or not it is needed, and advancing the depth by whether it is,
+  took the statements 0.8 to 1.0 ms higher: the next pop's load waits on a
+  store whose address the test decides late, where the branch was predicted.
+- **The operands' common push in a leaf of its own**, called by a copy of the
+  loop's expansion (`check_lower_operand` saves five registers on every
+  call; the leaf, three): 0.1 to 0.3 ms higher.
+- **A `VALUE`'s `LOCAL` and `GLOBAL` entries appended inline** rather than by
+  `check_lower_emit`'s call: 0.03 to 0.11 ms higher.
+- **The value's fields read from the stream where the expansion uses them**,
+  with no copy of the value: 0.3 to 0.7 ms higher. The copy's stores overlap
+  with the node's other work, where each field's second read costs a load.
+
+## Each node's class and facts by node (#1048)
+
+The expansion's head finds its node's class and facts through its value's
+type: the node's type, then the type tables (`check_lower_class`,
+`check_lower_facts`), a chain of dependent loads on every node. A pass in the
+preparation wrote each node's (`type_templates`' low 16 bits) 16 nodes at a
+time by a gather from the packed table, and a copy of the tasks' loop read them
+by node instead, beside the node's op. The stream writes every node's type in
+its column, payload rows' too (`check_stream_set_value`), so the column alone
+gives it. #1235's run at `c4aa3882`
+([run](https://github.com/buster14a/buster/actions/runs/41796225108/job/126464328680)),
+five rounds in turn on `sqlite3.c`, all three giving the base's object, with
+the pass gathering a payload row's type from the row (16) and with a payload
+row's node left to the table (32):
+
+| row | the base | 16 | 32 |
+| --- | ---: | ---: | ---: |
+| `lower` | 10.674 [10.577 to 10.715] | 10.939 [10.920 to 10.972] | 10.696 [10.679 to 10.772] |
+| `lower.prepare` | 1.170 [1.149 to 1.185] | 1.522 [1.500 to 1.553] | 1.295 [1.284 to 1.310] |
+| `lower.statements` | 6.915 [6.824 to 7.027] | 6.776 [6.754 to 6.819] | 6.803 [6.744 to 6.828] |
+
+The shorter chain took 0.11 to 0.14 ms off the statements, and the pass over
+the unit's 323,557 nodes cost as much: about 0.4 ns a node, its gather and its
+reads of two columns. So neither is kept. Two more of the same kind didn't pay
+on this session's Xeon, and weren't run on the 9700X: the operands'
+conversion tests taking their operand's class and facts by node too (mixed
+rounds), and each node's local resolved by a pass over its body's range of
+nodes once the body's locals are set (`lower.bodies` 0.7 ms higher, the
+statements unchanged).
+
+Nor did carrying them without a pass. An operand's push reads its type and,
+for its conversion's test, the type's packed word, and an `EXPRESSION`
+task's payload is otherwise zero: the push put the word there, and a copy of
+the loop took it in the expansion's head; a second variant carried the
+operand's op too. #1235's run at `38727492`
+([run](https://github.com/buster14a/buster/actions/runs/41803179958/job/126487426058))
+put `lower.statements` at 7.264 ms and 7.298 against the base's 6.909, every
+round above every base round: the push's added lookups and the copy cost more
+than the shorter chain saved.
 
 ## Against clang -O0's objects
 

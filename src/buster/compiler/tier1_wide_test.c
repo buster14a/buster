@@ -841,7 +841,7 @@ static void tier1_wide_test_program(Tier1WideTest* test, const char* name, const
         for (uint32_t i = 0; ok && i < optimized.function.instruction_count; i += 1)
         {
             muls += optimized.function.op[i] == IR_MUL;
-            highs += optimized.function.op[i] == IR_MULHU;
+            highs += optimized.function.op[i] == IR_INTRINSIC && optimized.function.c[i] == BUSTER_IR_INTRINSIC_MULHU;
             selects += optimized.function.op[i] == IR_SELECT;
         }
         tier1_wide_test_expect(test, !constant_counts || selects == 0, "a shift by a constant through its conversions leaves no select");

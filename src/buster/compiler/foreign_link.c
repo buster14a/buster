@@ -1196,25 +1196,10 @@ struct ForeignLinkBounds
     uint64_t relocations;
 };
 
-static bool foreign_link_c_identifier(const uint8_t* bytes, uint64_t length)
-{
-    bool result = length != 0 && !(bytes[0] >= '0' && bytes[0] <= '9');
-    for (uint64_t i = 0; result && i < length; i += 1)
-    {
-        const uint8_t c = bytes[i];
-        result = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-    }
-    return result;
-}
-
 // The suffix of a __start_ or __stop_ name, and whether it is __stop_'s; length 0 for another name.
 static String8 foreign_link_bound_suffix(const uint8_t* bytes, uint32_t length, bool* stop)
 {
-    const bool start = length > 8 && memcmp(bytes, "__start_", 8) == 0;
-    *stop = length > 7 && memcmp(bytes, "__stop_", 7) == 0;
-    const uint32_t prefix = start ? 8 : *stop ? 7 : length;
-    const String8 result = { .pointer = (char*)bytes + prefix, .length = length - prefix };
-    return foreign_link_c_identifier((const uint8_t*)result.pointer, result.length) ? result : (String8){ 0 };
+    return link_bound_suffix_bytes(bytes, length, stop);
 }
 
 // Count undefined candidates 64 resolutions at a time without allocating. Only when candidates exist, gather their

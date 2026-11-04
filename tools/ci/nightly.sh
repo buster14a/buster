@@ -88,9 +88,11 @@ evidence()
 {
     local event=${GITHUB_EVENT_NAME:?} commit=${GITHUB_SHA:?} run=${GITHUB_RUN_ID:?}
     local scope=full hosted=run hosted_source='' native=run native_source='' measurement=run measurement_source=''
-    local hardware=admit reason=admitted retired=false notes='' native_host='' window_start='' window_deadline='' window_override=false
+    local hardware=admit reason=admitted retired=false notes='' window_start='' window_deadline='' window_override=false
     case "$event" in
         pull_request)
+            # A ready pull request's 9700X job measures, without native correctness, which its hosted rows cover and
+            # which runs after the merge (#1272); a draft keeps off the 9700X.
             scope=plain
             if [ "${EVIDENCE_DRAFT:-false}" = true ]; then
                 hardware=skip
@@ -98,56 +100,8 @@ evidence()
             fi
             ;;
         push)
-            local tree parent_tree head='' pulls="$work/pulls.json" facts="$work/reuse.tsv" record="$work/pull-record.tsv"
-            tree=$(git rev-parse 'HEAD^{tree}')
-            parent_tree=$(git rev-parse 'HEAD^1^{tree}')
-            : > "$facts"
-            if "$gh" api "repos/$repository/commits/$commit/pulls" > "$pulls"; then
-                jq -r '.[]? | ["pr", .number, (if .merged_at then 1 else 0 end), .base.ref, (.merge_commit_sha // "-"), .head.sha,
-                    (.head.repo.id // 0)] | @tsv' "$pulls" >> "$facts"
-                head=$(jq -r --arg commit "$commit" '[.[]? | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $commit)
-                    | .head.sha] | if length == 1 then .[0] else empty end' "$pulls")
-            fi
-            if sha "$head"; then
-                # The pull request's run finishes its record job after the merge can happen: wait a little for it.
-                local attempt newest status
-                for attempt in $(seq 1 20); do
-                    "$gh" api "repos/$repository/actions/workflows/9700x.yml/runs?head_sha=$head&event=pull_request&per_page=30" > "$work/pull-runs.json" || break
-                    newest=$(jq -r '[.workflow_runs[]?] | max_by(.id) | .id // empty' "$work/pull-runs.json")
-                    status=$(jq -r '[.workflow_runs[]?] | max_by(.id) | .status // empty' "$work/pull-runs.json")
-                    if [ -z "$newest" ] || [ "$status" = completed ] || [ "${NIGHTLY_NOW:-}" != '' ]; then
-                        break
-                    fi
-                    sleep 15
-                done
-                runs_facts < "$work/pull-runs.json" >> "$facts" || true
-                if [[ "${newest:-}" =~ ^[1-9][0-9]*$ ]]; then
-                    fetch_jobs "$newest" >> "$facts" || true
-                    fetch_record "$newest" "$(jq -r '[.workflow_runs[]?] | max_by(.id) | .run_attempt' "$work/pull-runs.json")" "$record" || true
-                fi
-            fi
-            local verdict
-            if verdict=$("$tool" reuse --commit "$commit" --tree "$tree" --parent-tree "$parent_tree" --now "$(now)" --facts "$facts" --record "$record"); then
-                native=$(awk -F '\t' '$1 == "native" { print $2 }' <<< "$verdict")
-                measurement=$(awk -F '\t' '$1 == "measurement" { print $2 }' <<< "$verdict")
-                notes=$(awk -F '\t' '$1 == "native" { print $4 }' <<< "$verdict")
-                if [ "$native" = reused ]; then
-                    native_source=$(awk -F '\t' '$1 == "native" { print $3 }' <<< "$verdict")
-                    native_host=$(awk -F '\t' '$1 == "host" { print $2 }' <<< "$verdict")
-                fi
-                if [ "$measurement" = reused ]; then
-                    measurement_source=$native_source
-                fi
-            else
-                native=run
-                measurement=run
-                notes='the reuse decision failed; the work runs'
-            fi
-            # Before the nightly mode, a push measures every plain run, after its own native correctness.
-            if [ "${EVIDENCE_NIGHTLY:-}" = on ] && [ "$native" = reused ]; then
-                hardware=skip
-                reason=native-reused
-            fi
+            # A push to main: its own native correctness and measurements, after its own hosted rows. It reuses nothing
+            # from its pull request, whose run measures without native correctness.
             ;;
         schedule)
             if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
@@ -242,7 +196,6 @@ evidence()
     output hardware "$hardware"
     output hardware_reason "$reason"
     output retired "$retired"
-    output native_host "$native_host"
     output window_start "$window_start"
     output window_deadline "$window_deadline"
     output window_override "$window_override"
@@ -438,12 +391,18 @@ publish()
         printf 'The ledger is not published: no BUSTER_PERFORMANCE_LEDGER_TOKEN in the nightly-ledger environment (docs/ci.md).\n'
         return 0
     fi
-    local target="$work/publication" header
+    # Best effort: a publication that fails (a token refused, the network, the branch moved on meanwhile) warns and
+    # changes nothing else. The coordinator's artifacts carry the ledger from run to run, and the next run publishes it
+    # again; a fresh history is only ever pushed to a branch that doesn't exist yet, never forced over one that does.
+    local target="$work/publication" header remote=${NIGHTLY_PERFORMANCE_REMOTE:-https://github.com/buster14a/buster-performance.git}
     header=$(printf 'x-access-token:%s' "$NIGHTLY_PUBLICATION_TOKEN" | base64 -w 0)
     printf '::add-mask::%s\n' "$header"
-    local remote=https://github.com/buster14a/buster-performance.git
+    local auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header")
+    local published=true
+    : > "$work/publication.log"
     rm -rf "$target"
-    if ! git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" clone -q --depth 1 --branch nightly-ledger "$remote" "$target" 2> /dev/null; then
+    if ! GIT_TERMINAL_PROMPT=0 git "${auth[@]}" clone -q --depth 1 --branch nightly-ledger "$remote" "$target" 2>> "$work/publication.log"; then
+        rm -rf "$target"
         git init -q -b nightly-ledger "$target"
     fi
     mkdir -p "$target/nightly/reports"
@@ -451,9 +410,19 @@ publish()
     cp "$work/report.md" "$target/nightly/reports/$cycle.md"
     git -C "$target" add nightly
     if ! git -C "$target" diff --cached --quiet; then
-        git -C "$target" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "Nightly ledger: cycle $cycle (buster run ${GITHUB_RUN_ID:-local})"
-        git -C "$target" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push -q "$remote" HEAD:nightly-ledger
+        if ! git -C "$target" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Nightly ledger: cycle $cycle (buster run ${GITHUB_RUN_ID:-local})" 2>> "$work/publication.log" ||
+            ! GIT_TERMINAL_PROMPT=0 git -C "$target" "${auth[@]}" push -q "$remote" HEAD:nightly-ledger 2>> "$work/publication.log"; then
+            published=false
+        fi
+    fi
+    if [ "$published" = true ]; then
+        printf 'The ledger is published: buster-performance, branch nightly-ledger, nightly/reports/%s.md.\n' "$cycle"
+    else
+        # git's own reasons (`remote:` and `fatal:` lines) say why better than its last line.
+        local reason
+        reason=$(awk '/^(remote|fatal): / && n < 3 { r = r (n ? " " : "") $0; n += 1 } { last = $0 } END { print n ? r : last }' "$work/publication.log")
+        printf '::warning title=Nightly ledger::the ledger could not be published to buster-performance (%s); this run'"'"'s artifact keeps it, and the next run publishes it again\n' "$reason"
     fi
 }
 
@@ -621,10 +590,13 @@ coordinate()
         sleep "$pause"
     done
     summary < "$work/report.md"
-    publish "$cycle"
     if [ "$phase" = prepare ]; then
         output snapshot "$(awk -F '\t' -v cycle="$cycle" '$1 == "cycle" && $2 == cycle { print $3 }' "$ledger" | tail -n 1)"
         output pending "$(pending_handoff "$pending")"
+    fi
+    # After the handoff's outputs, and never failing the job: the window job's night doesn't depend on buster-performance.
+    publish "$cycle"
+    if [ "$phase" = prepare ]; then
         # The window job runs when the window is open, or opens before this job's 6 hours end (5 hours 55 minutes from
         # its start, to leave the job a margin).
         local current

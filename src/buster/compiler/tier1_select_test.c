@@ -526,6 +526,35 @@ static void tier1_select_test_node(IrFunction* function, uint32_t i, uint8_t op,
     function->c[i] = c;
 }
 
+// An intrinsic of BMI (#141) of operands of `bits` bits, as the instructions' pseudocode has it, independently of the IR's
+// interpreter: pdep and pext through the mask's set bits from its lowest, bzhi and bextr by the bits of the control's
+// bytes they keep.
+static uint64_t tier1_select_test_intrinsic(uint32_t operation, uint32_t bits, uint64_t a, uint64_t b)
+{
+    uint64_t result = 0;
+    if (operation == BUSTER_IR_INTRINSIC_PDEP || operation == BUSTER_IR_INTRINSIC_PEXT)
+    {
+        uint64_t bit = 1;
+        for (uint64_t mask = b; mask != 0; mask &= mask - 1)
+        {
+            const uint64_t lowest = mask & (0 - mask);
+            const bool set = operation == BUSTER_IR_INTRINSIC_PDEP ? (a & bit) != 0 : (a & lowest) != 0;
+            result |= set ? (operation == BUSTER_IR_INTRINSIC_PDEP ? lowest : bit) : 0;
+            bit <<= 1;
+        }
+    }
+    else
+    {
+        const uint32_t start = operation == BUSTER_IR_INTRINSIC_BEXTR ? (uint32_t)(b & 0xff) : 0;
+        const uint32_t length = operation == BUSTER_IR_INTRINSIC_BEXTR ? (uint32_t)((b >> 8) & 0xff) : (uint32_t)(b & 0xff);
+        for (uint32_t k = 0; k < length && start + k < bits; k += 1)
+        {
+            result |= ((a >> (start + k)) & 1) << k;
+        }
+    }
+    return result;
+}
+
 // Independent, deliberately direct evaluator for the generated single-block integer fixtures. It never consults a
 // selection rule, pattern or physical register. Types, operand IDs and memory accesses come only from the original IR.
 static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t a, uint64_t b, uint64_t c)
@@ -628,6 +657,9 @@ static uint64_t tier1_select_test_interpret(const IrFunction* function, uint64_t
         case IR_FENCE:
             // One thread's accesses in program order, as this runs them: nothing to do. A fence orders other threads' views
             // of them (#1059).
+            break;
+        case IR_INTRINSIC:
+            values[i] = tier1_select_test_intrinsic(third, bits, values[left] & mask, values[right] & mask);
             break;
         case IR_ATOMIC_RMW:
         {
@@ -839,6 +871,105 @@ static void tier1_select_test_plans(Tier1SelectTest* test)
             }
         }
     }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+// The IR's intrinsics of BMI (#141): pdep, pext, bzhi and bextr of an I32 and an I64 of the parameters a and b in either
+// order, or of b's bits within 0x3f3f (a bzhi's index and a bextr's start and length within the width, which random
+// values seldom are), into a register of their own or an operand's. Emitted for x86-64-v3 (BMI1 and BMI2), both paths'
+// code runs natively against the test's evaluator where this machine has both; x86-64's baseline, which has neither,
+// refuses each as the target's.
+static void tier1_select_test_intrinsics(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    X86Target v3 = {0};
+    const X86Target host = x86_target_native();
+    uint8_t* allowed = malloc(X86_FORM_COUNT);
+    uint8_t* native = malloc(X86_FORM_COUNT);
+    const bool parsed = x86_target_parse("x86-64-v3", strlen("x86-64-v3"), &v3) && allowed != 0 && native != 0;
+    tier1_select_test_expect(test, parsed, "x86-64-v3's forms");
+    // The manifest is x86-64 baseline's records, which measure-tier1-model takes: these, of x86-64-v3's forms, stay out
+    // of it and of its counts, but not out of the check that every emitted form is covered.
+    const bool manifest = test->manifest;
+    uint64_t emitted_records[3];
+    uint64_t unknown_costs[3];
+    uint64_t missing_columns[3][X86_COST_COLUMN_COUNT];
+    memcpy(emitted_records, test->emitted_records, sizeof(emitted_records));
+    memcpy(unknown_costs, test->unknown_costs, sizeof(unknown_costs));
+    memcpy(missing_columns, test->missing_columns, sizeof(missing_columns));
+    test->manifest = false;
+    if (parsed)
+    {
+        x86_target_forms(&v3, allowed);
+        x86_target_forms(&host, native);
+        static const uint8_t operations[] = { BUSTER_IR_INTRINSIC_PDEP, BUSTER_IR_INTRINSIC_PEXT, BUSTER_IR_INTRINSIC_BZHI, BUSTER_IR_INTRINSIC_BEXTR };
+        static const uint8_t destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDI, X86_REGISTER_RSI };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operations); k += 1)
+        {
+            for (uint32_t width = 4; width <= 8; width += 4)
+            {
+                for (uint32_t shape = 0; shape < 3; shape += 1)
+                {
+                    for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
+                    {
+                        // Shape 0 takes (a, b), 1 (b, a), and 2 (a, b & 0x3f3f).
+                        const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+                        const IrSizes sizes = {
+                            .instruction_count = 6,
+                            .block_count = 1,
+                            .constant_count = 1,
+                            .parameter_count = 2,
+                        };
+                        IrFunction function;
+                        const IrError created = ir_create(&input, &sizes, &function);
+                        tier1_select_test_expect(test, created == IR_OK, "create intrinsic IR fixture");
+                        if (created == IR_OK)
+                        {
+                            function.block_offsets[1] = 6;
+                            function.result_type = type;
+                            function.parameter_types[0] = type;
+                            function.parameter_types[1] = type;
+                            function.constants[0].low = 0x3f3f;
+                            uint8_t registers[6] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RCX, X86_REGISTER_RCX, destinations[d], X86_REGISTER_RAX };
+                            tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                            tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                            tier1_select_test_node(&function, 2, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                            tier1_select_test_node(&function, 3, IR_AND, type, 1, 2, BUSTER_IR_NONE);
+                            tier1_select_test_node(&function, 4, IR_INTRINSIC, type, shape == 1 ? 1 : 0, shape == 0 ? 1 : shape == 1 ? 0 : 3, operations[k]);
+                            tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                            const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                            tier1_select_test_expect(test, verified, "intrinsic IR fixture verifies by both paths");
+                            uint8_t* const baseline = test->allowed;
+                            test->allowed = allowed;
+                            test->native_allowed = native;
+                            tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
+                            test->allowed = baseline;
+                            test->native_allowed = 0;
+                            Tier1SelectPlan plan;
+                            Tier1SelectCode code;
+                            uint32_t node = 0;
+                            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, false, &plan, &node);
+                            const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node) : planned;
+                            tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[4].rule == TIER1_RULE_INTRINSIC && emitted == TIER1_SELECT_ERROR_TARGET && node == 4,
+                                                     "x86-64's baseline refuses a BMI intrinsic as the target's");
+                            arena_pop_to(&output, 0);
+                        }
+                        arena_pop_to(&input, 0);
+                    }
+                }
+            }
+        }
+    }
+    test->manifest = manifest;
+    memcpy(test->emitted_records, emitted_records, sizeof(emitted_records));
+    memcpy(test->unknown_costs, unknown_costs, sizeof(unknown_costs));
+    memcpy(test->missing_columns, missing_columns, sizeof(missing_columns));
+    free(native);
+    free(allowed);
     arena_release(&scratch);
     arena_release(&output);
     arena_release(&input);
@@ -1979,8 +2110,8 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
 
 static void tier1_select_test_copy_elision(Tier1SelectTest* test)
 {
-    // Issue #981: a copy from canonical storage in its own register is nothing, but a 32-bit copy that may
-    // come from a parameter or call result keeps its clearing move. Truncations and zero extensions always emit.
+    // Issue #981: a copy from canonical storage in its own register is nothing. Issue #1116: so is a 32-bit copy of an
+    // I32 and a truncation to I32, whose upper half is unspecified. Zero extensions and narrow truncations always emit.
     for (uint32_t width = 4; width <= 8; width += 4)
     {
         const Tier1SelectHoles same =
@@ -1991,8 +2122,7 @@ static void tier1_select_test_copy_elision(Tier1SelectTest* test)
             .destination = X86_REGISTER_RAX,
             .left = X86_REGISTER_RAX,
         };
-        const bool clears = width == 4;
-        tier1_select_test_expect(test, tier1_select_expand(&same).count == (clears ? 1 : 0), "same-register copy keeps its move only where it may clear dirty bits");
+        tier1_select_test_expect(test, tier1_select_expand(&same).count == 0, "same-register copy emits nothing at either width");
         Tier1SelectHoles moved = same;
         moved.left = X86_REGISTER_RCX;
         const Tier1SelectRecords copy = tier1_select_expand(&moved);
@@ -2039,12 +2169,19 @@ static void tier1_select_test_copy_elision(Tier1SelectTest* test)
         Tier1SelectHoles truncated =
         {
             .rule = TIER1_RULE_TRUNCATE,
-            .width = source == 4 ? 4 : source,
+            .width = source,
             .destination = X86_REGISTER_RAX,
             .left = X86_REGISTER_RAX,
         };
         const Tier1SelectRecords trunc = tier1_select_expand(&truncated);
-        tier1_select_test_expect(test, trunc.count == 1, "same-register truncation still clears bits past its width");
+        const uint16_t clear = source == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16;
+        tier1_select_test_expect(test, source == 4 ? trunc.count == 0 : trunc.count == 1 && trunc.records[0].form == clear,
+                                 "same-register narrow truncation clears bits past its width, and one to I32 emits nothing");
+        truncated.left = X86_REGISTER_RCX;
+        const Tier1SelectRecords trunc_moved = tier1_select_expand(&truncated);
+        tier1_select_test_expect(test, trunc_moved.count == 1 && trunc_moved.records[0].form == (source == 4 ? X86_FORM_MOV_R32_RM32 : clear) &&
+                                 trunc_moved.records[0].reg == X86_REGISTER_RAX && trunc_moved.records[0].rm == X86_REGISTER_RCX,
+                                 "truncation to another register moves or clears into it");
     }
 }
 
@@ -4203,6 +4340,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_memory(&test);
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
+            tier1_select_test_intrinsics(&test);
             tier1_select_test_memory_plans(&test);
             tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);

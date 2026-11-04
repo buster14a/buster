@@ -33,7 +33,8 @@ parts, a direct call (`check_program_emit_round` and
 `check_program_emit_follow`); the worker budget's slots are taken
 before the round, without waiting, and given back after it, and a team the
 jobserver left short of its lanes grows as other recipes give tokens back,
-lane 0 admitting the round's sleeping lanes (`CheckEmitGrowth`, #673). Elsewhere
+lane 0 admitting the round's sleeping lanes, and takes every part's lowering
+before any part's code (`CheckEmitGrowth`, #673). Elsewhere
 (`CheckProgramLanes.flow` null) the emission's lanes are a `lane_run`.
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
@@ -81,10 +82,11 @@ each (`run_check_command`'s collective call), each lane the same thread
 throughout, no thread created, each object `--lanes 1`'s; then the same on a
 lazy session. Then a growing team: the first program of 600 functions by
 `--lanes 4` under a jobserver pipe of no token or one, its lane 0 writing none,
-2, 3 or 5 more after its first part (`BUSTER_TEST_WORKER_SUPPLY`): its
+2, 3 or 5 more after its first item (`BUSTER_TEST_WORKER_SUPPLY`): its
 `--time-stages` grant, team and growth, no more lanes taking parts than it
 admitted, its object `--lanes 1`'s, and every token back in the pipe once;
-the growth gate alone around its threshold and bounds, and its release of a
+the growth gate alone around its threshold and bounds, before any part is
+lowered and after every one is, and its release of a
 guardian that took no token; the driver by the default policy on programs of
 4,000 functions (which grow, to `--worker-budget 3` where given) and of 200
 (which ask for more than one lane but don't); and in this process, on a session

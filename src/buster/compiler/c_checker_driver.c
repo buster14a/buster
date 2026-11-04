@@ -120,6 +120,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_FALLTHROUGH_PLACEMENT: result = "fallthrough annotation does not directly precede switch label"; break;
         case CHECK_INPUT_VERBOSE_TRAP_STRING: result = "argument to __builtin_verbose_trap must be a pointer to a constant string"; break;
         case CHECK_INPUT_VERBOSE_TRAP_DOLLAR: result = "argument to __builtin_verbose_trap must not contain $"; break;
+        case CHECK_INPUT_LONGJMP_INTEGER: result = "argument to '__builtin_longjmp' must be a constant integer"; break;
+        case CHECK_INPUT_LONGJMP_ONE: result = "argument to __builtin_longjmp must be a constant 1"; break;
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
@@ -1235,28 +1237,34 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         }
                         else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT) && named)
                         {
-                            // An attribute on a label or a statement that clang refuses there (#147), spelled as written
-                            // (a scope's `gnu::` too) and worded as clang's: a label's subjects by its name without a GNU
-                            // keyword's underscores (check_input_label_refusal).
+                            // An attribute on a label or a statement that clang refuses there (#147), from its first token
+                            // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
+                            // normalizes it (its name without a keyword's underscores, `gnu::` and `clang::` for theirs),
+                            // which its list's opener, the nearest shallower token before it, tells (`[` or `(`); a label's
+                            // subjects by its name without a GNU keyword's underscores (check_input_label_refusal).
                             // `::` is one token in C23 and two colons before it.
                             const bool scoped = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
                             const uint32_t at = !scoped ? token : parser->tokens.kinds[token + 2] == PARSE_KIND_COLON && token + 3 < count ? token + 3 : token + 2;
                             const uint32_t scope = scoped ? parser->tokens.names[token] : 0;
                             const uint32_t name = parser->tokens.names[at];
-                            const InternSpan span = pp->table->spans[name];
-                            String8 bare = { (char*)pp->table->records + span.offset, span.length };
-                            if (bare.length >= 4 && bare.pointer[0] == '_' && bare.pointer[1] == '_' && bare.pointer[bare.length - 1] == '_' && bare.pointer[bare.length - 2] == '_')
+                            uint32_t opener = token;
+                            while (opener > 0 && parser->tree.depths[opener - 1] >= parser->tree.depths[token])
                             {
-                                bare.pointer += 2;
-                                bare.length -= 4;
+                                opener -= 1;
                             }
+                            const bool standard = opener > 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_L_SQUARE;
+                            const String8 written = { (char*)intern_bytes(pp->table, name), intern_length(pp->table, name) };
+                            const String8 bare = check_warning_attribute_normalized(written);
+                            const String8 spelled = standard ? bare : written;
+                            String8 scope_text = scope != 0 ? check_warning_attribute_normalized((String8){ (char*)intern_bytes(pp->table, scope), intern_length(pp->table, scope) })
+                                                            : (String8){ "", 0 };
+                            scope_text = check_input_attribute_equal(scope_text, "_Clang") ? (String8){ "clang", 5 } : scope_text;
                             const char* refusal = kind == CHECK_INPUT_LABEL_ATTRIBUTE ? check_input_label_refusal(bare) : NULL;
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", scope != 0 ? (int)intern_length(pp->table, scope) : 0,
-                                                 scope != 0 ? (const char*)intern_bytes(pp->table, scope) : "", scope != 0 ? "::" : "", (int)intern_length(pp->table, name),
-                                                 (const char*)intern_bytes(pp->table, name), ending);
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
+                                                 scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
                         {
@@ -1379,13 +1387,18 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                         {
-                            // A label's errors name it, as clang's do.
+                            // A label's errors name it, as clang's do; a redefinition's with its note at the first.
                             const uint32_t name = parser->tokens.names[token];
                             const CheckInputMessage label = input->reports[index].message;
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
-                                                 label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
-                                                 label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
-                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            const uint32_t previous = input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ? input->reports[index].note_token : count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = "previous definition is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                        label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
+                                                        label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
@@ -2421,6 +2434,9 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
             case EXECUTABLE_CAUSE_UNSUPPORTED_VERSION:
                 fprintf(out, "error: can't link %s: symbol '%s' has unavailable version %" PRIu64 "\n", path, unsupported, result->value);
                 break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_BOUND:
+                fprintf(out, "error: can't link %s: '%s' bounds an input section whose atoms one output section can't hold\n", path, unsupported);
+                break;
             default: fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path, unsupported); break;
         }
     }
@@ -2929,6 +2945,10 @@ struct CheckDriverCommand
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
+    // --units-memory=BYTES, #1109's test option: the memory the units' lanes may hold at once, by their estimates, in
+    // place of what the process may take, and the command reports how many units waited for it, after the units'
+    // diagnostics (c_checker_units.c). 0 without it.
+    uint64_t units_memory;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2951,14 +2971,16 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
-    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), and
-    // --helper-forms' families, whose operations take their helpers (CheckProgramOptions.helper_forms).
+    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
+    // option, when no unit makes its report; and --helper-forms' families, whose operations take their helpers
+    // (CheckProgramOptions.helper_forms).
     CheckHelperReport* helper_report;
     uint32_t helper_forms;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
+static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
@@ -3028,6 +3050,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
+        // One of several units (#1109): the unit's estimated peak, from its tokens, out of the memory the units' lanes
+        // share, before the parse and the checker take it; it may wait for another lane's units to give theirs back.
+        if (lanes != NULL && lanes->units_lane != NULL)
+        {
+            check_units_admit(lanes->units_lane, pp->output.count);
+        }
         if (ready)
         {
             ready = parse_translation_unit(parser, pp);
@@ -3388,7 +3416,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         kept != NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3412,7 +3440,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         false, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3702,9 +3730,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
-    // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
+    // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
+    // (CheckDriverCommand's).
     bool poison_arenas = false;
     bool shared_parts = false;
+    uint64_t units_memory = 0;
+    bool invalid_units_memory = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -3744,6 +3775,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // part (CheckProgramLanes.grow_supply), read only when it is set.
     const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
     lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
+    // And another (#673): "LANE,MICROSECONDS", a lane (its index plus one) that sleeps that long at each part it takes,
+    // before each part's lowering in a growing team (CheckProgramLanes.slow_lane), read only when it is set.
+    const char* slow_lane = getenv("BUSTER_TEST_SLOW_LANE");
+    char* slow_end = NULL;
+    lanes.slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
+    lanes.slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
     bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
@@ -3920,6 +3957,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--helper-report") == 0)
         {
             helper_report = true;
+            lanes.helper_reporting = true;
         }
         else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
         {
@@ -3978,6 +4016,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--shared-parts") == 0)
         {
             shared_parts = true;
+        }
+        else if (strncmp(arguments[i], "--units-memory=", 15) == 0)
+        {
+            char* end = NULL;
+            units_memory = strtoull(arguments[i] + 15, &end, 10);
+            invalid_units_memory |= end == arguments[i] + 15 || *end != 0 || units_memory == 0 || arguments[i][15] == '-';
         }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
@@ -4089,7 +4133,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
@@ -4137,6 +4181,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_order = id_order,
         .poison_arenas = poison_arenas,
         .shared_parts = shared_parts,
+        .units_memory = units_memory,
         .emit_object = emit_object,
         .link = link,
         .runtime_kind = runtime_kind,
@@ -4151,7 +4196,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
-        .helper_report = &lanes.helper_report,
+        .helper_report = helper_report ? &lanes.helper_report : NULL,
         .helper_forms = lanes.helper_forms,
     };
     if (worker_budget.dry_run)
@@ -4182,7 +4227,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
@@ -4200,10 +4245,6 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: %s needs --tier1\n", lanes.tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" : "--tier1-no-lifetimes");
-    }
-    else if (lanes.tier1 && source_rows)
-    {
-        fprintf(stderr, "error: --tier1 doesn't support -g: Tier 1's code has no source rows yet\n");
     }
     else
     {

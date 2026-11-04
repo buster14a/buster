@@ -26,12 +26,13 @@
 // SUPPRESSED retains the audited fact without a diagnostic. No event is a hard action error. Missing CFG information
 // must remain DEFERRED or later emit conservatively; it must not silently suppress the warning.
 //
-// The immutable 558 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
-// implementation was copied. They cover 530 exact names: 127 RC sets, 91 SAE sets, 64 scale sets and 276 deferred ranges
+// The immutable 559 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
+// implementation was copied. They cover 531 exact names: 127 RC sets, 91 SAE sets, 64 scale sets and 277 deferred ranges
 // (#126 added the build's 17 ranges and 6 scales, whose names joined the own-main scope, #619 ucmpd128_mask's range,
 // #148 the 8 ranges of the SSE shuffles, shifts, extracts and inserts that stb_image, dr_libs and minimp3 call,
 // #799 five additional 128/256-bit shuffle, blend and align names, and #148 the rest of clang's x86 builtins it
-// implements, the supplementary scope's: c_builtin_supplementary_scope.inc). Names in the
+// implements, the supplementary scope's: c_builtin_supplementary_scope.inc, <xmmintrin.h>'s _mm_prefetch's hint among
+// them, the table's last row: its name sorts after every __builtin_ one). Names in the
 // attested catalogue without a row have no additional SemaX86 rule. Reference source/case lines accompany each row:
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaX86.cpp
 // Generic ICE/range behavior: SemaChecking.cpp:2971-2989,6796-6843; runtime context/reachability: SemaExpr.cpp and
@@ -705,9 +706,10 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_vpshrdw128", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 877 },
     { "__builtin_ia32_vpshrdw256", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 878 },
     { "__builtin_ia32_vpshrdw512", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 879 },
+    { "_mm_prefetch", 12, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 607 },
 };
 
-_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 558, "the audited x86 rule manifest has 558 rows");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 559, "the audited x86 rule manifest has 559 rows");
 
 static int check_builtin_x86_compare(const char* name, uint32_t bytes, const CheckBuiltinX86Rule* rule)
 {

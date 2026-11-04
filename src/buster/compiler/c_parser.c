@@ -1262,6 +1262,9 @@ typedef enum ParseMode
 // GNU attributes seen at a block-item boundary, classified only to resolve declaration/expression ambiguity.
 #define BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE 0x2000000u
 #define BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE 0x4000000u
+// A GNU attribute specifier, even an empty one, seen there: after one, the names decide, and C23's attributes alone don't.
+#define BUSTER_PARSE_FRAME_GNU_ATTRIBUTE 0x10000000u
+#define BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES (BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE | BUSTER_PARSE_FRAME_GNU_ATTRIBUTE)
 // GNU attributes came after a bit-field's width (`int x : 3 __attribute__((packed))`, the member's): more of them, or
 // what ends the member's declarator, may follow, and nothing else. A flag and not a mode of its own, which cost the scalar
 // parser instructions on every token (#430's review): a new mode's values moved the switch's cases, and a second call of
@@ -1684,6 +1687,16 @@ static bool parse_scalar_keyword_statement(const ParseScalar* parser, uint32_t t
     return kind == PARSE_KIND_RETURN || kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
            kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CASE ||
            kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE;
+}
+
+// Whether `token`, after a block item's C23 attributes, starts the statement they are of rather than a declaration, as
+// clang reads them: a statement's keyword, or what starts no declaration (clang's isDeclarationStatement), but the null
+// statement's `;` (above): an expression statement's first token, a label's name, asm, or a block's `}`, where clang
+// expects the statement (parse_scalar_block_attribute_end).
+static bool parse_scalar_attributed_statement(const ParseScalar* parser, uint32_t token)
+{
+    const uint8_t kind = token < parser->count ? parser->kinds[token] : PARSE_KIND_SEMI;
+    return parse_scalar_keyword_statement(parser, token) || (kind != PARSE_KIND_SEMI && !parse_scalar_starts_declaration(parser, token, true));
 }
 
 BUSTER_INLINE void parse_scalar_bind_name(ParseScalar* parser, uint32_t name, uint8_t meaning)
@@ -3087,14 +3100,15 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
             frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
             frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
             frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
-            frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+            frame->flags = (frame->flags & ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES) | BUSTER_PARSE_FRAME_GNU_ATTRIBUTE;
         }
-        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_keyword_statement(parser, parse_scalar_after_attributes(parser, i)))
+        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_attributed_statement(parser, parse_scalar_after_attributes(parser, i)))
         {
             // C23 attributes before a statement's keyword, which clang reads as that statement's (#147's
-            // [[clang::musttail]] return): read as GNU's are at a block item, the keyword after them deciding.
+            // [[clang::musttail]] return), or before what starts no declaration (an expression statement's `[[x]] y += 1;`,
+            // #147's unknown attributes): read as GNU's are at a block item, the token after them deciding.
             parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
-            frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
+            frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
         }
         else if ((parse_scalar_starts_declaration(parser, i, true) || kind == PARSE_KIND_STATIC_ASSERT) && waiting && !labeled)
         {
@@ -3121,6 +3135,43 @@ static void parse_scalar_item(ParseScalar* parser, uint32_t i, ParseFrame* frame
     }
 }
 
+// The token after a block item's attributes (parse_scalar_block_attribute), which isn't another's: whether they start a
+// declaration or the statement they are of. `head` after a control head or a label, `attributes` GNU ones that are each a
+// statement's, `gnu` any GNU one.
+static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step, bool head, bool attributes, bool gnu)
+{
+    const uint8_t kind = parser->kinds[i];
+    const bool statement = kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
+                           kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK ||
+                           kind == PARSE_KIND_RETURN || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE ||
+                           kind == PARSE_KIND_SEMI || kind == PARSE_KIND_ASM ||
+                           (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
+    const bool expression = !gnu && kind != PARSE_KIND_R_BRACE && !parse_scalar_starts_declaration(parser, i, true);
+    frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
+    if (kind == PARSE_KIND_R_BRACE && ((!head && attributes) || !gnu))
+    {
+        // A statement's attributes before a block's end, which clang's statement reader expects a statement after (C23's
+        // after a label's name too).
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (!head && !attributes && !statement && !expression)
+    {
+        parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
+        // An attribute has already started the declaration: an extension marker is not a specifier here.
+        frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
+    }
+    else if (kind == PARSE_KIND_EXTENSION)
+    {
+        frame->statement = PARSE_ITEM_EXPRESSION;
+        parse_scalar_begin_expression(frame, false, false, step);
+    }
+    else
+    {
+        frame->mode = PARSE_MODE_ITEM;
+        step->again = true;
+    }
+}
+
 // Clang's statement reader distinguishes `__attribute__((noinline)) f();` from a declaration beginning with other
 // attributes. Statement keywords and labels decide directly; after a control head only a statement is permitted.
 // A named label consumes its own attributes before its statement. None of these places uses a compound body's
@@ -3134,10 +3185,7 @@ static void parse_scalar_block_attribute(ParseScalar* parser, uint32_t i, ParseF
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
         frame->attribute_continuation = PARSE_MODE_BLOCK_ATTRIBUTE;
-    }
-    else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_keyword_statement(parser, parse_scalar_after_attributes(parser, i)))
-    {
-        parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
+        frame->flags |= BUSTER_PARSE_FRAME_GNU_ATTRIBUTE;
     }
     else
     {
@@ -3146,31 +3194,25 @@ static void parse_scalar_block_attribute(ParseScalar* parser, uint32_t i, ParseF
         const bool head = waiting && top->kind != PARSE_KIND_CASE;
         const bool attributes = (frame->flags & BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE) != 0 &&
                                 (frame->flags & BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE) == 0;
-        const bool statement = kind == PARSE_KIND_IF || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_DO ||
-                               kind == PARSE_KIND_FOR || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_BREAK ||
-                               kind == PARSE_KIND_RETURN || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_L_BRACE ||
-                               kind == PARSE_KIND_SEMI || kind == PARSE_KIND_ASM ||
-                               (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
-        frame->flags &= ~(BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE | BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE);
-        if (kind == PARSE_KIND_R_BRACE && !head && attributes)
+        // GNU's attributes decide by their names (clang: a declaration's unless each is a statement's); C23's alone by the
+        // token after them, which starts an expression statement where it starts no declaration.
+        const bool gnu = (frame->flags & BUSTER_PARSE_FRAME_GNU_ATTRIBUTE) != 0;
+        const bool label = waiting && top->kind == PARSE_KIND_COLON;
+        if (parse_scalar_standard_attribute(parser, i) && gnu && !label)
         {
-            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_STATEMENT, BUSTER_PARSE_AT_TOKEN);
+            // C23 attributes after GNU ones, which clang reads no further: an expression's `[[` after a control head or
+            // where the GNU ones are a statement's, and a declaration's misplaced list where they are a declaration's.
+            // After a label's name GNU's are the label's, and C23's then the statement's.
+            parse_scalar_error(parser, i, waiting || attributes ? PARSE_MESSAGE_EXPECTED_EXPRESSION : PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED,
+                               BUSTER_PARSE_AT_TOKEN);
         }
-        else if (!head && !attributes && !statement)
+        else if (parse_scalar_standard_attribute(parser, i) && parse_scalar_attributed_statement(parser, parse_scalar_after_attributes(parser, i)))
         {
-            parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_NAME_REQUIRED, step);
-            // An attribute has already started the declaration: an extension marker is not a specifier here.
-            frame->mode = kind == PARSE_KIND_EXTENSION ? PARSE_MODE_DECLARATOR : frame->mode;
-        }
-        else if (kind == PARSE_KIND_EXTENSION)
-        {
-            frame->statement = PARSE_ITEM_EXPRESSION;
-            parse_scalar_begin_expression(frame, false, false, step);
+            parse_scalar_standard_attribute_open(parser, i, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_MODE_BLOCK_ATTRIBUTE, step);
         }
         else
         {
-            frame->mode = PARSE_MODE_ITEM;
-            step->again = true;
+            parse_scalar_block_attribute_end(parser, i, frame, step, head, attributes, gnu);
         }
     }
 }
@@ -3345,10 +3387,13 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
     }
     else if (kind == PARSE_KIND_ATTRIBUTE)
     {
+        // GNU's attributes are among clang's declaration specifiers: specifiers of them alone have no type, an implicit
+        // int, a member's too (#147).
         step->role = PARSE_ROLE_LEAF_RIGHT;
         frame->mode = PARSE_MODE_ATTRIBUTE_PAREN;
         frame->attribute_closer_role = PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
         frame->attribute_continuation = PARSE_MODE_SPECIFIERS;
+        frame->flags |= BUSTER_PARSE_FRAME_SPECIFIED;
     }
     else if (parse_scalar_standard_attribute(parser, i))
     {
@@ -3409,8 +3454,17 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
         parse_scalar_typeless_place(parser, i);
         frame->mode = PARSE_MODE_AFTER_DECLARATOR;
     }
+    else if ((kind == PARSE_KIND_STAR || kind == PARSE_KIND_L_PAREN) && (frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 &&
+             frame->role == PARSE_ROLE_OPEN_STRUCT)
+    {
+        // A member's declarator after C23 attributes alone, which clang's specifiers don't hold (#147), as after nothing.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_TYPE_NAME_REQUIRES_SPECIFIER, BUSTER_PARSE_AT_TOKEN);
+    }
     else
     {
+        // Another declarator after C23 attributes alone (`[[x]] *p;` at file scope) has an implicit int, as one after
+        // nothing has (parse_scalar_item).
+        frame->flags |= kind == PARSE_KIND_STAR || kind == PARSE_KIND_L_PAREN ? BUSTER_PARSE_FRAME_SPECIFIED : 0;
         parse_scalar_end_specifiers(parser, i, frame, step);
     }
 }
@@ -3542,11 +3596,14 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
     }
     else if (kind == PARSE_KIND_L_PAREN)
     {
-        const uint8_t next = parser->kinds[i + 1];
         // Where the declarator may be abstract, `(` after the specifiers or a `*` is a function's parameters if they
-        // start (a type, `)` or `...`), else a group; where it needs a name, it is a group, whose name comes inside.
-        const bool function = abstract && (parse_scalar_starts_type(parser, i + 1) || next == PARSE_KIND_R_PAREN || next == PARSE_KIND_ELLIPSIS ||
-                                           parse_scalar_standard_attribute(parser, i + 1));
+        // start (a type, `)` or `...`), else a group; where it needs a name, it is a group, whose name comes inside. GNU
+        // attributes right after the `(` are read first, as clang's ParseParenDeclarator reads them, and the token after
+        // them decides (`int (__attribute__((ms_abi)) *p)(int)` is a group, #147).
+        const uint32_t first = parser->kinds[i + 1] == PARSE_KIND_ATTRIBUTE ? parse_scalar_after_attributes(parser, i + 1) : i + 1;
+        const uint8_t next = first < parser->count ? parser->kinds[first] : PARSE_KIND_END;
+        const bool function = abstract && (parse_scalar_starts_type(parser, first) || next == PARSE_KIND_R_PAREN || next == PARSE_KIND_ELLIPSIS ||
+                                           parse_scalar_standard_attribute(parser, first));
         frame->flags &= ~BUSTER_PARSE_FRAME_AFTER_STAR;
         if (function)
         {
@@ -3944,6 +4001,52 @@ static bool parse_scalar_statement_attribute(const ParseScalar* parser, IdentId 
         {
             result = length == strlen(names[n]) && memcmp(bytes, names[n], length) == 0;
         }
+    }
+    return result;
+}
+
+// Whether an identifier's spelling, a keyword's surrounding underscores stripped where `strip` says, is `expected`.
+static bool parse_scalar_attribute_spelled(const ParseScalar* parser, IdentId name, bool strip, const char* expected)
+{
+    bool result = false;
+    if (parser->table != 0 && name != 0 && name < parser->table->count)
+    {
+        const uint8_t* bytes = intern_bytes(parser->table, name);
+        uint32_t length = intern_length(parser->table, name);
+        const bool alternate = strip && length >= 4 && bytes[0] == '_' && bytes[1] == '_' && bytes[length - 2] == '_' && bytes[length - 1] == '_';
+        bytes += alternate ? 2 : 0;
+        length -= alternate ? 4 : 0;
+        result = length == strlen(expected) && memcmp(bytes, expected, length) == 0;
+    }
+    return result;
+}
+
+// The C23 spellings of clang 23's statement attributes (#147, its Attr.td's StmtAttr and DeclOrStmtAttr): what a block
+// item's attributes must all be, GNU ones among them, for the item to be the statement after them (clang's
+// ParseStatementOrDeclaration). A scope `0` for none; clang's scopes normalized (__gnu__ as gnu, _Clang as clang) and their
+// names' and an unscoped one's keyword underscores stripped, as clang's normalizeAttrName does.
+static bool parse_scalar_standard_statement_attribute(const ParseScalar* parser, IdentId scope, IdentId name)
+{
+    static const char* const clang_names[] = {
+        "always_inline", "assume", "atomic", "code_align", "likely", "musttail", "no_outline", "noinline", "nomerge", "suppress", "unlikely",
+    };
+    static const char* const gnu_names[] = { "always_inline", "fallthrough", "noinline" };
+    static const char* const msvc_names[] = { "forceinline", "forceinline_calls", "noinline" };
+    const bool gnu = scope != 0 && (parse_scalar_attribute_spelled(parser, scope, false, "gnu") || parse_scalar_attribute_spelled(parser, scope, false, "__gnu__"));
+    const bool clang = scope != 0 && (parse_scalar_attribute_spelled(parser, scope, false, "clang") || parse_scalar_attribute_spelled(parser, scope, false, "_Clang"));
+    const bool msvc = scope != 0 && parse_scalar_attribute_spelled(parser, scope, false, "msvc");
+    bool result = scope == 0 && parse_scalar_attribute_spelled(parser, name, true, "fallthrough");
+    for (uint32_t n = 0; clang && !result && n < sizeof(clang_names) / sizeof(clang_names[0]); n += 1)
+    {
+        result = parse_scalar_attribute_spelled(parser, name, true, clang_names[n]);
+    }
+    for (uint32_t n = 0; gnu && !result && n < sizeof(gnu_names) / sizeof(gnu_names[0]); n += 1)
+    {
+        result = parse_scalar_attribute_spelled(parser, name, true, gnu_names[n]);
+    }
+    for (uint32_t n = 0; msvc && !result && n < sizeof(msvc_names) / sizeof(msvc_names[0]); n += 1)
+    {
+        result = parse_scalar_attribute_spelled(parser, name, false, msvc_names[n]);
     }
     return result;
 }
@@ -4583,6 +4686,16 @@ static void parse_scalar_standard_attribute_item(ParseScalar* parser, uint32_t i
     {
         step->role = PARSE_ROLE_OPERAND;
         frame->mode = mode == PARSE_MODE_STANDARD_ATTRIBUTE_NAME ? PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_NAME : PARSE_MODE_STANDARD_ATTRIBUTE_AFTER_SCOPED_NAME;
+        // At a block item, whether the attribute is a statement's, as GNU's names say (parse_scalar_operand): a scoped
+        // one's at its name, its scope three tokens before; an unscoped one's where no `::` follows.
+        const bool scoped = mode == PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME;
+        const bool scoping = !scoped && parser->kinds[i + 1] == PARSE_KIND_COLON && parser->kinds[i + 2] == PARSE_KIND_COLON &&
+                             (parser->flags[i + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
+        if (!scoping && parser->frame_count >= 3 && parser->frames[parser->frame_count - 2].continuation == PARSE_MODE_BLOCK_ATTRIBUTE)
+        {
+            const bool statement = parse_scalar_standard_statement_attribute(parser, scoped ? parser->names[i - 3] : 0, parser->names[i]);
+            parser->frames[parser->frame_count - 3].flags |= statement ? BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE : BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE;
+        }
     }
     else if (mode == PARSE_MODE_STANDARD_ATTRIBUTE_SCOPED_NAME)
     {
@@ -12386,6 +12499,80 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
     return parse_columns(parser, 5, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
 }
 
+// Whether token `t` is a number where a C23 attribute's identifier goes: before `::` (the two colons of one `::` token, a
+// scope's) or right after `[[` (a name's), which C has nowhere else.
+BUSTER_INLINE bool parse_clang_scope_place(const ParseTokens* tokens, uint32_t t)
+{
+    const bool scope = tokens->kinds[t + 1] == PARSE_KIND_COLON && tokens->kinds[t + 2] == PARSE_KIND_COLON &&
+                       (tokens->flags[t + 2] & BUSTER_PARSE_COLONCOLON_SECOND) != 0;
+    const bool name = tokens->kinds[(int64_t)t - 1] == PARSE_KIND_L_SQUARE && tokens->kinds[(int64_t)t - 2] == PARSE_KIND_L_SQUARE;
+    return tokens->kinds[t] == PARSE_KIND_NUMBER && (scope || name);
+}
+
+// clang's reading of `__clang__`'s expansion where a C23 attribute's identifier goes (#147, clang's
+// TryParseCXX11AttributeIdentifier): a number the macro's own expansion made, outside any other macro's and its arguments,
+// before `::` or right after `[[`, is `_Clang`, with clang's warning, which the checker gives it (it knows such a token by
+// its source, a number). The token becomes that identifier before the names' meanings are sized. The places are found 64
+// tokens at a time, as masks of the kinds around each token (the columns' padding covers the edges), and each one's
+// expansion is looked up, the history recorded first where it was deferred; the scalar path tests each token, the twin.
+static void parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
+{
+    ParseTokens* tokens = &parser->tokens;
+    const uint32_t count = tokens->count;
+    const IdentId clang = intern_find(pp->table, (const uint8_t*)"__clang__", 9);
+    IdentId spelling = 0;
+    // The history, which a deferred one replays the unit for (pp_history_ensure), is read only where a place is found.
+    bool history = false;
+    bool asked = false;
+    for (uint32_t first = 0; clang != 0 && first < count; first += 64)
+    {
+        uint64_t places = 0;
+        const uint32_t length = count - first < 64 ? count - first : 64;
+#if BUSTER_HOST_VECTOR
+        if (!BUSTER_SCALAR_PATH(parser->options.scalar))
+        {
+            const __mmask64 live = _bzhi_u64(~UINT64_C(0), length);
+            const __m512i kinds = _mm512_loadu_si512(tokens->kinds + first);
+            const __m512i after = _mm512_loadu_si512(tokens->kinds + first + 1);
+            const __m512i second = _mm512_loadu_si512(tokens->kinds + first + 2);
+            const __m512i before = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 1);
+            const __m512i earlier = _mm512_loadu_si512(tokens->kinds + (int64_t)first - 2);
+            const __m512i flags = _mm512_loadu_si512(tokens->flags + first + 2);
+            const __mmask64 number = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_NUMBER));
+            const __mmask64 scope = _mm512_cmpeq_epi8_mask(after, _mm512_set1_epi8(PARSE_KIND_COLON)) &
+                                    _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(PARSE_KIND_COLON)) &
+                                    _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_PARSE_COLONCOLON_SECOND));
+            const __mmask64 name = _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)) &
+                                   _mm512_cmpeq_epi8_mask(earlier, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
+            places = live & number & (scope | name);
+        }
+        else
+#endif
+        {
+            for (uint32_t i = 0; i < length; i += 1)
+            {
+                places |= parse_clang_scope_place(tokens, first + i) ? UINT64_C(1) << i : 0;
+            }
+        }
+        for (; places != 0; places &= places - 1)
+        {
+            const uint32_t t = first + (uint32_t)__builtin_ctzll(places);
+            history = asked ? history : pp_history_ensure(pp);
+            asked = true;
+            const uint32_t origin = history ? pp_history_at(pp, tokens->sources[t]) : 0;
+            const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+            const bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
+                                  pp->history[index].name == clang && pp->history[index].parent == 0;
+            spelling = expanded && spelling == 0 ? intern_find_or_add(pp->table, (const uint8_t*)"_Clang", 6) : spelling;
+            if (expanded && spelling != 0)
+            {
+                tokens->kinds[t] = PARSE_KIND_IDENTIFIER;
+                tokens->names[t] = spelling;
+            }
+        }
+    }
+}
+
 // The meaning of every name the unit may use, ordinary but for clang's predeclared typedef names.
 static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 {
@@ -12457,6 +12644,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parse_tokens_from_output(output, &parser->tokens);
         }
         parse_mark_pragma_packs(pp, &parser->tokens);
+        parse_clang_scope_numbers(parser, pp);
         const uint32_t count = parser->tokens.count;
         parser->diagnostic_capacity = count + 16;
         parser->diagnostics = parse_column(parser, 8, parser->diagnostic_capacity, sizeof(ParseDiagnostic));

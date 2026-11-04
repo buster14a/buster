@@ -101,7 +101,15 @@ borrows the prior declaration's diagnostic fact, not its closed-block type.
 `-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
 for plain library names, but do not disable explicit `__builtin_` spellings.
 `-fbuiltin` reverses the global disabling option; freestanding mode separately
-disables library builtins, matching the pinned Clang 23.1.4 oracle. A recognized
+disables library builtins, matching the pinned Clang 23.1.4 oracle. That
+release's table has `strlcat` and `strlcpy` as GNU library builtins, in GNU
+C89's warning and GNU C99's and later modes' error alike; 23.1.5's table drops
+them, so the oracle compares `clang --version` with 23.1.4, prints both
+releases when they differ, and skips only the plain names the found release is
+known to classify differently (the named list `cbuiltin_library_table_differences`:
+23.1.5's `strlcat` and `strlcpy`), a difference no named release explains still
+failing. Calls of `strlcat` and `strlcpy` are plain calls in every mode, by
+both paths: neither is one of the plain names buster folds. A recognized
 library declaration can still be formed in C23 when its diagnostic is
 suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
 
@@ -3340,7 +3348,9 @@ small one.
   waited on its first touch of each node's checked value and conversions, two
   arrays too large for the caches. A statement's nodes come before its root in
   the graph, so before each statement the lowering prefetches the next one's,
-  up to its root (`check_lower_prefetch`, its last 64 nodes at most).
+  up to its root (`check_lower_prefetch`, its last 64 nodes at most). #1048
+  removed it once the values were columns (#628), when its own work cost more
+  than the misses it hid ([the lowering guide](c-lowering.md)).
 
 The objects are the same bytes. On the 9700X, against main at `ad408cf2`
 (medians: the whole compile's of 10 rounds of `perf stat -r 3`, the two in
@@ -4783,7 +4793,8 @@ so shadows an outer one and the function's label of the same name, and a goto
 from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
 name in the list, reported as the block ends; a second definition in the scope
-is "redefinition of label" at its name; and a name that a block's lists declare
+is "redefinition of label" at its name, with clang's "previous definition is
+here" at the first (a local label's at its name in the list); and a name that a block's lists declare
 twice is ambiguous where it is defined or used, and undeclared at both of its
 declarations. Clang reports that last one's ambiguity first, the driver in
 source order. A unit without a list builds none of it; the vector path's mask
@@ -4932,6 +4943,141 @@ region reader takes a musttail return for a return, inside a statement expressio
 frame is where its first was; `musttail-external-callees`, tail calls of the harness's clang functions and of the C
 library's `isatty`; and `musttail-vectors`, for x86-64-v4. `test-checker-driver` compares every error's place and
 message and the exit status with clang's on 41 fixtures (`c_check_musttail_driver_test.c`).
+
+## Attributes clang doesn't know (#147)
+
+Clang ignores an attribute it doesn't know, with `-Wunknown-attributes`'
+warning (on by default; `-Werror=unknown-attributes` makes it an error, and
+`-Wno-unknown-attributes` and `-w` silence it). The checker does too: it keeps
+nothing of such an attribute and warns where clang warns. Before this
+change, it refused such a declaration by name.
+
+- **What clang knows.** `c_check_attribute_clang.inc` lists clang's
+  vocabulary for C on x86-64 Linux: the GNU names whose `__has_attribute` is
+  nonzero (a keyword's surrounding underscores removed) and the C23 spellings
+  whose `__has_c_attribute` is nonzero under `-std=gnu23`, plain or scoped.
+  `check_input_attribute_clang_knows` looks a name up by binary search: a GNU
+  one as written without its underscores, and a C23 one with its scope
+  normalized (`gnu`, and `clang` for `clang` or `_Clang`). An attribute clang
+  knows is applied by the checker's rule where it has one; where it has none
+  it is still refused by name, as before. An attribute clang doesn't know
+  gives the warning event `CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE` and isn't
+  appended, whatever the checker's rules say of its name. GCC's own
+  `externally_visible`, `optimize` and `access`, C23's `unsequenced` (which
+  clang 23 doesn't take) and WebAssembly's `export_name` (which clang knows
+  only for that target) are among them.
+- **The warning.** It is at the attribute's first token, a C23 one's scope,
+  and names it as clang does: `unknown attribute 'X' ignored`, a GNU name as
+  written, a C23 one normalized (`'gnu::invented'` for
+  `[[__gnu__::__invented__]]`; a name's underscores stay under another scope,
+  `'msvc::__y__'`) (`c_check_warning_render.c`). Its group is
+  `-Wunknown-attributes`, under `-Wattributes` (`c_check_diagnostic.c`).
+- **The suggestion.** Clang's `; did you mean 'Y'?`, as its
+  `DiagnoseUnknownAttribute` makes it (`check_warning_attribute_suggestion`):
+  a C23 scope that isn't one of its 9 is corrected to the closest of them,
+  then a name that isn't one of its 539 spellings (normalized for that scope)
+  to the closest of those, where clang knows that one in the attribute's
+  syntax and scope. The closest is the first of the fewest edits (insertions,
+  deletions, replacements) within a third of the name's length, rounded up,
+  a candidate skipped whose length differs by more than a third of the name's
+  (`SimpleTypoCorrection`); only that one is tried, so `alignd`'s closest,
+  `align` (a declspec's), gives no suggestion. The lists are clang's
+  `AttributeSpellingList.inc` (the end of `c_check_attribute_clang.inc`).
+- **`__clang__`.** Where a C23 attribute's scope goes (before `::`), or its
+  name right after `[[`, the number the predefined `__clang__` expands to is
+  clang's `_Clang`, with its `-Wignored-attributes` warning "'__clang__' is a
+  predefined macro name, not an attribute scope specifier; did you mean
+  '_Clang' instead?" (clang's `TryParseCXX11AttributeIdentifier`). The parser
+  makes such a number the identifier `_Clang` before it reads the unit
+  (`parse_clang_scope_numbers`, which asks the expansion history only where a
+  number stands there); the checker warns at a `_Clang` whose source is a
+  number (`check_input_attribute_clang_macro`).
+- **Statements.** C23 attributes alone before a statement are the
+  statement's where the next token starts no declaration, as clang's
+  `isDeclarationStatement` decides (`[[x]] y += 1;`): the parser reads them so
+  (`parse_scalar_attributed_statement`), and the checker's statement
+  attributes too. With GNU ones among them it is a declaration unless each
+  attribute, C23's too, is one of clang's statement attributes
+  (`parse_scalar_standard_statement_attribute`: `fallthrough`, and
+  `clang::`'s `always_inline`, `assume`, `atomic`, `code_align`, `likely`,
+  `musttail`, `no_outline`, `noinline`, `nomerge`, `suppress` and
+  `unlikely`, `gnu::`'s `always_inline`, `fallthrough` and `noinline`, and
+  `msvc::`'s `forceinline`, `forceinline_calls` and `noinline`). A C23
+  attribute refused on a statement is named as clang normalizes it, at its
+  first token (`'gnu::aligned' attribute cannot be applied to a statement`).
+  Before a label's name a statement's attributes are the label's
+  (`[[x]] l:`), read as GNU ones after its colon are
+  (`check_input_label_attributes`); their closer is the name's parent in the
+  tree, so a label's name is the token before its colon there
+  (`check_input_label_name`). The parser reports clang's errors for C23
+  attributes after GNU ones and before a block's `}`. Specifiers of
+  attributes alone have no type: an implicit int's error at the declarator's
+  name, but a member's "type name requires a specifier or qualifier" after
+  C23 ones, which clang's specifiers don't hold (GNU ones count as
+  specifiers there).
+- **Differences left.**
+  - Several `__clang__` scopes in one declaration's attributes: clang gives
+    its parser's warnings first, then its unknown-attribute ones; the
+    driver orders them by place. A `__clang__` after a comma in a list
+    (`[[x, __clang__]]`) stays a number, a parse error.
+  - The note "expanded from macro '__clang__'" is at the predefines' own
+    line of it, not clang's (line 2 of its `<built-in>`), as every note at a
+    predefined macro is.
+  - An error of an attribute at `__clang__`'s scope that the checker
+    refuses comes before clang's warning at the same token, where clang
+    gives the warning first.
+  - An ordinary identifier the unit declares, after specifiers of
+    attributes alone (`int x; ... __attribute__(()) x = 1;`), is clang's
+    "expected identifier or '('" at it, which needs a lookup the parser
+    doesn't make: ours is the implicit int's error or "unknown type name".
+- **Tests.** `test-checker`'s attribute fixtures check the vocabulary's
+  order and lookups and what each kind of name keeps
+  (`c_check_attribute_test.c`). `test-checker-driver` compares the warning
+  lines with clang's for a source of every kind of unknown attribute
+  (declarations, members, labels and statements, beside known ones, with
+  suggestions and `__clang__`), on both paths, with no option,
+  `-Wno-unknown-attributes`, `-Werror=unknown-attributes` and `-w`; the
+  whole output of attributed statements and labels; and clang's lines for
+  misspellings of every spelling, made by a fixed generator
+  (`check_test_driver_attribute_typos`). It also asks clang every listed
+  spelling again (`check_test_driver_unknown_attributes`). `test-parser`'s
+  snippets cover the statement and declaration forms against clang.
+
+The vocabulary is regenerated where clang's changes, from the installed
+`clang` and its `libclang-cpp`, in a scratch directory:
+
+```sh
+export LC_ALL=C
+LIB=$(ldd "$(readlink -f "$(command -v clang)")" | awk '/libclang-cpp/{print $3}')
+strings -n 3 "$LIB" | tr -c 'A-Za-z0-9_\n' '\n' | grep -E '^[A-Za-z_][A-Za-z0-9_]{1,60}$' | sed 's/^__\(.*\)__$/\1/' | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u > candidates.txt
+clang -dM -E -x c /dev/null | awk '{print $2}' | grep '(' | sed 's/(.*//' > function-macros.txt
+grep -vE '^(__has_|__building_module$|_Pragma$|__is_target_|__is_identifier$|__identifier$|defined$|__pragma$|__embed|__assume$)' candidates.txt | grep -vxF -f function-macros.txt > names.txt
+awk '{print NR " __has_attribute(" $1 ")"}' names.txt > gnu-query.c
+clang -E -P -ferror-limit=0 -std=gnu17 -x c gnu-query.c 2>/dev/null | awk 'NF==2 && $2!=0 {print $1}' > gnu-lines.txt
+awk 'NR==FNR{k[$1]=1;next} (FNR in k){print}' gnu-lines.txt names.txt > gnu.txt
+{ awk '{print $1; print "gnu::" $1; print "clang::" $1; print "msvc::" $1}' gnu.txt; awk '{print "gnu::" $1; print "clang::" $1; print "msvc::" $1; print $1}' names.txt; } | sort -u > c23-candidates.txt
+awk '{print NR " __has_c_attribute(" $1 ")"}' c23-candidates.txt > c23-query.c
+clang -E -P -ferror-limit=0 -std=gnu23 -x c c23-query.c 2>/dev/null | awk 'NF==2 && $2!=0 {print $1}' > c23-lines.txt
+awk 'NR==FNR{k[$1]=1;next} (FNR in k){print}' c23-lines.txt c23-candidates.txt > c23.txt
+```
+
+Each query is numbered by its line, so an answer is matched with its name
+even where a name is a macro or clang reports an error for it. The spelling
+list is clang-tblgen's, from `Attr.td` and the files it includes at the
+installed clang's tag (`AttrDocs.td`, `ASTNode.td`, `DeclNodes.td`,
+`StmtNodes.td`, in a `clang/Basic` directory):
+
+```sh
+clang-tblgen --gen-attribute-spelling-list -I . clang/Basic/Attr.td -o spelling.inc
+```
+
+Its `ATTR_NAME` and `ATTR_SCOPE_NAME` lines, in order, are the file's
+`BUSTER_CHECK_CLANG_SPELLING` and `BUSTER_CHECK_CLANG_SCOPE` lines. `gnu.txt` and
+`c23.txt` are the two lists, in the file's macros
+(`BUSTER_CHECK_CLANG_GNU_ATTRIBUTE("name")` and
+`BUSTER_CHECK_CLANG_C23_ATTRIBUTE("spelling")`), under its header; update
+THIRD_PARTY_NOTICES.md's record, the counts `test-checker` checks, and
+compare the lists with `Attr.td` before taking them.
 
 ## Ignorable and unsupported pragmas
 

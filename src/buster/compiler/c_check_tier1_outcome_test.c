@@ -167,6 +167,115 @@ static void check_tier1_test_classification(CheckLanesTestTally* tally)
                             "the speculative callee-saved preference ignores constraint and capacity", NULL);
 }
 
+// A refused call's kinds (#1116): each shape a call's descriptor can have, a node that isn't a call, and the refusal
+// line and report that print them.
+static void check_tier1_test_call_kinds(CheckLanesTestTally* tally)
+{
+    Arena arena = arena_reserve(1u << 20);
+    const uint32_t many = BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1;
+    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .call_count = 6, .call_type_count = 3 + many + 8, .abi_call_count = 3, .passed_count = 7 };
+    IrFunction function;
+    const bool created = arena.base != NULL && ir_create(&arena, &sizes, &function) == IR_OK;
+    check_lanes_test_expect(tally, created, "create the call kinds' IR", NULL);
+    if (created)
+    {
+        // f(int, double, long double) -> double; (*p)(short, long..., __int128) of one argument past the boundary's
+        // limit, the __int128, all named, -> __int128; g(long) whose ABI record's outgoing area is past any frame's;
+        // h(long) of two parameters -> long double; k(a, b, c, d) of four 32-byte aggregates, each whole in a ymm
+        // register, whose parts take 16 staging slots; m(a, b) of two 64-byte ones, each whole in a zmm register, whose
+        // parts wait in zmm16 and on instead (#141); and a constant.
+        function.call_types[0] = IR_I32;
+        function.call_types[1] = IR_F64;
+        function.call_types[2] = IR_F80;
+        function.call_types[3] = IR_I16;
+        for (uint32_t k = 1; k < many - 1; k += 1)
+        {
+            function.call_types[3 + k] = IR_I64;
+        }
+        function.call_types[2 + many] = IR_I128;
+        function.call_types[3 + many] = IR_I64;
+        function.call_types[4 + many] = IR_I64;
+        for (uint32_t k = 5 + many; k < 11 + many; k += 1)
+        {
+            function.call_types[k] = IR_PTR;
+        }
+        function.calls[0] = (IrCall){ .type_first = 0, .argument_count = 3, .parameter_count = 3, .result_type = IR_F64 };
+        function.calls[1] = (IrCall){ .type_first = 3, .argument_count = many, .parameter_count = many, .result_type = IR_I128, .variadic = true };
+        function.calls[2] = (IrCall){ .type_first = 3 + many, .argument_count = 1, .parameter_count = 1, .result_type = IR_VOID, .abi = 1 };
+        function.calls[3] = (IrCall){ .type_first = 4 + many, .argument_count = 1, .parameter_count = 2, .result_type = IR_F80 };
+        function.calls[4] = (IrCall){ .type_first = 5 + many, .argument_count = 4, .parameter_count = 4, .result_type = IR_VOID, .abi = 2 };
+        function.calls[5] = (IrCall){ .type_first = 9 + many, .argument_count = 2, .parameter_count = 2, .result_type = IR_VOID, .abi = 3 };
+        function.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = UINT32_MAX }, .passed = 0, .result_size = 0 };
+        function.abi_calls[1] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 1, .result_size = 0 };
+        function.abi_calls[2] = (IrAbiCall){ .call = { .stack_bytes = 0 }, .passed = 5, .result_size = 0 };
+        function.passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } } };
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            const uint32_t reg = k < 4 ? k : k - 4;
+            const AbiLocation whole = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | reg), BUSTER_ABI_REGISTER_NONE } };
+            function.passed[1 + k] = (IrPassed){ .size = k < 4 ? 32 : 64, .location = whole };
+        }
+        static const uint8_t ops[7] = { IR_CALL, IR_CALL_INDIRECT, IR_CALL, IR_CALL, IR_CALL, IR_CALL, IR_CONST };
+        static const uint8_t results[7] = { IR_F64, IR_I128, IR_VOID, IR_F80, IR_VOID, IR_VOID, IR_I32 };
+        for (uint32_t node = 0; node < 7; node += 1)
+        {
+            function.op[node] = ops[node];
+            function.type[node] = results[node];
+            function.b[node] = node < 6 ? node : 0;
+            function.c[node] = BUSTER_IR_NONE;
+        }
+        // A double and a long double, argument or result, are the boundary's since #141, and so is each of k's and m's
+        // records, and m's parts' zmm registers; the short isn't, nor the 17th argument, the __int128 result, the
+        // record's area, the missing argument or k's 16 slots past the 14. The 17th is still an __int128.
+        const uint32_t expected[7] = {
+            0,
+            1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC | 1u << CHECK_TIER1_CALL_STACK_ARGUMENTS | 1u << CHECK_TIER1_CALL_NARROW_ARGUMENT |
+                1u << CHECK_TIER1_CALL_OTHER_ARGUMENT | 1u << CHECK_TIER1_CALL_OTHER_RESULT,
+            1u << CHECK_TIER1_CALL_ABI_RECORD,
+            1u << CHECK_TIER1_CALL_ARGUMENT_COUNT,
+            1u << CHECK_TIER1_CALL_ABI_RECORD,
+            0,
+            0,
+        };
+        const uint32_t taken = 1u << CHECK_TIER1_CALL_INDIRECT | 1u << CHECK_TIER1_CALL_VARIADIC;
+        for (uint32_t node = 0; node < 7; node += 1)
+        {
+            check_lanes_test_expect(tally, check_tier1_call_kinds(&function, node) == expected[node], "a refused call's kinds are its descriptor's shapes", ir_op_names[ops[node]]);
+            check_lanes_test_expect(tally, node == 6 || tier1_select_call_supported(&function, node) == ((check_tier1_call_kinds(&function, node) & ~taken) == 0),
+                                    "a call has a kind past indirect and variadic exactly where the selector refuses it", ir_op_names[ops[node]]);
+        }
+        CheckTier1Outcome outcome = check_tier1_failure(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, TIER1_SELECT_ERROR_UNSUPPORTED, 1, 0);
+        outcome.operation = IR_CALL_INDIRECT;
+        outcome.call_kinds = expected[1];
+        char line[512] = { 0 };
+        FILE* stream = fmemopen(line, sizeof(line) - 1, "w");
+        if (stream != NULL)
+        {
+            check_tier1_print_refusal(stream, (const uint8_t*)"f", 1, outcome);
+            outcome.call_kinds = 0;
+            check_tier1_print_refusal(stream, (const uint8_t*)"g", 1, outcome);
+            fclose(stream);
+        }
+        check_lanes_test_expect(tally, strstr(line, "\toperation=call_indirect\t") != NULL && strstr(line, "\tfallback=tier0\tcall=indirect,variadic,stack-arguments,narrow-argument,other-argument,other-result\n") != NULL &&
+                                strstr(line, "tier1-refused\tg\t") != NULL && strstr(strstr(line, "tier1-refused\tg\t"), "call=") == NULL,
+                                "a refused call's line ends in its kinds, and another refusal's has none", line);
+        static CheckTier1Report report;
+        report.calls[CHECK_TIER1_CALL_NARROW_ARGUMENT] = 3;
+        report.calls[CHECK_TIER1_CALL_ABI_RECORD] = 1;
+        char printed[8192] = { 0 };
+        stream = fmemopen(printed, sizeof(printed) - 1, "w");
+        if (stream != NULL)
+        {
+            check_tier1_print_report(stream, &report);
+            fclose(stream);
+        }
+        check_lanes_test_expect(tally, strstr(printed, "\tselection.call.narrow-argument=3") != NULL && strstr(printed, "\tselection.call.abi-record=1") != NULL &&
+                                strstr(printed, "selection.call.indirect") == NULL,
+                                "the report counts refused calls by kind", NULL);
+    }
+    arena_release(&arena);
+}
+
 // benchmark-tier1-code-certificate's preparation takes a function's planning and emission as the outcomes do: a refusal
 // of its code, or a step out of memory or past a limit (the code certificate's capacity among them), fails it, so that it
 // never times a smaller corpus than the file's; an unsupported function, or one the emitter doesn't take, is left out.
@@ -236,12 +345,12 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         const uint8_t result_class = check_program_result_class(function, program, 0, false);
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_tier1_failure_cases); i += 1)
         {
-            Tier0Code code;
+            EmittedCode code;
             CheckTier1Counts counts;
             memset(&code, 0xa5, sizeof(code));
             memset(&counts, 0xa5, sizeof(counts));
             const CheckTier1FailureCase* test = check_tier1_failure_cases + i;
-            const CheckTier1Outcome outcome = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, test->fault.stage == CHECK_TIER1_VALUE_NUMBERING, true, &output, &code, &counts, &test->fault);
+            const CheckTier1Outcome outcome = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, test->fault.stage == CHECK_TIER1_VALUE_NUMBERING, true, false, &output, &code, &counts, &test->fault);
             bool empty = lane.scratch.length == 0;
             for (uint32_t step = 0; step < BUSTER_CHECK_TIER1_STEPS; step += 1)
             {
@@ -256,16 +365,16 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
                 check_lanes_test_expect(tally, prefix[k] == 0xa5, "refusal leaves the output prefix untouched", NULL);
             }
             // Reuse the same lane after every failure, not merely a fresh lane whose state cannot expose leftovers.
-            const CheckTier1Outcome success = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, true, &output, &code, &counts, NULL);
+            const CheckTier1Outcome success = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, true, false, &output, &code, &counts, NULL);
             check_lanes_test_expect(tally, success.category == CHECK_TIER1_SUCCESS && code.count != 0 && counts.records == code.count,
                                     "a refused lane can subsequently publish a genuine Tier 1 function", NULL);
             arena_pop_to(&output, mark);
         }
         const uint64_t capacity = output.capacity;
         output.capacity = mark;
-        Tier0Code code = { 0 };
+        EmittedCode code = { 0 };
         CheckTier1Counts counts = { 0 };
-        const CheckTier1Outcome full = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+        const CheckTier1Outcome full = check_tier1_compile(&lane, function, result_class, &program->target, scalar, true, false, false, false, &output, &code, &counts, NULL);
         check_lanes_test_expect(tally, full.stage == CHECK_TIER1_PUBLICATION && full.category == CHECK_TIER1_RESOURCE_FAILURE &&
                                 full.error == BUSTER_CHECK_TIER1_ARENA_OUTPUT && output.length == mark && code.records == NULL && counts.records == 0,
                                 "real publication exhaustion is a resource error, not Tier 0 coverage", NULL);
@@ -277,24 +386,24 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         const Tier0Function* nested_function = function;
         const uint8_t nested_result_class = result_class;
         const uint64_t emitter_capacity = lane.steps[1].capacity;
-        Tier0Code chain_code = { 0 };
+        EmittedCode chain_code = { 0 };
         CheckTier1Counts chain_counts = { 0 };
-        const CheckTier1Outcome chain_full = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &chain_code, &chain_counts, NULL);
+        const CheckTier1Outcome chain_full = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &chain_code, &chain_counts, NULL);
         check_lanes_test_expect(tally, chain_full.category == CHECK_TIER1_SUCCESS && chain_code.count != 0 && chain_counts.records == chain_code.count,
                                 "the chain body fits its full emission arena", NULL);
         const uint64_t peak = lane.steps[1].peak;
         arena_pop_to(&output, mark);
         uint64_t low = 0;
         uint64_t high = peak != 0 ? peak : emitter_capacity;
-        Tier0Code probe_code = { 0 };
+        EmittedCode probe_code = { 0 };
         CheckTier1Counts probe_counts = { 0 };
         lane.steps[1].capacity = high;
-        CheckTier1Outcome probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+        CheckTier1Outcome probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
         if (probe.category != CHECK_TIER1_SUCCESS && high != emitter_capacity)
         {
             high = emitter_capacity;
             lane.steps[1].capacity = high;
-            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
         }
         check_lanes_test_expect(tally, probe.category == CHECK_TIER1_SUCCESS, "the chain body fits the binary search's high bound", NULL);
         arena_pop_to(&output, mark);
@@ -302,7 +411,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
         {
             const uint64_t middle = low + (high - low) / 2;
             lane.steps[1].capacity = middle;
-            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &probe_code, &probe_counts, NULL);
+            probe = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &probe_code, &probe_counts, NULL);
             if (probe.stage == CHECK_TIER1_PROMOTION)
             {
                 low = middle;
@@ -314,7 +423,7 @@ static void check_tier1_test_rollback(CheckLanesTestTally* tally, CheckLanesTest
             arena_pop_to(&output, mark);
         }
         lane.steps[1].capacity = high;
-        CheckTier1Outcome nested = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, &output, &code, &counts, NULL);
+        CheckTier1Outcome nested = check_tier1_compile(&lane, nested_function, nested_result_class, &program->target, scalar, true, false, false, false, &output, &code, &counts, NULL);
         arena_pop_to(&output, mark);
         char nested_detail[160];
         snprintf(nested_detail, sizeof(nested_detail), "stage=%u category=%u cause=%u error=%" PRIu32 " emission=%" PRIu32 " capacity=%" PRIu64 " peak=%" PRIu64,
@@ -457,6 +566,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
     const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && x86_zen5_initialize();
     check_lanes_test_expect(tally, ready, "initialize Tier 1 outcome regression tables", NULL);
     check_tier1_test_classification(tally);
+    check_tier1_test_call_kinds(tally);
     check_tier1_test_code_benchmark(tally);
     char source[PATH_MAX];
     char object[PATH_MAX];

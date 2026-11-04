@@ -574,6 +574,93 @@ the successor's start, or in a stub for a split critical edge. The plan's
 definitions are its uses there, required, since an instruction writes its
 destination's register.
 
+### Values live across calls (#1116)
+
+A call saves each value that lives past it in a caller-saved register: the
+value goes to its register's call-save row, a frame row of that register's for
+the whole function. Where the allocation puts it in a callee-saved register,
+the prologue saves that register once instead (`tier1_emit_cfg_callee`). `rbp`
+is the sixth callee-saved register where the frame keeps no frame pointer in it.
+The frame's reservations, made before allocation, say so (`tier1_frame.c`'s
+`reserved_registers`).
+
+A parameter keeps its incoming register over its definition's interval, so a
+parameter live across a run of calls in its entry block, as in Lua's
+`luac.c:PrintCode` and its runs of `printf`, stays in a caller-saved register.
+Saving it call by call was most of such functions' `call_stores` and
+`call_loads`. Both consumers now save less often within straight-line code: a
+chain, or a block of a CFG (`Tier1EmitSaves`).
+
+- **Loads wait until a read.** A call doesn't load its saved registers back.
+  It owes those loads until a node reads the register, or does anything that
+  would move or replace its value: its transitions at either phase, its
+  definition, or a fixed registers' sequence. The straight-line code's last
+  node, which jumps, also takes them all back (`tier1_emit_owed`). At a return
+  or a trap the owed values are dead, so they are dropped. A value read by none
+  of the calls stays in its row across the run.
+- **A row isn't stored again while it holds the value.** For each general
+  register, the code keeps the owner its row was stored or kept for. A call
+  stores a register only where its owner is now another value. A fixed
+  registers' sequence, which stores those rows, forgets them. The rows are one
+  vector of the 16 general registers' lanes, as the owners' first 16 locations
+  are, so a call's kept registers are one compare and its rows one blend
+  (`tier1_emit_kept`, `tier1_emit_saved`), each with a scalar twin that
+  `test-tier1-emit` checks it against on random rows. A row stays its owner's
+  while that SSA value's bits don't change, and they change only where the
+  value is defined again, an iteration later.
+- **Every CFG block starts with no rows.** A row that a block's one
+  predecessor stored would still hold its value where that predecessor comes
+  first in layout. But the code's certificate (#939,
+  `tier1_certificate_emitted.c`) proves each block from its entry facts, which
+  hold each value in one place, the allocation's, so it can't know the row's.
+  The first call of a block stores again what it saves. On Lua 5.4.8, carrying
+  rows into such blocks stored 3,163 values where this stores 4,253, in 255,363
+  bytes of `.text` against 260,821.
+
+`test-tier1-emit`'s call fixtures check this natively, against hostile helpers
+that poison every caller-saved register (`tier1_call_test.c`):
+
+- **A run of calls in one block**, where the second call stores none of the
+  values live past both, and **two blocks**: the second call stores them again
+  in a block whose one predecessor comes first, at a join and past a later
+  predecessor.
+- **Values live past a call** take the callee-saved registers the frame
+  leaves. Six take all six, `rbp` among them, without a frame pointer. With
+  one, five take exactly `rbx` and `r12` to `r15`, the frame pushing them and
+  `rbp` as its pointer. (Six would split one there, which discards the
+  preference whole, so they only run.) In
+  `test-check-debug --cross-check`'s Tier 1 fixture, `six` is such a function,
+  with a branch and a join that keep it on the CFG consumer, since the
+  straight-line consumer takes no callee-saved register. Its FDE must save
+  `rbp` in a frame without a frame pointer, `backtrace()` walks through it to
+  `main`, and gdb steps every instruction of it.
+- **Every fixture's records**, and every caller of the pipeline test's, show
+  each call-save store loaded back before the code branches, returns or traps
+  (`tier1_emit_test_saves_loaded`). That covers a general register's row, a
+  floating value's xmm row (#141) and a mask's opmask row (#179), and the
+  float, stack-argument and mask tests check it too.
+
+Measured with #1116's 32-bit moves, after #1117, at `6e1e6121` against main `b70deb47`
+([the record](https://github.com/buster14a/buster-performance/tree/b3b04fb39b07a267e9d5e0aba0346b739148a7fb/docs/measurements/tier1-code-quality-1116-2026-11-03)):
+
+- **Lua 5.4.8 by `--tier1 -c`**, all 1,104 functions Tier 1's: `call_stores` go from 5,956 to 3,165, `call_loads` from
+  5,956 to 5,207, and `.text` from 289,580 to 260,789 bytes, against clang -O0's 273,461.
+- **The frozen `sqlite3.c`**, 2,666 of 2,668 functions Tier 1's: `call_stores` go from 28,027 to 15,079.
+- **speedtest1 by `--tier1`, on the 9700X:** 3.2% fewer instructions and 1.3% less time. Lua's interpreter runs 3.0%
+  and 3.8% fewer instructions on its tables and strings scripts, and as many on the other three.
+- **Compile time:** `--tier1 -c` of `sqlite3.c`, at `3b195d57` against main `703ae9f5`, each built at six placements of
+  the backend's code and timed over them and fresh copies, takes 0.10% more instructions and 0.33% more user cycles
+  (main against itself: −0.05%). Before the definition's interval was looked up once and the rows kept in a vector,
+  it was 0.17% and 0.50%. Throwaway builds price the instructions: the scan for owed loads, run twice, adds 3.09 M
+  (0.053%), and `rbp` out of the callee-saved registers takes 3.72 M away, with 5,046 more records and 3,165 more
+  spills in `sqlite3.c`. A bound at each call, skipping the scan before the first node that can need a load back,
+  would spend a good part of the scan's cost on its own searches, so the scan stays.
+
+An owed register's owner never changes while the load is owed: whatever would
+change it takes the value back first. So the emitter's view of where each value
+is stays the allocation's, which `tier1_cfg_verify` checks unchanged. The cost is a scan of each node's uses and transitions while some
+load is owed, scalar work bounded by the node's own uses.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,

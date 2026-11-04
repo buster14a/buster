@@ -147,7 +147,7 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         source->program.status = request.fault_unsupported ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
     }
     const bool selected = prepared && (!request.select || check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE,
-                                                                                   scalar, &path->output_arena, &path->scratch));
+                                                                                   scalar, false, &path->output_arena, &path->scratch));
     // -c's check of the selected definitions' target features (the driver's check_driver_target_features), its errors
     // counted rather than printed; its output popped, as the driver pops it.
     const uint64_t mark = path->output_arena.length;

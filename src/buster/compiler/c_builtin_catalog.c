@@ -50,9 +50,9 @@
 // Exact source spellings and audited source capabilities. A zero entry is recognized but has no complete native
 // source path. The scoped families (__scoped_atomic_*, __hip_atomic_* and __opencl_atomic_*) are their base builtins'
 // operations with a scope (c_check_builtin_atomic_c11.c). CHECKER alone is a builtin the checker checks as clang does
-// but no lowering takes: __builtin_elementwise_clmul (VPCLMULQDQ is no form Tier 0's rows cover), the masked memory
-// builtins (their masks are vectors of bools, which the lowering has no class for) and the matrix ones (every call an
-// error: no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
+// but no lowering takes: __builtin_elementwise_clmul (VPCLMULQDQ is no form Tier 0's rows cover) and the masked memory
+// builtins (their masks are vectors of bools, which the lowering has no class for). The matrix ones are SOURCE: every
+// call is an error, as clang's is without -fenable-matrix (no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
 // take 0x380 to 0x390, its other bit builtins (c_check_builtin_bits.c: bitreverse, clrsb, the generic counts, C23's
@@ -344,9 +344,9 @@
     X(MASKED_COMPRESS_STORE, 0x363u, "__builtin_masked_compress_store", BUSTER_CBUILTIN_CAP_CHECKER) \
     X(MASKED_GATHER, 0x364u, "__builtin_masked_gather", BUSTER_CBUILTIN_CAP_CHECKER) \
     X(MASKED_SCATTER, 0x365u, "__builtin_masked_scatter", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MATRIX_TRANSPOSE, 0x370u, "__builtin_matrix_transpose", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MATRIX_COLUMN_MAJOR_LOAD, 0x371u, "__builtin_matrix_column_major_load", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MATRIX_COLUMN_MAJOR_STORE, 0x372u, "__builtin_matrix_column_major_store", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(MATRIX_TRANSPOSE, 0x370u, "__builtin_matrix_transpose", BUSTER_CBUILTIN_SOURCE) \
+    X(MATRIX_COLUMN_MAJOR_LOAD, 0x371u, "__builtin_matrix_column_major_load", BUSTER_CBUILTIN_SOURCE) \
+    X(MATRIX_COLUMN_MAJOR_STORE, 0x372u, "__builtin_matrix_column_major_store", BUSTER_CBUILTIN_SOURCE) \
     X(SCOPED_ATOMIC_ADD_FETCH, 0x400u, "__scoped_atomic_add_fetch", BUSTER_CBUILTIN_SOURCE) \
     X(SCOPED_ATOMIC_AND_FETCH, 0x401u, "__scoped_atomic_and_fetch", BUSTER_CBUILTIN_SOURCE) \
     X(SCOPED_ATOMIC_COMPARE_EXCHANGE, 0x402u, "__scoped_atomic_compare_exchange", BUSTER_CBUILTIN_SOURCE) \
@@ -474,7 +474,17 @@ typedef enum CBuiltinId
 #define BUSTER_CBUILTIN_SPECIAL_ENUM(id, value, name, capabilities) CBUILTIN_##id = value,
     BUSTER_CBUILTIN_SPECIAL_NAMES(BUSTER_CBUILTIN_SPECIAL_ENUM)
 #undef BUSTER_CBUILTIN_SPECIAL_ENUM
+    // C23's <stdbit.h> functions, clang's library builtins of C23 (#148, cbuiltin_stdc_library): stdc_leading_zeros_uc
+    // to stdc_bit_ceil_ull, each the generic __builtin_stdc_ builtin of its name (leading_zeros to bit_ceil, in their
+    // codes' order) of a parameter of unsigned char, short, int, long or long long, in that order. They have no entry of
+    // the catalog, whose names a call that no declaration binds resolves: a call is one of these where it calls the
+    // unit's declaration of the function, as clang makes the declaration the builtin.
+    CBUILTIN_STDC_LIBRARY_FIRST = 0x460,
+    CBUILTIN_STDC_LIBRARY_LAST = 0x460 + (CBUILTIN_STDC_BIT_CEIL - CBUILTIN_STDC_LEADING_ZEROS + 1) * 5 - 1,
 } CBuiltinId;
+
+// The parameter types of the stdc library builtins' names, in their identities' order, and their suffixes.
+#define BUSTER_CBUILTIN_STDC_LIBRARY_TYPES 5u
 
 typedef struct CBuiltinName CBuiltinName;
 struct CBuiltinName
@@ -658,11 +668,58 @@ static __attribute__((unused)) bool cbuiltin_float_canonicalize(uint32_t id)
     return result;
 }
 
+// Whether an identity is one of C23's <stdbit.h> functions as library builtins (CBUILTIN_STDC_LIBRARY_FIRST), the generic
+// builtin it computes, and its parameter type's index: unsigned char, short, int, long and long long, 0 to 4.
+static __attribute__((unused)) bool cbuiltin_stdc_library(uint32_t id)
+{
+    return id >= CBUILTIN_STDC_LIBRARY_FIRST && id <= CBUILTIN_STDC_LIBRARY_LAST;
+}
+
+static __attribute__((unused)) CBuiltinId cbuiltin_stdc_generic(uint32_t id)
+{
+    const CBuiltinId generic = (CBuiltinId)(CBUILTIN_STDC_LEADING_ZEROS + (id - CBUILTIN_STDC_LIBRARY_FIRST) / BUSTER_CBUILTIN_STDC_LIBRARY_TYPES);
+    return cbuiltin_stdc_library(id) ? generic : (CBuiltinId)id;
+}
+
+static __attribute__((unused)) uint32_t cbuiltin_stdc_library_type(uint32_t id)
+{
+    return (id - CBUILTIN_STDC_LIBRARY_FIRST) % BUSTER_CBUILTIN_STDC_LIBRARY_TYPES;
+}
+
+// The stdc library builtin a name spells (stdc_leading_zeros_uc to stdc_bit_ceil_ull): its operation's name among the
+// generic ones' (__builtin_stdc_ less its prefix), then a suffix of its parameter type; CBUILTIN_NONE for any other name.
+// Whether the name is a builtin of the unit is the preprocessor's (pp_library_builtin: C23's, unless -fno-builtin says
+// otherwise) and the checker's, which takes a call of it as the builtin where it calls the unit's declaration.
+static __attribute__((unused)) CBuiltinId cbuiltin_stdc_library_resolve(const char* name, uint32_t length)
+{
+    static const char* const operations[] =
+    {
+        "leading_zeros", "leading_ones", "trailing_zeros", "trailing_ones", "first_leading_zero", "first_leading_one", "first_trailing_zero",
+        "first_trailing_one", "count_zeros", "count_ones", "has_single_bit", "bit_width", "bit_floor", "bit_ceil",
+    };
+    _Static_assert(sizeof(operations) / sizeof(operations[0]) == CBUILTIN_STDC_BIT_CEIL - CBUILTIN_STDC_LEADING_ZEROS + 1, "an operation per generic stdc builtin");
+    static const char* const suffixes[BUSTER_CBUILTIN_STDC_LIBRARY_TYPES] = { "_uc", "_us", "_ui", "_ul", "_ull" };
+    CBuiltinId result = CBUILTIN_NONE;
+    const bool prefixed = name != NULL && length > 8 && length < 32 && memcmp(name, "stdc_", 5) == 0;
+    for (uint32_t t = 0; prefixed && result == CBUILTIN_NONE && t < BUSTER_CBUILTIN_STDC_LIBRARY_TYPES; t += 1)
+    {
+        const uint32_t suffix = (uint32_t)strlen(suffixes[t]);
+        const uint32_t middle = length - 5 - suffix;
+        const bool suffixed = memcmp(name + length - suffix, suffixes[t], suffix) == 0;
+        for (uint32_t o = 0; suffixed && result == CBUILTIN_NONE && o < sizeof(operations) / sizeof(operations[0]); o += 1)
+        {
+            const bool match = strlen(operations[o]) == middle && memcmp(name + 5, operations[o], middle) == 0;
+            result = match ? (CBuiltinId)(CBUILTIN_STDC_LIBRARY_FIRST + o * BUSTER_CBUILTIN_STDC_LIBRARY_TYPES + t) : CBUILTIN_NONE;
+        }
+    }
+    return result;
+}
+
 // Whether an identity is one of the bit builtins c_check_builtin_bits.c checks, which the checker's graph takes as
 // miscellaneous builtins (their arguments a list), and whether it is one of their carry chains, which store a carry.
 static __attribute__((unused)) bool cbuiltin_bits(uint32_t id)
 {
-    const bool result = id >= CBUILTIN_BITREVERSE8 && id <= CBUILTIN_SUBCLL;
+    const bool result = (id >= CBUILTIN_BITREVERSE8 && id <= CBUILTIN_SUBCLL) || cbuiltin_stdc_library(id);
     return result;
 }
 

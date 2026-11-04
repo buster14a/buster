@@ -598,6 +598,105 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "__m128d c=_mm_castps_pd(f),k=_mm_castps_pd(g);int s[]={_mm_movemask_epi8(a),_mm_movemask_ps(f),_mm_movemask_pd(c),_mm_cvttss_si32(f),_mm_cvtss_si32(g),"
           "_mm_cvttsd_si32(c),_mm_cvtsd_si32(k)};FOLD(s);long long l[]={_mm_cvttss_si64(f),_mm_cvtss_si64(g),_mm_cvttsd_si64(k),_mm_cvtsd_si64(c)};FOLD(l);return (int)h;}\n"
         },
+        // The rest of SSE and SSE2's intrinsics (#775's survey): averages, sums of differences, minima and maxima,
+        // saturating arithmetic, unpacks, conversions, square roots, approximations, scalar operations, compares into
+        // vectors and into flags (a NaN among their operands), moves of halves and non-temporal stores.
+        { "baseline-sse2-survey",
+          "#include <emmintrin.h>\n"
+          "int tested(int n){unsigned h=2166136261u;__m128i a,b;__m128 f,g;__m128d d,e;fill(&a,16,n);fill(&b,16,n+1);fillf((float*)&f,4,n+2);fillf((float*)&g,4,n+3);"
+          "filld((double*)&d,2,n+4);filld((double*)&e,2,n+5);union{unsigned u[4];__m128 v;}nan={{0x7fc01234u,0,0x80000000u,0x3f800000u}};\n"
+          "__m128i r[]={_mm_avg_epu8(a,b),_mm_avg_epu16(a,b),_mm_sad_epu8(a,b),_mm_min_epu8(a,b),_mm_max_epu8(a,b),_mm_min_epi16(a,b),_mm_max_epi16(a,b),"
+          "_mm_adds_epi8(a,b),_mm_adds_epu8(a,b),_mm_adds_epi16(a,b),_mm_adds_epu16(a,b),_mm_subs_epi8(a,b),_mm_subs_epu8(a,b),_mm_subs_epi16(a,b),_mm_subs_epu16(a,b),"
+          "_mm_unpacklo_epi8(a,b),_mm_unpackhi_epi8(a,b),_mm_unpacklo_epi16(a,b),_mm_unpackhi_epi16(b,a),_mm_unpacklo_epi32(a,b),_mm_unpackhi_epi32(a,b),"
+          "_mm_unpacklo_epi64(a,b),_mm_unpackhi_epi64(b,a),_mm_move_epi64(a),_mm_cvtpd_epi32(d),_mm_cvttpd_epi32(e),_mm_castps_si128(_mm_cmplt_ps(f,g)),"
+          "_mm_castpd_si128(_mm_cmpneq_pd(d,e))};FOLD(r);\n"
+          "__m128 s[]={_mm_sqrt_ps(_mm_mul_ps(f,f)),_mm_sqrt_ss(g),_mm_rcp_ps(g),_mm_rsqrt_ps(_mm_mul_ps(g,g)),_mm_max_ss(f,g),_mm_min_ss(f,nan.v),_mm_cvtpd_ps(d),"
+          "_mm_cvtsd_ss(f,e),_mm_unpacklo_ps(f,g),_mm_unpackhi_ps(f,g),_mm_movehl_ps(f,g),_mm_movelh_ps(f,g),_mm_move_ss(f,g),_mm_cmpgt_ss(f,g),"
+          "_mm_cmpord_ps(f,nan.v),_mm_cmpunord_ss(nan.v,g),_mm_shuffle_ps(f,g,0x4e)};FOLD(s);\n"
+          "__m128d t[]={_mm_sqrt_pd(_mm_mul_pd(d,d)),_mm_sqrt_sd(d,_mm_mul_pd(e,e)),_mm_cvtps_pd(f),_mm_cvtepi32_pd(a),_mm_max_sd(d,e),_mm_min_sd(d,e),_mm_cvtss_sd(d,g),"
+          "_mm_unpacklo_pd(d,e),_mm_unpackhi_pd(d,e),_mm_move_sd(d,e),_mm_cmple_sd(d,e),_mm_shuffle_pd(d,e,1)};FOLD(t);\n"
+          "int c[]={_mm_comieq_ss(f,g),_mm_comilt_ss(f,g),_mm_comige_ss(g,f),_mm_ucomineq_ss(f,nan.v),_mm_comieq_ss(nan.v,nan.v),_mm_comile_sd(d,e),"
+          "_mm_ucomigt_sd(e,d),_mm_cvtsi128_si32(_mm_srli_si128(a,4)),_mm_extract_epi16(b,7)};FOLD(c);\n"
+          "__m64 m[2]={0};_mm_storeh_pi(&m[0],f);_mm_storel_pi(&m[1],g);FOLD(m);__m128 l[]={_mm_loadh_pi(f,&m[1]),_mm_loadl_pi(g,&m[0])};FOLD(l);"
+          "_Alignas(16) float stream[4];_mm_stream_ps(stream,f);FOLD(stream);return (int)h;}\n"
+        },
+        // Shuffles of every element size by the baseline's sequences: PSHUFD's and SHUFPD's, SHUFPS's of halves, of pairs
+        // and of three elements and one, unpacks, PSHUFLW's and PSHUFHW's, and with SSSE3 PSHUFB's of any bytes; narrow
+        // results and operands.
+        { "baseline-shuffles",
+          "typedef short v8hi __attribute__((vector_size(16)));typedef char v16qi __attribute__((vector_size(16)));"
+          "typedef float v2sf __attribute__((vector_size(8)));typedef int v2si __attribute__((vector_size(8)));\n"
+          "int tested(int n){unsigned h=2166136261u;v4si a,b;v2di q,r;v4sf f,g;v2df d,e;fill(&a,16,n);fill(&b,16,n+1);fill(&q,16,n+2);fill(&r,16,n+3);"
+          "fillf((float*)&f,4,n);fillf((float*)&g,4,n+1);filld((double*)&d,2,n);filld((double*)&e,2,n+1);v8hi w=(v8hi)a,x=(v8hi)b;v16qi y=(v16qi)a,z=(v16qi)b;\n"
+          "v4si s[]={__builtin_shufflevector(a,b,3,2,1,0),__builtin_shufflevector(a,b,4,1,2,3),__builtin_shufflevector(a,b,0,1,2,7),__builtin_shufflevector(a,b,5,0,7,2),"
+          "__builtin_shufflevector(a,b,6,7,0,1),__builtin_shufflevector(a,b,3,4,1,2),__builtin_shufflevector(a,b,1,6,3,0),__builtin_shufflevector(a,b,4,5,6,1),"
+          "__builtin_shufflevector(a,b,7,6,5,4),__builtin_shufflevector(a,b,4,4,4,0),__builtin_shufflevector(a,b,1,2,3,4),__builtin_shufflevector(b,a,0,4,1,5)};FOLD(s);\n"
+          "v2di t[]={__builtin_shufflevector(q,r,1,0),__builtin_shufflevector(q,r,3,0),__builtin_shufflevector(q,r,2,3),__builtin_shufflevector(q,r,1,2),"
+          "__builtin_shufflevector(q,r,3,3)};FOLD(t);\n"
+          "v4sf u[]={__builtin_shufflevector(f,g,0,4,1,5),__builtin_shufflevector(f,g,6,7,2,3),__builtin_shufflevector(f,f,3,2,1,0),__builtin_shufflevector(f,g,7,0,6,1)};FOLD(u);"
+          "v2df k[]={__builtin_shufflevector(d,e,1,2),__builtin_shufflevector(d,e,3,1)};FOLD(k);\n"
+          "v8hi m[]={__builtin_shufflevector(w,x,0,8,1,9,2,10,3,11),__builtin_shufflevector(w,x,12,4,13,5,14,6,15,7),__builtin_shufflevector(w,w,3,2,1,0,7,7,4,5),"
+          "__builtin_shufflevector(w,x,11,10,9,8,15,14,13,12),__builtin_shufflevector(w,x,2,3,0,1,6,7,4,5)\n"
+          "#ifdef __SSSE3__\n,__builtin_shufflevector(w,x,7,8,1,15,4,4,9,0)\n#endif\n};FOLD(m);\n"
+          "v16qi o[]={__builtin_shufflevector(y,z,0,16,1,17,2,18,3,19,4,20,5,21,6,22,7,23),__builtin_shufflevector(z,y,8,24,9,25,10,26,11,27,12,28,13,29,14,30,15,31),"
+          "__builtin_shufflevector(y,z,2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13)\n"
+          "#ifdef __SSSE3__\n,__builtin_shufflevector(y,z,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(y,z,0,17,2,19,31,5,6,7,16,9,3,3,12,30,14,1)\n"
+          "#endif\n};FOLD(o);\n"
+          "v2sf p=__builtin_shufflevector(f,f,2,3);v4sf pp=__builtin_shufflevector(p,(v2sf){1.0f,2.0f},0,2,1,3);FOLD(p);FOLD(pp);"
+          "v2si i2=__builtin_shufflevector((v2si){n,7},(v2si){-3,n*5},3,0);FOLD(i2);return (int)h;}\n"
+        },
+        // SSE3's, SSSE3's and SSE4.1's (x86-64-v2's): blends by a vector's signs and by immediates, extensions, elements'
+        // extractions and insertions, packs, minima and maxima, products, horizontal sums, alignments, signs, roundings,
+        // dot products and tests.
+        { "baseline-sse41",
+          "#include <smmintrin.h>\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "#ifdef __SSE4_1__\n"
+          "__m128i a,b,m;__m128 f,g;__m128d d,e;fill(&a,16,n);fill(&b,16,n+1);fill(&m,16,n+2);fillf((float*)&f,4,n);fillf((float*)&g,4,n+3);filld((double*)&d,2,n);"
+          "filld((double*)&e,2,n+1);\n"
+          "__m128i r[]={_mm_blendv_epi8(a,b,m),_mm_blend_epi16(a,b,0x5a),_mm_cvtepi8_epi16(a),_mm_cvtepu8_epi32(b),_mm_cvtepi16_epi64(a),_mm_cvtepu32_epi64(b),"
+          "_mm_insert_epi8(a,n,5),_mm_insert_epi32(b,n*3,2),_mm_insert_epi64(a,(long long)n<<33,1),_mm_packus_epi32(a,b),_mm_min_epi8(a,b),_mm_max_epu16(a,b),"
+          "_mm_min_epi32(a,b),_mm_max_epu32(a,b),_mm_mullo_epi32(a,b),_mm_alignr_epi8(a,b,5),_mm_hadd_epi16(a,b),_mm_hsub_epi32(a,b),_mm_sign_epi8(a,b),"
+          "_mm_maddubs_epi16(a,b),_mm_mulhrs_epi16(a,b),_mm_abs_epi16(a),_mm_shuffle_epi8(a,b),_mm_minpos_epu16(a)};FOLD(r);\n"
+          "__m128 s[]={_mm_blendv_ps(f,g,_mm_castsi128_ps(m)),_mm_blend_ps(f,g,5),_mm_round_ps(f,1),_mm_floor_ps(g),_mm_dp_ps(f,g,0xf1),_mm_hadd_ps(f,g),"
+          "_mm_addsub_ps(f,g)};FOLD(s);\n"
+          "__m128d t[]={_mm_blendv_pd(d,e,_mm_castsi128_pd(m)),_mm_blend_pd(d,e,2),_mm_round_pd(d,2),_mm_ceil_sd(d,e),_mm_dp_pd(d,e,0x31),_mm_hsub_pd(d,e),"
+          "_mm_addsub_pd(d,e)};FOLD(t);\n"
+          "int c[]={_mm_extract_epi8(a,9),_mm_extract_epi32(b,3),_mm_extract_ps(f,2),_mm_testz_si128(a,b),_mm_testc_si128(a,m),_mm_testnzc_si128(b,m)};FOLD(c);"
+          "long long l=_mm_extract_epi64(a,1);FOLD(l);\n"
+          "#endif\n"
+          "return (int)h;}\n"
+        },
+        // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
+        // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
+        { "baseline-avx2",
+          "#include <immintrin.h>\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "#ifdef __AVX2__\n"
+          "__m256i a,b;__m256 f,g,k;__m256d d,e;__m128i x;__m128 y;fill(&a,32,n);fill(&b,32,n+1);fill(&x,16,n+2);fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);"
+          "fillf((float*)&k,8,n+2);filld((double*)&d,4,n);filld((double*)&e,4,n+3);fillf((float*)&y,4,n+4);"
+          "int idx[16];float tab[16];for(int i=0;i<16;i++){idx[i]=(i*7+n)&15;tab[i]=(float)i*1.5f;}__m256i lane=_mm256_and_si256(a,_mm256_set1_epi32(15));\n"
+          "__m128i z;fill(&z,16,n+5);__v4di wide[]={__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,0,3),__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,2,1),"
+          "__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,2,3),__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,0,1),"
+          "__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,3,2)};FOLD(wide);__v8si dw=__builtin_shufflevector((__v4si)x,(__v4si)z,0,1,2,3,4,5,2,7);FOLD(dw);"
+          "__v4di sparse=__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,-1,3),sparse2=__builtin_shufflevector((__v2di)x,(__v2di)z,0,1,2,-1);"
+          "long long kept[]={sparse[0],sparse[1],sparse[3],sparse2[0],sparse2[1],sparse2[2]};FOLD(kept);\n"
+          "__m256i r[]={_mm256_unpacklo_epi8(a,b),_mm256_unpackhi_epi16(a,b),_mm256_unpacklo_epi32(a,b),_mm256_unpackhi_epi64(a,b),_mm256_broadcastb_epi8(x),"
+          "_mm256_broadcastw_epi16(x),_mm256_broadcastd_epi32(x),_mm256_broadcastq_epi64(x),_mm256_broadcastsi128_si256(x),_mm256_permutevar8x32_epi32(a,b),"
+          "_mm256_sllv_epi32(a,lane),_mm256_srlv_epi64(a,_mm256_and_si256(b,_mm256_set1_epi64x(63))),_mm256_srav_epi32(a,b),_mm256_permute4x64_epi64(a,0x1b),"
+          "_mm256_inserti128_si256(a,x,1),_mm256_cvtepi8_epi16(x),_mm256_cvtepu16_epi64(x),_mm256_shuffle_epi32(a,0x1b),_mm256_shufflehi_epi16(a,0x4e),"
+          "_mm256_slli_si256(a,3),_mm256_bsrli_epi128(b,5),_mm256_i32gather_epi32(idx,lane,4),_mm256_maddubs_epi16(a,b),_mm256_mulhrs_epi16(a,b),"
+          "_mm256_packus_epi32(a,b),(__m256i)__builtin_shufflevector((__v8si)a,(__v8si)b,0,9,2,11,12,5,14,7),"
+          "(__m256i)__builtin_shufflevector((__v4di)a,(__v4di)b,3,6,1,4)};FOLD(r);\n"
+          "__m256 s[]={_mm256_fmadd_ps(f,g,k),_mm256_fmsub_ps(f,g,k),_mm256_fmaddsub_ps(f,g,k),_mm256_permutevar_ps(f,a),_mm256_permute_ps(f,0x1b),"
+          "_mm256_shuffle_ps(f,g,0x4e),_mm256_permutevar8x32_ps(f,b),_mm256_cvtph_ps(x),_mm256_insertf128_ps(f,y,0),_mm256_i32gather_ps(tab,lane,4)};FOLD(s);\n"
+          "__m256d t[]={_mm256_fmadd_pd(d,e,d),_mm256_permute4x64_pd(d,0x4e),_mm256_shuffle_pd(d,e,5),_mm256_permute_pd(d,5)};FOLD(t);\n"
+          "__m128 u[]={_mm256_extractf128_ps(f,1),_mm_fmadd_ps(y,y,y),_mm_cvtph_ps(x),_mm_permutevar_ps(y,x)};FOLD(u);"
+          "__m128i v[]={_mm256_extracti128_si256(a,1),_mm_sllv_epi32(x,_mm_and_si128(x,_mm_set1_epi32(31)))};FOLD(v);"
+          "int c[]={_mm256_extract_epi32(a,5),_mm256_extract_epi8(b,30),_mm256_testz_si256(a,b)};FOLD(c);\n"
+          "#endif\n"
+          "return (int)h;}\n"
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t level = 0; level < BUSTER_ARRAY_LENGTH(levels); level += 1)
@@ -615,7 +714,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
             if (source != NULL)
             {
                 snprintf(source, length, "%s%s", check_test_vector_types, programs[i][1]);
-                check_test_program_includes = i + 1 == BUSTER_ARRAY_LENGTH(programs);
+                check_test_program_includes = strstr(programs[i][1], "#include") != NULL;
                 check_test_program_source_native_limits(test, source, programs[i][0], clang, false, -1, 0, &target,
                                                          (native.features & target.features) == target.features);
                 check_test_program_includes = false;
@@ -643,6 +742,38 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                                                "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
                                                "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
+            // Without AVX-512, what the baseline's rows refuse by name (#775), at each level that hasn't the instructions.
+            static const struct
+            {
+                uint32_t levels;
+                const char* source;
+                const char* reason;
+            } refused[] = {
+                { 1, "typedef char V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
+                  "vector shuffles of 8-bit elements without SSSE3" },
+                { 1, "typedef short V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,7,8,1,15,4,4,9,0);}",
+                  "vector shuffles of 16-bit elements without SSSE3" },
+                { 1, "typedef signed char V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_min(a,b);}",
+                  "vector minimum and maximum of these elements without SSE4.1" },
+                { 1, "typedef int V __attribute__((vector_size(16)));V tested(V a){return __builtin_elementwise_abs(a);}", "vector absolute values without SSSE3" },
+                { 1, "typedef char N __attribute__((vector_size(8)));typedef short V __attribute__((vector_size(16)));V tested(N a){return __builtin_convertvector(a,V);}",
+                  "vector extensions of integers without SSE4.1" },
+                { 1, "float tested(float a,float b,float c){return __builtin_elementwise_fma(a,b,c);}", "fused multiply-adds of scalars without FMA or AVX-512F" },
+                { 7, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
+                  "vector minimum and maximum of 64-bit elements without AVX-512" },
+                { 7, "typedef int V __attribute__((vector_size(16)));typedef short N __attribute__((vector_size(8)));N tested(V a){return __builtin_convertvector(a,N);}",
+                  "vector truncations of integers without AVX-512" },
+                { 4, "typedef char V __attribute__((vector_size(32)));V tested(V a,V b){return __builtin_shufflevector(a,b,31,30,29,28,27,26,25,24,23,22,21,20,19,"
+                     "18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
+                  "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512" },
+            };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+            {
+                if ((refused[i].levels >> level & 1) != 0)
+                {
+                    check_test_program_boundary_target(test, refused[i].source, "baseline-refusal", true, false, 0, 0, refused[i].reason, &target);
+                }
+            }
         }
     }
     check_test_program_build_release();

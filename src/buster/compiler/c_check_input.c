@@ -114,6 +114,10 @@ typedef enum CheckInputMessage
     // with a `$` (check_input_verbose_trap_arguments).
     CHECK_INPUT_VERBOSE_TRAP_STRING,
     CHECK_INPUT_VERBOSE_TRAP_DOLLAR,
+    // __builtin_longjmp's second argument (#148), at the call's first token: one that is no integer constant, and a
+    // constant other than 1 (check_input_longjmp_argument).
+    CHECK_INPUT_LONGJMP_INTEGER,
+    CHECK_INPUT_LONGJMP_ONE,
     // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
     // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
     CHECK_INPUT_UNKNOWN_BUILTIN,
@@ -204,6 +208,8 @@ static const char* const check_input_messages[] =
     "fallthrough annotation does not directly precede switch label",
     "argument to __builtin_verbose_trap must be a pointer to a constant string",
     "argument to __builtin_verbose_trap must not contain $",
+    "argument to '__builtin_longjmp' must be a constant integer",
+    "argument to __builtin_longjmp must be a constant 1",
     "use of unknown builtin",
     "attribute multiversioning cannot be combined with another attribute",
     "multiversioning attributes are not compatible",
@@ -234,13 +240,15 @@ static bool check_input_target_supported(const PPOptions* options)
 #define BUSTER_CHECK_ENUM_LISTED 2
 
 // The note a report carries, if any: clang's note at the earlier attribute of an incompatible multiversioning pair, at
-// the declaration that caused a function to be multiversioned, or at a naked function's attribute.
+// the declaration that caused a function to be multiversioned, at a naked function's attribute, or at a redefined label's
+// first definition.
 typedef enum CheckInputNoteKind
 {
     CHECK_INPUT_NOTE_NONE,
     CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE,
     CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED,
     CHECK_INPUT_NOTE_ATTRIBUTE_HERE,
+    CHECK_INPUT_NOTE_PREVIOUS_DEFINITION,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -715,26 +723,35 @@ static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 
 // Whether a name is one of the builtins of a constant the walk works out where it reads it (#148,
 // check_input_builtin_constant_prepare): the place's __builtin_LINE, __builtin_COLUMN, __builtin_FILE, __builtin_FILE_NAME
-// and __builtin_FUNCTION, and the queries of a type, __builtin_vectorelements and __builtin_omp_required_simd_align.
+// and __builtin_FUNCTION, the queries of a type, __builtin_vectorelements and __builtin_omp_required_simd_align,
+// clang's type traits of C, __is_destructible, __is_nothrow_destructible and __is_bitwise_cloneable, and
+// __builtin_ptrauth_type_discriminator, which no constant is: clang refuses every use on x86 ("this target does not
+// support pointer authentication", at the keyword).
 static bool check_input_source_builtin(uint32_t name)
 {
     return name == C_NAME_BUILTIN_LINE || name == C_NAME_BUILTIN_COLUMN || name == C_NAME_BUILTIN_FILE || name == C_NAME_BUILTIN_FILE_NAME ||
-           name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN;
+           name == C_NAME_BUILTIN_FUNCTION || name == C_NAME_BUILTIN_VECTORELEMENTS || name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN ||
+           name == C_NAME_IS_BITWISE_CLONEABLE || name == C_NAME_IS_DESTRUCTIBLE || name == C_NAME_IS_NOTHROW_DESTRUCTIBLE ||
+           name == C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR;
 }
 
 // The span of predefined names (c_intern.c's order) that holds those builtins: __builtin_COLUMN's to
-// __builtin_vectorelements', with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
+// __is_nothrow_destructible's, with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
 // them. The token count tests a name against the span with one comparison (check_input_count_tokens, and its twin
 // check_input_syntax_of), where a comparison per builtin cost the count's vector loop 8.4 million instructions of a
 // sqlite3.c -c (#148); the span's other names only make a few more tokens visited and the table of constants larger.
 #define BUSTER_CHECK_SOURCE_BUILTIN_FIRST ((uint32_t)C_NAME_BUILTIN_COLUMN)
-#define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN + 1))
-_Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_BUILTIN_VECTORELEMENTS && C_NAME_BUILTIN_VECTORELEMENTS - C_NAME_BUILTIN_COLUMN < 16 &&
+#define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_IS_NOTHROW_DESTRUCTIBLE - C_NAME_BUILTIN_COLUMN + 1))
+_Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_IS_NOTHROW_DESTRUCTIBLE - C_NAME_BUILTIN_COLUMN < 16 &&
+               C_NAME_IS_BITWISE_CLONEABLE > C_NAME_BUILTIN_COLUMN && C_NAME_IS_BITWISE_CLONEABLE < C_NAME_IS_NOTHROW_DESTRUCTIBLE &&
+               C_NAME_IS_DESTRUCTIBLE > C_NAME_BUILTIN_COLUMN && C_NAME_IS_DESTRUCTIBLE < C_NAME_IS_NOTHROW_DESTRUCTIBLE &&
+               C_NAME_BUILTIN_VECTORELEMENTS > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_VECTORELEMENTS < C_NAME_IS_NOTHROW_DESTRUCTIBLE &&
                C_NAME_BUILTIN_LINE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_LINE < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_FILE > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_FILE_NAME > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FILE_NAME < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_FUNCTION > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_FUNCTION < C_NAME_BUILTIN_VECTORELEMENTS &&
-               C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS,
+               C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS &&
+               C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR < C_NAME_BUILTIN_VECTORELEMENTS,
                "the builtins of constants the walk works out lie in one short span of predefined names");
 
 static bool check_input_source_builtin_span(uint32_t name)
@@ -5695,7 +5712,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 if (valid && !is_typedef && i >= reader->section_record_from)
                 {
                     check_input_section_declaration(reader, name, i, attributes, function, function && kind == PARSE_KIND_L_BRACE,
-                                                    !function && check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_STATIC), type);
+                                                    !function && check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_STATIC), thread_local,
+                                                    type);
                 }
                 more = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
                 if (more)
@@ -6440,16 +6458,20 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
-            // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes.
-            // Without branches (#1175): a token without a parent reads its own role and kind instead, which the test
-            // of the parent then ignores.
+            // A label's name, a goto's, and an address of a label's (GNU C's &&label): no identifier of the ordinary scopes. A
+            // label's name is right before its colon, whose child it is but after attributes (`[[x]] l:`, #147), whose closer
+            // the parser makes its parent. Without branches (#1175): a token without a parent reads its own role and kind
+            // instead, and the last token its own role for the next one's, which the tests then ignore.
             const bool has_parent = parent < parser->tokens.count;
+            const bool has_next = i + 1 < parser->tokens.count;
             const uint32_t above = has_parent ? parent : i;
+            const uint32_t next = has_next ? i + 1 : i;
             const uint8_t parent_role = parser->tree.roles[above];
             const uint8_t parent_kind = parser->tokens.kinds[above];
             const bool label_name = (role == PARSE_ROLE_OPERAND) & has_parent &
                                     ((parent_role == PARSE_ROLE_LABEL) | (parent_kind == PARSE_KIND_GOTO) |
-                                     ((parent_role == PARSE_ROLE_PREFIX) & (parent_kind == PARSE_KIND_AMPAMP)));
+                                     ((parent_role == PARSE_ROLE_PREFIX) & (parent_kind == PARSE_KIND_AMPAMP)) |
+                                     ((kind == PARSE_KIND_IDENTIFIER) & has_next & (parser->tree.roles[next] == PARSE_ROLE_LABEL)));
             reader->ignored[i] |= label_name | (role == PARSE_ROLE_LABEL) | (kind == PARSE_KIND_GOTO) | (kind == PARSE_KIND_SWITCH) |
                                   (role == PARSE_ROLE_OPEN_CASE);
         }
@@ -6712,7 +6734,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
             }
             const uint16_t builtin = check_input_builtin_id(reader, i);
-            if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) == 0)
+            const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
+            // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
+            // function that clang makes the builtin.
+            const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
+            if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
             {
                 const uint32_t close = parser->tree.parents[i];
                 const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
@@ -7010,12 +7036,35 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
     }
 }
 
+// __builtin_longjmp's second argument as clang's Sema takes it (#148, BuiltinLongjmp): an integer constant, else clang's
+// BuiltinConstantArg error, and 1, else its own; each at the call's first token, its name's, wherever the call is.
+static void check_input_longjmp_argument(CheckInputReader* reader, const CheckInputIntrinsicCall* call)
+{
+    const uint32_t keyword = call->keyword;
+    const CheckInputIntrinsicArgument span = call->arguments[1];
+    CheckValue value = { 0 };
+    const bool constant = check_input_evaluate_cached(reader, span.first, span.end, &value) && check_input_integer_constant(reader, &value);
+    if (!constant)
+    {
+        check_input_report(reader, keyword, CHECK_INPUT_LONGJMP_INTEGER);
+    }
+    else if (value.integer != 1)
+    {
+        check_input_report(reader, keyword, CHECK_INPUT_LONGJMP_ONE);
+    }
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
     CheckGraph* graph = &reader->output->graph;
     const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + call->declaration;
     static const char verbose_trap[] = "__builtin_verbose_trap";
+    static const char longjmp[] = "__builtin_longjmp";
+    if (call->argument_count == 2 && declaration->info->name_length == sizeof(longjmp) - 1 && memcmp(declaration->info->name, longjmp, sizeof(longjmp) - 1) == 0)
+    {
+        check_input_longjmp_argument(reader, call);
+    }
     if (call->argument_count == 2 && declaration->info->name_length == sizeof(verbose_trap) - 1 &&
         memcmp(declaration->info->name, verbose_trap, sizeof(verbose_trap) - 1) == 0)
     {

@@ -191,6 +191,122 @@ static void ir_simd_typed_test_masks(IrTestTally* tally)
            families[4]);
 }
 
+typedef struct IrSimdTypedTestIntrinsic IrSimdTypedTestIntrinsic;
+struct IrSimdTypedTestIntrinsic
+{
+    const char* name;
+    uint8_t intrinsic;
+};
+
+// The front end's scalar BMI rows (#141): every GENERAL rule, pdep, pext, bzhi and bextr of unsigned ints and longs, at a
+// target of every feature. Each decodes to its intrinsic (written out here by the rule's name, not the decoder's table),
+// its source the builtin's first argument and its other operand the second, its features exactly
+// x86_target_requirement's for its form (x86_target_rows.c's), and refuses as TARGET without it, the result untouched.
+// Then each row changed one way at a time: a decoration, a displacement, an immediate, memory, a destination by number
+// (not a role), the other width's form, a result of a signed class or the other width's, an operand of the other
+// width's class, both registers one operand, a second record, and a third operand: each UNSUPPORTED.
+static void ir_simd_typed_test_intrinsics(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    static const IrSimdTypedTestIntrinsic expected_intrinsics[] = {
+        { "__builtin_ia32_pdep_si", BUSTER_IR_INTRINSIC_PDEP },
+        { "__builtin_ia32_pdep_di", BUSTER_IR_INTRINSIC_PDEP },
+        { "__builtin_ia32_pext_si", BUSTER_IR_INTRINSIC_PEXT },
+        { "__builtin_ia32_pext_di", BUSTER_IR_INTRINSIC_PEXT },
+        { "__builtin_ia32_bzhi_si", BUSTER_IR_INTRINSIC_BZHI },
+        { "__builtin_ia32_bzhi_di", BUSTER_IR_INTRINSIC_BZHI },
+        { "__builtin_ia32_bextr_u32", BUSTER_IR_INTRINSIC_BEXTR },
+        { "__builtin_ia32_bextr_u64", BUSTER_IR_INTRINSIC_BEXTR },
+    };
+    uint32_t rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        if (rule->family != CHECK_X86_LOWER_GENERAL)
+        {
+            continue;
+        }
+        char description[192];
+        uint32_t intrinsic = BUSTER_IR_INTRINSIC_COUNT;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(expected_intrinsics); k += 1)
+        {
+            intrinsic = strcmp(rule->name, expected_intrinsics[k].name) == 0 ? expected_intrinsics[k].intrinsic : intrinsic;
+        }
+        snprintf(description, sizeof(description), "%s: a GENERAL rule of the BMI builtins", rule->name);
+        ir_test_expect(tally, intrinsic != BUSTER_IR_INTRINSIC_COUNT, description);
+        Tier0Operation row;
+        const char* reason = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row);
+        snprintf(description, sizeof(description), "%s: its row is the front end's at every feature", rule->name);
+        ir_test_expect(tally, reason == NULL, description);
+        if (reason != NULL || intrinsic == BUSTER_IR_INTRINSIC_COUNT)
+        {
+            continue;
+        }
+        rows += 1;
+        const uint64_t features = x86_target_requirement(row.records[0].form) & (BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(BMI2));
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, features, &decoded);
+        snprintf(description, sizeof(description), "%s: the row decodes to its intrinsic of the builtin's arguments in order, its features its form's", rule->name);
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.intrinsic == intrinsic + 1 && decoded.intrinsic_operands[0] == 0 && decoded.intrinsic_operands[1] == 1 &&
+                                  decoded.mask_bytes == 0 && decoded.operand_count == 2 && decoded.required_features == features && features != 0,
+                       description);
+        IrSimdTypedOperation without;
+        memset(&without, 0x5a, sizeof(without));
+        const IrSimdTypedOperation before = without;
+        const IrSimdTypedStatus refused = ir_simd_typed_row(&row, ~features, &without);
+        snprintf(description, sizeof(description), "%s: refused as the target's without its feature, the result untouched", rule->name);
+        ir_test_expect(tally, refused == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0, description);
+        const bool wide = rule->bytes == 8;
+        for (uint32_t m = 0; m < 11; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* first = &changed.records[0];
+            switch (m)
+            {
+            case 0: first->decorations = 1; break;
+            case 1: first->displacement = 8; break;
+            case 2: first->immediate = 1; break;
+            case 3: first->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 4: first->reg = X86_REGISTER_RAX; break;
+            case 5:
+            {
+                // The other width's form of the same instruction: its other GENERAL rule's.
+                for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); k += 1)
+                {
+                    const CheckX86LowerRule* other = check_x86_lower_rules + k;
+                    const bool same = other->family == CHECK_X86_LOWER_GENERAL && other->bytes != rule->bytes && strncmp(other->name, rule->name, strlen(rule->name) - 2) == 0;
+                    first->form = same ? other->form : first->form;
+                }
+            } break;
+            case 6: changed.result_class = wide ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32; break;
+            case 7: changed.result_class = wide ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64; break;
+            case 8: changed.operand_classes[1] = wide ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64; break;
+            case 9: first->rm = first->vvvv; break;
+            default:
+                changed.records[1] = changed.records[0];
+                changed.record_count = 2;
+                break;
+            }
+            IrSimdTypedOperation mutated;
+            memset(&mutated, 0x3c, sizeof(mutated));
+            const IrSimdTypedStatus result = ir_simd_typed_row(&changed, UINT64_MAX, &mutated);
+            snprintf(description, sizeof(description), "%s: its row changed one way (%u) isn't the front end's operation", rule->name, m);
+            ir_test_expect(tally, result == IR_SIMD_TYPED_UNSUPPORTED, description);
+        }
+        Tier0Operation third = row;
+        third.operand_count = 3;
+        third.operand_classes[2] = row.operand_classes[0];
+        IrSimdTypedOperation mutated;
+        snprintf(description, sizeof(description), "%s: a row of a third operand isn't the front end's operation", rule->name);
+        ir_test_expect(tally, ir_simd_typed_row(&third, UINT64_MAX, &mutated) == IR_SIMD_TYPED_UNSUPPORTED, description);
+    }
+    ir_test_expect(tally, rows == BUSTER_ARRAY_LENGTH(expected_intrinsics), "every BMI builtin's rule decodes");
+    printf("  IR SIMD rows: %u of the front end's scalar BMI rows decode to intrinsics\n", rows);
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
     TypeTestTable table = { 0 };
@@ -307,5 +423,6 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_test_expect(tally, ir_simd_typed_operation(NULL, target, &decoded) == IR_SIMD_TYPED_INVALID && ir_simd_typed_row(NULL, target, &decoded) == IR_SIMD_TYPED_INVALID,
                    "missing typed operation input is rejected before indexing a record");
     ir_simd_typed_test_masks(tally);
+    ir_simd_typed_test_intrinsics(tally);
     type_test_table_close(&table);
 }

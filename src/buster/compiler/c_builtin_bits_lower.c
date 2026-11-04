@@ -636,9 +636,12 @@ static void cbuiltin_bits_wide(CBuiltinLowerRecipe* recipe, CBuiltinId id, const
 
 // A bit builtin's recipe, from `count` arguments' locals and descriptors, of the result's descriptor `result` (a wide
 // one's value through `object`).
-static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId id, const uint32_t* arguments, const uint32_t* types, uint32_t count, uint32_t result,
+static void cbuiltin_bits_recipe(CBuiltinLowerRecipe* recipe, CBuiltinId builtin, const uint32_t* arguments, const uint32_t* types, uint32_t count, uint32_t result,
                                  uint32_t object)
 {
+    // A stdc library builtin (stdc_leading_zeros_ui) is its generic builtin's of the argument its check converted to its
+    // parameter's type.
+    const CBuiltinId id = cbuiltin_stdc_generic(builtin);
     const uint32_t width = cbuiltin_bits_width(types[0]);
     if (cbuiltin_carry(id))
     {

@@ -161,14 +161,22 @@ run_evidence()
     (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log"
 }
 
-# A draft pull request: hosted feedback, no hardware, and no API call.
+# A draft pull request: hosted feedback, no hardware, and no API call. A ready one's 9700X job measures (it skips
+# native correctness: #1272).
 GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=true run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a pull request runs the plain rows'
 expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a draft keeps off the 9700X'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=draft' 'a draft says why'
 GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=false run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a ready pull request is admitted'
-expect_no_match "$fixtures/calls.log" 'commits/' 'a pull request reads no API'
+expect_no_match "$fixtures/calls.log" 'commits/|actions/' 'a pull request reads no API'
+# A merge queue, and any other event, is no supported path: the job fails and nothing runs.
+for event in merge_group pull_request_target workflow_run repository_dispatch; do
+    if GITHUB_EVENT_NAME=$event GITHUB_SHA=$head run_evidence "$history" 2> /dev/null; then
+        fail "the evidence job accepted a $event run"
+    fi
+    expect_no_match "$GITHUB_OUTPUT" 'hardware=admit' "a $event run admits no hardware"
+done
 
 # The nightly mode retires the daily run; before it, the daily run is as it was.
 GITHUB_EVENT_NAME=schedule GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
@@ -176,81 +184,21 @@ expect_line "$GITHUB_OUTPUT" 'retired=true' 'the nightly mode retires the daily 
 GITHUB_EVENT_NAME=schedule GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'retired=false' 'without the nightly mode the daily run runs'
 expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
+expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
 
-# A push whose pull request's newest run tested the identical tree on the identical first-parent tree.
+# A push to main runs its own native correctness, needing no pull request's native evidence, and reads no API.
 tree=$(git -C "$history" rev-parse "$head^{tree}")
-parent_tree=$(git -C "$history" rev-parse "$head^1^{tree}")
-pull_head=$(printf 'pullhead' | sha1sum | cut -c 1-40)
+other=$(printf 'other' | sha1sum | cut -c 1-40)
 now=$(madrid '2026-11-04 12:00')
 export NIGHTLY_NOW=$now
-cat > "$fixtures/pulls-$head.json" <<JSON
-[{"number":77,"merged_at":"2026-11-04T10:00:00Z","base":{"ref":"main"},"merge_commit_sha":"$head","head":{"sha":"$pull_head","repo":{"id":1421805693}}}]
-JSON
-cat > "$fixtures/runs-head-$pull_head.json" <<JSON
-{"workflow_runs":[{"id":700,"run_attempt":1,"event":"pull_request","status":"completed","conclusion":"success","head_sha":"$pull_head","path":".github/workflows/9700x.yml","head_branch":"feature","created_at":"2026-11-04T10:00:00Z","updated_at":"2026-11-04T11:00:00Z","head_repository":{"id":1421805693},"display_title":"a pull request"}]}
-JSON
-{
-    printf '{"jobs":['
-    for arch in x86-64 native; do
-        for shard in 1 2 3 4; do
-            printf '{"name":"Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %s of 4)","status":"completed","conclusion":"success"},' "$arch" "$shard"
-        done
-    done
-    printf '{"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success"},'
-    printf '{"name":"Build and execute on Ryzen 7 9700X","status":"completed","conclusion":"success"}]}\n'
-} > "$fixtures/jobs-700.json"
-echo '{"artifacts":[{"id":7001,"name":"coverage-record-1","expired":false}]}' > "$fixtures/artifacts-700.json"
-other=$(printf 'other' | sha1sum | cut -c 1-40)
-write_record()
-{
-    local record=$1 tested_tree=$2 tested_parent=$3
-    {
-        printf 'format\tbuster-coverage-record-1\nrepository\t1421805693\nrun\t700\nattempt\t1\nevent\tpull_request\npurpose\tpr\nrequest\t-\n'
-        printf 'commit\t%s\ntree\t%s\nparent\t%s\nparent_tree\t%s\npr_head\t%s\nsnapshot\t-\n' "$other" "$tested_tree" "$other" "$tested_parent" "$pull_head"
-        printf 'workflow\t%s\nselector\t%s\ninventory\t%s\ntoolchain\t%s\ncorpus\t%s\nmode\toff\ncode\ttrue\nmeasure\t,lexer,\ngates\t-\n' "$other" "$other" "$other" "$other" "$other"
-        printf 'changes_result\tsuccess\nevidence_result\tsuccess\nscope\tplain\nhosted\trun\nhosted_source\t-\nnative_evidence\trun\nnative_source\t-\n'
-        printf 'measurement_evidence\trun\nmeasurement_source\t-\nhardware\tadmit\nhardware_reason\tadmitted\ntest_result\tsuccess\nfuzz_result\tskipped\n'
-        printf 'benchmark_result\tsuccess\nwindow\t-\nnative\tpassed\nhost\t9700X/6.17/0xb40/gcc-15/glibc_2.42/sw-0123456789abcdef\nqualification_result\tsuccess\noverride\t-\ncoverage\ttargeted\noutcome\tcomplete\n'
-    } > "$record"
-}
-write_record "$work/record.tsv" "$tree" "$parent_tree"
-(cd "$work" && rm -f "$fixtures/artifact-7001.zip" && zip -q "$fixtures/artifact-7001.zip" record.tsv)
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'native=reused' 'a push reuses its pull request'"'"'s native correctness of the identical tree'
-expect_line "$GITHUB_OUTPUT" 'native_source=700' 'the reuse names its source run'
-expect_line "$GITHUB_OUTPUT" 'native_host=9700X/6.17/0xb40/gcc-15/glibc_2.42/sw-0123456789abcdef' 'and the host identity its run recorded, for the push to confirm'
-expect_line "$GITHUB_OUTPUT" 'measurement=reused' 'and its measurements on the identical first-parent tree'
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'the nightly mode skips the 9700X for it'
-expect_line "$GITHUB_OUTPUT" 'hardware_reason=native-reused' 'and says why'
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a push still measures every plain run'
-# A host identity with a component its run couldn't read (a placeholder) can't be confirmed: nothing is reused.
-sed -i 's#^host\t.*#host\t9700X/6.17/unknown/gcc-15/glibc_2.42#' "$work/record.tsv"
-(cd "$work" && rm -f "$fixtures/artifact-7001.zip" && zip -q "$fixtures/artifact-7001.zip" record.tsv)
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'native=run' 'an incomplete host identity reuses nothing'
-expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and the 9700X job runs'
-# Another first-parent tree: native correctness alone; another tree: nothing.
-write_record "$work/record.tsv" "$tree" "$other"
-(cd "$work" && rm -f "$fixtures/artifact-7001.zip" && zip -q "$fixtures/artifact-7001.zip" record.tsv)
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'native=reused' 'another first-parent tree still reuses native correctness'
-expect_line "$GITHUB_OUTPUT" 'measurement=run' 'but not the measurements'
-write_record "$work/record.tsv" "$other" "$parent_tree"
-(cd "$work" && rm -f "$fixtures/artifact-7001.zip" && zip -q "$fixtures/artifact-7001.zip" record.tsv)
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'native=run' 'another tree reuses nothing'
-expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and runs the 9700X job'
-# An unqualified direct push (no pull request) and a corrupt record take the fallback too.
-rm "$fixtures/pulls-$head.json"
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'native=run' 'a direct push runs native correctness'
-cat > "$fixtures/pulls-$head.json" <<JSON
-[{"number":77,"merged_at":"2026-11-04T10:00:00Z","base":{"ref":"main"},"merge_commit_sha":"$head","head":{"sha":"$pull_head","repo":{"id":1421805693}}}]
-JSON
-printf 'not a zip' > "$fixtures/artifact-7001.zip"
-GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=on run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'native=run' 'a corrupt record reuses nothing'
+: > "$fixtures/calls.log"
+for nightly in on ''; do
+    GITHUB_EVENT_NAME=push GITHUB_SHA=$head EVIDENCE_NIGHTLY=$nightly run_evidence "$history"
+    expect_line "$GITHUB_OUTPUT" 'native=run' "a push runs native correctness (nightly mode '$nightly')"
+    expect_line "$GITHUB_OUTPUT" 'hardware=admit' "and is admitted (nightly mode '$nightly')"
+    expect_line "$GITHUB_OUTPUT" 'native_source=' 'reusing no pull request'"'"'s run'
+done
+expect_no_match "$fixtures/calls.log" 'pulls|actions/' 'a push looks up no pull request run'
 
 # A nightly backlog dispatch: its commit's push run passed the plain rows, and the window decides.
 cat > "$fixtures/runs-head-$merge.json" <<JSON
@@ -528,6 +476,37 @@ expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' 'a dry r
 expect_line "$GITHUB_OUTPUT" 'window=closed' 'a dry run never waits for the window'
 expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'the cycle pins main'"'"'s head'
 expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'and hands over a valid empty list of pending dispatches'
+
+# The ledger's publication to buster-performance: it creates the nightly-ledger branch with the ledger and the
+# cycle's report; and when the push is refused (a token GitHub rejects, say), the step still succeeds and hands over
+# its outputs, so the window job's night doesn't depend on it, and only a warning says so.
+git init -q --bare "$work/performance.git"
+NIGHTLY_PUBLICATION_TOKEN=token NIGHTLY_PERFORMANCE_REMOTE="$work/performance.git" GITHUB_RUN_ID=9110 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') \
+    run_coordinator "$work/published" prepare dry-run
+expect_match "$work/coordinate.log" 'The ledger is published' 'the ledger is published'
+git -C "$work/performance.git" cat-file -e nightly-ledger:nightly/main-coverage.tsv || fail 'the published branch holds the ledger'
+git -C "$work/performance.git" cat-file -e nightly-ledger:nightly/reports/2026-11-04.md || fail 'and the cycle'"'"'s report'
+git init -q --bare "$work/refusing.git"
+printf '#!/bin/sh\necho "remote: Permission to buster14a/buster-performance.git denied" >&2\nexit 1\n' > "$work/refusing.git/hooks/pre-receive"
+chmod +x "$work/refusing.git/hooks/pre-receive"
+NIGHTLY_PUBLICATION_TOKEN=token NIGHTLY_PERFORMANCE_REMOTE="$work/refusing.git" GITHUB_RUN_ID=9111 NIGHTLY_NOW=$(madrid '2026-11-03 22:10') \
+    run_coordinator "$work/refused" prepare dry-run
+expect_match "$work/coordinate.log" '::warning title=Nightly ledger::the ledger could not be published' 'a refused publication warns'
+expect_match "$work/coordinate.log" 'Permission to buster14a/buster-performance.git denied' 'and says why'
+expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'and the step still hands over its snapshot'
+expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'its pending dispatches'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'and its window'
+git -C "$work/refusing.git" rev-parse -q --verify refs/heads/nightly-ledger > /dev/null && fail 'nothing reached the refusing remote'
+
+# An earlier schedule's step on time, at 16:10 (there for hours-late scheduled starts): it harvests and reports, and
+# pins, dispatches and waits for nothing, in run mode too.
+: > "$fixtures/calls.log"
+GITHUB_RUN_ID=9150 NIGHTLY_NOW=$(madrid '2026-11-03 16:10') run_coordinator "$work/early" prepare run
+expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' 'a step before 22:00 writes nothing'
+expect_no_match "$work/early/ledger.tsv" $'^cycle\t2026-11-04\t' 'nor pins the cycle'
+expect_match "$work/early/report.md" 'No plan: it is before 22:00 Europe/Madrid' 'and its report says why'
+expect_line "$GITHUB_OUTPUT" 'window=closed' 'and it does not wait for the window'
+expect_line "$GITHUB_OUTPUT" 'snapshot=' 'with no snapshot to hand over'
 
 # Run mode before the window: branches and dispatches of the hosted preparations, and the wait for the window.
 : > "$fixtures/calls.log"
