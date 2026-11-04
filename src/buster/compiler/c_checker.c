@@ -304,14 +304,17 @@ struct CheckStatistics
     uint64_t output_bytes;
     uint64_t scratch_bytes;
     // The vector path's memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
-    // (hits), those probed and not found (misses), those whose operator memoizes but an operand or argument of which holds
-    // a payload, most often a constant to fold (folds), the entries inserted and the table's entries at the end, and with
-    // CheckOptions.verify_transitions, the hits whose action gave another answer.
+    // (hits, of which those found after the batch their operands waited in ran: flushed hits), those probed and not found
+    // (misses), those whose operator memoizes but an operand or argument of which has no class, a fault or an overload set
+    // (folds), the entries inserted and the table's entries at the end, and with CheckOptions.verify_transitions, the hits
+    // checked by their actions too (verified) and those whose action gave another answer (mismatches).
     uint32_t transition_hits;
+    uint32_t transition_flushed_hits;
     uint32_t transition_misses;
     uint32_t transition_folds;
     uint32_t transition_inserts;
     uint32_t transition_entries;
+    uint32_t transition_verified;
     uint32_t transition_mismatches;
 };
 
@@ -595,13 +598,9 @@ struct CheckOptions
     // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
     bool level_order;
     // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than its regions in postorder
-    // batches: opt in (the driver's --check-transitions), since on the 9700X they saved 4% of sqlite3.c's graph run, about
-    // 0.5% of its compile, and the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes
-    // none.
+    // batches: opt in (the driver's --check-transitions), since they don't save a large fraction of check-expressions, and
+    // the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
     bool transitions;
-    // With transitions, their alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
-    // (check_graph_transition_windows), rather than node by node, which the benchmark compares.
-    bool transition_windows;
     // Each transition hit's action run as well, its result stored and compared with the transition's
     // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
     bool verify_transitions;
@@ -3147,9 +3146,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
         const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
-                                 (options->transition_windows ?
-                                  check_graph_transition_windows(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions) :
-                                  check_graph_transitions(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions));
+                                 check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
         if (transitions && stream->statistics.transition_mismatches != 0)
         {
