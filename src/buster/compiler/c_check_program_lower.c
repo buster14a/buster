@@ -816,6 +816,9 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 4096: the statements' plain loop is
+    // its split copy (check_lower_drain_split).
+    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -10291,6 +10294,30 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
 }
 
+// #1048's experiment, temporary (#1235, bit 4096): the expansion with its cases of the ops past CHECK_OP_SELECT (the
+// builtins, statement values, va_arg, VLAs' extents, the complex parts and bit casts) out of line, for the tasks' loop's
+// split copy (check_lower_drain_split), which then keeps the other ops' cases alone.
+static __attribute__((noinline)) void check_lower_expand_rare(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
+                                                              bool bit_int)
+{
+    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+}
+
+static inline __attribute__((always_inline)) void check_lower_expand_split(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard,
+                                                                           bool bit_ints, bool bit_int)
+{
+    const CheckOp op = writer->program->input->graph.ops[node];
+    if (op > CHECK_OP_SELECT)
+    {
+        check_lower_expand_rare(writer, node, address, initialized, discard, bit_ints, bit_int);
+    }
+    else
+    {
+        __builtin_assume(op <= CHECK_OP_SELECT);
+        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+    }
+}
+
 #include "c_check_program_batch.c"
 #include "c_check_program_templates.c"
 
@@ -10378,7 +10405,7 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // subtrees it splices. Constants in each but the sources' `bit_ints`, so that the plain loop does none of it: the tests
 // for a _BitInt took 3.9 million of sqlite3.c's instructions there (#137), and the templates' test would run on every
 // expression of every compile, which takes none of them.
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates, bool split)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -10418,7 +10445,14 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 {
                     if (!plain)
                     {
-                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        if (split)
+                        {
+                            check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        }
+                        else
+                        {
+                            check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        }
                     }
                     expression_nodes += 1;
                 }
@@ -10519,14 +10553,20 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, false);
+    check_lower_drain_body(writer, false, false, false, false);
+}
+
+// #1048's experiment (bit 4096): the plain loop with the split expansion (check_lower_expand_split).
+static __attribute__((noinline)) void check_lower_drain_split(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false, false, false, true);
 }
 
 // The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
 // (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, true, false);
+    check_lower_drain_body(writer, false, true, false, false);
 }
 
 // The tasks' loop for a body whose node templates are ready (CheckLowerWriter.template_ready, #1048): a copy of its own
@@ -10534,7 +10574,7 @@ static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWrite
 // nor a _BitInt type (CheckLowerShared.templates_allowed).
 static __attribute__((noinline)) void check_lower_drain_templates(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, true);
+    check_lower_drain_body(writer, false, false, true, false);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
@@ -10544,7 +10584,7 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     {
         writer->owners->draining = true;
     }
-    check_lower_drain_body(writer, true, writer->bit_ints, false);
+    check_lower_drain_body(writer, true, writer->bit_ints, false, false);
     if (writer->owners != NULL)
     {
         writer->owners->draining = false;
@@ -12549,6 +12589,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
+    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -12970,6 +13012,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             else if (writer->template_ready)
             {
                 check_lower_drain_templates(writer);
+            }
+            else if ((writer->experiment & 4096) != 0)
+            {
+                check_lower_drain_split(writer);
             }
             else
             {
