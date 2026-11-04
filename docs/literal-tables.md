@@ -69,7 +69,13 @@ Refused at its last element, a 200,000-element `float` table took 27.8% longer
 than main when every element before it was converted first, 23% longer when
 every integer of four characters or more was, and 6.3% longer when each
 element's spelling was gathered into scratch (`check_input_spelling`) before
-any conversion (buster-performance#250).
+any conversion. Read in place, it takes about 1% longer (`188d0a10` on the
+9700X, over four placements of the checker's code, main's again within 0.6%),
+and at 128 and 4,096 elements the difference is within the spread of
+placements; the tables it accepts take 5% to 8% less time at 128 elements, 32%
+to 49% less at 4,096 and 56% to 77% less at 200,000 (buster-performance#250).
+What remains of the fallback is reading each element's token and, for a long
+one, its bytes once more than main does.
 
 Floating payloads are stored in masked eight-element batches, with
 bit-preserving 64-to-32-bit narrowing for `float`. The scalar path stores the
