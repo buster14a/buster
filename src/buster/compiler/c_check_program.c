@@ -1269,9 +1269,24 @@ static bool check_control_fold_operand(const CheckControlWriter* writer, uint32_
         operand = graph->operand0[operand];
         value = operand < graph->count ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
     }
-    // A named array (of a constant size) decays to its address as `&` takes a named object's.
-    const bool decays = operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && check_action_kind(program->types, value.type) == BUSTER_TYPE_KIND_ARRAY;
-    const uint32_t object = operand < graph->count && graph->ops[operand] == CHECK_OP_ADDRESS ? graph->operand0[operand] : decays ? operand : BUSTER_CHECK_NONE;
+    // A named array, including a VLA, decays without reading its elements. Its declaration's bound evaluations
+    // remain obligations of the statement proof. An element's address also needs a constant, in-bounds index.
+    const bool decays = operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && type_kind_is_array(check_action_kind(program->types, value.type));
+    uint32_t object = operand < graph->count && graph->ops[operand] == CHECK_OP_ADDRESS ? graph->operand0[operand] : decays ? operand : BUSTER_CHECK_NONE;
+    if (object < graph->count && graph->ops[object] == CHECK_OP_SUBSCRIPT)
+    {
+        const uint32_t left = graph->operand0[object];
+        const uint32_t right = graph->operand1[object];
+        const TypeId left_type = left < graph->count ? check_stream_type(program->stream, left) : 0;
+        const bool left_array = type_kind_is_array(check_action_kind(program->types, left_type));
+        const uint32_t array = left_array ? left : right;
+        const uint32_t index = left_array ? right : left;
+        const TypeId type = array < graph->count ? type_strip_aligned(program->types, check_stream_type(program->stream, array)) : 0;
+        const CheckValue offset = index < graph->count ? check_stream_value(program->stream, index) : (CheckValue){ 0 };
+        const bool bounded = check_action_kind(program->types, type) == BUSTER_TYPE_KIND_ARRAY && check_control_fold_value(&offset) &&
+                             offset.constant_kind == CHECK_CONSTANT_INTEGER && offset.integer <= program->types->types.extent[type_index(type)];
+        object = bounded ? array : BUSTER_CHECK_NONE;
+    }
     const bool named = object < graph->count && graph->ops[object] == CHECK_OP_VALUE && check_graph_leaf_of(graph, object)->object != 0 &&
                        (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
     return operand < graph->count && (check_control_fold_value(&value) || named) && check_control_fold_push(writer, depth, visits, operand);
@@ -1506,6 +1521,8 @@ static bool check_control_foldable(const CheckControlWriter* writer, uint32_t ex
     return foldable;
 }
 
+#include "c_check_program_fold.c"
+
 // Leaves tokens `low` to `high` out of the program (CheckProgram.dropped_ranges): their statement expressions' regions
 // are written empty (check_control_build), and the cases of their own switches go where the writer is, since every
 // case of a body has a place.
@@ -1611,14 +1628,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             // constant context too (check_control_foldable: not __builtin_constant_p of a variable).
             const CheckGraph* graph = &input->graph;
             const uint32_t expression = graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
-            const CheckValue checked_value = check_stream_value(writer->program->stream, expression);
-            const CheckValue* value = &checked_value;
-            uint32_t width = 0;
-            bool sign = false;
             bool truth = false;
-            const bool folded = expression < graph->count && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
-                                check_action_integer_type(writer->program->types, value->type, &width, &sign) &&
-                                check_action_truth(writer->program->types, value, &truth) && check_control_foldable(writer, expression) &&
+            const bool folded = check_control_fold_truth(writer, expression, &truth) &&
                                 !check_control_labeled(writer, keyword + 1, token) && !check_control_enterable(writer, truth ? alternate : body);
             const uint32_t executed = truth ? body : alternate;
             const uint32_t skipped = truth ? alternate : body;
