@@ -1,0 +1,15 @@
+--- a/src/buster/compiler/c_check_debug_values.c
++++ b/src/buster/compiler/c_check_debug_values.c
+@@ -269,7 +269,11 @@
+             for (uint32_t e = low; e < input->enum_value_count && input->enum_values[e].token < definition.close; e += 1)
+             {
+                 const CheckInputEnumValue enumerator = input->enum_values[e];
+-                const unsigned __int128 value = enumerator.value;
++                // The checker keeps narrow signed constants as masked bits, not sign-extended host integers.
++                // Reuse its conversion rules before choosing SLEB128 or a wide constant's 16-byte representation.
++                CheckValue constant = { .type = input->declared_types[enumerator.token], .integer = enumerator.value, .constant_kind = CHECK_CONSTANT_INTEGER };
++                check_action_convert_plain(table, &constant, BUSTER_TYPE_INT128, enumerator.token);
++                const unsigned __int128 value = constant.integer;
+                 const bool wide = signed_value ? (__int128)value < INT64_MIN || (__int128)value > INT64_MAX : value > UINT64_MAX;
+                 debug_uleb(info, wide ? CHECK_DEBUG_ENUM_WIDE : signed_value ? CHECK_DEBUG_ENUM_SIGNED : CHECK_DEBUG_ENUM_UNSIGNED);
+                 debug_string(info, check_debug_name(values, values->parser->tokens.names[enumerator.token]));
