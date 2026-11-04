@@ -3495,22 +3495,58 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // What clang deduces as C++ deduces a declarator's type, and GCC refuses: refused by name.
-            "__auto_type: a pointer declarator",
+            // What clang deduces as C++ deduces a declarator's type, and GCC refuses (#147): pointer and function
+            // declarators, qualifiers through them, and a declaration's later declarators, each the same deduction.
+            "__auto_type: pointer declarators",
+            "int g(void);\n"
             "void f(void) {\n"
             "    int y = 0;\n"
+            "    double d = 1;\n"
             "    __auto_type *p = &y;\n"
+            "    __auto_type **pp = &p;\n"
+            "    __auto_type const *q = &d;\n"
+            "    __auto_type (*fp)(void) = g;\n"
+            "    _Static_assert(_Generic(p, int *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(pp, int **: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(q, const double *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(fp, int (*)(void): 1, default: 0), \"\");\n"
             "}\n",
-            true,
-            true
+            false,
+            false
         },
         {
-            "__auto_type: a second declarator",
+            "__auto_type: later declarators",
+            "int a[3];\n"
             "void f(void) {\n"
             "    __auto_type x = 1, y = 2;\n"
+            "    const __auto_type c = 3, e = 4;\n"
+            "    __auto_type r = a, s = &a[1];\n"
+            "    _Static_assert(_Generic(y, int: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(&e, const int *: 1, default: 0), \"\");\n"
+            "    _Static_assert(_Generic(s, int *: 1, default: 0), \"\");\n"
+            "    (void)x; (void)c; (void)r;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // Declarators that deduce differently, clang's error at the keyword.
+            "__auto_type: later declarators' different deductions",
+            "int a[3];\n"
+            "void f(void) {\n"
+            "    __auto_type r = a, *s = &a[1];\n"
             "}\n",
             true,
-            true
+            false
+        },
+        {
+            "__auto_type: a pointer declarator of no pointer",
+            "int x;\n"
+            "void f(void) {\n"
+            "    __auto_type *p = x;\n"
+            "}\n",
+            true,
+            false
         },
         {
             // A name with linkage declared before: its types would bind before the deduction.

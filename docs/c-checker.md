@@ -5000,12 +5000,19 @@ the declarator leave to the deduction rather than check against the
 placeholder's `int` (`check_input_attribute_type`'s `deduced`); and its clashes
 with the other specifiers where clang reports them: a second type specifier at
 itself, and a signedness or a width at its keyword, wherever it is in the list
-(`check_input_auto_type_clash`). Refused by name: what clang deduces as C++
-deduces a declarator's type and GCC refuses (a pointer declarator, and a
-declaration's second declarator); `_Atomic`, `restrict` and type attributes with
-`__auto_type`; a variably modified deduced type, whose sizes the declaration
-would have evaluated; and a variable with linkage that a declaration before it
-declared, whose types bind before the deduction.
+(`check_input_auto_type_clash`). What clang deduces as C++ deduces a
+declarator's type, and GCC refuses, is deduced as clang deduces it (#147): a
+pointer or function declarator (`__auto_type *p = &x`, with the specifiers'
+qualifiers at the placeholder), and a declaration's later declarators, which
+must deduce the same type, by C23 `auto`'s deduction below
+(`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
+`__auto_type`'s words in its errors). Declarators that deduce differently are
+clang's error at the declaration, in the checker's words ("'__auto_type'
+deduced types differ within one declaration"). Refused by name: `_Atomic`,
+`restrict` and type attributes with `__auto_type`; a variably modified deduced
+type, whose sizes the declaration would have evaluated; and a variable with
+linkage that a declaration before it declared, whose types bind before the
+deduction.
 
 `test-checker`'s source fixtures compare these with clang, their acceptance and
 first error's line, on both paths, and its programs (`local-labels`,
@@ -5020,10 +5027,10 @@ is deduced from its initializer as clang deduces it: the initializer is
 lvalue-converted and decayed at the top, then each pointer, array, function and
 aligned level of the declarator matches its own operands, an array's extent and
 a function's parameters must be the same, and the placeholder takes the type
-there with the specifiers' `const` and `volatile`. Unlike `__auto_type`, a
-pointer declarator (`auto *p = &x`) and a declaration's later declarators
-(`auto a = 1, b = 2`) are the language's, and each later declarator must
-deduce the same type; file scope and `static`, `extern` and `register` are
+there with the specifiers' `const` and `volatile`. A pointer declarator
+(`auto *p = &x`) and a declaration's later declarators (`auto a = 1, b = 2`)
+are the language's, and each later declarator must deduce the same type, as
+clang deduces `__auto_type`'s; file scope and `static`, `extern` and `register` are
 C23's. `auto` with another type specifier (`auto int x`) keeps its storage-class
 meaning, so `auto` and no initializer there is C's existing storage-class rule,
 not a deduction. Deduced declarations are refused by name where clang refuses

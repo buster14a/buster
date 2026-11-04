@@ -89,6 +89,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AUTO_DEDUCED_ARRAY,
     CHECK_INPUT_AUTO_DEDUCED_BIT_FIELD,
     CHECK_INPUT_AUTO_DEDUCED_MISMATCH,
+    // __auto_type's declarators of differing deductions (#147).
+    CHECK_INPUT_AUTO_TYPE_MISMATCH,
     // C23's constexpr (#793): an initializer that isn't a constant expression; a pointer's that isn't null; a place
     // other than an initialized object's definition.
     CHECK_INPUT_CONSTEXPR_INITIALIZER,
@@ -1284,6 +1286,8 @@ struct CheckInputSpecifierJob
 #define BUSTER_CHECK_DECLARATION_DEDUCED 0x10u
 #define BUSTER_CHECK_DECLARATION_CONSTEXPR 0x20u
 #define BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP 0x40u
+// A deduced declarator's type (DEDUCED) is __auto_type's, whose errors name `__auto_type` (#147).
+#define BUSTER_CHECK_DECLARATION_GNU_AUTO 0x80u
 typedef struct CheckConstexprValue CheckConstexprValue;
 struct CheckConstexprValue
 {
@@ -5983,12 +5987,12 @@ static uint32_t check_input_main(CheckInputReader* reader, TypeId type, uint32_t
 }
 
 // An __auto_type declarator, as clang takes it before deducing its type: a typedef's and a function's are errors at the
-// keyword, one without an initializer at its name, an array's and an initializer list's at the initializer. Refused by
-// name, as GCC refuses them where clang deduces them as C++ deduces a declarator's type: a declarator other than a name
-// (in parentheses or not) and a declaration's second. And a variable with linkage that a declaration before it declared,
-// whose types bind before the deduction.
+// keyword, one without an initializer at its name, an array's and an initializer list's at the initializer. A pointer
+// declarator and a declaration's later declarators are deduced as clang deduces them, as C++ deduces a declarator's
+// type (GCC refuses them). Refused by name: a variable with linkage that a declaration before it declared, whose types
+// bind before the deduction.
 static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInputReader* reader, TypeId base, TypeId type, uint32_t name, uint32_t next,
-                                                                         bool continuation, bool is_typedef, uint32_t storage)
+                                                                         bool is_typedef, uint32_t storage)
 {
     const Parser* parser = reader->parser;
     const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
@@ -5997,11 +6001,8 @@ static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInpu
     const uint32_t spelled = parser->tokens.names[name];
     uint32_t token = BUSTER_CHECK_NONE;
     CheckInputMessage message = CHECK_INPUT_UNSUPPORTED;
-    if (continuation)
-    {
-        token = name;
-    }
-    else if (is_typedef || kind == BUSTER_TYPE_KIND_FUNCTION)
+    (void)base;
+    if (is_typedef || kind == BUSTER_TYPE_KIND_FUNCTION)
     {
         token = reader->specifier_auto_type;
         message = CHECK_INPUT_AUTO_TYPE_CONTEXT;
@@ -6015,10 +6016,6 @@ static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInpu
     {
         token = next + 1;
         message = CHECK_INPUT_AUTO_TYPE_ARRAY;
-    }
-    else if (type != base)
-    {
-        token = name;
     }
     else if (parser->tokens.kinds[next + 1] == PARSE_KIND_L_BRACE)
     {
@@ -6570,11 +6567,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         if (valid && check_input_auto_type(base))
         {
             valid = c23_auto ? check_input_c23_auto_declarator(reader, base, type, name, i, is_typedef, storage) :
-                               check_input_auto_type_declarator(reader, base, type, name, i, continuation, is_typedef, storage);
-            if (valid && c23_auto)
+                               check_input_auto_type_declarator(reader, base, type, name, i, is_typedef, storage);
+            // Both deduce as clang's DeduceAutoType does, through the declarator and the same in each of the
+            // declaration's declarators (check_input_c23_auto_deduce); __auto_type's errors name it (#147).
+            if (valid)
             {
                 check_input_rare_claim(reader, &reader->declaration_flags[name]);
-                reader->declaration_flags[name] |= BUSTER_CHECK_DECLARATION_DEDUCED;
+                reader->declaration_flags[name] |= BUSTER_CHECK_DECLARATION_DEDUCED | (c23_auto ? 0 : BUSTER_CHECK_DECLARATION_GNU_AUTO);
                 check_input_rare_claim(reader, &reader->declaration_specifiers[name]);
                 reader->declaration_specifiers[name] = declaration_group;
             }

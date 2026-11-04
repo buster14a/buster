@@ -105,6 +105,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_DEDUCED_ARRAY: result = "cannot use 'auto' with array in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_BIT_FIELD: result = "cannot pass bit-field as auto initializer in C"; break;
         case CHECK_INPUT_AUTO_DEDUCED_MISMATCH: result = "'auto' deduced types differ within one declaration"; break;
+        case CHECK_INPUT_AUTO_TYPE_MISMATCH: result = "'__auto_type' deduced types differ within one declaration"; break;
         case CHECK_INPUT_CONSTEXPR_INITIALIZER: result = "constexpr variable must be initialized by a constant expression"; break;
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
