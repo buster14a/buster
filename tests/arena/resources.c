@@ -388,9 +388,23 @@ static bool memory_layout_refusal(void)
 }
 
 // Let exec's loader map its ELF segments and make RELRO read-only. Refuse only the compiler's inaccessible
-// reservations or read/write commits, avoiding a guessed RLIMIT_AS floor that a smaller compiler can pass.
+// reservations or read/write commits, avoiding a guessed RLIMIT_AS floor that a smaller compiler can pass. Operation 3
+// refuses, as Valgrind may, inaccessible reservations of 8 to 64 GiB with EINVAL: of a unit's, only the preprocessor's
+// arena of tables (pp_initialize_once, 9.65 GB in its full shape with the stacks' columns), between its 4 GiB arenas and
+// its 64 GiB ones, whose refusal the compact shape must take in.
 static bool memory_refuse(uint32_t operation)
 {
+    const struct sock_filter layout[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap, 0, 6),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PROT_NONE, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1]) + 4),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 2, 0, 2),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 16, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EINVAL),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
     const struct sock_filter instructions[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, operation == 1 ? __NR_mmap : __NR_mprotect, 0, 3),
@@ -399,10 +413,13 @@ static bool memory_refuse(uint32_t operation)
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOMEM),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
-    const struct sock_fprog filter = { .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
+    const struct sock_fprog filter = operation == 3 ? (struct sock_fprog){ .len = sizeof(layout) / sizeof(layout[0]), .filter = (struct sock_filter*)layout } :
+                                                      (struct sock_fprog){ .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
     return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
 }
 
+// Runs a command under `limit` and refusal `refused` (memory_refuse; 0 for none), which must succeed unless it refuses
+// every reservation or commit (1 and 2), in which case it must fail with a fatal byte-count diagnostic.
 static bool memory_command(char* const* arguments, const char* log, rlim_t limit, uint32_t refused)
 {
     const pid_t child = fork();
@@ -421,8 +438,9 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
         }
         _exit(127);
     }
-    bool valid = memory_wait(child, refused == 0 ? 0 : 1);
-    if (refused != 0)
+    const bool fails = refused == 1 || refused == 2;
+    bool valid = memory_wait(child, fails ? 1 : 0);
+    if (fails)
     {
         char text[4096] = { 0 };
         FILE* stream = fopen(log, "r");
@@ -486,9 +504,9 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
         }
         const rlim_t limit = valgrind || strict ? RLIM_INFINITY : UINT64_C(2) << 30;
         valid = memory_command(valgrind ? traced : options[i], log, limit, 0) && valid;
-        for (uint32_t refused = 1; !valgrind && !strict && refused <= 2; refused += 1)
+        for (uint32_t refused = 1; !valgrind && !strict && refused <= 3; refused += 1)
         {
-            snprintf(log, sizeof(log), "%s/failure-%u-%u.log", directory, i, refused);
+            snprintf(log, sizeof(log), "%s/%s-%u-%u.log", directory, refused == 3 ? "layout" : "failure", i, refused);
             valid = memory_command(options[i], log, RLIM_INFINITY, refused) && valid;
         }
     }
