@@ -816,10 +816,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 1: check_lower_expression's push in
-    // place too (check_lower_push_operand); bit 4096: the statements' plain loop is its copy with a plain conversion's
-    // fast path (check_lower_drain_conversions).
-    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -2159,67 +2155,13 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
     }
 }
 
-// An operand `child` pushed with its conversion to `target` (or as an address) in a unit without overload sets, as
-// check_lower_expression pushes it: its void context's tests only in a void context, its conversion's test in place and
-// its EXPRESSION task packed directly (#1048: 0.23 ms of sqlite3.c's statements on the 9700X, docs/c-lowering.md's "The
-// operands' push").
-static inline __attribute__((always_inline)) void check_lower_push_operand(CheckLowerWriter* writer, uint32_t child, bool address, TypeId target)
-{
-    const CheckProgram* program = writer->program;
-    const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
-    if (child < stream->count)
-    {
-        // check_lower_expression's discard: a statement's aggregate assignment, a bit-field's store or update, a comma.
-        bool discard = false;
-        if (!address && target == BUSTER_TYPE_VOID)
-        {
-            const CheckOp op = graph->ops[child];
-            const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
-            const uint32_t destination = graph->operand0[child];
-            const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && destination < stream->count &&
-                                   (check_stream_flags(stream, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
-            discard = (store && check_lower_aggregate(writer, check_stream_type(stream, child))) || bit_field || op == CHECK_OP_COMMA;
-        }
-        if (!address && !discard && target != 0)
-        {
-            const TypeId from = check_stream_type(stream, child);
-            if (from != target && !check_lower_conversion_empty(writer, from, target))
-            {
-                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target });
-            }
-        }
-        if (writer->depth < writer->capacity)
-        {
-            // check_lower_task_pack's EXPRESSION task.
-            writer->tasks[writer->depth++] = (CheckLowerTaskPacked){
-                .control = child | (uint64_t)CHECK_LOWER_EXPRESSION << 32 | (uint64_t)address << 40 | (uint64_t)discard << 42,
-                .payload = 0,
-            };
-        }
-        else
-        {
-            check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
-        }
-    }
-    else
-    {
-        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-    }
-}
-
 // An operand pushed with its conversion. A pending overload set's leaf (its value's overload head) is refused; a unit
 // without overload sets has none, and its operands don't read their payload rows for it (#1048: on the 9700X that read
 // cost sqlite3.c's statements 0.38 ms, docs/c-lowering.md's "The operands' overload tests").
 static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
-    if (!writer->overloads && (writer->experiment & 1) != 0)
-    {
-        // #1048's experiment (bit 1): the operands' push in place for every expression pushed here too.
-        check_lower_push_operand(writer, node, address, target);
-    }
-    else if (node < program->stream->count && (!writer->overloads || check_stream_overload_head(program->stream, node) == 0))
+    if (node < program->stream->count && (!writer->overloads || check_stream_overload_head(program->stream, node) == 0))
     {
         // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
         // bit-field (an update's too) leaves no value. A discarded comma discards its right operand in its place.
@@ -2253,9 +2195,47 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
     const CheckOverloadResult* selected = writer->overloads ? check_program_overload_address(program, node, operand) : NULL;
     if (!writer->overloads)
     {
+        const CheckStream* stream = program->stream;
         const uint32_t child = operand == 0 ? graph->operand0[node] : operand == 1 ? graph->operand1[node] : operand == 2 ? graph->operand2[node] :
                                operand - 3 < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + operand - 3] : BUSTER_CHECK_NONE;
-        check_lower_push_operand(writer, child, address, target);
+        if (child < stream->count)
+        {
+            // check_lower_expression's discard: a statement's aggregate assignment, a bit-field's store or update, a comma.
+            bool discard = false;
+            if (!address && target == BUSTER_TYPE_VOID)
+            {
+                const CheckOp op = graph->ops[child];
+                const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
+                const uint32_t destination = graph->operand0[child];
+                const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && destination < stream->count &&
+                                       (check_stream_flags(stream, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
+                discard = (store && check_lower_aggregate(writer, check_stream_type(stream, child))) || bit_field || op == CHECK_OP_COMMA;
+            }
+            if (!address && !discard && target != 0)
+            {
+                const TypeId from = check_stream_type(stream, child);
+                if (from != target && !check_lower_conversion_empty(writer, from, target))
+                {
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target });
+                }
+            }
+            if (writer->depth < writer->capacity)
+            {
+                // check_lower_task_pack's EXPRESSION task.
+                writer->tasks[writer->depth++] = (CheckLowerTaskPacked){
+                    .control = child | (uint64_t)CHECK_LOWER_EXPRESSION << 32 | (uint64_t)address << 40 | (uint64_t)discard << 42,
+                    .payload = 0,
+                };
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
     }
     else if (selected != NULL)
     {
@@ -10472,7 +10452,7 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // subtrees it splices. Constants in each but the sources' `bit_ints`, so that the plain loop does none of it: the tests
 // for a _BitInt took 3.9 million of sqlite3.c's instructions there (#137), and the templates' test would run on every
 // expression of every compile, which takes none of them.
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates, bool conversions)
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -10524,22 +10504,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_CONVERSION)
         {
-            // #1048's experiment (bit 4096): a conversion between two plain scalars' types but to _Bool, on the vector path,
-            // its one CONVERT (check_lower_scalar_conversion_body's last case) where their classes differ.
-            const uint32_t from_info = conversions ? check_lower_type_info(writer, node) : UINT8_MAX;
-            const uint32_t to_info = conversions ? check_lower_type_info(writer, type) : UINT8_MAX;
-            if (conversions && check_lower_plain_scalar(from_info, false) && check_lower_plain_scalar(to_info, false) &&
-                ((to_info >> 8) & BUSTER_CHECK_LOWER_TYPE_BOOL) == 0)
-            {
-                if ((uint8_t)from_info != (uint8_t)to_info)
-                {
-                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, (uint8_t)to_info, 0);
-                }
-            }
-            else
-            {
-                check_lower_conversion_body(writer, node, type, bit_ints);
-            }
+            check_lower_conversion_body(writer, node, type, bit_ints);
         }
         else if (kind == CHECK_LOWER_LABEL)
         {
@@ -10628,20 +10593,14 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, false, false);
-}
-
-// #1048's experiment (bit 4096): the plain loop with a plain conversion's fast path.
-static __attribute__((noinline)) void check_lower_drain_conversions(CheckLowerWriter* writer)
-{
-    check_lower_drain_body(writer, false, false, false, true);
+    check_lower_drain_body(writer, false, false, false);
 }
 
 // The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
 // (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, true, false, false);
+    check_lower_drain_body(writer, false, true, false);
 }
 
 // The tasks' loop for a body whose node templates are ready (CheckLowerWriter.template_ready, #1048): a copy of its own
@@ -10649,7 +10608,7 @@ static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWrite
 // nor a _BitInt type (CheckLowerShared.templates_allowed).
 static __attribute__((noinline)) void check_lower_drain_templates(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, true, false);
+    check_lower_drain_body(writer, false, false, true);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
@@ -10659,7 +10618,7 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     {
         writer->owners->draining = true;
     }
-    check_lower_drain_body(writer, true, writer->bit_ints, false, false);
+    check_lower_drain_body(writer, true, writer->bit_ints, false);
     if (writer->owners != NULL)
     {
         writer->owners->draining = false;
@@ -12667,8 +12626,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -13090,10 +13047,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             else if (writer->template_ready)
             {
                 check_lower_drain_templates(writer);
-            }
-            else if ((writer->experiment & 4096) != 0 && writer->type_templates != NULL)
-            {
-                check_lower_drain_conversions(writer);
             }
             else
             {

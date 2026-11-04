@@ -1041,6 +1041,12 @@ compound literal), didn't pay either, interleaved this time
 two separate runs found. A `VALUE` node costs about the same through the
 expansion, whose instructions aren't what it waits on.
 
+Two more didn't pay ([run at `0ac86c2e`](https://github.com/buster14a/buster/actions/runs/41787103822/job/126434576373),
+four rounds): `check_lower_expression`'s own pushes (the statements' roots
+among them) in place too, `lower.statements` 6.720 ms against 6.768 with
+rounds overlapping the base's; and a conversion between two plain scalars'
+types by their packed classes alone, in a copy of the loop, 6.833 ms.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
