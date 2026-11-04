@@ -2438,6 +2438,14 @@ static TypeId check_input_predefined_type(CheckInputReader* reader, uint32_t nam
     return result;
 }
 
+// The record a CFString builtin's value points to (#148), clang's predeclared __NSConstantString, made the first time a
+// call needs it: at its claim, or where an evaluation reaches the call first (a typeof's or a file scope sizeof's operand).
+static TypeId check_input_ns_constant_string(CheckInputReader* reader)
+{
+    reader->output->graph.ns_constant_string = check_input_predefined_type(reader, reader->predefined_names[2]);
+    return reader->output->graph.ns_constant_string;
+}
+
 #include "c_check_declspec.c"
 
 // The report of specifiers from `first` to `end` that don't combine: clang's error, its place and its message, if it
@@ -3549,6 +3557,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                     .type = type,
                     .bytes = literal.bytes,
                     .byte_count = literal.byte_count,
+                    .utf8 = literal.utf8,
                 };
                 for (uint32_t i = token; i < end; i += 1)
                 {
@@ -7391,6 +7400,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
                 else if (call)
                 {
+                    if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || builtin == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
+                    {
+                        // Its value points to clang's predeclared __NSConstantString record (#148).
+                        (void)check_input_ns_constant_string(reader);
+                    }
                     check_input_rare_claim(reader, &reader->builtins[close]);
                     reader->builtins[close] = builtin;
                     for (uint32_t t = group; t <= end; t += 1)

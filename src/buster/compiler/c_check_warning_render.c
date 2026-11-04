@@ -570,6 +570,11 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_CFSTRING_TRUNCATED:
+        {
+            result = "input conversion stopped due to an input byte that does not belong to the input codeset UTF-8";
+            break;
+        }
         case CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE:
         {
             result = check_warning_text(scratch, "'%.*s' attribute ignored when parsing type", (int)name.length, name.pointer);

@@ -483,7 +483,8 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; and __builtin_clear_padding past its limits.
+// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; and eh_return's
+// unwinding and the constant strings' objects, which clang makes and this compiler doesn't.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
     static const struct
@@ -497,6 +498,11 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
         { "struct S { char c[5000]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores" },
+        { "void f(void* p) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return, whose unwinding to a handler this compiler doesn't make" },
+        { "const void* f(void) { return __builtin___CFStringMakeConstantString(\"x\"); }\n",
+          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
+        { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
+          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
     };
     char source[256];
     char object[256];

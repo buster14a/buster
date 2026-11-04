@@ -867,6 +867,13 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void d(void) { f(); }\nvoid e(void);\nvoid e(void) __attribute__((deprecated));\nvoid e(void);\nT x __attribute__((deprecated));\n"
         "struct S;\nstruct S *ps;\nenum __attribute__((deprecated)) F { F0 };\nenum F ef;\nint k(void) { e(); return F0; }\n",
         "void u(void) __attribute__((unavailable(\"gone\")));\nint h(void) { return sizeof(u); }\n",
+        // __builtin___CFStringMakeConstantString's literal that isn't UTF-8 (#148, check_input_cfstring_literal), past its
+        // parentheses and casts; a valid one's, and NSString's, without a word.
+        "const void* f(void) { return __builtin___CFStringMakeConstantString(\"\\xff\"); }\n"
+        "const void* g(void) { return __builtin___CFStringMakeConstantString(((const char*)(\"\\xc0\\x80\"))); }\n"
+        "const void* h(void) { return __builtin___CFStringMakeConstantString(\"\\xc3\\xa9 \\xed\\x9f\\xbf a\\0b\"); }\n"
+        "const void* k(void) { return __builtin___NSStringMakeConstantString(\"\\xff\"); }\n"
+        "const void* m(void) { return __builtin___CFStringMakeConstantString(\"\\xed\\xa0\\x80\" \"\\xf4\\x90\\x80\\x80\"); }\n",
         "void u(void) __attribute__((unavailable));\nvoid z(void) { u(); }\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)

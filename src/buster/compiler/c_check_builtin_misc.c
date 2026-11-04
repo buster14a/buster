@@ -54,11 +54,15 @@ struct CheckBuiltinMiscAction
     bool string_known;
     const uint8_t* string_bytes;
     uint32_t string_length;
+    // Whether that literal is a UTF-8 one (u8"..."), which the CFString builtins refuse (clang's isOrdinary).
+    bool string_utf8;
     // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and the objects of
     // the functions the first argument names (CheckBuiltinCall's, #1126's review).
     bool string_cast;
     const uint32_t* function_objects;
     uint32_t function_object_count;
+    // The unit's __NSConstantString, which CFString's and NSString's constant strings point to (CheckGraph's), or 0.
+    TypeId ns_constant_string;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -1067,6 +1071,39 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_EH_RETURN)
+    {
+        // void(size_t, void*), which doesn't return (#148): clang's code generation unwinds to the handler, which this
+        // compiler's doesn't (check_lower_unsupported).
+        check_builtin_misc_convert(table, input, output, values + 0, 0, BUSTER_TYPE_ULONG);
+        check_builtin_misc_convert(table, input, output, values + 1, 1, type_pointer(table, BUSTER_TYPE_VOID));
+        output->action.value.type = BUSTER_TYPE_VOID;
+        output->action.value.category = CHECK_RVALUE;
+        output->action.value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+        output->terminates = true;
+    }
+    else if (id == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
+    {
+        // A constant CFString (#148), a const __NSConstantString *: CFString's of an ordinary string literal (clang's
+        // CheckObjCString: "CFString literal is not a string constant" otherwise), NSString's of any const char * in C,
+        // which clang checks in Objective-C alone. clang's evaluator takes either call as an address constant
+        // (IsOpaqueConstantCall), which this checker's doesn't; clang's code generation makes the object, which this
+        // compiler's doesn't (check_lower_unsupported).
+        // Its argument converts to const char * as a prototype's, and past its parentheses and casts is an ordinary
+        // literal, never a UTF-8 one (u8"x", a char array before C23).
+        check_builtin_misc_convert(table, input, output, values + 0, 0, type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)));
+        const TypeId record = input->ns_constant_string != 0 ? type_qualify(table, input->ns_constant_string, BUSTER_TYPE_CONST) : 0;
+        const TypeId result = record != 0 ? type_pointer(table, record) : 0;
+        const bool ordinary = id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING || (input->string_known && !input->string_utf8);
+        if (output->action.diagnostic == CHECK_DIAG_NONE && (!ordinary || result == 0))
+        {
+            check_action_diagnose(&output->action, result == 0 && ordinary ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (output->action.diagnostic == CHECK_DIAG_NONE)
+        {
+            output->action.value = (CheckValue){ .type = result, .category = CHECK_RVALUE, .flags = output->action.value.flags };
+        }
+    }
     else if (id == CBUILTIN_CLEAR_PADDING)
     {
         // clang's void(void*) of custom checks (#148): a pointer as written (an array isn't one), to a complete object type
@@ -1215,7 +1252,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_CPU_IS:
         case CBUILTIN_CPU_SUPPORTS:
         case CBUILTIN_PRESERVE_ACCESS_INDEX:
-        case CBUILTIN_CLEAR_PADDING: minimum = maximum = 1; break;
+        case CBUILTIN_CLEAR_PADDING:
+        case CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING:
+        case CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING: minimum = maximum = 1; break;
+        case CBUILTIN_EH_RETURN: minimum = maximum = 2; break;
         // void(...), which clang checks as a prototype's variadic arguments outside HLSL: as many as the operands' mask holds.
         case CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED: minimum = 0; maximum = 31; break;
         case CBUILTIN_OPERATOR_NEW:

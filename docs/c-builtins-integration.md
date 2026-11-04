@@ -1642,6 +1642,46 @@ clang's Sema builds it.
   are.
 - `__has_builtin` answers 1.
 
+`__builtin_eh_return(offset, handler)` (0x456, #148) is `void(size_t,
+void *)` and doesn't return, as clang's Sema takes it: each argument converts
+as a prototype's parameter. Clang's code generation unwinds the stack by the
+offset and jumps to the handler; this compiler's refuses it by name
+("unsupported: __builtin_eh_return, whose unwinding to a handler this
+compiler doesn't make").
+
+`__builtin___CFStringMakeConstantString(s)` and
+`__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are
+`const __NSConstantString *`, clang's predeclared record (`const int *isa;
+int flags; const char *str; long length;`, 32 bytes), which the reader makes
+the first time a call needs it, at its claim or where an operand's evaluation
+reaches the call first (`check_input_ns_constant_string`: a `typeof`'s, a file
+scope `sizeof`'s).
+
+- **Sema.** s converts to `const char *` as a prototype's parameter. CFString's
+  is, past its parentheses and casts, an ordinary string literal
+  (`CheckObjCString`): a pointer, a wide literal, `__func__` or a UTF-8 one
+  (`u8"x"`, or `"a" u8"b"`, `CheckStringLiteral.utf8`) is refused. NSString's
+  is any `const char *`: clang checks its literal in Objective-C alone.
+- **Warning.** A CFString literal that isn't UTF-8 as LLVM's strict conversion
+  reads it (an overlong form, a surrogate, past U+10FFFF, or cut short;
+  `pp_utf8_sequence`) is clang's `-WCFString-literal`, "input conversion
+  stopped due to an input byte that does not belong to the input codeset
+  UTF-8", at the literal (`check_input_cfstring_literal`).
+- **Code.** Clang makes a `cfstring` section object pointing at
+  `__CFConstantStringClassReference` and the literal; this compiler refuses
+  either call by name ("unsupported: a constant CFString or NSString, whose
+  object this compiler doesn't make").
+- **Difference.** Clang's evaluator takes either call as an address constant
+  (`IsOpaqueConstantCall`), so a static initializer of one (`static const void
+  *p = __builtin___CFStringMakeConstantString("x");`, cast to `long` or
+  `_Bool` too, or plus an offset) is accepted. This checker's isn't, and
+  refuses it as "initializer is not a constant expression": it has no object
+  to give the address of, as its code generation doesn't.
+
+A miscellaneous builtin's argument of the other signedness of a `char`
+pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
+an ordinary call's.
+
 `__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;

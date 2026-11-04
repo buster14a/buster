@@ -205,6 +205,8 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
             evidence->nan_payload = evidence->nan_payload_known ? string->bytes : 0;
             evidence->nan_payload_length = evidence->nan_payload_known ? (uint32_t)string->byte_count - 1 : 0;
             evidence->nan_payload_cast = evidence->nan_payload_known && cast;
+            evidence->nan_payload_utf8 = evidence->nan_payload_known && string->utf8;
+            evidence->nan_payload_token = first;
             evidence->minimum_alignment = UINT64_C(1) << type_alignment_log2(reader->types, element);
             evidence->alignment_known = true;
             size = string->byte_count;

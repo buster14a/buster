@@ -50,14 +50,16 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     }
     else if (family == CHECK_OP_BUILTIN_MISC)
     {
+        const bool constant_string = builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || builtin == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING;
         const CheckBuiltinMiscAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
             .context = context,
             .pointer_object = evidence.base_object, .pointer_alignment = evidence.base_alignment,
             .string_known = evidence.nan_payload_known, .string_bytes = evidence.nan_payload, .string_length = evidence.nan_payload_length,
-            .string_cast = evidence.nan_payload_cast, .function_objects = evidence.function_objects,
+            .string_cast = evidence.nan_payload_cast, .string_utf8 = evidence.nan_payload_utf8, .function_objects = evidence.function_objects,
             .function_object_count = evidence.function_object_count,
+            .ns_constant_string = constant_string ? check_input_ns_constant_string(reader) : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

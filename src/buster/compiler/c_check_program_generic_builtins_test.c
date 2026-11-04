@@ -259,6 +259,25 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: clear_padding of an incomplete array", .source = "void f(int (*q)[])\n{\n__builtin_clear_padding(q);\n}\n", .rejected = true },
         { .name = "generic: clear_padding of two", .source = "void f(int* p)\n{\n__builtin_clear_padding(p, p);\n}\n", .rejected = true },
         { .name = "generic: clear_padding's value", .source = "int f(int* p)\n{\nreturn __builtin_clear_padding(p);\n}\n", .rejected = true },
+        // eh_return (#148): void(size_t, void*), which doesn't return. CFString's argument is an ordinary literal past its
+        // parentheses and casts, NSString's any const char *, each a const __NSConstantString *, whose record is made
+        // where an operand's evaluation reaches it first.
+        { .name = "generic: eh_return and constant strings", .source =
+          "enum { E = sizeof(*__builtin___NSStringMakeConstantString(\"x\")) };\nconst __NSConstantString* f(const char* s, int x)\n{\n"
+          "if (x) __builtin_eh_return(x, &x);\n(void)__builtin___CFStringMakeConstantString(\"x\");\n"
+          "(void)__builtin___CFStringMakeConstantString(((const char*)(\"a\" \"b\")));\n(void)sizeof(__builtin___CFStringMakeConstantString(\"\"));\n"
+          "long n = __builtin___CFStringMakeConstantString(\"abc\")->length;\n__typeof__(__builtin___CFStringMakeConstantString(\"x\")) p = 0;\n"
+          "(void)n;\n(void)p;\nreturn __builtin___NSStringMakeConstantString(s);\n}\n" },
+        { .name = "generic: eh_return of one", .source = "void f(void)\n{\n__builtin_eh_return(1);\n}\n", .rejected = true },
+        { .name = "generic: eh_return of a pointer offset", .source = "void f(void)\n{\n__builtin_eh_return((void*)0, 0);\n}\n", .rejected = true },
+        { .name = "generic: eh_return's value", .source = "int f(void)\n{\nreturn __builtin_eh_return(1, 0);\n}\n", .rejected = true },
+        { .name = "generic: CFString of a pointer", .source = "const void* f(const char* s)\n{\nreturn __builtin___CFStringMakeConstantString(s);\n}\n", .rejected = true },
+        { .name = "generic: CFString of a wide literal", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString(L\"x\");\n}\n", .rejected = true },
+        { .name = "generic: CFString of a UTF-8 literal", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString(\"a\" u8\"x\");\n}\n", .rejected = true },
+        { .name = "generic: CFString of __func__", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString(__func__);\n}\n", .rejected = true },
+        { .name = "generic: CFString of none", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString();\n}\n", .rejected = true },
+        { .name = "generic: CFString as an int", .source = "int f(void)\n{\nreturn __builtin___CFStringMakeConstantString(\"x\");\n}\n", .rejected = true },
+        { .name = "generic: NSString of an int", .source = "const void* f(int x)\n{\nreturn __builtin___NSStringMakeConstantString(x);\n}\n", .rejected = true },
         // __builtin_invoke(f, a...) is the call f(a...) in C (#148): of a function, a pointer to one and a member of one,
         // with a prototype's conversions and a variadic one's promotions; its errors are the call's.
         { .name = "generic: invoke", .source =

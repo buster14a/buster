@@ -22,6 +22,8 @@ struct CheckInitString
     uint64_t byte_count;
     // Predefined function-name arrays have static bytes, but C does not treat them as string-literal syntax.
     bool predefined;
+    // A UTF-8 literal (CheckStringLiteral.utf8), which the CFString builtins refuse as clang's isOrdinary does.
+    bool utf8;
 };
 
 typedef enum CheckInitKind

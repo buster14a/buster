@@ -153,6 +153,35 @@ static void check_input_vararg_type(CheckInputReader* reader, uint32_t token)
 // read too (`one ? 0.5 : 0.25`): it never runs, so its subtree is checked as a constant context's
 // (BUSTER_CHECK_CONTEXT_VALUE, which reports no constraint of its own). Out of line, so that check_input_expressions'
 // walk keeps its frame and registers: inlined, the evaluator's state took the walk's frame from 376 to 904 bytes.
+// clang's -WCFString-literal (#148, CheckObjCString): __builtin___CFStringMakeConstantString's ordinary literal that isn't UTF-8 as LLVM's
+// strict conversion reads it (pp_utf8_sequence: an overlong form, a surrogate, past U+10FFFF, or cut short), at the
+// literal, once the call is read (its closing parenthesis `closing`). A rare builtin's rare literal: scalar.
+static void check_input_cfstring_literal(CheckInputReader* reader, const CheckBuiltinCall* evidence, uint32_t closing)
+{
+    uint32_t at = 0;
+    uint32_t length = 1;
+    while (at < evidence->nan_payload_length && length != 0)
+    {
+        uint32_t code_point = 0;
+        length = pp_utf8_sequence(evidence->nan_payload + at, evidence->nan_payload_length - at, &code_point);
+        at += length;
+    }
+    if (length == 0)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_CFSTRING_LITERAL,
+            .kind = CHECK_WARNING_EVENT_CFSTRING_TRUNCATED,
+            .token = evidence->nan_payload_token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = closing,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader* reader, uint32_t node, uint32_t token, uint32_t count, uint32_t end,
                                                                 CheckBuiltinCall* evidence)
 {
@@ -172,6 +201,10 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
     {
         check_input_annotation_evidence(reader, end, token, evidence);
+    }
+    if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING && count == 1 && evidence->nan_payload_known && !evidence->nan_payload_utf8)
+    {
+        check_input_cfstring_literal(reader, evidence, token);
     }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)

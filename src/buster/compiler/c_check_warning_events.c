@@ -34,6 +34,7 @@ enum
     CHECK_WARNING_ID_GCC_COMPAT = 42,
     CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION = 43,
     CHECK_WARNING_ID_DEPRECATED_DECLARATIONS = 44,
+    CHECK_WARNING_ID_CFSTRING_LITERAL = 45,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -103,6 +104,8 @@ typedef enum CheckWarningEventKind
     // A use of what a deprecated attribute marks (#147, check_input_deprecated_uses): the used name, and the attribute's
     // message's string token in the payload's token (or none).
     CHECK_WARNING_EVENT_DEPRECATED_USE,
+    // A CFString builtin's literal that isn't UTF-8 (#148, check_input_cfstring_literal), at the literal.
+    CHECK_WARNING_EVENT_CFSTRING_TRUNCATED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

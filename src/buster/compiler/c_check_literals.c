@@ -68,6 +68,8 @@ struct CheckStringLiteral
     uint32_t failed_part;
     bool valid;
     bool resource;
+    // Whether a part is u8-prefixed, which makes the whole a UTF-8 literal and no ordinary one (clang's isOrdinary).
+    bool utf8;
 };
 
 typedef enum CheckStringEncoding
@@ -819,6 +821,7 @@ static CheckStringLiteral check_literal_strings(const CheckStringPart* parts, ui
                 result.byte_count = length;
                 result.unit_count = length / width;
                 result.valid = true;
+                result.utf8 = encoding == CHECK_STRING_UTF8;
             }
             else
             {

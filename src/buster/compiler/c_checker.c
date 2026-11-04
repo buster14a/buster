@@ -44,6 +44,9 @@ struct CheckBuiltinCall
     // Whether an explicit cast was stripped before that literal: clang's literal-only arguments (allow_runtime_check's,
     // allow_sanitize_check's, cpu_supports' and cpu_is') refuse one, as annotation's doesn't (#1126's review).
     bool nan_payload_cast;
+    // Whether that literal is a UTF-8 one (u8"..."), which the CFString builtins refuse, and its first token.
+    bool nan_payload_utf8;
+    uint32_t nan_payload_token;
     // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
     // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
     uint32_t function_objects[4];
@@ -166,6 +169,8 @@ struct CheckGraphValidation
 
 struct CheckGraph
 {
+    // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0.
+    TypeId ns_constant_string;
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
     // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf_of). Other nodes use types/member as
     // action data.
@@ -2117,16 +2122,19 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
             .string_known = witness != NULL && witness->nan_payload_known,
             .string_cast = witness != NULL && witness->nan_payload_cast,
+            .string_utf8 = witness != NULL && witness->nan_payload_utf8,
             .function_objects = witness != NULL ? witness->function_objects : NULL,
             .function_object_count = witness != NULL ? witness->function_object_count : 0,
             .string_bytes = witness != NULL ? witness->nan_payload : NULL,
             .string_length = witness != NULL ? witness->nan_payload_length : 0,
+            .ns_constant_string = graph->ns_constant_string,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
         *result = checked.action;
         check_builtin_library_fold_memory(types, input.id, action, checked.argument_conversions, result);
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+        result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_POINTER_SIGN) != 0 ? CHECK_WARNING_POINTER_SIGN : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 4; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];

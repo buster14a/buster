@@ -465,7 +465,10 @@
     X(PRESERVE_ACCESS_INDEX, 0x452u, "__builtin_preserve_access_index", BUSTER_CBUILTIN_SOURCE) \
     X(HLSL_RESOURCE_GETPOINTER_TYPED, 0x453u, "__builtin_hlsl_resource_getpointer_typed", BUSTER_CBUILTIN_SOURCE) \
     X(CLEAR_PADDING, 0x454u, "__builtin_clear_padding", BUSTER_CBUILTIN_SOURCE) \
-    X(INVOKE, 0x455u, "__builtin_invoke", BUSTER_CBUILTIN_SOURCE)
+    X(INVOKE, 0x455u, "__builtin_invoke", BUSTER_CBUILTIN_SOURCE) \
+    X(EH_RETURN, 0x456u, "__builtin_eh_return", BUSTER_CBUILTIN_SOURCE) \
+    X(CFSTRING_MAKE_CONSTANT_STRING, 0x457u, "__builtin___CFStringMakeConstantString", BUSTER_CBUILTIN_SOURCE) \
+    X(NSSTRING_MAKE_CONSTANT_STRING, 0x458u, "__builtin___NSStringMakeConstantString", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -749,7 +752,8 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 // around the scoped atomics' (0x400 to 0x43c), which a range of ids from the first to the last would take in.
 static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
-    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING);
+    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING) ||
+           (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING);
 }
 
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
@@ -760,11 +764,12 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 
 // Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
 // fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's, and the literal and
-// function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is and cpu_supports.
+// function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is, cpu_supports and
+// __builtin___CFStringMakeConstantString.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
-                        id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS;
+                        id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS || id == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING;
     return result;
 }
 

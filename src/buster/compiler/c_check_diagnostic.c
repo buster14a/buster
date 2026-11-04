@@ -81,6 +81,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wgcc-compat", NULL, "GCC does not allow attribute in this position on a function definition" },
     { "-Wgnu-alignof-expression", "-Wgnu", "alignof applied to an expression is a GNU extension" },
     { "-Wdeprecated-declarations", "-Wdeprecated", "use of a deprecated declaration" },
+    { "-WCFString-literal", NULL, "input conversion stopped due to an input byte that does not belong to the input codeset UTF-8" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

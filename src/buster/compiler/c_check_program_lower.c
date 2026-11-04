@@ -7658,6 +7658,14 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_unsupported(writer, "__builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either");
     }
+    else if (runtime == CBUILTIN_EH_RETURN)
+    {
+        check_lower_unsupported(writer, "__builtin_eh_return, whose unwinding to a handler this compiler doesn't make");
+    }
+    else if (runtime == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || runtime == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING)
+    {
+        check_lower_unsupported(writer, "a constant CFString or NSString, whose object this compiler doesn't make");
+    }
     else if (runtime == CBUILTIN_CPU_INIT)
     {
         // libgcc's call, which fills the model (it is also its constructor, of priority 101).
