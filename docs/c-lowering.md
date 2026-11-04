@@ -961,6 +961,32 @@ on the base without the fragments (every variant's object was the base's):
 Every round of the two together was below every round of the base: `lower`
 0.29 ms lower.
 
+## The tasks' loop's code (#1048)
+
+The loop's copies (`check_lower_drain_body`) inline the whole expansion, so
+the plain copy was 17 KB of code, of which the common nodes' cases are a
+fraction; #1235's diagnostic found the lowering a third frontend-bound. The
+expansion's cases of the ops past `CHECK_OP_SELECT` (the builtins,
+statement values, `va_arg`, VLAs' extents, the complex parts and bit casts)
+now run out of line, through a copy of the whole expansion of their own
+(`check_lower_expand_rare`), and every copy of the loop keeps the other ops'
+cases alone (`check_lower_expand_split`, whose assumption on the op lets
+clang leave those cases out): the plain copy is 14 KB.
+
+#1235's run at `e5b79666`
+([run](https://github.com/buster14a/buster/actions/runs/41774131348/job/126393324952))
+ran a split copy of the plain loop beside the plain one, in one build, five
+rounds in turn on `sqlite3.c` (the variant's object was the base's):
+
+| row | the base | the split copy |
+| --- | ---: | ---: |
+| `lower` | 10.920 [10.867 to 10.932] | 10.733 [10.714 to 10.767] |
+| `lower.statements` | 7.149 [6.997 to 7.162] | 6.878 [6.832 to 6.918] |
+
+Every round of the split copy was below every round of the base. On this
+session's Xeon, a build with the split alone took 4% off the statements in 7
+of 8 alternating rounds.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

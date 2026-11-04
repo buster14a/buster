@@ -10291,6 +10291,33 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
 }
 
+// The expansion's cases of the ops past CHECK_OP_SELECT (the builtins, statement values, va_arg, VLAs' extents, the
+// complex parts and bit casts) out of line, a copy of the whole expansion of its own (check_lower_expand_rare), so that
+// the tasks' loop's copies, which inline the expansion, keep the other ops' cases alone (#1048: the plain copy's code went
+// from 17 KB to 14 KB, and sqlite3.c's statements took 0.27 ms less on the 9700X, docs/c-lowering.md's "The tasks' loop's
+// code").
+static __attribute__((noinline)) void check_lower_expand_rare(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
+                                                              bool bit_int)
+{
+    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+}
+
+static inline __attribute__((always_inline)) void check_lower_expand_split(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard,
+                                                                           bool bit_ints, bool bit_int)
+{
+    const CheckOp op = writer->program->input->graph.ops[node];
+    if (op > CHECK_OP_SELECT)
+    {
+        check_lower_expand_rare(writer, node, address, initialized, discard, bit_ints, bit_int);
+    }
+    else
+    {
+        // What lets clang leave those ops' cases out of the copy inlined here.
+        __builtin_assume(op <= CHECK_OP_SELECT);
+        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+    }
+}
+
 #include "c_check_program_batch.c"
 #include "c_check_program_templates.c"
 
@@ -10418,7 +10445,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 {
                     if (!plain)
                     {
-                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
                     }
                     expression_nodes += 1;
                 }
