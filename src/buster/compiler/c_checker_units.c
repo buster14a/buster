@@ -160,6 +160,18 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             memcpy(bytes, link->atoms.bytes[a], size);
         }
         copy->atoms.bytes[a] = bytes;
+        const String8 section = link->atoms.section[a];
+        char* name = section.length != 0 ? arena_push(kept->arena, section.length, 1) : NULL;
+        result = result && (section.length == 0 || name != NULL);
+        if (name != NULL)
+        {
+            memcpy(name, section.pointer, section.length);
+            copy->atoms.section[a] = (String8){ .pointer = name, .length = section.length };
+        }
+        else
+        {
+            copy->atoms.section[a] = (String8){ 0 };
+        }
     }
     if (result)
     {
@@ -644,7 +656,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         for (AtomId a = 1; valid && a < unit->atoms.count; a += 1)
         {
             placed[a] = link_add_atom(link, unit->atoms.class[a], unit->atoms.alignment_log2[a], unit->atoms.size[a], unit->atoms.bytes[a], u);
-            valid = placed[a] != 0;
+            valid = placed[a] != 0 && link_set_atom_section(link, placed[a], unit->atoms.section[a]);
             const FixupId begin = unit->atoms.fixup_begin[a];
             for (uint32_t i = 0; valid && i < unit->atoms.fixup_count[a]; i += 1)
             {
@@ -1310,6 +1322,7 @@ static void check_units_merge_lane(void* argument)
                 link->atoms.alignment_log2[placed] = unit->atoms.alignment_log2[a];
                 link->atoms.unit[placed] = (uint32_t)u;
                 link->atoms.size[placed] = unit->atoms.size[a];
+                link->atoms.section[placed] = unit->atoms.section[a];
                 link->atoms.bytes[placed] = unit->atoms.bytes[a];
                 link->atoms.fixup_begin[placed] = fixup_count != 0 ? fixup : 0;
                 link->atoms.fixup_count[placed] = fixup_count;

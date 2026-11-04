@@ -1018,6 +1018,77 @@ static void check_units_test_merge(CheckUnitsTestTally* tally, const char* execu
     printf("  merge: duplicates and a wide addend by %u commands, the twin's\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
 }
 
+// #1122's bound section across units: the bound's references are in the unit with main, and a second unit's section
+// members, a static among them that nothing references, which the kept link must hold all the same, as a -c object
+// does: the merge's section is every unit's. GNU ld's output (gcc's) is the oracle's; clang drops the static.
+static void check_units_test_bounds(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    static const char b1[] = "#include <stdio.h>\n"
+                             "struct entry { long value; };\n"
+                             "__attribute__((section(\"mreg\"), aligned(16))) struct entry from_main = { 1 };\n"
+                             "extern struct entry __start_mreg[], __stop_mreg[];\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    long total = 0;\n"
+                             "    for (struct entry* e = __start_mreg; e < __stop_mreg; e += 1) total += e->value;\n"
+                             "    printf(\"%ld %ld\\n\", total, (long)(__stop_mreg - __start_mreg));\n"
+                             "    return 0;\n"
+                             "}\n";
+    static const char b2[] = "struct entry { long value; };\n"
+                             "static __attribute__((section(\"mreg\"), aligned(16))) struct entry hidden = { 20 };\n"
+                             "__attribute__((section(\"mreg\"), aligned(16))) struct entry shared = { 300 };\n";
+    char bounds_directory[PATH_MAX];
+    char path[PATH_MAX];
+    char errors_path[PATH_MAX];
+    char output_path[PATH_MAX];
+    snprintf(bounds_directory, sizeof(bounds_directory), "%s/bounds", directory);
+    snprintf(errors_path, sizeof(errors_path), "%s/errors.txt", bounds_directory);
+    snprintf(output_path, sizeof(output_path), "%s/output.txt", bounds_directory);
+    bool written = mkdir(bounds_directory, 0755) == 0;
+    for (uint32_t f = 0; written && f < 2; f += 1)
+    {
+        snprintf(path, sizeof(path), "%s/b%u.c", bounds_directory, f + 1);
+        written = parse_test_write(path, f == 0 ? b1 : b2, strlen(f == 0 ? b1 : b2));
+    }
+    check_units_test_expect(tally, written, "write the bounds' units", bounds_directory);
+    static const char* const options[][3] = {
+        { "--lanes", "1", NULL },
+        { "--lanes", "8", NULL },
+        { "--scalar", "--lanes", "8" },
+    };
+    for (uint32_t o = 0; written && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    {
+        char* arguments[16];
+        uint32_t used = 0;
+        arguments[used++] = (char*)executable;
+        for (uint32_t i = 0; options[o][i] != NULL; i += 1)
+        {
+            arguments[used++] = (char*)options[o][i];
+        }
+        arguments[used++] = "-o";
+        char output[32];
+        snprintf(output, sizeof(output), "bounds_%u", o);
+        arguments[used++] = output;
+        arguments[used++] = (char*)"b1.c";
+        arguments[used++] = (char*)"b2.c";
+        arguments[used] = NULL;
+        const int linked = check_units_test_run(bounds_directory, arguments, "/dev/null", errors_path, false);
+        char run[48];
+        snprintf(run, sizeof(run), "./%s", output);
+        char* run_arguments[] = { run, NULL };
+        const int ran = linked == 0 ? check_units_test_run(bounds_directory, run_arguments, output_path, "/dev/null", false) : -1;
+        uint64_t length = 0;
+        char* text = ran == 0 ? check_units_test_read(output_path, &length) : NULL;
+        char detail[80];
+        snprintf(detail, sizeof(detail), "%s %s", options[o][0], options[o][1]);
+        // Three members of 8 bytes at 16-byte strides: the bound covers their ends, and gcc's output is "321 5".
+        check_units_test_expect(tally, ran == 0 && text != NULL && strcmp(text, "321 5\n") == 0,
+                                "a bound across units covers every member, the unreferenced static's too", detail);
+        free(text);
+    }
+    printf("  bounds: a section's members kept across units by %u commands\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
+}
+
 // A few large units (see the file's comment), in a directory of its own under `directory`: the count that the command's
 // --shared-parts report gives after `prefix` (the shared parts', or the lanes' that left their memory to the exit), or
 // `missing` without one.
@@ -2092,6 +2163,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
+        check_units_test_bounds(&tally, executable, directory);
         check_units_test_merge_lease(&tally);
         check_units_test_shared(&tally, executable, directory);
 #if BUSTER_SANITIZER_RESOURCES
