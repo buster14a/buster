@@ -3737,6 +3737,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // part (CheckProgramLanes.grow_supply), read only when it is set.
     const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
     lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
+    // And another (#673): "LANE,MICROSECONDS", a lane (its index plus one) that sleeps that long at each part it takes,
+    // before each part's lowering in a growing team (CheckProgramLanes.slow_lane), read only when it is set.
+    const char* slow_lane = getenv("BUSTER_TEST_SLOW_LANE");
+    char* slow_end = NULL;
+    lanes.slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
+    lanes.slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each

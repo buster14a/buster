@@ -485,7 +485,8 @@ struct CheckProgramLanes
     // Optional external ownership for the extra workers. The C driver supplies it; isolated callers/tests may omit it.
     WorkerBudget* budget;
     // A test's lane that sleeps `slow_microseconds` after each part it takes, its index plus one (0 for none), so that the
-    // other lanes take the parts it would have and finish theirs first.
+    // other lanes take the parts it would have and finish theirs first; in a growing team (CheckEmitGrowth), before each
+    // part's lowering it takes, so that the lanes that take that part's code wait for it.
     uint32_t slow_lane;
     uint32_t slow_microseconds;
     // A test's lane short of room: the lane that takes the part holding body `squeeze_body` (its index plus one, 0 for
@@ -1118,6 +1119,13 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     lanes->squeezed = index + 1;
 }
 
+// A test's slow lane's sleep (CheckProgramLanes.slow_lane). Out of line, so that the lanes' loops carry none of it.
+static __attribute__((noinline)) void check_program_emit_pause(const CheckProgramLanes* lanes)
+{
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)lanes->slow_microseconds * 1000 };
+    nanosleep(&pause, NULL);
+}
+
 // The halves `half` of part `part` of the bodies, cut by CheckEmitRun.boundaries, on lane `index`, whose state is `lane`.
 // A lane prepares its writer when it takes its first part, so that one that takes none spends nothing on it; one that
 // can't refuses the part, whichever half it took.
@@ -1144,10 +1152,9 @@ static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint
             check_program_emit_part_refused(result);
         }
     }
-    if (run->lanes->slow_lane == index + 1)
+    if (half == CHECK_EMIT_HALF_BOTH && run->lanes->slow_lane == index + 1)
     {
-        const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)run->lanes->slow_microseconds * 1000 };
-        nanosleep(&pause, NULL);
+        check_program_emit_pause(run->lanes);
     }
 }
 
@@ -1245,6 +1252,10 @@ static void check_program_emit_item(CheckEmitRun* run, CheckEmitLane* lane, uint
     if (!lowering && (__atomic_load_n(lowered + place, __ATOMIC_ACQUIRE) & ~1u) == 0)
     {
         lane_wait(lowered + place, 0);
+    }
+    if (lowering && run->lanes->slow_lane == index + 1)
+    {
+        check_program_emit_pause(run->lanes);
     }
     check_program_emit_take(run, lane, index, order[place], lowering ? CHECK_EMIT_HALF_LOWER : CHECK_EMIT_HALF_CODE);
     if (lowering)
