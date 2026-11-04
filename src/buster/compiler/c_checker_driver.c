@@ -5,6 +5,7 @@
 // accepted. Diagnostics retain source/macro history and are ordered by the point their constraint is known.
 
 #include "linker_options.c"
+#include "c_driver_inputs.c"
 
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
@@ -2539,6 +2540,7 @@ static void check_driver_lower_report(const CheckProgramCode* code, const CheckC
 
 // A unit's link kept for the link of several units (c_checker_units.c), which check_driver_object fills.
 typedef struct CheckUnitsKept CheckUnitsKept;
+static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
@@ -2593,7 +2595,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
-                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept)
+                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign)
 {
     (void)scalar;
 
@@ -2642,7 +2644,15 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     if (valid && kept != NULL)
     {
         const LinkError checked = link_check(&code.link);
-        valid = checked == LINK_ERROR_NONE && check_units_keep(kept, &code.link, program, parser, pp, debug ? &dwarf.object : NULL);
+        if (foreign)
+        {
+            const Object object = check_driver_object_build(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch);
+            valid = checked == LINK_ERROR_NONE && check_units_keep_object(kept, &object);
+        }
+        else
+        {
+            valid = checked == LINK_ERROR_NONE && check_units_keep(kept, &code.link, program, parser, pp, debug ? &dwarf.object : NULL);
+        }
         if (checked != LINK_ERROR_NONE)
         {
             fprintf(errors, "internal compiler error: the unit's link isn't valid (link error %u)\n", (uint32_t)checked);
@@ -2705,6 +2715,7 @@ typedef enum CheckUnitsRound
     CHECK_UNITS_ROUND_MERGE,
     CHECK_UNITS_ROUND_CHECK,
     CHECK_UNITS_ROUND_WRITE,
+    CHECK_UNITS_ROUND_FOREIGN,
 } CheckUnitsRound;
 struct CheckUnitsFlow
 {
@@ -3121,6 +3132,9 @@ struct CheckDriverLibraries
     uint32_t count;
     String8* directories;
     uint32_t directory_count;
+    // The positional files and -l requests in their original order, for mixed-input links (#1120).
+    ForeignArgument* arguments;
+    uint32_t argument_count;
 };
 
 // Says why the -l libraries didn't import (runtime_libraries_import's error).
@@ -3601,6 +3615,10 @@ struct CheckDriverCommand
     const char* output;
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
+    const CheckDriverInput* inputs;
+    uint32_t source_count;
+    bool mixed_inputs;
+    bool assembly_intel;
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
@@ -4074,7 +4092,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
                             result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
                                                                            object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
-                                                                           scratch, stage_clock, errors, kept) ? 0 : 1;
+                                                                           scratch, stage_clock, errors, kept, command->mixed_inputs) ? 0 : 1;
                         }
                         else if (!selection)
                         {
@@ -4224,7 +4242,7 @@ static void check_driver_flow(void* argument)
         check_clock_mark(run->stage_clock, CHECK_STAGE_LANES_START);
         run->lanes->lanes = run->lanes->lanes < lane_count() ? run->lanes->lanes : lane_count();
     }
-    if (run->input_count > 1)
+    if (run->input_count > 1 || run->command->mixed_inputs)
     {
         // Lane 0 runs the units' driver alone, its wide parts rounds of the flow (CheckUnitsFlow), the lanes' start having
         // gone on until the first.
@@ -4353,6 +4371,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The source files: every argument that is neither an option nor an option's value (#152). pp_parse_options reads the
     // first, as it reads -E's one file, and the others are each a unit too.
     char** inputs = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
+    CheckDriverInput* input_kinds = BUSTER_ARENA_PUSH_ARRAY(&arena, CheckDriverInput, (uint64_t)count + 1);
+    CheckDriverInputKind language = CHECK_DRIVER_INPUT_AUTO;
+    const char* invalid_language = NULL;
+    bool invalid_stdin = false;
+    bool mixed_inputs = false;
+    bool assembly_intel = false;
+    uint32_t source_count = 0;
     uint32_t input_count = 0;
     uint32_t stdin_count = 0;
     bool end_options = false;
@@ -4397,13 +4422,19 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     char** linker_arguments = linker_capacity <= INT_MAX ? arena_push_array(&arena, linker_capacity, sizeof(char*), _Alignof(char*)) : NULL;
+    uint32_t* linker_inputs = linker_capacity <= INT_MAX ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, linker_capacity) : NULL;
+    if (linker_inputs != NULL)
+    {
+        memset(linker_inputs, 0, linker_capacity * sizeof(*linker_inputs));
+    }
     int linker_count = 0;
     CheckDriverLibraries libraries = {
         .names = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
         .directories = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
         .required = arena_push_array(&arena, linker_capacity, sizeof(bool), _Alignof(bool)),
+        .arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, ForeignArgument, linker_capacity),
     };
-    const bool linker_ready = linker_arguments != NULL && libraries.required != NULL &&
+    const bool linker_ready = linker_arguments != NULL && linker_inputs != NULL && input_kinds != NULL && libraries.arguments != NULL && libraries.required != NULL &&
                               linker_options_initialize(&libraries.linker, (uint32_t)linker_capacity, &arena);
     bool missing_value = false;
     // The code generation and ABI layout options the driver refuses, read as every client of the request reads them
@@ -4452,8 +4483,27 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             {
                 filtered[filtered_count++] = arguments[i];
             }
-            stdin_count += strcmp(arguments[i], "-") == 0;
+            const bool standard_input = strcmp(arguments[i], "-") == 0;
+            stdin_count += standard_input;
+            invalid_stdin |= standard_input && language == CHECK_DRIVER_INPUT_AUTO;
+            input_kinds[input_count] = check_driver_classify(arguments[i], language);
+            mixed_inputs |= input_kinds[input_count].kind != CHECK_DRIVER_INPUT_C;
+            source_count += input_kinds[input_count].kind != CHECK_DRIVER_INPUT_LINK;
+            linker_inputs[linker_count] = input_count + 1;
+            linker_arguments[linker_count++] = arguments[i];
             inputs[input_count++] = arguments[i];
+            continue;
+        }
+        if (strncmp(arguments[i], "-x", 2) == 0)
+        {
+            const char* value = arguments[i][2] != 0 ? arguments[i] + 2 : i + 1 < count ? arguments[++i] : "";
+            language = check_driver_language(value);
+            invalid_language = language == CHECK_DRIVER_INPUT_INVALID && invalid_language == NULL ? value : invalid_language;
+            continue;
+        }
+        if (strcmp(arguments[i], "--intel") == 0)
+        {
+            assembly_intel = true;
             continue;
         }
         scalar |= strcmp(arguments[i], "--scalar") == 0;
@@ -4711,7 +4761,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
             if (source)
             {
-                stdin_count += strcmp(arguments[i], "-") == 0;
+                const bool standard_input = strcmp(arguments[i], "-") == 0;
+                stdin_count += standard_input;
+                invalid_stdin |= standard_input && language == CHECK_DRIVER_INPUT_AUTO;
+                input_kinds[input_count] = check_driver_classify(arguments[i], language);
+                mixed_inputs |= input_kinds[input_count].kind != CHECK_DRIVER_INPUT_C;
+                source_count += input_kinds[input_count].kind != CHECK_DRIVER_INPUT_LINK;
+                linker_inputs[linker_count] = input_count + 1;
+                linker_arguments[linker_count++] = arguments[i];
                 inputs[input_count++] = arguments[i];
             }
         }
@@ -4725,8 +4782,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool as_needed = true;
     for (int i = 0; link && linker_ready && libraries.linker.error == NULL && !libraries.linker.resource && i < linker_count; i += 1)
     {
+        const int option_index = i;
         const char* argument = linker_arguments[i];
-        if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i))
+        if (linker_inputs[i] != 0)
+        {
+            const uint32_t input = linker_inputs[i] - 1;
+            input_kinds[input].argument = libraries.argument_count;
+            libraries.arguments[libraries.argument_count++] = (ForeignArgument){
+                .name = foreign_string(argument),
+                .flags = as_needed ? BUSTER_FOREIGN_INPUT_AS_NEEDED : 0,
+            };
+        }
+        else if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i))
         {
             // Shared output options.
         }
@@ -4753,6 +4820,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 {
                     libraries.required[libraries.count] = !as_needed;
                     libraries.names[libraries.count++] = text;
+                    libraries.arguments[libraries.argument_count++] = (ForeignArgument){
+                        .name = text,
+                        .flags = BUSTER_FOREIGN_INPUT_LIBRARY | (as_needed ? BUSTER_FOREIGN_INPUT_AS_NEEDED : 0) |
+                                 (runtime_kind_is_static(runtime_kind) ? BUSTER_FOREIGN_INPUT_STATIC : 0),
+                    };
                 }
                 else
                 {
@@ -4763,6 +4835,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else
         {
             libraries.linker.error = argument;
+        }
+        if (i != option_index && linker_inputs[i] != 0)
+        {
+            libraries.linker.error = linker_arguments[option_index];
+            libraries.linker.missing = true;
         }
     }
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
@@ -4780,9 +4857,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
                   !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
-    if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
+    if (parsed && (stdin_count > 1 || invalid_stdin))
     {
-        fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
+        fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
+        parsed = false;
+    }
+    if (invalid_language != NULL)
+    {
+        fprintf(stderr, "error: unsupported or missing input language '%s'\n", invalid_language);
         parsed = false;
     }
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
@@ -4835,6 +4917,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .unwind_tables = unwind_tables,
         .output = output,
         .libraries = &libraries,
+        .inputs = input_kinds,
+        .source_count = source_count,
+        .mixed_inputs = mixed_inputs,
+        .assembly_intel = assembly_intel,
         .tier1 = lanes.tier1,
         .tier1_strict = lanes.tier1_strict,
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
@@ -4894,6 +4980,17 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else
     {
+        for (uint32_t i = 0; i < input_count; i += 1)
+        {
+            if (input_kinds[i].kind == CHECK_DRIVER_INPUT_LINK && !link)
+            {
+                fprintf(stderr, "warning: %s: linker input unused because linking was not requested\n", inputs[i]);
+            }
+            else if (input_kinds[i].unknown)
+            {
+                fprintf(stderr, "warning: %s: unrecognized suffix; treating as linker input\n", inputs[i]);
+            }
+        }
         // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
         if (lanes.tier1 && !check_tier1_ready)
         {

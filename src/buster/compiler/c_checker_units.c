@@ -45,6 +45,8 @@
 // symbols, or none.
 struct CheckUnitsKept
 {
+    // Mixed-input links retain exactly the ELF object -c would write, including named sections and DWARF.
+    String8 object;
     Link link;
     uint8_t* system;
     ObjectDebug debug;
@@ -60,6 +62,7 @@ struct CheckUnitsKept
 struct CheckUnitsUnit
 {
     const char* path;
+    CheckDriverInputKind kind;
     uint64_t bytes;
     const char* object;
     int status;
@@ -70,6 +73,17 @@ struct CheckUnitsUnit
     CheckUnitsKept kept;
     DependencyOutput dependency;
 };
+
+static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object)
+{
+    char* bytes = object->error == OBJECT_ERROR_NONE ? arena_push(kept->bytes, object->size, 16) : NULL;
+    if (bytes != NULL)
+    {
+        memcpy(bytes, object->bytes, object->size);
+        kept->object = (String8){ .pointer = bytes, .length = object->size };
+    }
+    return bytes != NULL;
+}
 
 // The memory the units' lanes may hold at once (#1109), against which each unit, once preprocessed, takes an estimate of
 // its peak (check_units_admit): `limit`, what the process may still take when the run starts
@@ -116,6 +130,8 @@ struct CheckUnitsLane
     CheckUnitsMemory* memory;
     uint64_t held;
 };
+
+#include "c_driver_mixed.c"
 
 // What every lane of the units' run reads, and each unit's result, which the lane that takes it fills.
 typedef struct CheckUnitsRun CheckUnitsRun;
@@ -1770,7 +1786,11 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     unit->unbuffered = errors == NULL;
     unit->status = 1;
     unit->compiled = true;
-    if (errors != NULL && !check_units_lane_ready(lane, command))
+    if (errors != NULL && unit->kind == CHECK_DRIVER_INPUT_LINK)
+    {
+        unit->status = 0;
+    }
+    else if (errors != NULL && !check_units_lane_ready(lane, command))
     {
         fprintf(errors, "fatal error: can't reserve the lane's memory\n");
     }
@@ -1799,8 +1819,15 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         lane->memory = run->memory;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
-        unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
-                                         &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
+        if (unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY || unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
+        {
+            unit->status = check_driver_assembly(command, &options, unit, lane, errors);
+        }
+        else
+        {
+            unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
+                                             &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept);
+        }
         arena_small_floor = 0;
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
         if (command->helper_report != NULL)
@@ -1960,6 +1987,10 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
     }
     for (uint32_t u = 0; reserved && distinct && u < count; u += 1)
     {
+        if (units[u].kind == CHECK_DRIVER_INPUT_LINK)
+        {
+            continue;
+        }
         units[u].object = check_driver_object_name(arena, units[u].path);
         reserved = units[u].object != NULL;
         const uint64_t length = reserved ? strlen(units[u].object) : 0;
@@ -2013,6 +2044,7 @@ static void check_units_follow(CheckUnitsFlow* flow)
                 case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(argument); break;
                 case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(argument); break;
                 case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(argument); break;
+                case CHECK_UNITS_ROUND_FOREIGN: foreign_driver_flow(argument); break;
                 case CHECK_UNITS_ROUND_END: break;
             }
         }
@@ -2052,7 +2084,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
     uint64_t* keys = units != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count) : NULL;
     uint64_t* sorting = keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count) : NULL;
     uint32_t* order = sorting != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count) : NULL;
-    if (command->emit_object && command->output != NULL)
+    const uint32_t sources = command->inputs != NULL ? command->source_count : count;
+    if (command->emit_object && command->output != NULL && sources > 1)
     {
         fprintf(stderr, "error: cannot specify -o when generating multiple output files\n");
     }
@@ -2075,7 +2108,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             const uint64_t size = stat(inputs[u], &status) == 0 && status.st_size > 0 ? (uint64_t)status.st_size : 0;
             const uint32_t cost = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX - 1;
             units[u].path = inputs[u];
-            units[u].bytes = size;
+            units[u].kind = command->inputs != NULL ? command->inputs[u].kind : CHECK_DRIVER_INPUT_C;
+            units[u].bytes = units[u].kind != CHECK_DRIVER_INPUT_LINK ? size : 0;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }
         const uint64_t* sorted = c_bindings_sort(keys, sorting, count, !command->scalar, UINT32_MAX);
@@ -2083,7 +2117,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             order[i] = (uint32_t)sorted[i];
         }
-        const bool named = !command->emit_object || check_units_objects(units, count, &arena);
+        const bool named = !command->emit_object || command->output != NULL || check_units_objects(units, count, &arena);
         // The tables every unit's code reads, which the first to need them would build: built here, before the lanes,
         // which then only read them. The parser's are the front end's home's (main.c), which parse_initialize builds.
         // The parser starts zeroed: a refusal of the units' objects' names skips its initialization, and its release
@@ -2096,6 +2130,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         if (ready && emitting && !tier0_initialized)
         {
             ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
+        }
+        if (ready && command->mixed_inputs)
+        {
+            ready = x86_encoder_initialize() && x86_semantics_initialize();
         }
         if (ready && emitting && command->unwind_tables && !unwind_ready)
         {
@@ -2221,9 +2259,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 // The executable is written on as many lanes as the units' run took, each of its rounds (the merge, the
                 // link's check and the write) on those the worker budget gives of them.
                 CheckProgramLanes writers = { .lanes = active, .budget = lanes->budget, .units_flow = lanes->units_flow };
-                const bool linked = check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
-                                                            command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
-                                                            stage_clock, units, count, command->runtime_kind);
+                const bool linked = command->mixed_inputs ? check_driver_mixed_link(command, units, count, lanes) :
+                    check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
+                                            command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
+                                            stage_clock, units, count, command->runtime_kind);
                 result = linked ? 0 : 1;
             }
             for (uint32_t u = 0; result == 0 && u < count; u += 1)

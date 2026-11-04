@@ -13,7 +13,7 @@ requirements. [Command index](README.md).
   diagnostics as clang does, with exit status 0 for a unit without errors and
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
   Tier 0 ([the checker guide](../../docs/c-checker.md)); and with neither option it
-  links an executable (`-o`, `a.out` by default) by the direct path, bound
+  links an executable (`-o`, `a.out` by default), for pure-C inputs by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
   checking every function's records with `x86_validate`, `--check-transitions`
@@ -144,3 +144,44 @@ with the preprocessor. The [CC driver guide](../../docs/cc-driver.md) records
 the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
+
+## Mixed inputs
+
+The implicit compile/link driver classifies each positional input before opening
+it (#1120). `.c`, `.h` and `.i` are C; `.s` is assembly; `.S` is preprocessed
+assembly. `.o`, `.a`, `.so` and versioned `.so.*` are linker inputs. Other suffixes
+are also linker inputs, with a warning; the foreign reader diagnoses their
+actual format. `-x c`, `-x assembler` and `-x assembler-with-cpp` override the
+suffix for following inputs only; `-x none` restores suffix inference. Joined
+`-xLANG` works too. Stdin requires an explicit language at that operand.
+
+C-only commands retain the existing direct path. Mixed commands compile C and
+assembly on the unit scheduler's lanes, retain their ELF objects in memory,
+and use the built-in foreign resolver and writer with the discovered C runtime.
+No host compiler/linker or temporary object files are used. Input order, `-l`
+state, archive extraction, named sections, C DWARF and unwind records survive
+this boundary. Each `.S` unit owns its preprocessing state on its lane, including
+`-D`, `-U`, include paths and dependency output; it does not share the standalone
+assembler command's static preprocessor. Dependencies publish only after all
+units and the final link succeed. The foreign link reuses the command's worker
+session and leases its active lanes from the same worker budget.
+
+`-c` writes each C/assembly source's object and warns about unused linker inputs.
+An explicit `-o` requires at most one source, not at most one input. Assembly
+syntax checking does not write an object. The explicit `assemble` command keeps
+its standalone options; preprocessing-only commands retain their own driver.
+Existing unsupported C code-generation and linker options remain refusals.
+
+```sh
+./build/compiler main.c helper.o answer.s -o program
+./build/compiler main.o libhelper.a -o program
+./build/compiler -DBASE=40 main.c answer.S -o program
+./build/compiler -x c unusual.s -x none helper.o -o program
+./build/compiler -c main.c answer.s
+clang -std=c17 -O2 -Wall -Wextra -Wno-unused-function -DBUSTER_DRIVER_MIXED_STANDALONE src/buster/compiler/c_driver_mixed_test.c -o /tmp/buster-mixed-test && /tmp/buster-mixed-test ./build/compiler clang
+```
+
+The last command runs the focused original argv-level fixtures, also included
+in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
+shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
+`.S`, positional languages, stdin, compile-only output and failure preservation.
