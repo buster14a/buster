@@ -1148,6 +1148,23 @@ five rounds in turn on `sqlite3.c`, both giving the base's object:
 Every round of `lower` was below every base round; one round of the
 statements overlapped the base's.
 
+Four more of the operands' and the values' paths didn't pay on this
+session's Xeon, each in three alternating rounds against the base of one
+build, and weren't run on the 9700X:
+
+- **A branchless conversion push.** Writing an operand's `CONVERSION` task
+  whether or not it is needed, and advancing the depth by whether it is,
+  took the statements 0.8 to 1.0 ms higher: the next pop's load waits on a
+  store whose address the test decides late, where the branch was predicted.
+- **The operands' common push in a leaf of its own**, called by a copy of the
+  loop's expansion (`check_lower_operand` saves five registers on every
+  call; the leaf, three): 0.1 to 0.3 ms higher.
+- **A `VALUE`'s `LOCAL` and `GLOBAL` entries appended inline** rather than by
+  `check_lower_emit`'s call: 0.03 to 0.11 ms higher.
+- **The value's fields read from the stream where the expansion uses them**,
+  with no copy of the value: 0.3 to 0.7 ms higher. The copy's stores overlap
+  with the node's other work, where each field's second read costs a load.
+
 ## Each node's class and facts by node (#1048)
 
 The expansion's head finds its node's class and facts through its value's
