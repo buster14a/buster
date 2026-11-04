@@ -348,16 +348,17 @@ static uint32_t check_literal_table_classify(const uint8_t* bytes, uint32_t leng
         const uint64_t question = splices && trigraphs ? _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('?')) : 0;
         const uint64_t spliced = live & (backslash | question);
         result = spliced != 0 ? BUSTER_CHECK_LITERAL_TABLE_SPLICED : 0;
-        if (round && spliced == 0)
+        const __m512i lower = _mm512_or_si512(text, _mm512_set1_epi8(0x20));
+        const bool hexadecimal = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'x';
+        // A '.' or an exponent makes it a floating literal, which most long numbers of a table are: no digits to count.
+        const uint64_t floating = round && spliced == 0 ? live & (_mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('.')) |
+                                                                  _mm512_cmpeq_epi8_mask(lower, _mm512_set1_epi8(hexadecimal ? 'p' : 'e'))) : 0;
+        if (round && spliced == 0 && floating == 0)
         {
-            const __m512i lower = _mm512_or_si512(text, _mm512_set1_epi8(0x20));
-            const bool hexadecimal = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'x';
             const bool binary = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'b';
             const bool octal = !hexadecimal && !binary && length > 1 && bytes[0] == '0';
             const uint32_t first = hexadecimal || binary ? 2 : octal ? 1 : 0;
             const uint32_t limit = hexadecimal ? (width == 32 ? 6 : 13) : binary ? (width == 32 ? 24 : 53) : octal ? (width == 32 ? 8 : 17) : (width == 32 ? 7 : 15);
-            const uint64_t floating = live & (_mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('.')) |
-                                              _mm512_cmpeq_epi8_mask(lower, _mm512_set1_epi8(hexadecimal ? 'p' : 'e')));
             const uint64_t decimal = _mm512_cmple_epu8_mask(_mm512_sub_epi8(text, _mm512_set1_epi8('0')), _mm512_set1_epi8(9));
             const uint64_t letter = hexadecimal ? _mm512_cmple_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(5)) : 0;
             const uint64_t digit = live & (decimal | letter);
@@ -366,7 +367,7 @@ static uint32_t check_literal_table_classify(const uint8_t* bytes, uint32_t leng
             const uint64_t stops = from & ~(digit | separator);
             const uint64_t before = stops != 0 ? (stops & (0 - stops)) - 1 : UINT64_MAX;
             const uint32_t digits = (uint32_t)__builtin_popcountll(digit & from & before);
-            result = floating == 0 && digits > limit ? BUSTER_CHECK_LITERAL_TABLE_ROUND : 0;
+            result = digits > limit ? BUSTER_CHECK_LITERAL_TABLE_ROUND : 0;
         }
     }
     return result;
@@ -520,34 +521,41 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
 // double) is passed by its token's length alone, and a longer one is read in place (check_literal_table_element), with
 // nothing kept: the batches read the bytes again. The other late refusals (a range warning, an imaginary, bit-precise or
 // malformed constant) are code that warns or fails, and keep their cost.
-static bool check_literal_table_floating_integers(CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId element, uint32_t width,
-                                                  uint8_t* payload, uint64_t* converted)
+static bool check_literal_table_floating_integers(CheckInputReader* reader, CheckLiteralTableSource* source, uint32_t begin, uint32_t end, TypeId element,
+                                                  uint32_t width, uint8_t* payload, uint64_t* converted)
 {
     const uint8_t* kinds = reader->parser->tokens.kinds;
+    const uint32_t* sources = reader->parser->tokens.sources;
+    const PPTokens* output = &reader->pp->output;
     const uint32_t unit = width / 8;
-    CheckLiteralTableSource source = check_literal_table_span(reader, begin, end);
+    const uint32_t shortest = width == 32 ? 8 : 16;
     uint32_t index = 0;
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
     {
-        if (kinds[token] == PARSE_KIND_NUMBER)
+        const uint32_t at = sources[token];
+        // A number shorter as written than the shortest integer that may round (check_literal_table_element) passes by
+        // its length alone, without a call.
+        const bool short_number = kinds[token] == PARSE_KIND_NUMBER && output->kinds[at] == C_TOKEN_NUMERIC_CONSTANT &&
+                                  output->values[at] > output->locations[at] && output->values[at] - output->locations[at] < shortest;
+        if (kinds[token] == PARSE_KIND_NUMBER && !short_number)
         {
             const uint64_t mark = reader->scratch->length;
             uint32_t category = 0;
-            valid = check_literal_table_element(reader, &source, token, width, true, NULL, NULL, &category);
+            valid = check_literal_table_element(reader, source, token, width, true, NULL, NULL, &category);
             if (valid && category == BUSTER_CHECK_LITERAL_TABLE_ROUND)
             {
                 const uint8_t* spelling = NULL;
                 uint32_t length = 0;
                 uint64_t bits = 0;
-                valid = check_literal_table_element(reader, &source, token, width, false, &spelling, &length, &category) &&
+                valid = check_literal_table_element(reader, source, token, width, false, &spelling, &length, &category) &&
                         check_literal_table_floating_value(reader, spelling, length, kinds[token - 1] == PARSE_KIND_MINUS, element, &bits);
                 memcpy(payload + (uint64_t)index * unit, &bits, unit);
                 converted[index / 64] |= (uint64_t)valid << (index % 64);
             }
             arena_pop_to(reader->scratch, mark);
-            index += 1;
         }
+        index += kinds[token] == PARSE_KIND_NUMBER;
     }
     return valid;
 }
@@ -644,9 +652,11 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     {
         memset(converted, 0, (uint64_t)words * sizeof(uint64_t));
     }
-    bool valid = converted != NULL && check_literal_table_floating_integers(reader, begin, end, element, width, payload, converted);
+    CheckLiteralTableSource source = check_literal_table_span(reader, begin, end);
+    bool valid = converted != NULL && check_literal_table_floating_integers(reader, &source, begin, end, element, width, payload, converted);
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    CheckLiteralTableSource source = valid ? check_literal_table_span(reader, begin, end) : (CheckLiteralTableSource){ 0 };
+    const uint32_t* sources = reader->parser->tokens.sources;
+    const PPTokens* output = &reader->pp->output;
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH];
@@ -657,9 +667,17 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     {
         if (kinds[token] == PARSE_KIND_NUMBER)
         {
+            const uint32_t at = sources[token];
+            const uint32_t location = output->locations[at];
+            const uint32_t stop = output->values[at];
+            // In the clean span its bytes are its spelling (check_literal_table_element), without a call.
+            const bool spanned = output->kinds[at] == C_TOKEN_NUMERIC_CONSTANT && stop > location && source.clean_end != 0 &&
+                                 location >= source.clean_begin && stop <= source.clean_end;
             uint32_t category = 0;
             tokens[batch] = token;
-            valid = check_literal_table_element(reader, &source, token, width, false, &spellings[batch], &lengths[batch], &category);
+            spellings[batch] = spanned ? source.clean + (location - source.clean_begin) : NULL;
+            lengths[batch] = stop - location;
+            valid = spanned || check_literal_table_element(reader, &source, token, width, false, &spellings[batch], &lengths[batch], &category);
             batch += 1;
             if (valid && (batch == BUSTER_CHECK_LITERAL_TABLE_BATCH || written + batch == count))
             {
