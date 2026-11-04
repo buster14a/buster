@@ -199,6 +199,10 @@ struct Tier1EmitResult
     uint32_t symbol_access_count;
     uint32_t call_stores;
     uint32_t call_loads;
+    // The CFG consumer's machine rows (#141, tier1_emit_cfg_row), and the moves it wrote around them into their roles'
+    // registers and out of them (#1283): their operands' and their results'.
+    uint32_t machine_rows;
+    uint32_t row_moves;
     uint64_t retained_bytes;
     uint64_t transition_scratch_bytes;
     // A function the straight-line consumer doesn't take goes through tier1_emit_cfg.c, which leaves `liveness` and

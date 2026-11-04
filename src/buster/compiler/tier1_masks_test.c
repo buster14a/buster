@@ -101,6 +101,12 @@ struct Tier1MasksFixture
     bool vector_cycle;
     // A machine row short of free opmask registers (#141), which borrows live masks' and reloads them after it.
     bool borrows;
+    // Its machine rows and the moves around them into their roles' registers and out of them (#1283,
+    // Tier1EmitResult.row_moves), by the vector path and by the scalar one (whose allocators assign registers
+    // differently; a host without the vector path runs the scalar one for both), with and without rematerialization:
+    // checked where `rows` isn't 0.
+    uint32_t rows;
+    uint32_t row_moves[2];
     // The buffer after a run, from the input and the count, where the interpreter can't run the fixture: a machine row's
     // (#141), which it has no model of. Null for the interpreter's.
     void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
@@ -168,6 +174,50 @@ static void tier1_masks_test_floating_model(const uint8_t* input, uint64_t count
     memcpy(&b, input + 4, 4);
     const uint32_t sum = a + b;
     memcpy(output + 128, &sum, 4);
+}
+
+// The vector rows' buffer (#1283), of a and b, 16 doublewords at 0 and 64, and k, the word at 0: at 128, w ^ z ^ m, where
+// s = a + b, t = s ^ a ^ b, m = a + t where k has a bit and a elsewhere, n = (b + b)'s low 4 doublewords, w = n + n in its
+// low 4 and 0 past them, z = n's 16 bytes zero-extended; at 192, the bytes of lo (at 0) where c's (at 64) top bit is
+// clear and of hi (at 32) where it is set; n at 224 and m's first doubleword doubled at 240.
+static void tier1_masks_test_vector_rows_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint32_t a[16];
+    uint32_t b[16];
+    uint16_t k = 0;
+    memcpy(a, input, sizeof(a));
+    memcpy(b, input + 64, sizeof(b));
+    memcpy(&k, input, sizeof(k));
+    uint32_t m[16];
+    uint32_t n[4];
+    uint32_t f[16];
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t sum = a[i] + b[i];
+        const uint32_t t = sum ^ a[i] ^ b[i];
+        m[i] = ((k >> i) & 1) != 0 ? a[i] + t : a[i];
+    }
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        n[i] = b[i] + b[i];
+    }
+    uint8_t bytes[16];
+    memcpy(bytes, n, sizeof(bytes));
+    for (uint32_t i = 0; i < 16; i += 1)
+    {
+        const uint32_t w = i < 4 ? n[i] + n[i] : 0;
+        f[i] = w ^ (uint32_t)bytes[i] ^ m[i];
+    }
+    memcpy(output + 128, f, sizeof(f));
+    for (uint32_t i = 0; i < 32; i += 1)
+    {
+        output[192 + i] = (input[64 + i] & 0x80) != 0 ? input[32 + i] : input[i];
+    }
+    memcpy(output + 224, n, sizeof(n));
+    const uint32_t doubled = m[0] + m[0];
+    memcpy(output + 240, &doubled, sizeof(doubled));
 }
 
 static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
@@ -992,6 +1042,60 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "}\n",
         .model = tier1_masks_test_floating_model,
     },
+    {
+        // #1283: vector rows placed one role at a time: a two-operand form's (its first operand read in its own register
+        // up to the result's first write, which the destination takes), a tied operand's (copied into the destination),
+        // a merging opmask's, an operand written and dying at the node (kept in its own register) under an integer
+        // result, a VEX form's /is4 blend in the run below xmm16, a narrow result written at a wider width (moved at its
+        // width), a narrow operand read at a wider one (copied at its width) and a widening conversion's pure write.
+        .name = "vector machine rows",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
+                "  row #1 (vector64, vector64, vector64) -> vector64 [VPTERNLOGD_Z_Z_ZM512_IMM8 0x80 0x81 0x82 0x00 0x00 0x00 150 0]\n"
+                "  row #2 (vector64) -> u32 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0] [VMOVD_RM32_X_EVEX 0x80 0x00 0x90 0x00 0x00 0x00 0 0]\n"
+                "  row #3 (vector32, vector32, vector32) -> vector32 [VPBLENDVB_Y_Y_YM256_Y 0x80 0x80 0x81 0x00 0x00 0x00 32 0]\n"
+                "  row #4 (vector64, vector64, mask2) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]\n"
+                "  row #5 (vector64) -> vector16 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
+                "  row #6 (vector16) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
+                "  row #7 (vector16) -> vector64 [VPMOVZXBD_Z_XM128 0x80 0x00 0x80 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v16i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = load.m16 %0 align=2\n"
+                "  %5 = call.v16i32 row #0(%1, %3) fixed=(v16i32, v16i32) variadic=0\n"
+                "  %6 = call.v16i32 row #1(%5, %1, %3) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
+                "  %7 = call.v16i32 row #4(%1, %6, %4) fixed=(v16i32, v16i32, m16) variadic=0\n"
+                "  %8 = call.v4i32 row #5(%3) fixed=(v16i32) variadic=0\n"
+                "  %9 = call.v16i32 row #6(%8) fixed=(v4i32) variadic=0\n"
+                "  %10 = call.v16i32 row #7(%8) fixed=(v4i32) variadic=0\n"
+                "  %11 = call.v16i32 row #1(%9, %10, %7) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
+                "  %12 = call.i32 row #2(%7) fixed=(v16i32) variadic=0\n"
+                "  %13 = address.ptr %0 offset=128\n"
+                "  %14 = store.void %13, %11 align=1\n"
+                "  %15 = load.v8i32 %0 align=1\n"
+                "  %16 = address.ptr %0 offset=32\n"
+                "  %17 = load.v8i32 %16 align=1\n"
+                "  %18 = load.v8i32 %2 align=1\n"
+                "  %19 = call.v8i32 row #3(%15, %17, %18) fixed=(v8i32, v8i32, v8i32) variadic=0\n"
+                "  %20 = address.ptr %0 offset=192\n"
+                "  %21 = store.void %20, %19 align=1\n"
+                "  %22 = address.ptr %0 offset=224\n"
+                "  %23 = store.void %22, %8 align=1\n"
+                "  %24 = address.ptr %0 offset=240\n"
+                "  %25 = store.void %24, %12 align=4\n"
+                "  %26 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_vector_rows_model,
+        // Tier 0's placement moved 25: each vector operand in (17) and each vector result out (8). What is left, by
+        // the vector path's allocation: the merging opmask's first operand in and the result out (its destination is
+        // the second operand's register), the narrow result's move into itself at its width, the narrow operand's
+        // copy at its width, and the tied operand's in and out (its destination is the second's); by the scalar
+        // path's, the narrow result's and the narrow operand's alone.
+        .rows = 9,
+        .row_moves = { 6, 2 },
+    },
 };
 
 // Refusals: a vector, a mask's select.
@@ -1289,6 +1393,12 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_expect(test, !fixture->spills || (emitted.spill_stores != 0 && emitted.spill_loads != 0), "masks past k1 to k7 are spilled and reloaded");
         tier1_masks_test_expect(test, !fixture->calls || (emitted.call_stores != 0 && emitted.call_loads != 0), "masks live across a call are saved and reloaded");
         tier1_masks_test_expect(test, !fixture->borrows || (emitted.call_stores != 0 && emitted.call_loads != 0), "a machine row short of opmask registers borrows live masks' and reloads them");
+        // A host without the vector path runs the scalar one for both (BUSTER_HOST_VECTOR), and allocates as it does.
+        const uint32_t row_moves = fixture->row_moves[vector && BUSTER_HOST_VECTOR ? 0 : 1];
+        if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
+        {
+            printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
+        }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
         uint32_t frame_accesses = 0;
