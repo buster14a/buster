@@ -1067,7 +1067,8 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
 // is planned alone, since this emitter refuses calls (tier1_select_test_call_barriers runs them through the native
 // one); a fence (#1059), a thread fence of seq_cst's mfence or a signal fence's no record, keeps the load's own record
 // before it. An atomic load and an atomic read/modify/write are barriers too, and an atomic load folds into nothing
-// itself (#1059).
+// itself (#1059). Nor does a load fold past another load (#1059's audit): the IR doesn't know whether an unflagged one is
+// a volatile object's, whose reads keep their order.
 typedef struct Tier1SelectTestBarrier Tier1SelectTestBarrier;
 struct Tier1SelectTestBarrier
 {
@@ -1089,7 +1090,7 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
 {
     { "adjacent", { IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 5 }, { 1, N, 4, N }, { 0, N, N, N }, 4, 4, 5, true },
     { "past arithmetic", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, true },
-    { "past a load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, true },
+    { "not past another load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, false },
     { "past a constant and its immediate", { IR_ADDRESS, IR_LOAD, IR_CONST, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 2, 6, 7 }, { 1, N, N, 5, 4, N }, { 0, N, N, N, N, N }, 6, 4, 7, true },
     { "a commutative consumer's left operand", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_XOR, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 4, 6 }, { 1, N, 1, 5, N }, { 0, N, N, N, N }, 5, 4, 6, true },
     { "after a store before the load", { IR_ADDRESS, IR_STORE, IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_VOID, IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 5, 2, 7, 8 }, { N, 2, 1, N, 1, 6, N }, { 2, N, 0, N, N, N, N }, 7, 6, 8, true },
@@ -1114,7 +1115,7 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
 
 // tier1_select_barriers against its scalar twin and an oracle (each node's last barrier before it, by a scan back), on
 // random kinds and flags (stores, calls, indirect calls, allocations, restores of the stack, fences, atomic
-// read/modify/writes, loads volatile, atomic or neither, other nodes, and flag bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
+// read/modify/writes, loads volatile, atomic or neither, each a barrier, other nodes, and flag bits besides theirs) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
 // page, the entries' page poisoned before them.
 static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
 {
@@ -1154,7 +1155,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             uint32_t before = node;
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
-                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || (ops[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_OBSERVABLE) != 0)))
+                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || ops[before - 1] == IR_LOAD))
             {
                 before -= 1;
             }

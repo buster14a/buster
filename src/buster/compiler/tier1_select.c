@@ -1806,9 +1806,18 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
     // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
-    // an atomic read/modify/write.
+    // an atomic read/modify/write. These are the nodes with an effect, which the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
            (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+}
+
+// Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
+// doesn't carry a C access's volatility, so that an IR load without BUSTER_IR_VOLATILE may still be a volatile object's,
+// and two volatile reads must keep their order. A load still folds into its own consumer (tier1_select_load_folds:
+// the last of these before the consumer the load itself), but past no other load.
+static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
+{
+    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD;
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -1820,11 +1829,11 @@ static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t co
     for (uint32_t node = 0; node < count; node += 1)
     {
         barriers[node] = barrier;
-        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
+        barrier = tier1_select_fold_barrier(function, node) ? node + 1 : barrier;
     }
 }
 
-// The same, 16 nodes at a time: their kinds and flags compared at once, each barrier's lane its position plus one, the
+// The same, 16 nodes at a time: their kinds compared at once, each barrier's lane its position plus one, the
 // running maximum by four shifts of the lanes and the vectors' before, and each node's entry its lane before's. The
 // columns are read, and the entries written, with masked loads and stores.
 static void tier1_select_barriers(const IrFunction* function, uint32_t count, uint32_t* barriers)
@@ -1837,12 +1846,10 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
         const uint32_t left = count - first;
         const __mmask16 active = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
         const __m512i op = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->op + first));
-        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
-        const __mmask16 observable_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_OBSERVABLE));
         const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | observable_load) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -2438,12 +2445,14 @@ static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t pa
     return value != BUSTER_IR_NONE && value < parent && forest->uses[value] == 1 && forest->blocks[value] == forest->blocks[parent];
 }
 
-// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory,
-// call nor access a volatile object (no barrier between them), and itself not volatile.
+// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory, call,
+// fence nor load (no barrier between them: the last before the consumer the load itself, a barrier of its own), and itself
+// neither volatile nor atomic.
 static inline __attribute__((always_inline)) bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
 {
     const IrFunction* function = forest->function;
-    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load;
+    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) &&
+           forest->barriers[consumer] <= load + 1;
 }
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)

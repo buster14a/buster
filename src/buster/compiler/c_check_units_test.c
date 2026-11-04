@@ -42,9 +42,12 @@
 //   symbols, by the same commands into the same bytes, a program in which the pointer holds its addend.
 // - A few large units (#777): big.c, of BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS functions, a table of them and their
 //   sum, beside small.c's main, which checks the sum against the test's own: with -c by --lanes 8 and --shared-parts
-//   (its emission pauses after each part it takes itself), each object its own alone, and the six lanes that take no
-//   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
-//   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
+//   (its emission pauses after each part it takes itself), each object its own alone, the six lanes that take no unit
+//   take parts of big.c's functions, and one lane alone, the last to stop taking units, leaves its memory to the exit,
+//   by the command's report; again without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where
+//   no lane takes parts and still one lane alone leaves its memory; linked by --lanes 1, by 8 and by the scalar path on
+//   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so and no lane's memory left
+//   to the exit.
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -1015,13 +1018,13 @@ static void check_units_test_merge(CheckUnitsTestTally* tally, const char* execu
     printf("  merge: duplicates and a wide addend by %u commands, the twin's\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
 }
 
-// A few large units (see the file's comment), in a directory of its own under `directory`: the shared parts' count from
-// the command's report, or 0 without one.
-static uint64_t check_units_test_shared_count(const char* errors)
+// A few large units (see the file's comment), in a directory of its own under `directory`: the count that the command's
+// --shared-parts report gives after `prefix` (the shared parts', or the lanes' that left their memory to the exit), or
+// `missing` without one.
+static uint64_t check_units_test_shared_count(const char* errors, const char* prefix, uint64_t missing)
 {
-    static const char prefix[] = "shared parts: ";
     const char* line = errors != NULL ? strstr(errors, prefix) : NULL;
-    return line != NULL ? strtoull(line + strlen(prefix), NULL, 10) : 0;
+    return line != NULL ? strtoull(line + strlen(prefix), NULL, 10) : missing;
 }
 
 static void check_units_test_shared(CheckUnitsTestTally* tally, const char* executable, const char* directory)
@@ -1074,23 +1077,44 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
     const bool alone = written && check_units_test_run(shared_directory, alone_big, "/dev/null", errors_path, false) == 0 &&
                        check_units_test_run(shared_directory, alone_small, "/dev/null", errors_path, false) == 0;
     check_units_test_expect(tally, alone, "each of the few large units writes its object alone", shared_directory);
-    // Both at once with -c by 8 lanes, six of which take no unit: their objects their own alone, and the large one's
-    // functions' parts taken by those lanes too.
-    char* together[] = { (char*)executable, "-c", "--lanes", "8", "--shared-parts", "big.c", "small.c", NULL };
-    const int status = alone ? check_units_test_run(shared_directory, together, "/dev/null", errors_path, false) : -1;
-    uint64_t length = 0;
-    char* text = check_units_test_read(errors_path, &length);
-    const uint64_t taken = check_units_test_shared_count(text);
-    free(text);
-    check_units_test_expect(tally, status == 0 && taken != 0, "-c of the few large units by 8 lanes: the lanes without units take the large one's parts",
-                            shared_directory);
+    // Both at once with -c by 8 lanes, six of which take no unit: their objects their own alone, the large one's
+    // functions' parts taken by those lanes too, and the lane that stops taking units last alone leaving its memory to
+    // the exit. Then without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed): no part shared, and
+    // still the last lane alone leaving its memory, the others releasing theirs.
+    static const char* const runs[] = { "with the board", "without the board" };
     const char* const objects[][2] = { { "big.o", "alone_big.o" }, { "small.o", "alone_small.o" } };
-    for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+    uint64_t length = 0;
+    char* text = NULL;
+    uint64_t taken = 0;
+    for (uint32_t b = 0; alone && b < BUSTER_ARRAY_LENGTH(runs); b += 1)
     {
-        char first[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
-        snprintf(first, sizeof(first), "%s/%s", shared_directory, objects[o][1]);
-        check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by 8 lanes: each object its own alone", objects[o][0]);
+        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+        {
+            snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
+            unlink(path);
+        }
+        const bool boardless = b == 1;
+        char* together[] = { (char*)executable, "-c", "--lanes", "8", "--shared-parts", "big.c", "small.c", NULL };
+        const bool hooked = !boardless || setenv("BUSTER_TEST_NO_UNITS_BOARD", "1", 1) == 0;
+        const int status = hooked ? check_units_test_run(shared_directory, together, "/dev/null", errors_path, false) : -1;
+        unsetenv("BUSTER_TEST_NO_UNITS_BOARD");
+        text = check_units_test_read(errors_path, &length);
+        const uint64_t shared = check_units_test_shared_count(text, "shared parts: ", 0);
+        const uint64_t kept = check_units_test_shared_count(text, "units' lanes: ", UINT64_MAX);
+        free(text);
+        taken = boardless ? taken : shared;
+        check_units_test_expect(tally, status == 0 && (boardless ? shared == 0 : shared != 0),
+                                "-c of the few large units by 8 lanes: the lanes without units take the large one's parts with the board, none without it", runs[b]);
+        check_units_test_expect(tally, status != 0 || kept == 1, "-c of the few large units by 8 lanes: the last lane alone leaves its memory to the exit", runs[b]);
+        for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+        {
+            char first[PATH_MAX];
+            char detail[64];
+            snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
+            snprintf(first, sizeof(first), "%s/%s", shared_directory, objects[o][1]);
+            snprintf(detail, sizeof(detail), "%s, %s", objects[o][0], runs[b]);
+            check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by 8 lanes: each object its own alone", detail);
+        }
     }
     // Linked by one lane (no board), by 8 and by the scalar path on 8: the same bytes, which run.
     static const char* const options[][5] = {
@@ -1116,7 +1140,8 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
         arguments[used] = NULL;
         const int linked = check_units_test_run(shared_directory, arguments, "/dev/null", errors_path, false);
         text = check_units_test_read(errors_path, &length);
-        const uint64_t link_taken = check_units_test_shared_count(text);
+        const uint64_t link_taken = check_units_test_shared_count(text, "shared parts: ", 0);
+        const uint64_t link_kept = check_units_test_shared_count(text, "units' lanes: ", UINT64_MAX);
         free(text);
         char run[48];
         snprintf(run, sizeof(run), "./%s", output);
@@ -1126,13 +1151,16 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
         snprintf(detail, sizeof(detail), "linked into %s", output);
         check_units_test_expect(tally, linked == 0 && ran == 0 && (o == 0 || link_taken != 0),
                                 "the few large units linked: the program's sum, and on 8 lanes the lanes without units take parts", detail);
+        check_units_test_expect(tally, linked != 0 || o == 0 || link_kept == 0, "the few large units linked: every lane releases its memory before the link", detail);
         char first[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", shared_directory, output);
         snprintf(first, sizeof(first), "%s/shared_0", shared_directory);
         check_units_test_expect(tally, o == 0 || check_test_driver_same_files(path, first), "the few large units linked: the same bytes by every lane count and path",
                                 detail);
     }
-    printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's\n", (unsigned long long)taken);
+    printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's; with -c the last lane alone "
+           "leaves its memory to the exit, with the board and without it, and none before a link\n",
+           (unsigned long long)taken);
 }
 
 // The most runs check_units_test_limits makes, past which its sweep has gone wrong.
