@@ -1930,7 +1930,9 @@ static void check_control_children(CheckControlWriter* writer, uint32_t opening,
         writer->last[inside ? parent : sink] = token;
         const uint8_t role = roles[token];
         uint32_t label = BUSTER_CHECK_NONE;
-        if (token != opening && token != closing && (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE))
+        // A label or a case is rare among the tokens, and its test comes first, hinted (#1175): the loop's back edge takes
+        // the jump the test took, but the iteration runs fewer instructions.
+        if (__builtin_expect(role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE, 0) && token != opening && token != closing)
         {
             label = check_control_label(writer);
         }
@@ -2777,7 +2779,9 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
             {
                 const uint32_t operand = operands[k];
-                const CheckOverloadResult* selected = operand != BUSTER_CHECK_NONE ? check_program_overload_address(program, node, k) : NULL;
+                // A C unit has no overloads, so no operand's address takes one (#1175).
+                const CheckOverloadResult* selected = __builtin_expect(program->stream->overload_address_count != 0, 0) && operand != BUSTER_CHECK_NONE ?
+                                                      check_program_overload_address(program, node, k) : NULL;
                 if (selected != NULL)
                 {
                     if (!check_program_overload_valid(program, selected))
