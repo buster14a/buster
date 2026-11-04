@@ -66,6 +66,18 @@ struct BuiltinIntrinsicTypeInput
     TypeId va_list_type;
     bool custom_typechecking;
     bool strict_prototypes;
+    // A library builtin of __fp16 (#148, c_builtin_library.c's cbuiltin_library_half): its function type takes and returns
+    // _Float16 where the prototype has __fp16, which no function type may, and the caller gives the call's arguments and
+    // result __fp16 (result_type and parameters keep it).
+    bool half_prototypes;
+    // The unit's FILE, which clang's prototype code P names (the FILE builtins: fprintf and its kin, #148): the type of
+    // the last file-scope typedef named FILE before the call, as clang's ASTContext keeps it (setFILEDecl), or 0 where
+    // the unit has none, which leaves P unsupported, as clang refuses the builtin ("use of unknown builtin"). jmp_buf,
+    // sigjmp_buf and ucontext_t, which J, SJ and K name (setjmp and its kin, getcontext), are the unit's alike.
+    TypeId file_type;
+    TypeId jmp_buf_type;
+    TypeId sigjmp_buf_type;
+    TypeId ucontext_type;
 };
 
 typedef struct BuiltinIntrinsicTypeResult BuiltinIntrinsicTypeResult;
@@ -283,7 +295,25 @@ static TypeId builtin_intrinsic_type_scalar(BuiltinIntrinsicTypeReader* reader, 
             }
         }
     }
-    else if (code == 'F' || code == 'G' || code == 'H' || code == 'M' || code == 'P' || code == 'J' || code == 'K' || code == 'p')
+    else if (code == 'P' && reader->input->file_type != 0)
+    {
+        modifiers = plain;
+        type = reader->input->file_type;
+    }
+    else if ((code == 'J' && (prefix.sign == 'S' ? reader->input->sigjmp_buf_type : reader->input->jmp_buf_type) != 0) ||
+             (code == 'K' && reader->input->ucontext_type != 0))
+    {
+        // SJ is sigjmp_buf, as clang's signed prefix on J reads.
+        modifiers = prefix.longs == 0 && prefix.special == 0 && (prefix.sign == 0 || (code == 'J' && prefix.sign == 'S'));
+        type = code == 'K' ? reader->input->ucontext_type : prefix.sign == 'S' ? reader->input->sigjmp_buf_type : reader->input->jmp_buf_type;
+    }
+    else if (code == 'p')
+    {
+        // pid_t, clang's process ID type, which x86-64 Linux's is int.
+        modifiers = plain;
+        type = BUSTER_TYPE_INT;
+    }
+    else if (code == 'F' || code == 'G' || code == 'H' || code == 'M' || code == 'P' || code == 'J' || code == 'K')
     {
         builtin_intrinsic_type_fail(reader, BUILTIN_INTRINSIC_TYPES_UNSUPPORTED, BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT, offset);
     }
@@ -491,11 +521,13 @@ static __attribute__((unused)) void builtin_intrinsic_types_decode(TypeTable* ta
                 {
                     result->prototype = input->strict_prototypes || result->parameter_count != 0 || !result->variadic;
                     bool model = type_unqualified(result->result_type) == BUSTER_TYPE_HALF;
+                    TypeId twins[BUSTER_INTRINSIC_TYPE_MAX_PARAMETERS];
                     for (uint32_t i = 0; i < result->parameter_count; i += 1)
                     {
                         model = model || result->parameters[i] == BUSTER_TYPE_HALF;
+                        twins[i] = result->parameters[i] == BUSTER_TYPE_HALF ? BUSTER_TYPE_FLOAT16 : result->parameters[i];
                     }
-                    if (model)
+                    if (model && !input->half_prototypes)
                     {
                         builtin_intrinsic_type_fail(&reader, BUILTIN_INTRINSIC_TYPES_UNSUPPORTED, BUSTER_INTRINSIC_TYPE_UNSUPPORTED_MODEL, 0);
                     }
@@ -503,7 +535,8 @@ static __attribute__((unused)) void builtin_intrinsic_types_decode(TypeTable* ta
                     {
                         const uint8_t flags = (result->prototype ? BUSTER_TYPE_FLAG_PROTOTYPE : 0) |
                                               (result->prototype && result->variadic ? BUSTER_TYPE_FLAG_VARIADIC : 0);
-                        result->function_type = builtin_intrinsic_type_factory(&reader, type_function(table, result->result_type, result->parameters, result->parameter_count, flags), 0);
+                        const TypeId returned = type_unqualified(result->result_type) == BUSTER_TYPE_HALF ? BUSTER_TYPE_FLOAT16 : result->result_type;
+                        result->function_type = builtin_intrinsic_type_factory(&reader, type_function(table, returned, twins, result->parameter_count, flags), 0);
                     }
                 }
             }

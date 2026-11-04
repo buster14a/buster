@@ -130,6 +130,26 @@ struct CheckValue
     uint32_t object_bit_offset;
 };
 
+_Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, object) == 64, "check_value_copy copies a value as its first 64 bytes and its last 32");
+
+// `source` copied whole into `destination` as two halves, its first 64 bytes and its last 32, by one load and one store
+// each on the vector path. A value the hot path copies (an action's operands, check_stream_value_to's) is written this way
+// and read back this way, so that every load takes its data from one store: Zen 5's code copies 96 bytes by two
+// overlapping 64-byte loads, of which the second spans both halves' stores, which no store can forward (#1050). The scalar
+// path is the assignment.
+// Always inlined (#880), as profile-guided builds do; hot callers: check_stream_value_to and check_action_operand_value.
+static inline __attribute__((always_inline)) void check_value_copy(CheckValue* destination, const CheckValue* source)
+{
+#if BUSTER_HOST_VECTOR
+    uint8_t* bytes = (uint8_t*)destination;
+    const uint8_t* from = (const uint8_t*)source;
+    _mm512_storeu_si512(bytes, _mm512_loadu_si512(from));
+    _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_loadu_si256((const __m256i*)(from + 64)));
+#else
+    *destination = *source;
+#endif
+}
+
 // A value's two x87 payloads as their ten meaningful bytes, the significand and the sign and exponent, copied as
 // integer storage: an x87 load and store of one is microcoded, and the six pad bytes needn't be read (#879). The
 // helper zeroes the destination's pad bytes itself, so its padding is deterministic whatever its caller left there.
@@ -927,11 +947,14 @@ static void check_action_conversion(const TypeTable* table, CheckValue* value, T
 
 #include "c_check_const_values.c"
 
+// check_action_operand of `operand`, as operand `index` of `action`, whose context and guards alone the conversion reads of
+// it: a call's argument takes its call's (check_action_call), with no action of its own to copy the argument into (#1050).
 // An operand's decays and its lvalue's exceptions (an incomplete, a volatile or an atomic one, or one the constant
 // evaluation reads) are rare, and the hints say so (#1175).
-static CheckValue check_action_operand(TypeTable* table, const CheckAction* action, CheckActionResult* result, uint32_t index)
+static CheckValue check_action_operand_value(TypeTable* table, const CheckAction* action, const CheckValue* operand, CheckActionResult* result, uint32_t index)
 {
-    CheckValue value = action->operands[index];
+    CheckValue value;
+    check_value_copy(&value, operand);
     CheckConversion* conversion = &result->conversions[index];
     conversion->type = value.type;
     const TypeId plain = type_strip_aligned(table, value.type);
@@ -1014,6 +1037,11 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         conversion->flags |= BUSTER_CHECK_CONVERT_LVALUE;
     }
     return value;
+}
+
+static CheckValue check_action_operand(TypeTable* table, const CheckAction* action, CheckActionResult* result, uint32_t index)
+{
+    return check_action_operand_value(table, action, &action->operands[index], result, index);
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_action_arithmetic.
@@ -2484,20 +2512,15 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
         }
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
-            CheckAction argument = { 0 };
-            argument.operands[0] = action->arguments[i];
-            argument.node = action->node;
-            argument.context = action->context;
-            argument.guards = action->guards;
             CheckActionResult converted = { 0 };
-            if (!type_is_valid(table, argument.operands[0].type))
+            if (!type_is_valid(table, action->arguments[i].type))
             {
                 check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, i + 1);
                 action->argument_conversions[i] = (CheckConversion){ 0 };
             }
             else
             {
-                CheckValue value = check_action_operand(table, &argument, &converted, 0);
+                CheckValue value = check_action_operand_value(table, action, &action->arguments[i], &converted, 0);
                 const bool parameter = (prototype || kr) && i < count;
                 if (!parameter)
                 {
@@ -2661,6 +2684,18 @@ static void check_action_fp_environment(const TypeTable* table, const CheckActio
     }
 }
 
+// Whether an action's operands hold a pointer, an array, a function or nullptr: pointer arithmetic or a pointer comparison
+// rather than arithmetic. check_action_compute asks it in those operators' cases alone, so that the others, most of the
+// checker's nodes, look no operand's kind up for it (#1050).
+// Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
+static inline __attribute__((always_inline)) bool check_action_pointer_pair(const TypeTable* table, const CheckAction* action, uint32_t count)
+{
+    const uint8_t left_kind = count != 0 ? check_action_kind(table, action->operands[0].type) : BUSTER_TYPE_KIND_NONE;
+    const uint8_t right_kind = count >= 2 ? check_action_kind(table, action->operands[1].type) : BUSTER_TYPE_KIND_NONE;
+    return left_kind == BUSTER_TYPE_KIND_POINTER || right_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(left_kind) || type_kind_is_array(right_kind) ||
+           left_kind == BUSTER_TYPE_KIND_FUNCTION || right_kind == BUSTER_TYPE_KIND_FUNCTION || left_kind == BUSTER_TYPE_KIND_NULLPTR || right_kind == BUSTER_TYPE_KIND_NULLPTR;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_node_action, once per action. Its checks of
 // the operands are for errors, and say so (#1175): without it, clang jumped around each check's report.
 static inline __attribute__((always_inline)) void check_action_compute(TypeTable* table, const CheckAction* action, CheckActionResult* result, TypeId common_hint, CheckIntegerFold* pending)
@@ -2700,9 +2735,6 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
     }
     if (result->diagnostic == CHECK_DIAG_NONE && !check_vector_action(table, action, result))
     {
-        const uint8_t left_kind = count != 0 ? check_action_kind(table, action->operands[0].type) : BUSTER_TYPE_KIND_NONE;
-        const uint8_t right_kind = count >= 2 ? check_action_kind(table, action->operands[1].type) : BUSTER_TYPE_KIND_NONE;
-        const bool pointer_pair = left_kind == BUSTER_TYPE_KIND_POINTER || right_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(left_kind) || type_kind_is_array(right_kind) || left_kind == BUSTER_TYPE_KIND_FUNCTION || right_kind == BUSTER_TYPE_KIND_FUNCTION || left_kind == BUSTER_TYPE_KIND_NULLPTR || right_kind == BUSTER_TYPE_KIND_NULLPTR;
         switch (action->op)
         {
             case CHECK_OP_VALUE:
@@ -2733,7 +2765,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_BIT_XOR: check_action_arithmetic(table, action, result, common_hint, pending); break;
             case CHECK_OP_BIT_NOT:
             {
-                if (left_kind == BUSTER_TYPE_KIND_COMPLEX)
+                if (check_action_kind(table, action->operands[0].type) == BUSTER_TYPE_KIND_COMPLEX)
                 {
                     check_complex_conjugate(table, action, result);
                 }
@@ -2747,7 +2779,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_ADD:
             case CHECK_OP_SUBTRACT:
             {
-                if (pointer_pair)
+                if (check_action_pointer_pair(table, action, count))
                 {
                     check_action_pointer_arithmetic(table, action, result);
                 }
@@ -2763,7 +2795,7 @@ static inline __attribute__((always_inline)) void check_action_compute(TypeTable
             case CHECK_OP_EQUAL:
             case CHECK_OP_NOT_EQUAL:
             {
-                if (pointer_pair)
+                if (check_action_pointer_pair(table, action, count))
                 {
                     check_action_pointer_compare(table, action, result);
                 }
@@ -2890,10 +2922,17 @@ static void check_action_scalar(TypeTable* table, const CheckAction* action, Che
     check_action_compute(table, action, result, 0, NULL);
 }
 
+// The operators whose integer folds a batch takes 8 lanes at a time (check_action_fold_vector).
+static bool check_action_fold_operator(CheckOp op)
+{
+    return op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT ||
+           (op >= CHECK_OP_SHIFT_LEFT && op <= CHECK_OP_BIT_XOR);
+}
+
 static bool check_action_vector_eligible(const TypeTable* table, const CheckAction* action)
 {
     const CheckOp op = action->op;
-    bool result = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || (op >= CHECK_OP_SHIFT_LEFT && op <= CHECK_OP_BIT_XOR);
+    bool result = check_action_fold_operator(op);
     const uint32_t count = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT ? 1 : 2;
     for (uint32_t i = 0; i < count && result; i += 1)
     {

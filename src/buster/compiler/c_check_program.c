@@ -138,6 +138,15 @@ struct CheckProgramOptions
     // The blocks' objects' lifetimes (#177, c_check_program_lifetime.c): CHECK_CONTROL_LIFETIME entries, which the
     // lowering turns into its functions' lifetime events, for Tier 1's frame (the C driver's --tier1).
     bool lifetimes;
+    // Every asm statement with instructions keeps its helper, none placed in its caller (#1059, check_asm_row): for a
+    // lowering Tier 1's IR takes (the C driver's --tier1, the IR's source tools), which has no operation for a placed
+    // statement's row and calls its helper as any function's.
+    bool asm_helpers;
+    // The helper families (a bit each, CheckProgramHelperFamily's) whose every operation takes its helper where it has a
+    // direct form (#1059's paired measurements: the C driver's --helper-forms, measure-helpers): the fences', the atomic
+    // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
+    // implicit _Atomic object's accesses have no helper to take, and stay the typed stream's.
+    uint32_t helper_forms;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -286,8 +295,10 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands and target.
+    // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms and target.
     bool unselected_operands;
+    bool asm_helpers;
+    uint32_t helper_forms;
     X86Target target;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
@@ -987,7 +998,7 @@ static bool check_control_static(const CheckControlWriter* writer, uint32_t node
     }
     const uint32_t declaration = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE && check_program_bit(writer->initialized, cursor) ?
                                  writer->initializers[cursor] : BUSTER_CHECK_NONE;
-    return declaration != BUSTER_CHECK_NONE && input->static_objects[declaration];
+    return declaration != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
 }
 
 // The STACK_RESTORE that a jump at `jump` needs before it, when it leaves blocks with variable-length arrays: of the
@@ -1136,10 +1147,10 @@ static bool check_control_named(const CheckControlWriter* writer, uint32_t jump)
     const uint8_t result_kind = result != 0 ? type_kind(types, result) : BUSTER_TYPE_KIND_NONE;
     const uint32_t variable = result_kind == BUSTER_TYPE_KIND_STRUCT || result_kind == BUSTER_TYPE_KIND_UNION ? check_control_returned(writer, jump) : BUSTER_CHECK_NONE;
     const TypeId declared = variable < count ? input->declared_types[variable] : 0;
-    const CheckInputAttributes* attributes = variable < count ? input->attributes[variable] : NULL;
+    const CheckInputAttributes* attributes = variable < count ? check_input_attributes_at(input, variable) : NULL;
     const bool aligned = attributes != NULL && attributes->alignment_log2 != 0 && attributes->alignment_log2 - 1u > type_alignment_log2(types, declared);
     bool named = variable > writer->opening && variable < writer->closing && input->declaration_kinds[variable] == C_BINDING_OBJECT &&
-                 !input->static_objects[variable] && declared != 0 && (type_qualifiers(declared) & BUSTER_TYPE_VOLATILE) == 0 && !aligned &&
+                 !check_input_bit(input->declaration_bits, variable, BUSTER_CHECK_BITS_STATIC) && declared != 0 && (type_qualifiers(declared) & BUSTER_TYPE_VOLATILE) == 0 && !aligned &&
                  type_unqualified(type_strip_aligned(types, declared)) == result;
     // Its scope: its block's to the block's closing token, or its for statement's to the statement's last.
     uint32_t scope = named ? parser->tree.parents[variable] : count;
@@ -1285,7 +1296,7 @@ static bool check_control_fold_simple(const CheckControlWriter* writer, uint32_t
     for (uint32_t t = low; foldable && t <= high; t += 1)
     {
         const bool object = input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_OBJECT;
-        foldable = !(object && input->static_objects[t] && input->linkage[t] == 0);
+        foldable = !(object && check_input_bit(input->declaration_bits, t, BUSTER_CHECK_BITS_STATIC) && check_input_linkage(input->declaration_bits, t) == 0);
     }
     const uint32_t first_plan = foldable && program->initializers != NULL && check_program_bit(writer->planned, token) ? writer->plan_first[token] : BUSTER_CHECK_NONE;
     for (uint32_t i = first_plan; foldable && i != BUSTER_CHECK_NONE; i = writer->plan_next[i])
@@ -2056,7 +2067,7 @@ static void check_control_drain(CheckControlWriter* writer)
                     }
                     a = writer->allocation_next[a];
                 }
-                else if (bound || !input->static_objects[declaration])
+                else if (bound || !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC))
                 {
                     if (writer->count < writer->capacity)
                     {
@@ -2647,14 +2658,14 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         {
             const CheckValue value = *check_graph_leaf_of(graph, node);
             if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
-                ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || program->input->static_objects[value.object - 1]) && seen[value.object] != epoch)
+                ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC)) && seen[value.object] != epoch)
             {
                 seen[value.object] = epoch;
                 needed[value.object] = 1;
                 references[reference_count++] = (uint64_t)value.object << 32;
             }
-            if (value.object != 0 && value.object < program->object_count && program->input->compound_objects[value.object - 1] &&
-                !program->input->static_objects[value.object - 1])
+            if (value.object != 0 && value.object < program->object_count && check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_COMPOUND) &&
+                !check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC))
             {
                 const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value.object - 1) : 0;
                 if (selected == 0 || selected > program->initializers->count)
@@ -2922,7 +2933,7 @@ static void check_program_allocation(CheckProgram* program, const Parser* parser
 static bool check_program_runtime_object(const CheckInput* input, const TypeTable* types, uint32_t token)
 {
     return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-           !input->static_objects[token] && check_action_runtime_size(types, input->declared_types[token]);
+           !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && check_action_runtime_size(types, input->declared_types[token]);
 }
 
 // Each statement's initializer plans, linked from the last back so that a statement's list is in declaration order: a
@@ -2937,7 +2948,7 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
     for (uint32_t i = initializers != 0 ? initializers->count : 0; i-- > 0;)
     {
         const uint32_t declaration = initializers->declaration_tokens[i];
-        const bool compound = declaration < count && input->compound_objects[declaration];
+        const bool compound = declaration < count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
         uint32_t token = declaration < count && check_sparse_get(input->initializer_begins, declaration) != 0 ? check_sparse_get(input->initializer_begins, declaration) - 1 : BUSTER_CHECK_NONE;
         uint32_t steps = 0;
         while (!compound && token < count && steps < count && parser->tree.roles[token] != PARSE_ROLE_TERMINATOR)
@@ -2950,7 +2961,7 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
             // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
             // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
             plan_next[i] = BUSTER_CHECK_NONE;
-            compound_initializers |= !input->static_objects[declaration];
+            compound_initializers |= !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
         }
         else if (token < count && steps < count)
         {
@@ -2989,7 +3000,7 @@ static void check_program_allocations(CheckProgram* program, const Parser* parse
         const __mmask16 objects = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + base), tokens) &
                                   _mm512_cmplt_epu32_mask(check_sparse_vector(input->declaration_bodies, base), _mm512_set1_epi32((int)count)) &
                                   _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->declaration_kinds + base)), _mm_set1_epi8((char)C_BINDING_OBJECT)) &
-                                  _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + base)), _mm_setzero_si128());
+                                  _mm_testn_epi8_mask(_mm_loadu_si128((const __m128i*)(input->declaration_bits + base)), _mm_set1_epi8((char)BUSTER_CHECK_BITS_STATIC));
         for (uint32_t bits = objects; bits != 0;)
         {
             const uint32_t lane = 31 - (uint32_t)__builtin_clz(bits);
@@ -3084,8 +3095,8 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
     if (object != 0 && object <= count)
     {
         program->object_declarations[object] = token;
-        needed[object] |= input->defined[token] || input->tentative[token];
-        const uint32_t attributes = input->attributes[token] != 0 ? check_program_attribute_bits(input->attributes[token]) : 0;
+        needed[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE);
+        const uint32_t attributes = check_input_attributes_at(input, token) != 0 ? check_program_attribute_bits(check_input_attributes_at(input, token)) : 0;
         const uint32_t function_attributes = attributes != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION ? attributes : 0;
         if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0)
         {
@@ -3136,7 +3147,7 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
     {
         const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
         const __mmask16 declared = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
-                                   _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128());
+                                   _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(input->declaration_bits + token)), _mm_set1_epi8((char)BUSTER_CHECK_BITS_STATIC));
         for (uint32_t bits = declared; bits != 0; bits &= bits - 1)
         {
             room = check_program_static_object(program, needed, token + (uint32_t)__builtin_ctz(bits), output, room, events);
@@ -3144,7 +3155,7 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
     }
     for (; token < count; token += 1)
     {
-        if (input->declarations[token] == token && input->static_objects[token])
+        if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
         {
             room = check_program_static_object(program, needed, token, output, room, events);
         }
@@ -3229,7 +3240,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
         for (uint32_t e = low; e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
         {
             const uint32_t token = (uint32_t)keys[e];
-            const CheckInputAttributes* attributes = input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = &attributes->records[i];
@@ -3386,7 +3397,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .target = options.target, .token = BUSTER_CHECK_NONE,
+                               .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     if (options.return_flow_work != NULL)
     {

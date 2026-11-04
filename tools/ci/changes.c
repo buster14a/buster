@@ -7,6 +7,7 @@
 //
 //   changes --event pull_request --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]
 //   changes --event push --workflow HEAD.yml [--output FILE]
+//   changes --event push --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]
 //   changes --self-test [--root DIR]
 //
 // LIST holds the merge's changed paths, one a line (`git diff --no-renames --name-only HEAD^1 HEAD`); BASE.yml is the
@@ -19,7 +20,10 @@
 //   change to such a step;
 // - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`.
 //
-// A push sets code alone and measure to all: its pull request's run measured what it changes. `changes_decide` is the
+// A push sets code alone and measure to all: its pull request's run measured what it changes. A push given its first-parent
+// change (the nightly mode's, docs/ci.md) is targeted instead: it decides as a pull request on that change, but code is
+// always true, since push's paths-ignore already left out documentation and a push of several commits can bring code
+// that its head's own change doesn't show. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy)
 // and the hosted test job's shards, its list and N alike (changes_shard_policy). The selector is CI tooling outside the
@@ -369,6 +373,27 @@ static const ChangesModule changes_modules[] = {
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
                    "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
     },
+    // #138's and #1189's programs, speedtest1 and Lua's scripts, by both tiers, clang -O0 and -O2 and tcc
+    // (measure-tier1-programs): where Tier 1's input or pipeline changes what --tier1 compiles them to (the checker's
+    // lowering into typed functions, the emission's Tier 1 step, the IR's lowering, promotion and optimizer, and Tier
+    // 1's selection, allocation, frames and emission), or the measurement does (its harness, and profile.c's timed
+    // processes, counters and medians, and compile_measure.c's file helpers, which it calls). The daily run measures
+    // main, Tier 0's column among them.
+    {
+        .name = "tier1_programs",
+        .sources = "tier1_programs_measure|profile|compile_measure|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
+                   "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|tier1_[a-z0-9_]*",
+    },
+    // #1059's paired measurements (measure-helpers): the primitives' kernels and speedtest1 by both tiers, each as the
+    // compiler lowers them and with --helper-forms=all, where what they compare changes (the direct forms' admission and
+    // the helpers' planning: the helper planner, the atomic builtins' and the asm statements' plans, and the x86
+    // semantics rows a placed statement's forms are admitted by) or the measurement does (its harness, the speedtest1
+    // build it shares with measure-tier1-programs, and profile.c's and compile_measure.c's timing and files). The daily
+    // and dispatched runs measure main.
+    {
+        .name = "helpers",
+        .sources = "helpers_measure|tier1_programs_measure|profile|compile_measure|c_check_program_helpers|c_check_program_atomic|c_check_program_asm|x86_semantics",
+    },
 };
 
 #define BUSTER_CHANGES_MODULE_COUNT (sizeof(changes_modules) / sizeof(changes_modules[0]))
@@ -440,6 +465,14 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
+    },
+    {
+        .name = "check-units",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
+                   "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
+                   "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime|profile",
     },
     {
         .name = "checker",
@@ -613,6 +646,19 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .sources = "tier1_certificate[a-z0-9_]*|tier1_cfg[a-z0-9_]*|tier1_allocate|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|"
                    "ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
+                   "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
+                   "bind|import|runtime",
+    },
+    {
+        // #939's certificates of the CFG consumer's code of real C's functions, decoded from its records: the corpus's
+        // preparation, as benchmark-tier1-select-source's (benchmark-backend-source's, then the IR's lowering, promotion
+        // and optimization), selection, the emission it certifies, its decoding and the checker.
+        .name = "tier1-code-certificate",
+        .sources = "tier1_certificate[a-z0-9_]*|tier1_code_certificate_benchmark|tier1_emit[a-z0-9_]*|tier1_select[a-z0-9_]*|tier1_frame[a-z0-9_]*|"
+                   "tier1_rematerialize|tier1_liveness|tier1_cfg[a-z0-9_]*|tier1_allocate|ir_optimize[a-z0-9_]*|dataflow|ir|ir_validate|ir_lower[a-z0-9_]*|"
+                   "ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|"
+                   "c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
                    "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|"
                    "debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|"
                    "bind|import|runtime",
@@ -1166,6 +1212,8 @@ typedef struct ChangesInput ChangesInput;
 struct ChangesInput
 {
     bool push;
+    // A push decided on its first-parent change (`files`), as the nightly mode's pushes are.
+    bool targeted;
     // The merge's changed paths, each NUL-terminated.
     TextList files;
     Text base_workflow;
@@ -1200,7 +1248,7 @@ static void changes_set_gate(ChangesResult* result, Text gate)
 static ChangesResult changes_decide(const ChangesInput* input)
 {
     ChangesResult result = { 0 };
-    if (input->push)
+    if (input->push && !input->targeted)
     {
         // push's paths-ignore leaves out documentation alone.
         result.code = true;
@@ -1304,6 +1352,8 @@ static ChangesResult changes_decide(const ChangesInput* input)
             }
             result.benchmarks[i] = changed || list_contains(&commands, text_c(benchmark->name));
         }
+        // A targeted push tests regardless: its tree, not its head's change alone, is what main has now.
+        result.code = result.code || input->push;
     }
     return result;
 }
@@ -1527,6 +1577,44 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "tools/performance/core.c",
         .outputs_true = "code performance",
         .outputs_false = "checker",
+    },
+    {
+        .name = "Tier 1's program measurement: its harness, its timing and Tier 1's input and pipeline",
+        .files = "src/buster/compiler/tier1_programs_measure.c src/buster/compiler/profile.c src/buster/compiler/c_check_program_lower.c "
+                 "src/buster/compiler/tier1_select.c src/buster/compiler/ir_lower.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the helpers' measurement: its harness",
+        .files = "src/buster/compiler/helpers_measure.c",
+        .outputs_true = "code helpers",
+    },
+    {
+        .name = "the asm statements' plans alone run the helpers' measurement",
+        .files = "src/buster/compiler/c_check_program_asm.c",
+        .outputs_true = "code helpers",
+    },
+    {
+        .name = "the helpers' tests alone start no helpers measurement",
+        .files = "src/buster/compiler/c_check_program_helpers_test.c src/buster/compiler/c_check_program_asm_test.c",
+        .outputs_true = "code",
+        .outputs_false = "helpers",
+    },
+    {
+        .name = "the timing alone runs Tier 1's program measurement",
+        .files = "src/buster/compiler/profile.c",
+        .outputs_true = "tier1_programs",
+    },
+    {
+        .name = "the checker's lowering alone feeds Tier 1's programs",
+        .files = "src/buster/compiler/c_check_program_lower.c",
+        .outputs_true = "tier1_programs",
+    },
+    {
+        .name = "Tier 1's tests alone, or a source Tier 1 doesn't read, start no program measurement",
+        .files = "src/buster/compiler/tier1_select_test.c src/buster/compiler/ir_lower_test.c src/buster/compiler/c_lexer.c",
+        .outputs_true = "code",
+        .outputs_false = "tier1_programs",
     },
     {
         .name = "a checker test alone starts no conditioned samples, but the plain runs that check the twins",
@@ -1857,6 +1945,33 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
     ChangesResult result = changes_decide(&push);
     changes_expect(test, result.code && result.all && !changes_any_gate(&result), "a push: code, every plain benchmark, no gate", (Text){ 0 });
     changes_expect(test, strcmp(changes_measure(&result), "all") == 0, "a push measures all", (Text){ 0 });
+
+    // A targeted push (the nightly mode's) decides on its first-parent change as a pull request would, but always tests.
+    ChangesInput targeted_documentation = {
+        .push = true,
+        .targeted = true,
+        .files = changes_words("docs/ci.md"),
+        .base_workflow = workflow,
+        .head_workflow = workflow,
+        .root = root,
+    };
+    result = changes_decide(&targeted_documentation);
+    changes_expect(test, result.code && !result.all && !changes_any_gate(&result) && changes_measured_count(&result) == 0, "a targeted push of documentation tests and measures nothing", (Text){ 0 });
+    ChangesInput targeted_types = {
+        .push = true,
+        .targeted = true,
+        .files = changes_words("src/buster/compiler/c_types.c"),
+        .base_workflow = workflow,
+        .head_workflow = workflow,
+        .root = root,
+    };
+    ChangesInput pull_types = targeted_types;
+    pull_types.push = false;
+    pull_types.targeted = false;
+    result = changes_decide(&targeted_types);
+    ChangesResult pull = changes_decide(&pull_types);
+    changes_expect(test, result.code && changes_measures(&result, "types") && !result.all, "a targeted push measures its change's benchmarks", (Text){ 0 });
+    changes_expect(test, strcmp(changes_measure(&result), changes_measure(&pull)) == 0 && memcmp(result.modules, pull.modules, sizeof(result.modules)) == 0 && memcmp(result.fixed, pull.fixed, sizeof(result.fixed)) == 0, "a targeted push selects what its pull request would", (Text){ 0 });
 
     ChangesInput nothing = {
         .base_workflow = workflow,
@@ -2345,7 +2460,12 @@ static void changes_test_split(ChangesTest* test)
 
 // Reuse on the persistent host is safe only behind independent correctness on both hosted variants of this revision.
 // Pull requests run the hosted plain builds alone; pushes to main and the periodic/manual runs add the sanitizer rows
-// and the fuzz campaigns.
+// and the fuzz campaigns. The `evidence` job (tools/ci/nightly.c) must succeed and admit the 9700X job; a nightly
+// dispatch may skip its hosted rows only where that job found its commit's own earlier run had passed them (`reused`);
+// a push's reuse of its pull request's native qualification skips the 9700X job only once the host-identity job read
+// the host the pull request's run recorded (needs host-identity), and runs it otherwise,
+// and skip fuzzing only in the plain scope, as a pull request does. Nightly backlog runs reuse the oracle cache, as
+// pull requests do; the snapshot's comprehensive run checks it, as the daily run did.
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow)
 {
@@ -2376,9 +2496,9 @@ static bool changes_oracle_policy(Text workflow)
         hosted_check |= job == 1 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
         hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
         hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
-        native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test, fuzz]");
-        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}");
-        native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}");
+        native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, evidence, host-identity, test, fuzz]");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && (needs.evidence.outputs.hardware == 'admit' || (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host))) && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}");
+        native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}");
         native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
     }
     return hosted_check && hosted_variants && hosted_revision && native_needs && native_success && native_modes && native_revision;
@@ -2398,19 +2518,30 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
         { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
         { "        host_arch: [x86-64, native]", "        host_arch: [native]" },
         { "        host_arch: [x86-64, native]", "        host_arch: [x86-64]" },
-        { "    needs: [changes, test, fuzz]", "    needs: changes" },
-        { "    needs: [changes, test, fuzz]", "    needs: [changes, test]" },
+        { "    needs: [changes, evidence, host-identity, test, fuzz]", "    needs: changes" },
+        { "    needs: [changes, evidence, host-identity, test, fuzz]", "    needs: [changes, evidence, host-identity, test]" },
+        { "    needs: [changes, evidence, host-identity, test, fuzz]", "    needs: [changes, test, fuzz]" },
+        // The evidence job must succeed and admit; hosted rows are skipped only by its evidenced reuse, on a dispatch;
+        // a push's reuse skips the 9700X job only with its host confirmed.
+        { " && needs.evidence.result == 'success' && (needs.evidence.outputs.hardware == 'admit'", " && (needs.evidence.outputs.hardware == 'admit'" },
+        { "needs.evidence.outputs.hardware == 'admit' ||", "needs.evidence.outputs.hardware != 'skip' ||" },
+        { " || (needs.evidence.outputs.hardware_reason == 'native-reused' && !(needs.host-identity.result == 'success' && needs.host-identity.outputs.host != '' && needs.host-identity.outputs.host == needs.evidence.outputs.native_host))", "" },
+        { "needs.host-identity.outputs.host == needs.evidence.outputs.native_host", "needs.host-identity.outputs.host != ''" },
+        { "github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && ", "" },
+        { "needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped'", "needs.test.result == 'skipped'" },
+        { "(github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')", "needs.evidence.outputs.scope == 'plain'" },
         { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
-        { " && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'))", "" },
+        { " && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))", "" },
         { "needs.fuzz.result == 'success'", "needs.fuzz.result != 'failure'" },
         { " && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)", "" },
         { "github.event.pull_request.draft == false", "github.event.pull_request.draft != true" },
-        // Pull requests skip the fuzz campaigns; nothing else may.
-        { "github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
-        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
+        // Pull requests and plain-scope dispatches skip the fuzz campaigns; nothing else may.
+        { "(github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
+        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}",
           "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'schedule' && 'check' || 'use' }}" },
-        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
-          "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'workflow_dispatch' && 'check' || 'use' }}" },
+        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check' || 'use' }}",
+          "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog') && 'check' || 'use' }}" },
+        { "(github.event_name == 'workflow_dispatch' && inputs.purpose != 'backlog')) && 'check'", "github.event_name == 'workflow_dispatch') && 'check'" },
         { "&& 'check' || 'use'", "&& 'use' || 'use'" },
     };
     const char* original = text_terminated(workflow);
@@ -2557,6 +2688,7 @@ static int changes_self_test(const char* root)
 static const char* changes_usage =
     "usage: changes --event pull_request --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]\n"
     "       changes --event push --workflow HEAD.yml [--output FILE]\n"
+    "       changes --event push --files LIST --base-workflow BASE.yml --workflow HEAD.yml [--root DIR] [--output FILE]\n"
     "       changes --self-test [--root DIR]\n";
 
 int main(int argc, char** argv)
@@ -2614,7 +2746,8 @@ int main(int argc, char** argv)
     }
     bool push = event != NULL && strcmp(event, "push") == 0;
     bool pull_request = event != NULL && strcmp(event, "pull_request") == 0;
-    valid = valid && root != NULL && (self_test ? event == NULL : (push || (pull_request && files != NULL && base_workflow != NULL)) && head_workflow != NULL);
+    const bool targeted = push && files != NULL;
+    valid = valid && root != NULL && (self_test ? event == NULL : ((push && (files == NULL) == (base_workflow == NULL)) || (pull_request && files != NULL && base_workflow != NULL)) && head_workflow != NULL);
     int status = 2;
     if (!valid)
     {
@@ -2628,11 +2761,12 @@ int main(int argc, char** argv)
     {
         ChangesInput input = {
             .push = push,
+            .targeted = targeted,
             .root = root,
         };
         Text list = { .data = "", .length = 0 };
         bool read = read_file(head_workflow, &input.head_workflow);
-        read = read && (push || (read_file(files, &list) && read_file(base_workflow, &input.base_workflow)));
+        read = read && ((push && !targeted) || (read_file(files, &list) && read_file(base_workflow, &input.base_workflow)));
         if (!read)
         {
             fprintf(stderr, "changes: can't read an input: %s\n", strerror(errno));

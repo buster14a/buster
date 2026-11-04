@@ -127,6 +127,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         .costs = 0,
         .barriers = barriers,
         .canonical = canonical,
+        .vectors = ir_function_has_vectors_path(function, false),
     };
     if (valid)
     {
@@ -160,6 +161,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         .costs = costs,
         .barriers = barriers,
         .canonical = canonical,
+        .vectors = ir_function_has_vectors_path(function, false),
     };
     for (uint32_t node = 0; valid && node < count; node += 1)
     {

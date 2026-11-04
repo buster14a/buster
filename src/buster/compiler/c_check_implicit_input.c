@@ -63,11 +63,16 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 decoded = check_input_intrinsic_decode(reader, info);
                 reader->output->resource |= decoded.types.status == BUILTIN_INTRINSIC_TYPES_CAPACITY;
             }
-            const bool library = eligible && decoded.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && !decoded.types.signature_ignored;
-            const bool header = eligible && ordinary && decoded.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
+            // A row whose declarations clang doesn't check against its prototype (attribute T: setjmp and its kin, vfork) is
+            // declared with it all the same where it decodes, and where it doesn't (no jmp_buf) declared as any undeclared
+            // function, without the header's warning (Sema's allowTypeMismatch).
+            const bool mismatch = eligible && memchr(info->attributes, 'T', info->attributes_length) != NULL;
+            const bool library = eligible && decoded.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS;
+            const bool header = eligible && ordinary && !mismatch && decoded.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
                                 (decoded.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
                                 decoded.types.error_offset < info->encoding_length &&
-                                (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J');
+                                (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J' ||
+                                 info->encoding[decoded.types.error_offset] == 'K');
             if (header && !reader->output->resource)
             {
                 const CheckWarningEvent event =
@@ -83,13 +88,26 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 check_input_warning_event(reader, &event, NULL, 0);
             }
             const TypeId type = library ? decoded.types.function_type : ordinary ? check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0)) : 0;
+            if (library)
+            {
+                // The named types its prototype took, for its diagnostic's spelling (CheckInput.implicit_library_types).
+                static const char* const spellings[4] = { "FILE", "jmp_buf", "sigjmp_buf", "ucontext_t" };
+                const char* jump = memchr(info->encoding, 'J', info->encoding_length);
+                const bool signal = jump != NULL && jump != info->encoding && jump[-1] == 'S';
+                const bool taken[4] = { memchr(info->encoding, 'P', info->encoding_length) != NULL, jump != NULL && !signal, signal,
+                                        memchr(info->encoding, 'K', info->encoding_length) != NULL };
+                for (uint32_t i = 0; i < 4; i += 1)
+                {
+                    reader->output->implicit_library_types[i] = taken[i] ? check_input_file_type(reader, spellings[i]) : reader->output->implicit_library_types[i];
+                }
+            }
             CheckInput* input = reader->output;
             const uint32_t linked = reader->linked_declarations[name];
             // An explicit declaration of a library function has already caused clang to create its translation-unit
             // builtin, without the first-use warning. A later use after that block closes still gets the catalogue
             // prototype, not the closed block's type; only the warning decision borrows this earlier linked identity.
             const bool declared_library = library && linked != 0 && linked - 1 < token &&
-                reader->declaration_kinds[linked - 1] == C_BINDING_FUNCTION && reader->linkage[linked - 1] == 2 &&
+                reader->declaration_kinds[linked - 1] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, linked - 1) == 2 &&
                 (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT) == 0;
             const bool diagnosed = declared_library ||
                 (library && linked != 0 && (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0);
@@ -133,11 +151,12 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 input->declarations[token] = token;
                 reader->declared_types[token] = type;
                 reader->declaration_kinds[token] = C_BINDING_FUNCTION;
-                input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT | (library ? CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY : 0);
-                input->attributes[token] = attributes;
+                input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT | (library ? CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY : 0) |
+                                               (attributes != NULL ? CHECK_INPUT_FUNCTION_NORETURN : 0);
+                check_input_set_attributes_at(input, token, attributes);
                 reader->objects[token] = token + 1;
-                reader->static_objects[token] = true;
-                reader->linkage[token] = 2;
+                check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_STATIC, true);
+                check_input_set_linkage(reader->declaration_bits, token, 2);
                 check_sparse_set(input->sparse_pool, input->declaration_bodies, token, reader->function_body);
                 check_input_bind(reader, token, token);
                 if (library && reader->library_declarations != NULL)

@@ -783,6 +783,63 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         ir_test_instruction(&function, 7, IR_CALL_INDIRECT, IR_I64, 4, 1, BUSTER_IR_NONE);
         ir_test_instruction(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_pair(tally, &function, scratch, 0, true, "valid calls, volatile memory and scaled address rejected");
+        // #1059's atomic accesses: an order on an atomic access alone, and one its kind takes (a store's relaxed, release or
+        // seq_cst; a load's relaxed, consume, acquire or seq_cst), volatile or not.
+        function.flags[2] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT;
+        function.flags[3] = BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, true, "a seq_cst atomic store and a volatile acquire atomic load rejected");
+        function.flags[2] = BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "an acquire atomic store accepted");
+        function.flags[2] = BUSTER_IR_ATOMIC | 3u << BUSTER_IR_ORDER_SHIFT;
+        function.flags[3] = BUSTER_IR_ATOMIC | 3u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "a release atomic load accepted");
+        function.flags[3] = 5u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "an order without an atomic access accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 6u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic access of no C order accepted");
+        // An atomic access aligned to its size at least, which an ordinary one need not be.
+        function.flags[3] = BUSTER_IR_ATOMIC | 2u << BUSTER_IR_ORDER_SHIFT;
+        function.alignment_log2[3] = 2;
+        ir_test_pair(tally, &function, scratch, 0, false, "an 8-byte atomic load aligned to 4 accepted");
+        function.flags[3] = BUSTER_IR_VOLATILE;
+        ir_test_pair(tally, &function, scratch, 0, true, "an 8-byte volatile load aligned to 4 rejected");
+        function.alignment_log2[2] = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "an 8-byte atomic store aligned to 1 accepted");
+        function.alignment_log2[2] = 4;
+        ir_test_pair(tally, &function, scratch, 0, true, "an 8-byte atomic store aligned to 16 rejected");
+        function.alignment_log2[2] = 3;
+        function.alignment_log2[3] = 3;
+        // An atomic read/modify/write in the load's place: of any C order, its operation (in its flags) an exchange, an
+        // addition or a compare-exchange, the last alone with a desired value of its type, an atomic access alone, aligned
+        // to its size at least.
+        ir_test_instruction(&function, 3, IR_ATOMIC_RMW, IR_I64, 1, 0, BUSTER_IR_NONE);
+        function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_EXCHANGE;
+        ir_test_pair(tally, &function, scratch, 0, true, "a seq_cst atomic exchange rejected");
+        function.flags[3] = BUSTER_IR_ATOMIC | 4u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
+        ir_test_pair(tally, &function, scratch, 0, true, "an acq_rel atomic addition rejected");
+        function.c[3] = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic addition with a desired value accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_COMPARE;
+        ir_test_pair(tally, &function, scratch, 0, true, "a seq_cst atomic compare-exchange rejected");
+        function.c[3] = 1;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic compare-exchange of a desired value of another type accepted");
+        function.c[3] = BUSTER_IR_NONE;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic compare-exchange without a desired value accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT | (BUSTER_IR_RMW_COMPARE + BUSTER_IR_RMW_ADD);
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic read/modify/write of no operation accepted");
+        function.flags[3] = 5u << BUSTER_IR_ORDER_SHIFT | BUSTER_IR_RMW_ADD;
+        ir_test_pair(tally, &function, scratch, 0, false, "a read/modify/write without an atomic access accepted");
+        function.flags[3] = BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "a volatile atomic read/modify/write accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC | 6u << BUSTER_IR_ORDER_SHIFT;
+        ir_test_pair(tally, &function, scratch, 0, false, "an atomic read/modify/write of no C order accepted");
+        function.flags[3] = BUSTER_IR_ATOMIC;
+        function.alignment_log2[3] = 2;
+        ir_test_pair(tally, &function, scratch, 0, false, "an 8-byte atomic read/modify/write aligned to 4 accepted");
+        ir_test_instruction(&function, 3, IR_LOAD, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.alignment_log2[3] = 3;
+        function.flags[2] = BUSTER_IR_VOLATILE;
+        function.flags[3] = BUSTER_IR_VOLATILE;
         IrUses uses = {
             0
         };

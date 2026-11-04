@@ -328,12 +328,14 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
     static const char annotations[] = ".text\nf: ret\n.addrsig\n.addrsig_sym f\n";
     asm_test_pair(test, (String8){.pointer = (char*)annotations, .length = sizeof(annotations) - 1}, 1, X86_ARCH_BASELINE);
     // #808: compiler-generated metadata and DWARF's LEB128 data. `.prefalign` is LLVM's; GNU as 2.42 refuses it, so
-    // only this frontend's two paths are compared. `.loc`'s view label and the LEB128 values are encoded here.
+    // only this frontend's two paths are compared. `.loc`'s view number (0, its section's first row's) and the LEB128
+    // values are encoded here, and its row gives .debug_line its table (#1115), as the .debug_info beside it asks.
     static const char compiler_metadata[] =
         ".file 0 \"/tmp/dir\" \"source.c\" md5 0x0123456789abcdef0123456789abcdef\n"
         ".text\n.Lfunc_begin0:\n.loc 0 1 0 view .LVU0\n.prefalign 4, .Lfunc_end0, nop\n"
         "metadata: nop\n.Lfunc_end0:\nret\n"
-        ".data\n.sleb128 -1,0,63,64,-64,-65,123456\n.uleb128 0,1,127,128,300,624485\n.uleb128 .LVU0\n";
+        ".data\n.sleb128 -1,0,63,64,-64,-65,123456\n.uleb128 0,1,127,128,300,624485\n.uleb128 .LVU0\n"
+        ".section .debug_info,\"\",@progbits\n.long 0\n";
     asm_test_pair(test, (String8){.pointer = (char*)compiler_metadata, .length = sizeof(compiler_metadata) - 1}, 1, X86_ARCH_BASELINE);
     static const char leb128[] = ".data\nleb:\n.sleb128 -1,0,63,64,-64,-65,123456\n.uleb128 0,1,127,128,300,624485\n";
     if (cross_check)

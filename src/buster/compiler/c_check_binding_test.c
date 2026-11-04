@@ -786,13 +786,12 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                     C_BINDING_FUNCTION,
                     C_BINDING_FUNCTION,
                 };
-                uint8_t linkage[] = {
-                    2,
-                    2,
+                // External linkage, undefined, not thread-local.
+                uint8_t declaration_bits[] = {
+                    2u << BUSTER_CHECK_BITS_LINKAGE_SHIFT,
+                    2u << BUSTER_CHECK_BITS_LINKAGE_SHIFT,
                 };
-                uint8_t defined[2] = { 0 };
                 uint32_t definition_origins[2] = { 0 };
-                uint8_t thread_local[2] = { 0 };
                 uint32_t objects[] = {
                     17,
                     19,
@@ -809,7 +808,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                 CheckInput input = {
                     .reports = reports,
                     .report_capacity = BUSTER_ARRAY_LENGTH(reports),
-                    .thread_local = thread_local,
+                    .declaration_bits = declaration_bits,
                 };
                 CheckInputReader reader = {
                     .output = &input,
@@ -818,9 +817,8 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                     .bindings = bindings,
                     .declared_types = declared_types,
                     .declaration_kinds = declaration_kinds,
-                    .defined = defined,
+                    .declaration_bits = declaration_bits,
                     .definition_origins = definition_origins,
-                    .linkage = linkage,
                     .objects = objects,
                     .linked_declarations = linked_declarations,
                     .linked_types = linked_types,

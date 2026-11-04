@@ -955,10 +955,12 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder, one at a time. The
-vector schedule finds contiguous regions whose type behavior is known to stay
-within builtin arithmetic types, and checks each region in postorder batches
-(`check_graph_region_postorder`). From the first node not yet done, a batch
+The scalar schedule processes graph nodes in postorder, one at a time. So
+does the vector schedule by default, with its leaves and statements' discards
+without their actions ("Node order or regions" below). With its regions
+(`CheckOptions.regions`), it finds contiguous regions whose type behavior is
+known to stay within builtin arithmetic types, and checks each region in
+postorder batches (`check_graph_region_postorder`). From the first node not yet done, a batch
 takes consecutive nodes that read none of each other, up to the batch size.
 The alternative, the region's level order (`check_graph_region`,
 `CheckOptions.level_order`), computes the nodes' relative dependency heights
@@ -1020,10 +1022,13 @@ before return.
 #133 left open which schedule the vector path's regions should take, decided
 by a benchmark on the same tables: their level order, or a vectorized walk in
 postorder. `benchmark-checker-source` times both in one build, with the same
-actions, type table and graph: its paths `vector` (the postorder batches, the
-default) and `levels` (`CheckOptions.level_order`), beside `scalar`. Before it
-times them, it checks that each gives the scalar path's typed stream, and
-`test-checker` compares both orders at every batch size with the scalar path.
+actions, type table and graph: its paths `regions` (the postorder batches,
+`CheckOptions.regions`, which were `vector`, the vector path's default, until
+#1050 made it node order: "Node order or regions" below) and `levels`
+(`CheckOptions.level_order`), beside `scalar`. Before it times them, it checks
+that each gives the scalar path's typed stream, and `test-checker` compares both
+orders at every batch size with the scalar path. The measurements below, from
+#133, name the postorder batches as they were then.
 
 Level order computes each region node's height from its operands, counts the
 heights, places the nodes by height, then checks each level in batches. The
@@ -1082,48 +1087,99 @@ catalogue's fixes, the comparison builtins, K&R definitions) cost 0.78M on
 `-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
 the commands, the trees and the logs.
 
+### Node order or regions
+
+#1050 measured what the regions do on `sqlite3.c`'s `-c`. A region's batch held
+1.4 nodes: in a tree's postorder a parent follows its last child, so the next
+node most often reads the one before it, and few of a region's nodes are the
+integer folds that a batch takes 8 lanes at a time. What every region paid was
+its machinery: a pass over its nodes for its leaves, then for each node a test
+of its done mark and of each operand's, the batch's packing, and the scan for
+the region's end. The vector path's default is node order now: each node in
+turn, a leaf without its action (`check_graph_leaf`), a statement's discard of
+an rvalue without its action (`check_graph_discard`), and any other node by its
+action, the integer folds by the scalar fold. A region's nodes are pure (they
+intern no type and have no effects), so in node order they make the same typed
+stream, the same table and the same objects. The regions stay, opt-in
+(`CheckOptions.regions`, which `CheckOptions.level_order` takes), for graphs
+whose independent folds fill a batch, as `benchmark-checker`'s synthetic ones
+do; `test-checker`, the graph tests' batch partitions and
+`benchmark-checker-source`'s `regions` path keep them checked and timed.
+
+The 9700X job of `232654c1` ([job 126383843829](https://github.com/buster14a/buster/actions/runs/41771140390/job/126383843829))
+timed `benchmark-checker-source` on the frozen `sqlite3.c`'s 2,608 bodies
+(311,601 nodes), as nanoseconds and cycles a node, medians of 21 passes:
+
+| Path | Every path in one process | Alone | After 100 ms of scalar work |
+| --- | --- | --- | --- |
+| node order (`vector`) | 28.435 ns, 156.9 | 28.131 ns, 155.5 | 28.778 ns, 159.2 |
+| regions | 31.597 ns, 174.8 | 31.123 ns, 172.5 | 31.454 ns, 174.3 |
+| transitions | 34.191 ns, 189.4 | 32.254 ns, 178.7 | 34.358 ns, 190.3 |
+| level order | 34.551 ns, 191.5 | 34.259 ns, 189.8 | 34.441 ns, 190.6 |
+| scalar | 46.318 ns, 254.9 | 46.152 ns, 254.2 | |
+
+Node order took 10.0% less time a node than the regions in one process, 9.6%
+alone and 8.5% after scalar work. On musl's `regcomp.c` (8,881 nodes) it took
+23.94 ns against the regions' 25.80, and the transitions 20.30. The 4-CPU Intel
+VM, with no PMU, agreed: the main loop of a cold `-c` of `sqlite3.c` took
+44.41M cycles in node order against 48.27M by the regions (−8.0%, medians of
+24 compiles each in ABBA order, the objects the same bytes).
+
 ### Memoized transitions
 
 #1050 found that a non-leaf node's action is, most of the time, a repeat: of
-`sqlite3.c`'s 128,459 non-leaf nodes without a constant to fold, 14,973 keys
-were distinct. With `CheckOptions.transitions` (the driver's
+`sqlite3.c`'s 311,601 body nodes, 172,121 non-leaf nodes the table takes have
+25,101 distinct keys. With `CheckOptions.transitions` (the driver's
 `--check-transitions`), the vector path (`check_graph_transitions`,
 `c_check_transitions.c`) checks those nodes by memoized transitions: a node
 whose inputs repeat an earlier node's writes that node's answer without running
-its action. They are opt-in: on the 9700X they took 4% less time than the
-regions on `sqlite3.c`'s bodies, about 0.5% of its compile, short of #1050's
-aim (below). Graphs with overload sets take the regions either way.
+its action. They are opt-in (below). Graphs with overload sets take the regions
+either way.
 
-When no operand or argument of a node holds a payload
-(`check_stream_value_rest`: a constant's value, an address constant's offset, a
-bit-field's place, a fault), the action is a function of a key. The key holds
-the node's operator, member, requested type, extensions (with the
-system-header bit) and floating environment, and each operand's and a call's
-arguments' type, flags, category and constant kind. It also holds the objects'
-pattern: which operands have an object and which share one.
+**Classes.** Each completed node's value has a class, a 32-bit id of its type,
+flags, category, constant kind and payload (every field of the value but its
+object), interned exactly on its first sight (`check_transitions_intern`). A
+value without a payload row (`check_stream_value_rest`) is its columns; one with
+a row is compared whole against its class's template, so that a constant, an
+address constant's offset and a bit-field's place each are a class. A value
+with a fault or an overload set has none (`BUSTER_CHECK_CLASS_UNKEYED`), and a
+node waiting in a batch is `BUSTER_CHECK_CLASS_PENDING`. The classes live in a
+column of the run's scratch (`levels`, which the later stages write before they
+read), with an open-addressed table of 16-byte slots and the payloads'
+templates.
 
-The key holds no object and no node. An action copies an object from an
-operand, and reads one only for zero and for equality between operands, which
-the pattern holds. It reads a node only as a new fault's place, and an answer
-with a fault isn't memoized.
+**The key.** An ordinary action is a function of a key of four 64-bit words:
+the node's operator, extensions (with the system-header bit), floating
+environment, a call's argument count and the objects' pattern (which operands
+have an object and which share one), its member, its requested type, its three
+operands' classes and a hash of a call's arguments' classes, each with whether
+it has an object; a call's arguments are compared whole beside the key. The
+key holds no object and no node. An action copies an object from an operand
+and reads one only for zero and for equality between operands, which the
+pattern holds: outside a constant evaluation, which isn't memoized, no action
+of the table's operators reads an object's identity
+(`check_const_load` and `check_const_union_allows` are a constant evaluation's,
+and the builtins that do are outside the table). An action reads a node only as
+a new fault's place, and an answer with a fault isn't memoized. A node with an
+operand of no class is a fold and runs its action.
 
 The first node of a key runs its action (a miss) and inserts its answer into a
-per-run table in the scratch arena. The answer is the value but its object, its
-conversions, diagnostic and its operand, warnings and a member's offset, a
-call's argument conversions, and its whole value as a template where it holds
-a payload: a static object's member, `&s.f`. It also names the operand whose
-object the value takes. A later node of the key (a hit) writes that answer with
-no `CheckAction` and no `CheckActionResult`.
+per-run table in the scratch arena. The answer is the value but its object (its
+class, type, flags, category and constant kind, and a payload's template, its
+class's), its conversions, diagnostic and its operand, warnings and a member's
+offset, and a call's argument conversions; it also names the operand whose
+object the value takes. A later node of the key (a hit) writes that answer and
+its class with no `CheckAction`, no `CheckActionResult` and no interning.
 
 A hit interns no type: every type the answer names was interned by its first
 node. The misses run in node order, so a fresh table's `TypeId`s are the
-scalar path's, which is what the regions' purity rule protected. Folds (an
-operand with a payload, most often a constant) and the operators the table
-doesn't take run their actions as before: the builtins, varargs, the
-variable-length arrays' operators, statement values, constant evaluations,
-vector members and plain library builtins' folds. Consecutive pure misses and
-folds that read none of each other go as one batch of `check_actions`, as the
-regions' batches did, so the integer folds still go 8 lanes at a time.
+scalar path's, which is what the regions' purity rule protected. Folds and the
+operators the table doesn't take run their actions as before: the builtins,
+varargs, the variable-length arrays' operators, statement values, constant
+evaluations, vector members and plain library builtins' folds; their values are
+interned after. Consecutive pure misses that read none of each other go as one
+batch of `check_actions`, as the regions' batches did, so the integer folds
+still go 8 lanes at a time.
 
 An answer that read the source position keeps what it read. Each tag whose
 completion `check_action_source_complete` asked about, with its answer, is a
@@ -1132,98 +1188,121 @@ tag read before its completion and after it thus takes two misses, the second
 writing over the first's entry. An answer that read a transparent union's
 activation, or more than four tags, isn't memoized.
 
-An entry is 128 bytes: its key's 64, compared whole by one AVX-512 compare,
-and its answer packed in the next cache line. A template, a call's arguments
-and a second guard go in side arrays. The slots are open-addressed, each an
-entry's index and its hash, two per entry. With its hash, an entry takes 148
-bytes. The table starts with room for an entry per 16 of the graph's nodes and
-at least 16 (a small graph's takes 2 KB, and 256 bytes of slots to clear),
-since `sqlite3.c`'s bodies took one per 19, and grows by doubling within a
-quarter of the room the run's scratch had left. An array's pages are touched
-only as its entries fill them, but the slots are cleared whole. Where its first
-size doesn't fit, it starts with at most 1,024 entries, and then with 16; where
-even that doesn't, the run takes the regions; where it can't grow, it stops
-inserting.
+**The loop.** A pass first gives each node its static word, 16 nodes at a time
+in AVX-512 with a scalar twin (`check_transition_statics`): a leaf, a node the
+table doesn't take, or the key's first word but its pattern, with the
+system-header bit gathered from the tokens' array (the lanes whose 4-byte
+gather would pass its end go one at a time). The node order's loop then holds
+only leaves and first-probe hits; every other node (a miss, a fold, a node
+reading a batch member, an operator the table doesn't take) goes out of line
+(`check_transition_other`), as do a payload's write and a call's argument
+conversions, so that the loop keeps its values in registers. Inlined into
+`check_graph_run`, the loop spilled its key and its columns' pointers to the
+stack on every node; out of line, the same code took about 8% less time on the
+VM below.
 
-`CheckOptions.verify_transitions` runs each hit's action too, keeps its answer
-and counts a difference (`CheckStatistics.transition_mismatches`), which fails
-the run. The driver's `--verify` (with `--check-transitions`) verifies, and so
-does `test-checker`, whose graphs and source fixtures the transitions check
-against the scalar path too. `CheckStatistics` counts
-hits, misses, folds, inserts and the table's entries, and `--time-stages`
+An entry is 128 bytes: its key and what the next nodes read (the class and the
+object's operand) in one cache line, its conversions and member offset in the
+next. A call's arguments and a second guard go in side arrays. The slots are
+open-addressed, each an entry's index and its hash's high half, two per entry.
+The table starts with room for an entry per 16 of the graph's nodes and a
+class's slot per 32, and at least 16 entries, since `sqlite3.c`'s bodies took
+an entry per 12 nodes and a class per 43, and grows by doubling within a
+quarter of the room the run's scratch had left. Where its first size doesn't
+fit, it starts with at most 1,024 entries, and then with 16; where even that
+doesn't, the run takes the regions; where it can't grow, it stops inserting,
+and where the classes can't, new values have none.
+
+`CheckOptions.verify_transitions` runs each hit's action too, the loop's
+first-probe hits' and those found after a batch ran (flushed hits), keeps its
+answer and counts a difference (`CheckStatistics.transition_mismatches`), which
+fails the run. The driver's `--verify` (with `--check-transitions`) verifies,
+and so does `test-checker`, whose graphs and source fixtures the transitions
+check against the scalar path too, each verified run's hits all verified
+(`transition_verified`). `CheckStatistics` counts hits (and of them the flushed
+ones), misses, folds, inserts and the table's entries, and `--time-stages`
 reports them as `time-check transition-*` lines. `benchmark-checker-source`
 prints them with each path's time.
 
 `test-checker --transitions` runs the section alone. Each fixture is checked by
 the scalar path, the oracle, and by the vector path's regions and its
-transitions in node order and in windows (below), and every stream must be the
-oracle's. A fixture of vector members, which the table doesn't take, puts them
-in windows past the first. Each fixture's hits, misses, folds and entries are
-pinned. The windows' keys and hashes must be `check_transition_key`'s and
-`check_transition_hash`'s for every node. A source of 1,500 structs runs in a
-sweep of scratch arenas from too small for the table's growth to room enough,
-then at the least room the run checks in, found by bisection (in any less, it
-fails whichever path it takes), where not even 16 entries fit and the regions
-must run, and in steps of 512 bytes past it, which must reach a table that takes
-entries. Each run that checks gives the oracle's stream, and the sweep must
-reach a table that stops inserting and one that takes every entry.
+transitions in batches of 32, 3 and 1, and every stream must be the oracle's.
+Each fixture's hits, flushed hits, misses, folds and entries are pinned, and a
+fixture's `(1 + 2) + 3` finds an earlier `3 + 3` only after `1 + 2`'s batch ran. Each node's class
+must be shared exactly with the nodes of the same value but its object, and the
+static words by 16 lanes must be the scalar path's, with system-header marks in
+arrays from the tokens' whole count down to fewer than a gather's 4 bytes. A
+source of 1,500 structs runs in a sweep of scratch arenas from too small for the
+table's growth to room enough, then at the least room the run checks in, found
+by bisection (in any less, it fails whichever path it takes), where not even 16
+entries fit and the regions must run, and in steps of 512 bytes past it, which
+must reach a table that takes entries. Each run that checks gives the oracle's
+stream, and the sweep must reach a table that stops inserting and one that takes
+every entry.
 
-#### Node order or windows
+#### What a hit costs
 
-The issue proposed keying 16 nodes at a time in postorder windows, resolving
-operands within a window in rounds. `CheckOptions.transition_windows`
-(`check_graph_transition_windows`) does that for windows of 64 nodes. A round
-keys the window's ready nodes 16 lanes at a time in AVX-512: gathering their
-operands' columns, building the objects' pattern, the header and the hash. Each
-lane then probes the table and compares its key whole. The misses run in node
-order as their turn comes.
+On a 4-CPU Xeon (Sapphire or Emerald Rapids, 2.1 GHz) VM without a PMU,
+`benchmark-checker-source` on `sqlite3.c`'s bodies, timed in check_graph_run's
+phases and by a second pass of the node order on its own warm table (a
+measuring patch, not kept): the run's validation took about 14 cycles a node and
+its loop about 145 by either path. The loop's misses took about 70: 21,000
+single misses of about 470 cycles of action each, and their interning and
+insertion about 200 more. A warm leaf took about 58 cycles and a warm hit about
+123: 42 to build its key, 38 to probe and check its guards and 44 to write its
+answer. A repeated action costs the regions about 160 cycles, so a hit saves
+about 40, which the misses' insertion and the leaves' interning spend again. An
+ideal memo over the same graph (every node a hit of a compact table, writing
+the same columns) took 18 ns a node, against the loop's 40 for its leaves and
+hits: the rest is the loop's own work per node.
 
-The rounds starve the lanes. On `sqlite3.c`'s bodies a window took 11.7 rounds
-and a batch held 2.97 nodes: a postorder's chains (`l->next->next->v`, a
-conversion over a call over a member) and the misses, each of whose dependents
-waits for the next round, leave most lanes empty. Building and probing a lane
-then cost as much as its action.
+The class design keyed constants, so that the first design's 27,822 folds became
+19,000 hits and 9,000 more misses: 146,916 hits and 25,205 misses, no fold. Per
+process, the transitions took 1.00 to 1.05 times the regions' time on that VM
+(medians of five processes), against 1.01 to 1.05 for the first design on the
+same host; a VM host before it had measured the first design 7% faster than the
+regions, the 9700X 4 to 7.5%.
 
-Node order keys each node from its operands' columns as it comes, one probe and
-one compare. It keeps no round state, and a hit's operands are the nodes just
-written, in the caches. `benchmark-checker-source` times both (`transitions`,
-node order; `windows`) beside the regions (`vector`, the default).
+#### On the 9700X, and the real compile
 
-On a 4-CPU Xeon (Emerald Rapids, 2.1 GHz) VM, pinned to one CPU: `sqlite3.c`'s
-2,608 bodies and 311,601 body nodes, each path a median of 21 interleaved
-passes, over six processes:
+The 9700X jobs of #1198 ([job 125700333685](https://github.com/buster14a/buster/actions/runs/41568611005/job/125700333685),
+[job 125709820070](https://github.com/buster14a/buster/actions/runs/41571004025/job/125709820070)) timed the
+graph run by `benchmark-checker-source`, whose passes run it again and again:
+`sqlite3.c`'s bodies took 32.33 to 34.29 ns a node by the transitions against
+35.18 to 36.58 by the regions (34.01 to 34.36 against 35.99 to 36.49 after
+100 ms of scalar work), and musl's `regcomp.c` 20.52 to 20.65 against 27.59 to
+28.42.
 
-| Path | ns a node |
-| --- | --- |
-| scalar | 132.4–137.2 |
-| transitions in node order (`transitions`) | 92.9–98.4 |
-| regions, the default (`vector`) | 97.1–102.6 |
-| levels | 100.6–108.4 |
-| windows | 119.0–129.9 |
+A real compile runs it once, and there the transitions lose. `sqlite3.c -c`
+on CPU 2, `measure-compile`'s medians of 11: `check-expressions` took 15.184 ms
+(14.919 to 15.640) with `--check-transitions` against 14.339 (14.243 to
+14.596) without; `time-runs`' medians of 21 put the compile at 113.66 against
+112.72 ms; `perf stat -r 11` counted 535.9 million user cycles against 531.7,
+though 1,130 million instructions against 1,206, and 2.72 million cache misses
+against 2.48. The table (about 4.5 MB of entries, slots, classes and templates
+for `sqlite3.c`), the class column and the static words are new lines to a
+single run, which the benchmark's repeated runs keep in the caches; their
+misses cost more than the instructions the hits save. Even without them, the
+benchmark's gain is about 1 ms of a 14.3 ms `check-expressions`.
 
-In each process the transitions took 0.8 to 9.3% less time a node than the
-regions, 3.9% at the median.
+Writing the leaves' and hits' columns later, 16 nodes at a time with gathers
+before an action or a pass needs them, took 6 to 16% more time on the VM than
+writing them in node order, as each output line is then written twice, far
+apart; direct open-addressed 64-byte entries without slots took 10% more.
 
-Node order made 128,081 hits, 16,218 misses (each inserted) and 27,822 folds.
-The windows made 126,495 hits and 17,804 misses, as a round probes nodes of one
-key before the first's insertion.
+#### The first design (#1146)
 
-Whole compiles (`-c --lanes 1 --time-stages`, 15 of each build in turn, the
-transitions against the regions): `check-expressions` took 37.43 ms against
-38.03 at the median, and the compile 304.1 ms against 313.2, with the same peak
-resident set. The table takes scratch pages the reader has already touched.
-
-The hits are concentrated: in a compile of `sqlite3.c`, 64 entries took 43.9%
-of them, 1,024 entries (128 KB) 77.7% and 4,096 entries 94.6%. So a hit's
-entry is mostly in the caches. On that VM, what a hit costs beyond a leaf is
-reading its operands' columns and writing the stream's ten output columns,
-which the actions it replaces wrote too; those common nodes' actions were
-cheap.
-
-#### On the 9700X, and other corpora
+The first design keyed each operand by its type, flags, category and constant
+kind in a 16-word key compared by one AVX-512 compare, and ran a node with a
+payload operand as a fold. Its windows (`CheckOptions.transition_windows`)
+keyed the ready nodes of 64-node windows 16 lanes at a time in rounds, as the
+issue proposed. The rounds starved the lanes: on `sqlite3.c`'s bodies a window
+took 11.7 rounds and a batch held 2.97 nodes, a postorder's chains and the
+misses' dependents leaving most lanes empty, and on the 9700X they took 55.13 ns
+a node against node order's 35.51; the class design removed them.
 
 The 9700X job of #1146 ([job 125383291201](https://github.com/buster14a/buster/actions/runs/41473866134/job/125383291201))
-timed the five paths on `sqlite3.c`'s bodies:
+timed the first design on `sqlite3.c`'s bodies:
 
 | Path | ns a node | after 100 ms of scalar work |
 | --- | --- | --- |
@@ -1235,65 +1314,137 @@ timed the five paths on `sqlite3.c`'s bodies:
 
 The transitions took 4.0% less time a node than the regions (3.3% after scalar
 work). The same job's `measure-compile` put `check-expressions` at 14.7 ms of a
-116.9 ms compile, and its profile `check_graph_transitions` at 2.70% of the
-cycles, `check_transition_key` at 1.44% and `check_transition_write` at 0.67%:
-keying, probing and writing take most of what the actions' copies saved, and
-the graph run's 4% is about 0.5% of the compile. #1050 asked for a large
-fraction of `check-expressions`, so the transitions stay opt-in
-(`CheckOptions.transitions`, the driver's `--check-transitions`) and the
-regions the default. The job times the transitions and the windows alone and
-after scalar work, musl's `regcomp.c` by every path, and `sqlite3.c`'s whole
-compile with them and without (`time-runs`, whose objects must be the same
-bytes) where the checker changes.
-
-That whole compile showed no gain ([job 125470563590](https://github.com/buster14a/buster/actions/runs/41499213226/job/125470563590),
+116.9 ms compile. The whole compile showed no gain ([job 125470563590](https://github.com/buster14a/buster/actions/runs/41499213226/job/125470563590),
 21 runs of each in a rotating order on CPU 2, the objects the same bytes): the
 regions took 118.43 ms (117.96 to 119.12) and the transitions 118.69 ms (117.96
-to 119.82), 0.2% more, with 557.3 and 559.2 million user cycles though the
-transitions ran 3.9% fewer instructions (1,229 million against 1,279 million).
-In the same job the graph run took 33.99 ns a node by the transitions against
-36.77 by the regions on `sqlite3.c`'s bodies (35.40 against 36.82 after scalar
-work), and 25.23 against 29.22 on musl's `regcomp.c`: the gain is real in the
-graph run but doesn't reach the compile.
+to 119.82). In the same job the graph run took 33.99 ns a node by the
+transitions against 36.77 by the regions on `sqlite3.c`'s bodies, and 25.23
+against 29.22 on musl's `regcomp.c`. The gain depended on the source: on the
+first VM host, Lua 5.4.8's `lvm.c` took 15% less time, its `lparser.c`,
+`lstrlib.c` and musl's `vfprintf.c` 3 to 5% more, as their keys repeated less;
+on a Ryzen 9 7940HS (Zen 4), the review of #1146 measured `lvm.c` 10 to 20%
+faster and `sqlite3.c` no faster.
 
-The gain depends on the source. On the VM, three processes of each file, each
-path a median of 21 interleaved passes, Lua 5.4.8's largest units, musl's from
-the frozen corpus and `sqlite3.c`, in ns a node, the range of the three
-processes' medians (the change is the transitions' time against the regions',
-the median and the range of the three processes'):
+### The per-node machinery (#1050)
 
-| File | Bodies | Nodes | Scalar | Regions | Levels | Transitions | Windows | Change | Hits / misses / folds |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Lua `lvm.c` | 32 | 19,786 | 108.8–125.0 | 81.5–84.6 | 87.0–89.8 | 68.6–79.1 | 113.0–114.4 | −15.4% (−15.9 to −6.6) | 7,649 / 622 / 3,731 |
-| Lua `lparser.c` | 96 | 5,989 | 122.9–130.0 | 80.2–85.3 | 81.8–90.1 | 83.1–84.6 | 124.0–130.1 | +2.9% (−0.9 to +4.9) | 2,097 / 689 / 520 |
-| Lua `lcode.c` | 103 | 5,982 | 120.9–125.2 | 81.1–106.9 | 86.2–101.0 | 76.9–86.9 | 123.9–135.2 | −6.8% (−18.8 to −3.3) | 1,773 / 452 / 1,030 |
-| Lua `lapi.c` | 93 | 6,601 | 108.0–116.0 | 73.2–77.8 | 76.8–79.6 | 63.6–66.3 | 101.4–102.9 | −14.4% (−18.2 to −11.8) | 3,084 / 590 / 514 |
-| Lua `lstrlib.c` | 73 | 5,604 | 124.9–138.3 | 84.4–91.2 | 88.3–92.3 | 88.9–94.3 | 130.9–137.8 | +5.3% (+3.4 to +7.1) | 1,736 / 622 / 540 |
-| musl `regcomp.c` | 41 | 8,881 | 118.4–128.4 | 77.9–94.2 | 80.8–104.6 | 68.9–92.4 | 101.6–121.5 | −7.0% (−13.6 to −1.8) | 3,480 / 739 / 714 |
-| musl `regexec.c` | 6 | 3,235 | 105.3–119.5 | 67.3–84.4 | 68.9–90.5 | 57.2–68.4 | 87.7–99.9 | −19.0% (−27.1 to −15.1) | 1,282 / 337 / 237 |
-| musl `vfprintf.c` | 36 | 4,864 | 113.3–125.1 | 76.2–78.3 | 82.3–83.0 | 79.4–80.7 | 124.8–126.2 | +4.5% (+1.4 to +5.9) | 1,213 / 494 / 859 |
-| `sqlite3.c` | 2,608 | 311,601 | 134.4–140.2 | 99.3–102.3 | 102.4–103.7 | 93.5–94.0 | 123.7–126.4 | −7.0% (−8.5 to −5.3) | 128,081 / 16,218 / 27,822 |
+#1050's last two rounds memoized the actions and found that what a hit skips
+isn't where the time goes: what every path pays is the machinery around each
+node. A profile of one cold `-c` of `sqlite3.c` (a VM's sampler and a
+per-operator `rdtsc` table, measuring patches not kept) put the stage's time in:
 
-The transitions pay where a key repeats: `lvm.c`'s nodes hit 92% of the times
-they were keyed and took 15% less time, and `lparser.c`, `lstrlib.c` and
-`vfprintf.c`, whose hits were 71 to 75%, took 3 to 5% more. On a 16-thread
-Ryzen 9 7940HS (Zen 4), the review of #1146 measured the same: `lvm.c` 10 to
-20% faster, 5,000 small functions much faster, and `sqlite3.c` no faster.
+- **building each action** (`check_graph_action`): copying each operand's
+  96-byte value into the action from a temporary that `check_stream_value`
+  cleared by two overlapping 32-byte stores, by a 32-byte load across both,
+  which no store can forward: the most sampled instruction of the stage;
+- **the warning pass** (`check_input_warning_graph`), a tenth of the stage's
+  user time, almost all of it cold reads of each candidate's conversion record
+  and whole value after the run;
+- **calls**, about 650 to 850 cycles each, 15% of the main loop: a call built a
+  408-byte action per argument to convert it;
+- **statements' discards**, the casts to void every expression statement ends
+  in, the most common operator after the leaves;
+- **the stream's columns**, which every node writes: skipping the conversions,
+  the diagnostics, their operands, the warnings and the members' offsets (a
+  bound, not a valid output) took 11% of the main loop.
 
-Whole compiles on the VM, each without and with `--check-transitions` as whole
-processes in a rotating order (`time-runs`), were too noisy there to decide:
-`sqlite3.c` (`-c`, one CPU, 21 runs) took 287.5 against 287.8 ms at the
-fastest, but 346.8 against 316.8 ms at the median, its runs spreading from 288
-to 1,016 ms. `lvm.c` (one CPU, 21 runs) took 29.5 against 29.3 ms at the
-median, and Lua's 32 units in one command (`-c` on the VM's 4 CPUs, 11 runs)
-199.0 against 203.7 ms, with 220 against 233 ms of user time: a unit's table
-starts empty, so small units pay their misses for few hits. Every object was
-the same bytes. The 9700X's `time-runs` comparison above decided: no gain.
+What the run does now, each step exact (both paths' streams, the objects and
+the diagnostics are the same bytes):
 
-The table takes 148 bytes an entry (128 for the entry, 16 for its two slots and
-4 for its hash). On `sqlite3.c`'s bodies its 32,768 entries' room took the run's
-scratch from 10,284,096 bytes with the regions to 16,503,552 (the 9700X job's
-`scratch_bytes`); its 16,218 entries touched 2 MB of it.
+- `check_stream_value_to` writes a node's value into its destination by each
+  case's own stores, the columns' case as one 64-byte and one 32-byte store;
+  the action's operands and arguments take it.
+- `check_graph_store` writes the result's value from the action's fields
+  (`check_stream_set_value_flags`) and its conversion records field by field.
+- `check_action_operand_value` converts a value as an operand of an action
+  whose context and guards alone it reads: a call converts each argument with
+  it, as an operand of the call.
+- The warning pass reads a source's conversion record and whole value only for
+  an integer constant expression of value zero without a fault, which two narrow
+  columns and the payload row say, and builds an ordered comparison's action
+  only where an operand can be a pointer: the exact preconditions of its two
+  warnings.
+- In a fresh output (`CheckOptions.fresh_output`, the C driver's), the run
+  clears no column and its main loop writes no zero (`CheckStream.zero_columns`):
+  the diagnostics, their operands, the warnings and their ignored kinds take
+  no memory where no node has one, and a first write reads no payload row.
+- The vector path writes a discard of an rvalue without its action
+  (`check_graph_discard`): the operand's value, its conversion to void and the
+  cast's provenance, by the same helpers in the same order as the action, where
+  the action would read nothing else (`check_graph_discard_taken`). The scalar
+  path keeps the action, the twin whose streams the tests compare.
+- `check_graph_constant_contexts` passes over 64 nodes that hold neither a
+  context nor a mark at a time, and `check_graph_is_leaf` reads no leaf's record
+  without overload candidates.
+- The vector path takes its nodes in node order, its regions opt-in ("Node
+  order or regions" above). With them, a region's end is found 64 marks at a
+  time (`check_graph_marked_end`), whose exit, a node at a time, had been the
+  main loop's most sampled branch on the 9700X, and a region batches only the
+  operators whose integer folds `check_actions` takes 8 lanes at a time
+  (`check_action_fold_operator`), another node whose operands are done checked
+  at once by its own action.
+- `check_stream_value` returns a value by assignment, as main's did: the
+  lowering, its main caller, takes it into registers or a value of its own, and
+  through `check_stream_value_to`'s stores clang had laid the lowering's
+  functions out anew, which cost `lower` 1.2 to 1.9% on the 9700X.
+- An action looks up only the kinds its operator reads: the comparisons' and
+  the additions' pointer pairs, a complement's complex operand, a vector
+  operation's types.
+
+The 9700X job's step "Compare check-expressions with the pull request's base
+over placements" compares a pull request's base and tree on `-c sqlite3.c`,
+with each build's stages, counters, profile and forwarding failures. The job of
+`232654c1` ([job 126383843829](https://github.com/buster14a/buster/actions/runs/41771140390/job/126383843829))
+compared the base, `2fef25b0`, with the tree (with
+`-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5
+-DSQLITE_ENABLE_RTREE`), each at four placements of its checker unit. Each
+placement's stages, as `measure-compile`'s medians of 11 runs, in ms (base →
+tree):
+
+| Placement | `check-expressions` | `lower` | `check-program` | span |
+| --- | --- | --- | --- | --- |
+| 0 | 14.330 → 10.493 (−26.8%) | 12.959 → 13.308 | 10.099 → 10.163 | 108.877 → 105.814 |
+| 1088 | 14.233 → 10.420 (−26.8%) | 12.973 → 12.963 | 10.183 → 10.042 | 109.198 → 105.093 |
+| 2112 | 14.704 → 10.482 (−28.7%) | 12.968 → 12.919 | 10.150 → 10.127 | 109.527 → 105.783 |
+| 3136 | 14.240 → 10.414 (−26.9%) | 13.010 → 12.946 | 10.186 → 10.122 | 109.344 → 105.354 |
+
+- `time-runs`, 5 runs of two fresh copies of each placement of each build, with
+  the base's executables again as the floor: the wall time went from
+  110.333 ms to 106.625 ms (−3.36%; −3.70% to −3.08% over the placements) and
+  the user cycles from 523.6M to 504.0M (−3.74%). The base again read −0.14%.
+- `perf stat` counters, 11 runs at placement 0:
+  - instructions: 1,219.5M → 1,172.9M;
+  - branch misses: 3.13M → 3.04M;
+  - failed store-to-load forwards (`ls_bad_status2.stli_other`): 5.96M → 4.24M.
+- Memory: the wait4 peak went from 282,608–283,884 KiB to 278,316–278,368
+  KiB over the placements. `check-expressions`' approximate peak growth went from 4,904 KiB
+  to 872 KiB.
+- `lower`:
+  - At placement 0 it took 2.7% longer: 13.308 ms (13.251 to 13.546) against
+    12.896 to 13.063 ms. Most of that is in `lower.statements`.
+  - At the other three placements it took 0.1% to 0.5% less.
+  - Since `check_stream_value` is by assignment again, the lowering's functions
+    are the base's instruction for instruction, but for data addresses. The
+    difference at placement 0 is the code's placement.
+  - Over the four placements its median is 12.95 ms against 12.97.
+- `check-program` read −1.4% to +0.6%.
+- The objects are the same bytes, which the step requires.
+
+`check-expressions` over the rounds, base → tree, in ms (placement 0; the
+fourth row's are medians over the placements):
+
+| Tree | `check-expressions` |
+| --- | --- |
+| `43b84486` | 14.346 → 12.744 (−11.2%) |
+| `837e3638` | 14.211 → 12.528 (−11.8%) |
+| `7da3876f` | 14.446 → 11.805 (−18.3%) |
+| `1244e794` | 14.37 → 11.61 (−19.2%) |
+| `232654c1` (node order) | 14.330 → 10.493 (−26.8%) |
+
+What remains is spread over the actions. The forwarding failures are one lead.
+One sample in 500 put 8.2% of the compile's failures in `check_graph_run`. A
+quarter of those were at two wide copies of values just written field by
+field: an operand's converted value returned whole (`check_action_operand`),
+and a result copied into its payload row (`check_stream_set_value_flags`).
 
 ## Constant evaluation
 

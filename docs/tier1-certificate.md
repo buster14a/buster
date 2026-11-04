@@ -3,9 +3,9 @@
 This is [#939](https://github.com/buster14a/buster/issues/939)'s certificate
 checker and the producers that feed it. It certifies **allocations**: the
 source program, the allocation's stream of stores, reloads, moves and
-recomputations, and its block-entry assertions. It does not decode the native
-emitter's records (see "What the certificate proves"). There are three entry
-points:
+recomputations, and its block-entry assertions; and, for the CFG consumer, the
+**code** emitted from them, decoded from its records (see "The emitted code's
+certificate"). There are four entry points:
 
 - `tier1_allocation_certificate_check` checks the interval allocator's existing
   fragment assignment. It cannot prove source uses, CFG edges or actual emitted
@@ -18,6 +18,10 @@ points:
   `tier1_cfg.c` made over a CFG: the source from the preallocation
   `Tier1CfgInput`, the stream, entry assertions and edges from the untrusted
   `Tier1CfgAllocation`. `tier1_certificate_cfg_check` publishes and checks.
+- `tier1_certificate_emitted` publishes that program for the code the CFG
+  consumer emitted: its stream decoded from the records themselves, each
+  node's records regenerated and compared, the control flow walked.
+  `tier1_certificate_emitted_check` publishes and checks.
 
 All implementation and fixtures in this change are original project material
 under Apache-2.0 WITH LLVM-exception. No external checker code or corpus is
@@ -40,10 +44,12 @@ memory addressing, flags, control-flow, implicit writes and every original
 memory effect when creating these records. Physical aliases share byte-unit
 indices. A private stack home aliases any actual write to the same bytes.
 
-This module does **not** decode x86 bytes or derive these target facts from
-`X86Instruction`. It must not be advertised as verifying native output until
-that independent bridge is implemented. An allocator-provided opcode label,
-effect label, location layout, recipe or swap annotation is not such a bridge.
+The checker itself does **not** decode x86 bytes or derive these target facts
+from `X86Instruction`. `tier1_certificate_emitted.c` is the independent bridge
+that does, for the CFG consumer's code: it decodes each record by its own form
+and operands, and takes no allocator-provided opcode label, effect label,
+location layout, recipe or swap annotation as proof. Its trust boundary is in
+"The emitted code's certificate".
 
 The untrusted proof consists of each block's entry facts and the rewritten
 block/edge streams. A missing source instruction/use, changed opcode/immediate/
@@ -90,6 +96,15 @@ The bounded edit vocabulary supports same-class moves through registers or
 private homes, disjoint GPR exchanges, three-instruction XOR exchanges, integer
 constant materializations and stable frame-address materializations.
 Memory-to-memory moves and unrecognized recipes fail closed.
+
+A move reads its source's first byte known, which refuses a move out of
+uninitialized storage; its other bytes are copied as they are, unknown ones as
+unknown, which no fact relies on. That is a 4-byte value's register moved whole
+by a 64-bit move, or a scalar float's by `movaps`, as the emitted code does. An
+exchange reads every byte of both sides known. A vector location may be a
+register's whole width or a scalar view of its low 4 or 8 bytes (`movss`'s and
+`movsd`'s), whose write extent is the register's. The oracle applies the same
+rules.
 
 A scratch-free GPR exchange is legal. The fast XOR transfer checks all three
 concrete instructions, operand relationships, classes, widths, write extents,
@@ -179,7 +194,9 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
     each value its intervals carry into the block, at
     `tier1_cfg_entry_location`. A value recomputed there gets a recipe fact.
   - **Shape.** Every column is in range, intervals and fragments are in order,
-    and each edge's placement agrees with its moves and degrees. Each offset is
+    and each edge's placement agrees with its moves and degrees (an edge its
+    consumer copies along, `Tier1CfgInput.edge_copies`, is placed without
+    moves). Each offset is
     bounded before it bounds a read. A fragment carries a register only if it
     is a register's (`UINT8_MAX` otherwise), and a slot only where the
     allocation has slots. Publication validates only this shape; whether the
@@ -470,15 +487,162 @@ spill slots and recomputations. It proves this for every allocation the Tier 1
 tests produce, and, with `--verify`, for every one the driver's `--tier1`
 emits from.
 
-The stream it checks is the allocation's own. The emitter turns that plan into
-records: moves, stores and reloads at known frame offsets, call saves,
-prologues and epilogues. Those records are not decoded back into the
-certificate's stream. A bridge from the actual records needs:
+Its stream is the allocation's own account of its transitions. The code
+emitted from it is proved by the emitted code's certificate, below, wherever
+the decoding takes the function's shape.
 
-- the emitter's provenance of each record;
-- a decoder of its moves and frame accesses (`x86_semantics.c`'s effects);
-- a recognizer of each node's selected records against the selector's
-  expansion.
+## The emitted code's certificate
 
-That stays outstanding. The trust boundary above still holds for it: a
-producer may not synthesize a passing machine stream from the allocation.
+`tier1_certificate_emitted.c` publishes the certificate of the code the CFG
+consumer wrote, decoded from its records. `Tier1EmitOptions.certify`, and so
+the tests and the driver's `--verify`, run it after every CFG function's
+emission. A refusal fails the function (`TIER1_EMIT_CERTIFICATE`, the
+diagnostic's error its `Tier1CertEmittedReason` plus
+`BUSTER_TIER1_EMIT_CODE_CERTIFICATE`), the checker's capacity is
+`TIER1_EMIT_MEMORY`, and a shape the decoding doesn't take leaves the code
+uncertified (`Tier1EmitResult.code_reason`), counted by `--tier1-report`'s
+`code_certified` and `code_uncertified`.
+
+**Trusted, as the source:** the IR and its selection (what a node's sequence
+computes from the registers it is given: `tier1_emit_cfg_kernel`,
+`tier1_select_fixed`), the ABI's argument registers, the rematerialization
+recipes, the frame's displacements from its base register, the CFG and its
+phis, and `x86_semantics.c`'s effects of each record.
+
+**Untrusted:** the allocation, every emitted record, and the emitter's
+account of them: each record's origin (`Tier1Origin`, marked by
+`tier1_emit_mark`), each block's and stub's first record, the references, and
+which recomputed definitions it left out. An origin only says which decoding
+applies; every record is decoded by its own bytes.
+
+The decoding:
+
+- **Storage.** Each general register is an 8-byte and a 4-byte location, each
+  xmm register its 16 bytes and its scalar 8 and 4, each opmask register its 1,
+  2, 4 and 8. The frame base register's displacements over the spill, save and
+  temporary rows, the calls' outgoing areas and the stack parameters' incoming
+  slots are byte units, so slots that values share over their lifetimes are the
+  same bytes. Values have their own widths: a general one 8 bytes or 4 (every
+  narrower one is in its canonical 32-bit form), a float 4 or 8, a mask its own.
+  The rows must be bytes no callee writes, at or above rsp after the prologue,
+  or in a function without calls in the red zone's 128 bytes below it: the
+  certificate models no write below rsp.
+- **Moves.** `mov` (32- and 64-bit), `movss`, `movsd`, `movaps` and `kmov`
+  between registers and frame bytes are the edits their forms say, at their
+  forms' widths: a 32-bit store of an 8-byte value truncates it, and its later
+  8-byte use fails. A recomputation is a constant's edit only where
+  `tier1_rematerialize` writes exactly that record, with its reference, for the
+  value its origin names.
+- **Nodes.** Each node's records are regenerated from the allocation's
+  registers at its use phase and must equal the emitted ones byte for byte. They
+  are one instruction: its operands read where the allocation has them, every
+  register and frame byte its records write (by their effects) killed, its
+  definition written where its interval starts. A general register the records
+  give back is not killed: one holding its own value at the run's end, followed
+  through their 64-bit `mov`s between general registers (the compare-exchange's
+  save of rax in the scratch register and its restore, #1059). A call's sequence is checked
+  against the IR (its target's reference, `al`, its result's extension), its
+  arguments read in their ABI registers and outgoing slots (a value passed
+  twice at each of its locations), then every register the SysV ABI lets the
+  callee change killed (rax, rcx, rdx, rsi, rdi, r8 to r11, every xmm and
+  opmask register, which `x86_semantics`' effects of the `call` itself don't
+  say) and the outgoing area too (its callee owns it), before its result. A copy that vanishes in its own register
+  is its operand's value. A return's epilogue may come before its `ret`.
+- **Entry.** The parameters are entry facts in their ABI registers and incoming
+  slots. An incoming slot is placed by the ABI from the decoded prologue (8 bytes
+  past the return address per slot), and the layout's offset, which the
+  parameter's load uses, must be that. The prologue may write none of them,
+  and a stack parameter's load must be its type's form. A narrow parameter (an
+  I1's, I8's or I16's) is at entry only its caller's 1 or 2 bytes, in its
+  register's low bytes or its slot's: its own value, past the function's. Its
+  zero extension into canonical 32-bit storage (`movzx`, in its register or
+  from its slot) is the instruction that reads those bytes and defines the
+  parameter, so an extension left out, or made a wider move or load, leaves the
+  parameter undefined and its uses fail.
+- **The frame protocol.** The prologue and each epilogue are decoded record by
+  record by rsp's offset from its value at entry, each record exactly its form's
+  (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),
+  nothing else in them. The prologue must build the frame the layout's offsets
+  are of: its saved registers pushed, its frame pointer set where it has one,
+  its allocation exactly; and with calls, rsp a multiple of 16 at them (the ABI's
+  alignment, rsp 8 past one at entry). A frame pointer is the ABI's frame
+  record: rbp pushed first and set right after, the caller's rbp at it and the
+  return address above it, as the layout's offsets from rbp and an unwinder by
+  frame pointers take it. A push is a store of its register into
+  its slot, a pop the load back, the frame pointer's set a kill of rbp. Each
+  callee-saved register's value at entry and the return address are values of
+  the certificate: entry facts, asserted at every other block's entry (in the
+  push's slot, or in the register where the prologue doesn't push it), and read
+  by each return's `ret`, where they were at entry, with rsp back at the return
+  address. A register the function doesn't give back, a slot something
+  overwrote, an epilogue that pops the wrong slot or leaves rsp elsewhere fails.
+- **Control.** Each block's tail, its jumps and edges' moves, is walked for each
+  successor, by its condition's value for a conditional branch's: the path must
+  reach the successor's first record through that edge's moves alone, or reach
+  a successor whose only predecessor it is and whose first records are the
+  edge's moves. Every branch target is a block's or a stub's start, or the
+  prologue's own probes'. A conditional jump reads the condition only while the
+  flags are its comparison's: the branch's own (or, for a branch with no
+  records but its jumps, the last node's that wrote them), with no move after it
+  and no edge move before the jump writing them (a zero's `xor` does).
+- **Frame.** No record but the prologue and the epilogues writes the frame base
+  register or the frame pointer, nor rsp but a call's and a `ret`'s own push and
+  pop. A store through
+  any pointer but the frame base register's is the program's own, assumed not to
+  reach the frame's rows, as C's object model says.
+
+**Not decoded yet**, so not certified, each counted by its reason: by-value
+aggregates (#789's copies, parts and hidden pointers), dynamic frames with
+`alloca` or a stack restore (a stack save alone is certified, rbp its base)
+and realigned ones, vectors wider than 8 bytes (#141's ymm and zmm moves) and
+long doubles (the x87 stack), a prologue's stack probes, a variadic
+definition's register save area,
+an indirect jump to several labels, a call's stack arguments or a stack
+parameter where the frame base register isn't rsp's (or the incoming area's),
+and an entry block that is a loop's. The allocation's certificate still covers
+them, and the straight-line consumer's functions keep the interval
+certificate. Canonical 32-bit storage (a 4-byte value's upper half zero) is the
+selection's contract and isn't checked: a 4-byte value is its low 4 bytes.
+
+**Tests.** The emitter's tests, the mask tests and the pipeline test run it on
+every CFG function they emit. `test-tier1-emit`'s call fixture
+(`tier1_code_certificate_test.c`, `g(v, v)` and `h()` with values live across
+them, the caller-saved registers alone allocatable) corrupts its calls: each
+argument move made a move of its source into itself, refused even for the
+second placement of the value passed twice, and each save or restore, and each
+store before a call with its load after it, left out, refused: the callee may
+change the register. It compiles the fixture with and without a frame pointer
+and moves the frame: its rows below rsp, every access with them, are refused;
+and rbp set after the allocation instead of right after its push, each
+epilogue's reset from it moved to match, is refused (every register and the
+return address still come back, but rbp is no longer the frame record). A
+dynamic frame without calls, from a stack save alone (its rows and incoming
+area from rbp), is certified with its stack parameter read through rbp; with
+rbp set after its allocation, that load and the rows are elsewhere, and it is
+refused. A conditional tail `je false; edge move; jne true`, walked directly, is
+refused when the move is a zero's `xor`, whose flags the `jne` would read. A
+fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
+its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
+A compare-exchange with four values live across it, rax among the four
+allocatable registers, is certified; its restore of rax made `mov rax, rax` or
+`mov rax, rcx` is refused.
+`test-tier1-pipeline` also corrupts each
+certified function's records: every prologue and epilogue record, and a sample
+of its moves and nodes' (another register, a frame access 8 bytes off, an
+immediate 8 off, two adjacent records of one origin swapped). A mutant the
+certificate refuses counts, and one it accepts runs natively and must still
+return the interpreter's results. At this change, 879 of 890 mutants are
+refused, all 76 of the prologues' and 72 of the epilogues' among them, and the
+11 accepted (independent moves swapped, and the like) are harmless. With `--tier1 --verify`, the
+compiler's `main.c` certifies 562 of its 813 CFG functions' code and the
+c-testsuite subset 231 of 288, none refused; most of the rest are aggregates'.
+
+**Cost.** `benchmark-tier1-code-certificate [--only emit|decode|check|certify]
+[-E's options] file...` times the decoding, the check and both per IR
+instruction and per record, beside the emission they certify, on every
+function whose code it certifies, with the certificates' sizes and the
+uncertified functions by reason. A refusal, or a step out of memory or past
+a limit, fails it with no report, rather than timing a smaller corpus. The
+9700X job runs it on the frozen `sqlite3.c` where `changes`'
+`tier1-code-certificate` entry says, and its numbers go to buster-performance
+(buster-performance#238 has #1212's).

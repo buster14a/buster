@@ -6,8 +6,8 @@
 // each thread fence of seq_cst and nothing for the others, in its place among the function's accesses to memory, as the
 // resolved effects (x86_instructions_effects) and the form's own (x86_effects: BUSTER_X86_MEMORY_EFFECT_FENCE) read
 // it; a fence of a dynamic or out-of-range order, of an argument with an effect or the floating environment's, or of a
-// scoped family keeps its helper, and the plan counts both (CheckProgramHelpers.direct and .helper), each of the
-// contract's admission clauses (CheckProgramHelperContract.direct) a case; and natively against clang, fences of every
+// scoped family keeps its helper, the plan's use of it (CheckProgramHelpers.uses), each of the contract's admission
+// clauses (CheckProgramHelperContract.direct) a case; and natively against clang, fences of every
 // order and scope in statements, in expressions, in a statement expression and in a loop, with the helpers' among them.
 // test-checker-driver runs the concurrent controls (c_check_fence_driver_test.c). Include after
 // c_check_program_folds_test.c, whose summary of a function's accesses this test extends.
@@ -144,23 +144,31 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         char description[192];
         snprintf(description, sizeof(description), "fences: the functions lower by the %s path", way);
         check_test_expect(test, ready && code.lowered.count == count, description);
-        // The plan: thirteen fences direct, five with their helper, one signature for them all (the thread fence's); no
-        // other family, which has no direct form (CheckProgramHelperContract.direct), counts a direct use.
+        // The plan: five fences with their helper (its uses), one signature for them all (the thread fence's); the lowered
+        // code: thirteen fences direct, its FENCE entries (each function's below).
         const CheckProgramHelpers* helpers = &code.lowered.helpers;
         uint32_t planned = 0;
+        uint32_t uses = 0;
+        uint32_t direct = 0;
         for (uint32_t h = 0; ready && h < helpers->count; h += 1)
         {
             planned += check_program_helper_family(&helpers->items[h]) == CHECK_PROGRAM_HELPER_FENCE;
         }
-        bool admitted = ready;
-        for (uint32_t f = 0; ready && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+        for (uint32_t u = 0; ready && u < helpers->use_count; u += 1)
         {
-            admitted &= check_program_helper_contracts[f].direct != NULL || helpers->direct[f] == 0;
+            uses += check_program_helper_family(&helpers->items[helpers->uses[u].helper]) == CHECK_PROGRAM_HELPER_FENCE;
         }
-        snprintf(description, sizeof(description), "fences (%s path): the plan takes %u fences directly and %u by their helper, of %u signatures", way,
-                 ready ? helpers->direct[CHECK_PROGRAM_HELPER_FENCE] : 0, ready ? helpers->helper[CHECK_PROGRAM_HELPER_FENCE] : 0, planned);
-        check_test_expect(test, admitted && helpers->direct[CHECK_PROGRAM_HELPER_FENCE] == 13 && helpers->helper[CHECK_PROGRAM_HELPER_FENCE] == 5 && planned == 1,
-                          description);
+        for (uint32_t f = 0; ready && f < code.lowered.count; f += 1)
+        {
+            const Tier0Function* function = &code.lowered.functions[f];
+            for (uint32_t e = 0; e < function->count; e += 1)
+            {
+                direct += function->kinds[e] == BUSTER_TYPED_FENCE;
+            }
+        }
+        snprintf(description, sizeof(description), "fences (%s path): the code takes %u fences directly and the plan %u by their helper, of %u signatures", way,
+                 direct, uses, planned);
+        check_test_expect(test, ready && direct == 13 && uses == 5 && planned == 1, description);
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];

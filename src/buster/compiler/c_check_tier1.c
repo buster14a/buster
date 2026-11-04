@@ -12,8 +12,11 @@
 // refuses with the option. Include after tier1_emit.c and c_check_program_emit.c.
 
 #include "ir_optimize_verified.c"
+#include "ir_wide.c"
 
-_Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
+_Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
+                   BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
+               "Tier 1 reads Tier 0's access column");
 
 // The emitter's nested cause domains, indexed by Tier1EmitCause. The public emitter error wraps these; the outcome
 // keeps the nested cause and error too, and the full table is regression-tested below (test-check-lanes).
@@ -83,8 +86,10 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
             category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         case CHECK_TIER1_CAUSE_CERTIFICATE:
-            // A refused certificate is an allocation the allocator got wrong (#939): internal, never Tier 0's to hide.
-            category = error == TIER1_CERT_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            // A refused certificate is an allocation the allocator got wrong, or code the emitter got wrong (its
+            // Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE, #939): internal, never Tier 0's to hide. Either
+            // checker's capacity is a resource failure.
+            category = error == TIER1_CERT_CAPACITY || error == (BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY) ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         default:
             break;
@@ -134,7 +139,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. The solver's arena (#866, step 6) is reserved only when `gvn` asks for it, so
+// for a target other than the last one's. The solver's arena (#866, step 7) is reserved only when `gvn` asks for it, so
 // that --tier1 alone maps no address space it never uses. Returns false if one can't be reserved.
 static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, bool gvn)
 {
@@ -255,7 +260,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         IrGvnOptions options = ir_gvn_options();
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[6], scratch, options, &gvn_result);
+        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
         outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
@@ -271,6 +276,16 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The 128-bit integers' halves (#141, ir_wide.c), which the optimizer then takes: a function without any is the
+    // promoted one itself, borrowed.
+    IrWideResult wide = { 0 };
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+    }
     IrOptimizeResult optimized = { 0 };
     IrVerifiedRevision revision = { 0 };
     IrVerifiedAnalysis analysis = { 0 };
@@ -278,10 +293,10 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_verified(&promoted, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
+        const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
-        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
     // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
@@ -296,9 +311,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered,
-        // GVN's rewritten function (steps[6], when enabled) and promoted IR may borrow from each other, but none is a
-        // dependency of the optimized function. Reuse lowered and promoted arenas for the plan and emitted records;
-        // retain optimized IR and analyses through emission.
+        // GVN's rewritten function (steps[7], when enabled), promoted IR and its 128-bit integers' halves (steps[6]) may
+        // borrow from each other, but none is a dependency of the optimized function. Reuse lowered and promoted arenas
+        // for the plan and emitted records; retain optimized IR and analyses through emission.
         arena_pop_to(&lane->steps[0], 0);
         arena_pop_to(&lane->steps[1], 0);
     }
@@ -404,6 +419,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .spill_slots = emitted.allocation.spill_count,
             .frame_bytes = emitted.frame.maximum_stack_bytes,
             .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
+            .code_certified = emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK,
+            .code_uncertified = emitted.code_checked && emitted.code_reason != TIER1_CERT_EMITTED_OK,
         };
         *code = (Tier0Code){
             .records = records,
@@ -502,7 +519,8 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
-                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\n",
+                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
-            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones);
+            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
+            report->code_certified, report->code_uncertified);
 }

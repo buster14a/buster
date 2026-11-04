@@ -168,6 +168,40 @@ table. The kinds are:
   the scalar validator, as it does a tail call's; the C producer gives a fence of a constant order one
   (`check_program_direct_fence`, [the builtin integration guide](c-builtins-integration.md)'s "Helper contracts and
   direct forms").
+- An integer class's `LOAD`, `STORE` and `SET` (#1059) take `value` 0 for an ordinary access, or
+  `BUSTER_TYPED_ACCESS_ATOMIC` with a C memory order for an atomic one: a single naturally aligned access of the class's
+  bytes, whose code is an ordinary access's (atomic on x86-64, whose total store order gives a load's and a release
+  store's orders); a seq_cst store's fence is the `FENCE` of seq_cst its producer writes after it. Tier 0 doesn't read
+  the marker, whose code is the same either way; `ir_lower` translates it to the IR's atomic access and refuses another
+  shape.
+- `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and
+  pushes the object's old value of `class`: `value` its operation (`BUSTER_TYPED_RMW_ADD` for an addition, an exchange
+  without it) and a C memory order, any of the six. Tier 0 defers it and emits `xchg` (an exchange) or `lock xadd` (an
+  addition) of the operand's register with the object, the class's bytes, a full barrier on x86-64 that every order
+  takes, then the old value into the address's register, extended as the class's load extends it. No consumer moves an
+  access across it or drops it; `ir_lower` makes it the IR's `rmw` with its class's natural alignment. The typed
+  interpreter runs it as one thread does, refusing a misaligned object and checking it as a load's (undefined bytes are
+  reported) before a store's. The C producer
+  gives an exchange, an addition or a subtraction of a constant order one (`check_program_direct_rmw`, and an implicit
+  `_Atomic` integer's additive update, `check_program_atomic_update_direct`: [the builtin integration
+  guide](c-builtins-integration.md)'s "Direct read/modify/writes").
+- `ATOMIC_CAS` (#1059), an atomic compare-exchange, pops the expected value and the desired one, both of an integer
+  `class`, and pushes the object's old value of `class`: `value` a C memory order and, from
+  `BUSTER_TYPED_CAS_LOCAL_SHIFT`, the local (of U64) that holds the object's address, since three operands and a scratch
+  register would take a fourth depth. Tier 0 defers it: the expected value swapped into rax where it isn't there (rax's
+  own value, a deeper one's, kept in its register), the address loaded from the local's home into the stack's first
+  free register (which the entry so claims, as a copy's scratch), `lock cmpxchg` of the desired value's register with
+  the object, the class's bytes, a full barrier on x86-64 that every order takes, which leaves the old value in rax, the
+  swap undone, and the old value extended as the class's load extends it. The producer compares it with the expected
+  value for the success (in `I32` for a narrow class, which Tier 0's compares take). Its local counts as a use of it
+  where Tier 0 gives locals their homes (`tier0_count_references` and its vector twin), so that a pointer parameter
+  whose only use is a compare-exchange's address keeps its incoming value (`test-ir-lowering` runs such functions
+  natively against both interpreters). No consumer moves an access across it or drops it; `ir_lower` makes it a load of
+  the local and the IR's `rmw ... cas`. The typed interpreter runs it as one thread does, as an `ATOMIC_RMW`. The C
+  producer gives a compare-exchange of a constant order one (`check_program_direct_cas`), and so does every plan's (an
+  implicit `_Atomic` update's loop, a generic form's), and a bitwise, minimum or maximum read/modify/write a loop of
+  them (`check_program_direct_fetch`): [the builtin integration guide](c-builtins-integration.md)'s "Direct
+  compare-exchanges" and "Direct fetch loops".
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
@@ -299,7 +333,13 @@ without aggregates:
 `BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
 register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A result whose
 `part_bytes` is its size, fewer than 8 bytes, alone in one register (an `_Atomic` vector of 4 bytes, which LLVM returns
-as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). A STACK location with
+as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). So is each of a
+vector's that LLVM splits over two to four of the target's widest vector registers (`tier0_vector_result_parts`, #137: a
+32- or 64-byte vector without AVX, in xmm0 to xmm3, or a 64-byte one with AVX alone, in ymm0 and ymm1), each register
+`part_bytes` of it whole, one after another, which the epilogue loads and a call's object stores. So are the elements of
+an extended vector of three doubles or three longs, which LLVM returns one per register at the baseline (#137): in xmm0,
+xmm1 and st0, and in rax, rdx and rcx, 8 bytes each from the object's first (`tier0_element_parts`; st0's an `fld` and an
+`fstp` of 8 bytes, `tier0_element_x87`, so that a call leaves the x87 stack as it found it). A STACK location with
 `BUSTER_ABI_FLAG_HIGH` or `BUSTER_ABI_FLAG_LOW` is one part too, the high or the low eightbyte alone, in its 8-byte
 slot: a copy of the aggregate's bytes would run into the next argument's slot (#137). A part loads only the
 aggregate's own bytes, which may end at a page's end:
@@ -454,6 +494,16 @@ left below the vector path's 16: the masks took the last one): each entry that m
 `tier0_validate` follows each depth's width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than
 an entry's is refused, not miscompiled.
 
+A vector of other bytes has no VECTOR value (#137): one of 1 or 2 bytes, one of more than 64 (AMX's 1024-byte tile among
+them) and an extended vector of `bool`, whose elements pack a bit each. The producer gives such a type an aggregate's value,
+its object's address (`check_lower_transport_type`), which Tier 0 copies, stores, passes and returns by its bytes as it
+does a struct's, at the locations the convention gives the type (an integer's or an SSE eightbyte's register, or memory),
+and an element of one whose elements are bytes is read and written through that address. What would compute with one
+(arithmetic and comparisons, conversions and splats, constant expressions, a `bool` vector's elements and the vector
+builtins) is refused by name (`check_lower_transport_refusal`). An atomic vector of 1, 2, 4 or 8 bytes aligned to them is
+lock-free, an integer's load and store of its bytes, as clang's code makes it (`check_builtin_atomic_c11_native`); C11's
+builtins on vectors, as on structs, call libatomic's generic functions.
+
 - **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
   `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,
   `STORE_LOCAL` and `SET_LOCAL` (of an object of the vector's bytes, all of which they read or write), `DISCARD` and
@@ -477,8 +527,10 @@ an entry's is refused, not miscompiled.
   in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
   memory, on the stack whole.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
-  the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
-  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
+  the copies of selection, measuring and the deferred entries' emitter that look for their entries
+  (`tier0_memory_function`), as `x87` and `int128` do, and the vectors' slots where an entry is of class VECTOR
+  (`tier0_vector_slots`, 64 entries' classes at a time on the vector path): a function whose rows are scalar alone (an
+  asm statement's placed in its caller, #1059, an x86 builtin's of general registers or masks) reserves none. Tier 0's own records for them are EVEX ones, so a front
   end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
 
 **Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
@@ -514,7 +566,11 @@ VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the
 non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
 values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are, and the
 extensions' system instructions: RAO-INT's atomic operations, `cldemote`, `serialize`, UINTR's, `ptwrite`, `umonitor`,
-MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); a VEX form without
+MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); any general-purpose legacy
+form of the same rule (#1059, for an asm statement placed in its caller: `tier0_operation_general_effects`), covered and of
+named operands, whose control goes on and that changes no flag but the status ones (not the direction flag) and touches
+none of the x87's state (`add`, `bswap`, `lock xadd`, `lea`, `setcc`, `mfence`, `lfence`, `sfence`, `pause`, the
+prefetches; not `cpuid`, `push`, `jmp r/m`, `cld` or `fld`); a VEX form without
 operands only where its effects name no register either (`tilerelease`, not `vzeroupper` or `vzeroall`); no branch,
 symbol or RIP-relative address, each field's role of its class (an integer operand's no narrower than its field, the
 integer result's in a field of 32 or 64 bits), and each record `x86_validate` takes with its roles placed. So a row

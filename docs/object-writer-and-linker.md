@@ -455,7 +455,7 @@ several, and several definitions can compete for one name. Columns:
 | `name` | its `NameId` |
 | `atom`, `value` | the defining atom and the offset in it |
 | `size` | its size |
-| `flags` | binding, visibility, type, where ELF's `st_info` and `st_other` have them |
+| `flags` | binding, visibility, type, where ELF's `st_info` and `st_other` have them; `STT_COMMON`'s type for a common symbol (#147), an object in its zero-filled atom that a relocatable object writes as `SHN_COMMON` (its value its atom's alignment, the atom left out) and an executable as `STT_OBJECT` |
 | `source` | where it is defined: program, runtime shared library, runtime archive member, foreign object, foreign shared library, or the linker |
 | `got_slot`, `dynamic_index`, `version` | its GOT slot, `.dynsym` index and version |
 | `reference` | after layout: what code that refers to it uses (its address, its GOT slot's for an import, its offset in the TLS block for a TLS variable) |
@@ -494,6 +494,7 @@ relocation, and an executable's patch kernel derives its arithmetic from it:
 | `PC64` | 8 bytes of data (unwind tables) | `R_X86_64_PC64` | S + A − P |
 | `ABS32`, `ABS32S` | 4 bytes: data, an imm32 or a disp32, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
 | `SIZE32`, `SIZE64` | 4 or 8 bytes: data, an imm32 or an imm64 | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
+| `TPOFF64`, `DTPOFF64` | 8 bytes: `movabs`'s imm64 (`movabs $x@tpoff`) or data (DWARF's `.quad x@dtpoff`); the importer's and the assembler's only (#1115) | `R_X86_64_TPOFF64`, `R_X86_64_DTPOFF64` | `TPOFF32`'s and `DTPOFF32`'s values in 8 bytes; a shared library refuses `TPOFF64` and takes `DTPOFF64` as its module's offset, as `DTPOFF32` |
 
 G is the address of S's GOT slot. A linker that relaxes `CALL_GOT`,
 `LOAD_GOT` or `GOTTPOFF` rewrites the instruction's bytes before the field,

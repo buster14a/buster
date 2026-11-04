@@ -1405,18 +1405,27 @@ static uint32_t x86_semantics_register_number(uint8_t value)
     return (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3u) : (value & 15u);
 }
 
-// A VSIB operand's data element and index: a gather's or scatter's last letter and the one before it (vpgatherdq:
-// dword indices, qword elements).
-static uint32_t x86_semantics_vsib_element(uint32_t form)
+// A VSIB operand's data element and index, in bytes, from the letters after a gather's or scatter's name: its index's,
+// then its element's (vpgatherdq: dword indices, qword elements), or for floating point `p` and the element's
+// (vgatherqps: qword indices, single elements; vscatterdpd: dword indices, doubles, #1115).
+static const char* x86_semantics_vsib_letters(uint32_t form)
 {
     const char* mnemonic = x86_form_descriptions[form].mnemonic;
-    return mnemonic[strlen(mnemonic) - 1] == 'q' ? 8 : 4;
+    const char* gather = strstr(mnemonic, "gather");
+    const char* scatter = strstr(mnemonic, "scatter");
+    return gather != 0 ? gather + 6 : scatter != 0 ? scatter + 7 : mnemonic + strlen(mnemonic);
+}
+
+static uint32_t x86_semantics_vsib_element(uint32_t form)
+{
+    const char* letters = x86_semantics_vsib_letters(form);
+    const char element = letters[0] != 0 && letters[1] == 'p' ? letters[2] : letters[0] != 0 ? letters[1] : 0;
+    return element == 'q' || (element == 'd' && letters[1] == 'p') ? 8 : 4;
 }
 
 static uint32_t x86_semantics_vsib_index(uint32_t form)
 {
-    const char* mnemonic = x86_form_descriptions[form].mnemonic;
-    return mnemonic[strlen(mnemonic) - 2] == 'q' ? 8 : 4;
+    return x86_semantics_vsib_letters(form)[0] == 'q' ? 8 : 4;
 }
 
 // A random record of the form: random registers (vvvv's too), the memory operand RIP-relative into the data page when

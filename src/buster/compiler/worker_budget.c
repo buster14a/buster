@@ -6,8 +6,10 @@
 // entry; bytes are taken only when useful work would start extra lanes. A private descriptor supplies nonblocking IO.
 // A guardian owns the bytes until the parent closes its control pipe, also on signal-driven process exit. The child
 // starts from a clean exec in its own session before taking any token, inherits blocked catchable signals, returns
-// the exact bytes and sends an acknowledgement before exiting. The driver has one lease at a time, covering only the
-// joined worker phase. posix_spawn avoids retaining a copy-on-write snapshot of the live front end during emission.
+// the exact bytes and sends an acknowledgement before exiting. A lease covers only the joined worker phase: an emission
+// takes one as it starts, and one more each time its team grows while it runs (worker_budget_grow), and returns them
+// all once its lanes have met. posix_spawn avoids retaining a copy-on-write snapshot of the live front end during
+// emission.
 // GNU make's protocol: https://www.gnu.org/software/make/manual/html_node/POSIX-Jobserver.html
 
 #include <ctype.h>
@@ -486,6 +488,70 @@ static __attribute__((unused)) bool worker_budget_release(WorkerBudgetLease* lea
     return result;
 }
 
+// The workers, the calling thread's among them, that this process may have at once: the explicit cap, or one.
+static __attribute__((unused)) uint32_t worker_budget_cap(const WorkerBudget* budget)
+{
+    const uint32_t maximum = budget->maximum != 0 ? budget->maximum : 1;
+    return maximum < BUSTER_WORKER_BUDGET_MAX ? maximum : BUSTER_WORKER_BUDGET_MAX;
+}
+
+// Up to `wanted` tokens under a lease of their own, which a guardian takes without waiting: how many it took. No spare
+// byte (FIONREAD) means none, without starting a guardian. A guardian that answers wrongly leaves the budget unavailable.
+static uint32_t worker_budget_borrow(WorkerBudget* budget, uint32_t wanted, WorkerBudgetLease* lease)
+{
+    uint32_t result = 0;
+    const int read_fd = budget->read_fd;
+    const int write_fd = budget->write_fd;
+    int available = 0;
+    const bool supplied = ioctl(read_fd, FIONREAD, &available) == 0 && available > 0;
+    int control[2] = { -1, -1 };
+    int reply[2] = { -1, -1 };
+    const bool pipes = supplied && syscall(SYS_pipe2, control, O_CLOEXEC) == 0 && syscall(SYS_pipe2, reply, O_CLOEXEC) == 0;
+    const pid_t child = pipes ? worker_budget_spawn(read_fd, write_fd, control[0], reply[1], wanted) : -1;
+    if (control[0] >= 0)
+    {
+        close(control[0]);
+    }
+    if (reply[1] >= 0)
+    {
+        close(reply[1]);
+    }
+    if (child > 0)
+    {
+        *lease = (WorkerBudgetLease){ .control = control[1], .reply = reply[0], .child = child, .owner = budget };
+        uint32_t granted = 0;
+        uint32_t count = 0;
+        bool reading = true;
+        while (reading && count < sizeof(granted))
+        {
+            const ssize_t got = read(reply[0], (uint8_t*)&granted + count, sizeof(granted) - count);
+            count += got > 0 ? (uint32_t)got : 0;
+            reading = got > 0 || (got < 0 && errno == EINTR);
+        }
+        if (count == sizeof(granted) && granted <= wanted)
+        {
+            result = granted;
+        }
+        else
+        {
+            budget->mode = WORKER_BUDGET_UNAVAILABLE;
+            worker_budget_release(lease);
+        }
+    }
+    else
+    {
+        if (control[1] >= 0)
+        {
+            close(control[1]);
+        }
+        if (reply[0] >= 0)
+        {
+            close(reply[0]);
+        }
+    }
+    return result;
+}
+
 static __attribute__((unused)) uint32_t worker_budget_acquire(WorkerBudget* budget, uint32_t requested, WorkerBudgetLease* lease)
 {
     if (!budget->prepared)
@@ -493,8 +559,7 @@ static __attribute__((unused)) uint32_t worker_budget_acquire(WorkerBudget* budg
         worker_budget_initialize(budget, budget->makeflags, budget->maximum);
     }
     *lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1, .owner = budget };
-    uint32_t maximum = budget->maximum != 0 ? budget->maximum : 1;
-    maximum = maximum < BUSTER_WORKER_BUDGET_MAX ? maximum : BUSTER_WORKER_BUDGET_MAX;
+    const uint32_t maximum = worker_budget_cap(budget);
     uint32_t result = requested < maximum ? requested : maximum;
     result = result != 0 ? result : 1;
     result = budget->dry_run ? 1 : result;
@@ -502,62 +567,26 @@ static __attribute__((unused)) uint32_t worker_budget_acquire(WorkerBudget* budg
     budget->return_failed = false;
     if (result > 1 && budget->mode != WORKER_BUDGET_NONE)
     {
-        const uint32_t wanted = result - 1;
-        result = 1;
-        const int read_fd = budget->read_fd;
-        const int write_fd = budget->write_fd;
-        if (budget->mode == WORKER_BUDGET_JOBSERVER)
-        {
-            budget->mode = WORKER_BUDGET_JOBSERVER;
-            int available = 0;
-            const bool supplied = ioctl(read_fd, FIONREAD, &available) == 0 && available > 0;
-            int control[2] = { -1, -1 };
-            int reply[2] = { -1, -1 };
-            const bool pipes = supplied && syscall(SYS_pipe2, control, O_CLOEXEC) == 0 && syscall(SYS_pipe2, reply, O_CLOEXEC) == 0;
-            const pid_t child = pipes ? worker_budget_spawn(read_fd, write_fd, control[0], reply[1], wanted) : -1;
-            if (control[0] >= 0)
-            {
-                close(control[0]);
-            }
-            if (reply[1] >= 0)
-            {
-                close(reply[1]);
-            }
-            if (child > 0)
-            {
-                *lease = (WorkerBudgetLease){ .control = control[1], .reply = reply[0], .child = child, .owner = budget };
-                uint32_t granted = 0;
-                uint32_t count = 0;
-                bool reading = true;
-                while (reading && count < sizeof(granted))
-                {
-                    const ssize_t got = read(reply[0], (uint8_t*)&granted + count, sizeof(granted) - count);
-                    count += got > 0 ? (uint32_t)got : 0;
-                    reading = got > 0 || (got < 0 && errno == EINTR);
-                }
-                if (count == sizeof(granted) && granted <= wanted)
-                {
-                    result += granted;
-                }
-                else
-                {
-                    budget->mode = WORKER_BUDGET_UNAVAILABLE;
-                    worker_budget_release(lease);
-                }
-            }
-            else
-            {
-                if (control[1] >= 0)
-                {
-                    close(control[1]);
-                }
-                if (reply[0] >= 0)
-                {
-                    close(reply[0]);
-                }
-            }
-        }
+        result = 1 + (budget->mode == WORKER_BUDGET_JOBSERVER ? worker_budget_borrow(budget, result - 1, lease) : 0);
     }
     budget->granted = result;
     return result;
+}
+
+// The jobserver's spare tokens now (FIONREAD on the private reader), which any recipe may take: 0 without a jobserver.
+static __attribute__((unused)) uint32_t worker_budget_available(const WorkerBudget* budget)
+{
+    int available = 0;
+    const bool jobserver = budget->mode == WORKER_BUDGET_JOBSERVER && ioctl(budget->read_fd, FIONREAD, &available) == 0;
+    return jobserver && available > 0 ? (uint32_t)available : 0;
+}
+
+// More workers for a team already running (#673's tail): up to `wanted` tokens, taken as worker_budget_acquire takes
+// them, without waiting, under a lease of their own, which the team returns with its first. The budget's request, grant
+// and return failure still describe the team's start and its earlier leases.
+static __attribute__((unused)) uint32_t worker_budget_grow(WorkerBudget* budget, uint32_t wanted, WorkerBudgetLease* lease)
+{
+    *lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1, .owner = budget };
+    const uint32_t most = BUSTER_WORKER_BUDGET_MAX - 1;
+    return wanted != 0 && budget->mode == WORKER_BUDGET_JOBSERVER && !budget->dry_run ? worker_budget_borrow(budget, wanted < most ? wanted : most, lease) : 0;
 }

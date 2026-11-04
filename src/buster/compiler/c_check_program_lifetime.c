@@ -28,7 +28,7 @@
 static bool check_program_lifetime_local(const CheckInput* input, uint32_t token)
 {
     return input->declarations[token] == token && check_sparse_get(input->declaration_bodies, token) < input->token_count &&
-           input->declaration_kinds[token] == C_BINDING_OBJECT && !input->static_objects[token];
+           input->declaration_kinds[token] == C_BINDING_OBJECT && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC);
 }
 
 // The innermost block around `token` (its closing brace), or BUSTER_CHECK_NONE where the function's body is the

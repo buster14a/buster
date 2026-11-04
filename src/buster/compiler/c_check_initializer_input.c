@@ -163,7 +163,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
         uint8_t* bytes = size != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, size) : NULL;
         valid = slot != BUSTER_CHECK_NONE && bytes != NULL;
         bool known = valid && check_init_object_bytes(types, plan, bytes, size);
-        if (valid && !known && !input->static_objects[token])
+        if (valid && !known && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
         {
             // Automatic const vectors may have runtime initializers. A bounded static-mode attempt reuses
             // earlier retained bytes; an ordinary nonconstant result does not reject the automatic object.
@@ -290,7 +290,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         valid = input->token_count == parser->tokens.count && input->token_count < UINT32_MAX && stream->count == input->graph.count &&
                 stream->status == CHECK_STATUS_OK && !input->resource && (input->report_count == 0 || input->diagnostic_graph) &&
                 (input->token_count == 0 || (check_sparse_present(input->initializer_begins) && check_sparse_present(input->initializer_ends) && input->declared_types != 0 &&
-                 input->static_objects != 0 && input->token_nodes != 0)) && (input->report_count == 0 || input->reports != 0) &&
+                 input->declaration_bits != 0 && input->token_nodes != 0)) && (input->report_count == 0 || input->reports != 0) &&
                 (stream->report_count == 0 || stream->reports != 0) && (stream->count == 0 ||
                  (check_stream_has_values(stream) && stream->diagnostics != 0 && input->graph.ops != 0 && input->graph.tokens != 0 &&
                   input->graph.operand0 != 0 && input->graph.operand1 != 0 && input->graph.operand2 != 0));
@@ -380,7 +380,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         {
             CheckInitializer plan = { 0 };
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
-                                                         input->declared_types[declaration], begin, end, input->static_objects[declaration] != 0,
+                                                         input->declared_types[declaration], begin, end, check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
             const bool retained = !accepted || check_init_object_retain(&objects, input, stream, parser, types, declaration, &plan, true, output, scratch);
             if (plan.warning_count != 0)
@@ -459,7 +459,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
     bool valid = output != scratch && tokens == parser->tokens.count && tokens < UINT32_MAX &&
                  stream->count == input->graph.count && (tokens == 0 ||
                  (check_sparse_present(input->initializer_begins) && check_sparse_present(input->initializer_ends) && input->declared_types != 0 &&
-                  input->static_objects != 0 && input->token_nodes != 0));
+                  input->declaration_bits != 0 && input->token_nodes != 0));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
     if (valid && (input->resource || input->report_count != 0 || stream->status != CHECK_STATUS_OK || stream->report_count != 0))
     {
@@ -530,7 +530,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         {
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                       input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
-                                      input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
+                                      check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
         }
         if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
         {

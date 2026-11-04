@@ -245,10 +245,13 @@ typedef enum X86Operation
     X86_OPERATION_SIGN_EXTEND,
     // cwd, cdq and cqo: the accumulator's sign into RDX (EDX, DX).
     X86_OPERATION_SIGN_SPLIT,
+    // nop and its multi-byte forms, and pause (#1059), a spin loop's hint that changes no state.
     X86_OPERATION_NOP,
     // int3 and ud2.
     X86_OPERATION_TRAP,
     X86_OPERATION_ENDBR,
+    // mfence, lfence and sfence (#1059: each a whole fence to the effects' consumers, which keep memory accesses on
+    // their sides), and serialize.
     X86_OPERATION_FENCE,
     X86_OPERATION_BSWAP,
     X86_OPERATION_BT,
@@ -307,7 +310,8 @@ typedef enum X86Operation
     // packs and narrowing moves, compresses and expands); compares into an opmask or a vector; a vector's signs, bytes or
     // bits into a general or opmask register; vpblendvb's, vblendvps's and vblendvpd's selects by a register's signs;
     // gathers and scatters; AES rounds and GF(2^8) transforms; the opmask registers' moves and arithmetic; BMI's bit
-    // fields (andn, bextr, bzhi, pdep, pext); the instruction prefetches; the fused multiply-adds (FMA's, AVX512-FP16's
+    // fields (andn, bextr, bzhi, pdep, pext); the instruction prefetches, and the data ones (prefetch, prefetchw,
+    // prefetchnta, prefetcht0 to prefetcht2 and prefetchwt1, #1059); the fused multiply-adds (FMA's, AVX512-FP16's
     // complex ones) and AVX512BF16's dot product; the approximations of reciprocals and reciprocal square roots
     // (rcp, rsqrt and their 14-bit and half-precision forms); getexp's exponent and scalef's scaling; vptest's, vtestps's,
     // vtestpd's, kortest's and ktest's tests into the flags; and an opmask register's bits into a vector's elements
@@ -503,6 +507,9 @@ typedef enum X86Pattern
     X(CQO, CQO, SIGN_SPLIT, NONE, 8, 0, 0, 0, 0, BUSTER_X86_GPR(RAX), BUSTER_X86_GPR(RDX), 0, NONE, NONE, 0) \
     X(ENDBR64, ENDBR64, ENDBR, NONE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(MFENCE, MFENCE, FENCE, NONE, 0, 0, 0, 0, 0, 0, 0, BUSTER_X86_MEMORY_EFFECT_FENCE, NONE, NONE, 0) \
+    X(LFENCE, SFENCE, FENCE, NONE, 0, 0, 0, 0, 0, 0, 0, BUSTER_X86_MEMORY_EFFECT_FENCE, NONE, NONE, 0) \
+    X(PAUSE, PAUSE, NOP, NONE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(PREFETCH_M8, PREFETCHWT1_M8, PREFETCH, NONE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(BSWAP_R32, BSWAP_R64, BSWAP, MODIFY, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(BT_RM16_R16, BT_RM16_R16, BT, READ, 0, 0, 0, BUSTER_X86_FLAG_CF, BUSTER_X86_FLAGS_STEP, 0, 0, BUSTER_X86_MEMORY_EFFECT_BIT_STRING, NONE, NONE, 0) \
     X(BT_RM16_IMM8, BT_RM16_IMM8, BT, READ, 0, 0, 0, BUSTER_X86_FLAG_CF, BUSTER_X86_FLAGS_STEP, 0, 0, 0, BIT, NONE, 0) \
