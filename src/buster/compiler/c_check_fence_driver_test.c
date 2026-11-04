@@ -693,7 +693,7 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
     {
         const bool scalar = run % 2 != 0;
         const uint32_t variant = run / 2;
-        char* arguments[8] = { (char*)executable };
+        char* arguments[9] = { (char*)executable };
         uint32_t count = 1;
         if (scalar)
         {
