@@ -12215,14 +12215,25 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         {
             shared->local_first[program->bodies[b].opening] = BUSTER_CHECK_NONE;
         }
+        // Each declaring token's body where it declares a local (check_lower_local_declaration), none for every other, in its
+        // `local_next` until the links below replace it, and the local's body's list's head cleared: the test once a token
+        // (#1048: its loads are a declaration's first touches, which two passes paid twice).
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
-            if (check_lower_local_declaration(program, declaring[d]))
+            const uint32_t token = declaring[d];
+            const uint32_t body = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
+            shared->local_next[token] = body;
+            if (body != BUSTER_CHECK_NONE)
             {
-                shared->local_first[check_sparse_get(input->declaration_bodies, declaring[d])] = BUSTER_CHECK_NONE;
+                shared->local_first[body] = BUSTER_CHECK_NONE;
             }
         }
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
+        // The objects whose local_map entries a body writes, its parameters' and its locals' (check_lower_part sets them as
+        // the body starts and puts them back to none as it ends), are each cleared and marked in `locals` before any body
+        // is lowered, after which the bodies' writers only read the bits (#877): a local's as it is linked, every local's
+        // whatever its body (one no writer lowers keeps an entry that reads as none either way), and the parameters' of
+        // each body below. Every other object's entry, which nothing writes, reads as none without being cleared.
         for (uint32_t d = declaring_count; d-- > 0;)
         {
             const uint32_t token = declaring[d];
@@ -12230,27 +12241,20 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             {
                 shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
             }
-            const uint32_t body = check_sparse_get(input->declaration_bodies, token);
-            if (check_lower_local_declaration(program, token))
+            const uint32_t body = shared->local_next[token];
+            if (body != BUSTER_CHECK_NONE)
             {
                 shared->local_next[token] = shared->local_first[body];
                 shared->local_first[body] = token;
+                check_lower_local_keep(shared, input->objects[token], count);
             }
         }
-        // The objects whose local_map entries a body writes, its parameters' and its locals' (check_lower_part sets them as
-        // the body starts and puts them back to none as it ends): each cleared and marked in `locals` before any body is
-        // lowered, after which the bodies' writers only read the bits (#877). Every other object's entry, which nothing
-        // writes, reads as none without being cleared.
         for (uint32_t b = 0; b < program->body_count; b += 1)
         {
             const uint32_t opening = program->bodies[b].opening;
             for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
             {
                 check_lower_local_keep(shared, input->objects[parameter], count);
-            }
-            for (uint32_t declaration = shared->local_first[opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
-            {
-                check_lower_local_keep(shared, input->objects[declaration], count);
             }
         }
         // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
