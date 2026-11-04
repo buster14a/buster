@@ -1,0 +1,23 @@
+name: Issue 1272 hosted validation workspace
+on:
+  push:
+    branches: [chatgpt/1272-hosted-workspace]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: e2a92f1cfc253502a53071bf706b001291ef60d5
+          persist-credentials: false
+      - name: Package the pinned source for local CI-policy regression tests
+        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1272-source
+          path: ${{ runner.temp }}/source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
