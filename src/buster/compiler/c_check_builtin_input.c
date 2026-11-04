@@ -182,6 +182,29 @@ static void check_input_cfstring_literal(CheckInputReader* reader, const CheckBu
     }
 }
 
+// Whether call `close` (its `)`) calls a builtin, as clang's getBuiltinCallee finds one through the callee's
+// parentheses (#148): a catalog builtin or a header builtin's leaf, which the reader claims at the call, or the unit's
+// declaration, with external linkage, of a library builtin's name (pp_library_builtin, `abs` or `strlen` declared).
+static bool check_input_builtin_callee(const CheckInputReader* reader, uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    uint32_t callee = reader->first_child[close];
+    for (uint32_t depth = 0; depth < 64 && callee < parser->tokens.count && parser->tree.roles[callee] == PARSE_ROLE_CLOSE_GROUP; depth += 1)
+    {
+        const uint32_t opener = reader->first_child[callee];
+        callee = opener < parser->tokens.count ? reader->next_child[opener] : BUSTER_CHECK_NONE;
+    }
+    const bool named = callee < parser->tokens.count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER;
+    const uint32_t declaration = named ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
+    const bool function = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                          check_input_linkage(reader->declaration_bits, declaration) == 2;
+    const IdentId name = named ? parser->tokens.names[callee] : 0;
+    const bool library = function && name != 0 &&
+                         pp_library_builtin(&reader->pp->options, intern_bytes(reader->pp->table, name), intern_length(reader->pp->table, name));
+    const bool intrinsic = reader->output->intrinsic_ids != NULL && reader->output->intrinsic_ids[close] != 0;
+    return reader->builtins[close] != CBUILTIN_NONE || intrinsic || library;
+}
+
 static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader* reader, uint32_t node, uint32_t token, uint32_t count, uint32_t end,
                                                                 CheckBuiltinCall* evidence)
 {
@@ -201,6 +224,18 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
     {
         check_input_annotation_evidence(reader, end, token, evidence);
+    }
+    if (builtin == CBUILTIN_CALL_WITH_STATIC_CHAIN && count == 2 && end < token && end > 0)
+    {
+        // clang's BuiltinCallWithStaticChain: a CallExpr as written, without parentheses around it (whose node is a
+        // grouping's), the root of its argument, of no builtin.
+        const Parser* parser = reader->parser;
+        const uint32_t close = end - 1;
+        const uint32_t keyword = reader->first_child[token];
+        const uint32_t begin = keyword < token ? keyword + 2 : token;
+        const uint32_t parent = parser->tree.parents[close];
+        const bool call = close >= begin && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && (parent < begin || parent >= end);
+        evidence->static_chain_call = call && !check_input_builtin_callee(reader, close);
     }
     if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
     {

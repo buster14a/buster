@@ -1729,6 +1729,25 @@ A miscellaneous builtin's argument of the other signedness of a `char`
 pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
 an ordinary call's.
 
+`__builtin_call_with_static_chain(call, chain)` (0x4b0, #148) is the call's
+value, as clang's `BuiltinCallWithStaticChain` checks it.
+
+- **The call.** The first argument is a call as written: not a name, and not
+  a call in parentheses (its node is then a grouping's). It may not call a
+  builtin. That means a catalog builtin, a header builtin's leaf, or the
+  unit's external declaration of a library builtin's name (`abs` or `strlen`
+  declared), found through the callee's parentheses, as `getBuiltinCallee`
+  finds it.
+- **The chain.** The second argument is a pointer, of any type.
+- **Code.** clang's code evaluates the callee, then the chain, then the
+  arguments, and passes the chain in `r10`. This compiler's calls have no
+  static chain register, so `-c` refuses the call by name. Adding one would
+  touch every consumer of a call's record: Tier 0, Tier 1, the interpreter
+  and the SSA lowering.
+- **Identities.** The miscellaneous builtins past 0x45f start at 0x4b0, past
+  the `<stdbit.h>` library builtins' identities (0x460 to 0x4a5). A static
+  assertion keeps them apart.
+
 `__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
 arguments never run. It is clang 23's allocation token: the reader works it
 out from the arguments' syntax, in the walk and in the constant evaluator

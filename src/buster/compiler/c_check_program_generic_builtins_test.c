@@ -317,6 +317,21 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "_Static_assert(sizeof(__builtin_infer_alloc_token(1)) == 8, \"\");\nenum { E = __builtin_infer_alloc_token(sizeof(int[4])) != 0 };\n"
           "unsigned long f(int i)\n{\nunsigned long s = sizeof(struct Q) * 2;\nstatic unsigned long t = __builtin_infer_alloc_token(sizeof(_Bool));\n"
           "return __builtin_infer_alloc_token(i++, sizeof(char)) + __builtin_infer_alloc_token(s) + __builtin_infer_alloc_token(i) + t;\n}\n" },
+        // call_with_static_chain (#148): a call as written of no builtin (a catalog one, a header's leaf or a library
+        // builtin's external declaration), the call's value, and a pointer chain.
+        { .name = "generic: call_with_static_chain", .source =
+          "struct S { int a[4]; };\nint f(int);\nstruct S h(void);\nstatic int abs(int x) { return x; }\nvoid v(void);\n"
+          "int g(void* p, char* q, int (*k)(int, ...))\n{\nstruct S s = __builtin_call_with_static_chain(h(), q);\n"
+          "__builtin_call_with_static_chain(v(), p);\n(void)sizeof(__builtin_call_with_static_chain(f(1), p));\n"
+          "return __builtin_call_with_static_chain(f(1), p) + __builtin_call_with_static_chain((*k)(1, 2.0), p++) + s.a[0] +\n"
+          "__builtin_call_with_static_chain(abs(2), p);\n}\n" },
+        { .name = "generic: call_with_static_chain of a name", .source = "int f(int);\nint g(void* p)\n{\nreturn __builtin_call_with_static_chain(f, p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a grouping", .source = "int f(int);\nint g(void* p)\n{\nreturn __builtin_call_with_static_chain((f(1)), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a builtin", .source = "int g(void* p)\n{\nreturn __builtin_call_with_static_chain(__builtin_abs(1), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a library builtin", .source = "unsigned long strlen(const char*);\nunsigned long g(void* p)\n{\nreturn __builtin_call_with_static_chain(strlen(\"x\"), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of an int chain", .source = "int f(int);\nint g(int p)\n{\nreturn __builtin_call_with_static_chain(f(1), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a null constant", .source = "int f(int);\nint g(void)\n{\nreturn __builtin_call_with_static_chain(f(1), 0);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of one", .source = "int f(int);\nint g(void)\n{\nreturn __builtin_call_with_static_chain(f(1));\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of none", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token();\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of void", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token((void)0);\n}\n", .rejected = true },
         { .name = "generic: infer_alloc_token of no type", .source = "_Static_assert(__builtin_infer_alloc_token(1) == 0, \"\");\n", .rejected = true },

@@ -59,6 +59,8 @@ struct CheckBuiltinMiscAction
     // __builtin_infer_alloc_token's token, where the call's arguments give one (CheckBuiltinCall.alloc_token).
     bool alloc_token_known;
     uint64_t alloc_token;
+    // Whether __builtin_call_with_static_chain's first argument is a call as written (CheckBuiltinCall.static_chain_call).
+    bool static_chain_call;
     // Whether an explicit cast was stripped before that literal, which the literal-only arguments refuse, and the objects of
     // the functions the first argument names (CheckBuiltinCall's, #1126's review).
     bool string_cast;
@@ -1074,6 +1076,30 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
                                                              BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         output->action.value = (CheckValue){ .type = values[0].type, .category = CHECK_RVALUE, .flags = flags };
     }
+    else if (id == CBUILTIN_CALL_WITH_STATIC_CHAIN)
+    {
+        // The call's value (#148), its first argument a call as written of no builtin (CheckBuiltinMiscAction.static_chain_call)
+        // and its second a pointer, as clang's BuiltinCallWithStaticChain checks them. clang's code passes the chain in r10,
+        // which this compiler's calls don't (check_lower_unsupported).
+        const TypeId chain = type_strip_aligned(table, input->arguments[1].type);
+        const uint8_t kind = type_is_valid(table, chain) ? check_action_kind(table, chain) : BUSTER_TYPE_KIND_VOID;
+        if (!input->static_chain_call)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+        else if (kind != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_POINTER_REQUIRED, 1);
+        }
+        else
+        {
+            output->action.value = input->arguments[0];
+            output->action.value.category = CHECK_RVALUE;
+            output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+            output->action.value.flags = (input->arguments[0].flags | input->arguments[1].flags) & BUSTER_CHECK_SIDE_EFFECT;
+            output->action.value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+        }
+    }
     else if (id == CBUILTIN_INFER_ALLOC_TOKEN)
     {
         // A size_t of arguments that never run (#148): its type's token (CheckBuiltinMiscAction.alloc_token), an integer
@@ -1288,6 +1314,7 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         case CBUILTIN_HLSL_RESOURCE_GETPOINTER_TYPED: minimum = 0; maximum = 31; break;
         // size_t(...), at least one argument.
         case CBUILTIN_INFER_ALLOC_TOKEN: minimum = 1; maximum = 31; break;
+        case CBUILTIN_CALL_WITH_STATIC_CHAIN: minimum = maximum = 2; break;
         case CBUILTIN_OPERATOR_NEW:
         case CBUILTIN_OPERATOR_DELETE:
             // C++'s alone, refused with any arguments, before their count can reach the operands' 32-bit mask.
@@ -1334,7 +1361,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         const bool refused = input->id >= CBUILTIN_OPERATOR_NEW && input->id <= CBUILTIN_PTRAUTH_STRIP;
         const bool classify = input->id == CBUILTIN_CLASSIFY_TYPE || input->id == CBUILTIN_ADDRESSOF || input->id == CBUILTIN_FUNCTION_START ||
                               input->id == CBUILTIN_ALLOW_RUNTIME_CHECK || input->id == CBUILTIN_ALLOW_SANITIZE_CHECK || input->id == CBUILTIN_CPU_IS ||
-                              input->id == CBUILTIN_CPU_SUPPORTS || input->id == CBUILTIN_INFER_ALLOC_TOKEN || refused;
+                              input->id == CBUILTIN_CPU_SUPPORTS || input->id == CBUILTIN_INFER_ALLOC_TOKEN || input->id == CBUILTIN_CALL_WITH_STATIC_CHAIN ||
+                              refused;
         if (classify && !refused && (!type_is_valid(table, input->arguments[0].type) || input->arguments[0].category > CHECK_FUNCTION))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);

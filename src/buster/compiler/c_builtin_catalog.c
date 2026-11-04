@@ -475,7 +475,8 @@
     X(ZOS_VA_START, 0x45Cu, "__builtin_zos_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(ZOS_VA_END, 0x45Du, "__builtin_zos_va_end", BUSTER_CBUILTIN_SOURCE) \
     X(ZOS_VA_COPY, 0x45Eu, "__builtin_zos_va_copy", BUSTER_CBUILTIN_SOURCE) \
-    X(INFER_ALLOC_TOKEN, 0x45Fu, "__builtin_infer_alloc_token", BUSTER_CBUILTIN_CONSTANT)
+    X(INFER_ALLOC_TOKEN, 0x45Fu, "__builtin_infer_alloc_token", BUSTER_CBUILTIN_CONSTANT) \
+    X(CALL_WITH_STATIC_CHAIN, 0x4B0u, "__builtin_call_with_static_chain", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -496,6 +497,10 @@ typedef enum CBuiltinId
     CBUILTIN_STDC_LIBRARY_FIRST = 0x460,
     CBUILTIN_STDC_LIBRARY_LAST = 0x460 + (CBUILTIN_STDC_BIT_CEIL - CBUILTIN_STDC_LEADING_ZEROS + 1) * 5 - 1,
 } CBuiltinId;
+
+// The miscellaneous builtins past the stdc library builtins' identities (#148) start at 0x4b0, after them.
+_Static_assert(CBUILTIN_INFER_ALLOC_TOKEN < CBUILTIN_STDC_LIBRARY_FIRST && CBUILTIN_STDC_LIBRARY_LAST < CBUILTIN_CALL_WITH_STATIC_CHAIN,
+               "the miscellaneous builtins' identities stay clear of the stdc library builtins'");
 
 // The parameter types of the stdc library builtins' names, in their identities' order, and their suffixes.
 #define BUSTER_CBUILTIN_STDC_LIBRARY_TYPES 5u
@@ -760,7 +765,8 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
     return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING) ||
-           (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) || id == CBUILTIN_INFER_ALLOC_TOKEN;
+           (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) || id == CBUILTIN_INFER_ALLOC_TOKEN ||
+           id == CBUILTIN_CALL_WITH_STATIC_CHAIN;
 }
 
 // The Microsoft and z/OS va_list builtins (#148, __builtin_ms_va_start to __builtin_zos_va_copy), which take the
@@ -780,12 +786,12 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 // Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
 // fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's, and the literal and
 // function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is, cpu_supports and
-// __builtin___CFStringMakeConstantString, and __builtin_infer_alloc_token's token.
+// __builtin___CFStringMakeConstantString, __builtin_infer_alloc_token's token and __builtin_call_with_static_chain's call.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
                         id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS || id == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING ||
-                        id == CBUILTIN_INFER_ALLOC_TOKEN;
+                        id == CBUILTIN_INFER_ALLOC_TOKEN || id == CBUILTIN_CALL_WITH_STATIC_CHAIN;
     return result;
 }
 

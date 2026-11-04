@@ -7655,6 +7655,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
+    else if (runtime == CBUILTIN_CALL_WITH_STATIC_CHAIN)
+    {
+        check_lower_unsupported(writer, "__builtin_call_with_static_chain, whose chain this compiler's calls don't pass in r10");
+    }
     else if (runtime == CBUILTIN_INFER_ALLOC_TOKEN)
     {
         // A call whose arguments give no type (#148): the AllocToken pass's fallback token, 0; its arguments never run.

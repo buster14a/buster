@@ -50,6 +50,8 @@ struct CheckBuiltinCall
     // __builtin_infer_alloc_token's token, where its arguments give one (check_input_alloc_token_evidence, #148).
     bool alloc_token_known;
     uint64_t alloc_token;
+    // Whether __builtin_call_with_static_chain's first argument is a call as written, of no builtin (#148).
+    bool static_chain_call;
     // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
     // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
     uint32_t function_objects[4];
@@ -2130,6 +2132,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .string_utf8 = witness != NULL && witness->nan_payload_utf8,
             .alloc_token_known = witness != NULL && witness->alloc_token_known,
             .alloc_token = witness != NULL ? witness->alloc_token : 0,
+            .static_chain_call = witness != NULL && witness->static_chain_call,
             .function_objects = witness != NULL ? witness->function_objects : NULL,
             .function_object_count = witness != NULL ? witness->function_object_count : 0,
             .string_bytes = witness != NULL ? witness->nan_payload : NULL,
