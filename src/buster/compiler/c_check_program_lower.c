@@ -816,9 +816,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 2: a body's short columns copied by
-    // a masked move (check_lower_copy_column).
-    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -12629,8 +12626,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -12649,26 +12644,6 @@ static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool so
     CheckProgramLowered status;
     Arena measure = arena_measure();
     return check_lower_writer_begin(&writer, &abi, &status, shared, sources, &measure) ? measure.length : UINT64_MAX;
-}
-
-// #1048's experiment, temporary (#1235, bit 2): a body's column of at most 64 bytes copied by one masked load and store
-// on the vector host, rather than by a call to memcpy, as most of a body's locals', calls' and arguments' columns are.
-static inline __attribute__((always_inline)) void check_lower_copy_column(void* destination, const void* source, uint64_t bytes, bool masked)
-{
-#if BUSTER_HOST_VECTOR
-    if (masked && bytes <= 64)
-    {
-        const __mmask64 live = _bzhi_u64(~UINT64_C(0), (uint32_t)bytes);
-        _mm512_mask_storeu_epi8(destination, live, _mm512_maskz_loadu_epi8(live, source));
-    }
-    else
-    {
-        memcpy(destination, source, bytes);
-    }
-#else
-    (void)masked;
-    memcpy(destination, source, bytes);
-#endif
 }
 
 // Lowers `part`'s bodies, in order, with `writer` (check_lower_writer_begin's), each into the program's Tier0Function, its
@@ -13162,7 +13137,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             type* column = BUSTER_ARENA_PUSH_ARRAY(output, type, length); \
             if (column != 0) \
             { \
-                check_lower_copy_column(column, writer->source, (uint64_t)(length) * sizeof(type), (writer->experiment & 2) != 0); \
+                memcpy(column, writer->source, (uint64_t)(length) * sizeof(type)); \
                 function->field = column; \
             } \
             else \
