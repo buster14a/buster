@@ -472,6 +472,12 @@ that repository alone, and the environment should allow main only. Each run's
 own record is the source the ledger is rebuilt from, so a lost ledger costs
 only the re-harvest.
 
+Publication is best effort. A refused token, a network error or a branch that
+moved on meanwhile gives a warning with git's reason. It changes nothing else:
+the prepare job has already handed over its outputs, the window job's night
+goes ahead, and the next run publishes again. A fresh history is pushed only
+to a branch that doesn't exist yet, never forced over one that does.
+
 **The report** gives each status's count; this cycle's selected, completed,
 failed and deferred runs and hosted preparations; reuse; the oldest carried-over
 state; the remaining states; and evidence links. It warns when the week's
