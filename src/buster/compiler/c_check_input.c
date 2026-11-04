@@ -3974,6 +3974,15 @@ static bool check_input_kernel_sizes(CheckInputReader* reader, const CheckInputA
            check_input_attribute_equal(name, "amdgpu_flat_work_group_size") || check_input_attribute_equal(name, "amdgpu_waves_per_eu");
 }
 
+// Whether a generic attribute is an ownership's (#147), whose parameter indices (its arguments after its first, an
+// identifier) are evaluated where it is read (CheckInputAttribute.constants), as a kernel's sizes are.
+static bool check_input_ownership_indices(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    return check_input_attribute_equal(name, "ownership_holds") || check_input_attribute_equal(name, "ownership_takes") ||
+           check_input_attribute_equal(name, "ownership_returns");
+}
+
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
 {
     if (!check_input_attribute_starts(reader->parser, *cursor, end))
@@ -4017,6 +4026,26 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             if (!evaluated && !unresolved && !type_argument)
             {
                 check_input_attribute_constant_error(reader, &parsed, attribute, 0, attribute->argument_first, attribute->argument_end);
+            }
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 && attribute->argument_count <= 8 &&
+                 check_input_ownership_indices(reader, attribute))
+        {
+            attribute->argument_values = arena_push_array(reader->arena, attribute->argument_count, sizeof(int64_t), 8);
+            reader->output->resource |= attribute->argument_values == NULL;
+            uint32_t first = attribute->argument_first;
+            for (uint32_t argument = 0; attribute->argument_values != NULL && argument < attribute->argument_count; argument += 1)
+            {
+                uint32_t stop = first;
+                while (stop < attribute->argument_end && reader->parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+                {
+                    stop = check_input_attribute_after_group(reader->parser, stop, attribute->argument_end);
+                }
+                int64_t value = 0;
+                const bool constant = argument != 0 && check_input_constant_ice(reader, first, stop, &value);
+                attribute->argument_values[argument] = value;
+                attribute->constants |= constant ? (uint8_t)(1u << argument) : 0u;
+                first = stop + 1;
             }
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 1 && attribute->argument_count <= 3 &&
@@ -4968,6 +4997,51 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
     run->parameter_count = parameter_count;
 }
 
+// clang's LazyProcessLifetimeCaptureByParams (#147): once a function's parameters are known, each lifetime_capture_by
+// argument of its list's parameters that is an identifier other than `global`, `unknown` and `this` must name one of
+// them (`function`'s, its names linked by CheckInputReader.parameter_next), else "'lifetime_capture_by' attribute argument
+// 'X' is not a known function parameter; ..." at it (check_input_attribute_annotations checked the rest). Whether they do.
+static bool check_input_capture_names(CheckInputReader* reader, const CheckDeclaratorPart* function)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t close = function->token < count ? parser->tree.parents[function->token] : count;
+    uint32_t unknown = BUSTER_CHECK_NONE;
+    uint32_t item = BUSTER_CHECK_NONE;
+    for (uint32_t t = function->token + 1; unknown == BUSTER_CHECK_NONE && close < count && t < close; t += 1)
+    {
+        const bool named = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && t + 1 < close && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN &&
+                           t > 0 && (parser->tokens.kinds[t - 1] == PARSE_KIND_L_PAREN || parser->tokens.kinds[t - 1] == PARSE_KIND_COMMA) &&
+                           check_input_attribute_equal(check_input_attribute_name(reader, parser->tokens.names[t]), "lifetime_capture_by") &&
+                           parser->tree.roles[t + 1] == PARSE_ROLE_OPEN_CALL;
+        const uint32_t end = named ? parser->tree.parents[t + 1] : t;
+        for (uint32_t a = t + 2; named && unknown == BUSTER_CHECK_NONE && a < end; a += 1)
+        {
+            const bool lone = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER && (a + 1 == end || parser->tokens.kinds[a + 1] == PARSE_KIND_COMMA) &&
+                              (parser->tokens.kinds[a - 1] == PARSE_KIND_L_PAREN || parser->tokens.kinds[a - 1] == PARSE_KIND_COMMA);
+            const String8 word = lone ? check_input_attribute_name(reader, parser->tokens.names[a]) : (String8){ 0 };
+            bool known = !lone || check_input_attribute_equal(word, "global") || check_input_attribute_equal(word, "unknown") || check_input_attribute_equal(word, "this");
+            for (uint32_t parameter = function->names; !known && parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(reader->parameter_next, parameter))
+            {
+                known = parser->tokens.names[parameter] == parser->tokens.names[a];
+            }
+            unknown = known ? BUSTER_CHECK_NONE : a;
+            item = known ? item : t;
+        }
+    }
+    if (unknown != BUSTER_CHECK_NONE)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report_argument(reader, unknown, CHECK_INPUT_ATTRIBUTE_ARGUMENT, CHECK_ARGUMENT_CAPTURE_UNKNOWN);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].attribute = item;
+            reader->output->reports[before].value = unknown;
+        }
+    }
+    return unknown == BUSTER_CHECK_NONE;
+}
+
 // The run's type, 0 when it failed, and as a complete run, where it ended (`cursor`), its name and a definition's
 // parameters (`names`), its attributes, the tags and enumeration constants its parameter list declared and its ABI's
 // origin (reader->declarator_attributes, reader->declarator_declarations and reader->declarator_abi_origin). A run
@@ -4992,7 +5066,8 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     const CheckDeclaratorPart* own = complete && run->function_part != BUSTER_CHECK_NONE ? run->parts + run->function_part : NULL;
     reader->declarator_lifetimebound = own != NULL && own->lifetimebound != 0 && type_kind(reader->types, run->result) == BUSTER_TYPE_KIND_FUNCTION &&
                                        type_kind(reader->types, type_return(reader->types, run->result)) == BUSTER_TYPE_KIND_VOID ? own->lifetimebound - 1 : BUSTER_CHECK_NONE;
-    const TypeId result = complete ? run->result : 0;
+    const bool captured = own == NULL || check_input_capture_names(reader, own);
+    const TypeId result = complete && captured ? run->result : 0;
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
     {

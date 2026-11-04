@@ -623,6 +623,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR:
         case CHECK_WARNING_EVENT_TYPE_ON_DECLARATION:
         case CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED:
+        case CHECK_WARNING_EVENT_IBOUTLET:
+        case CHECK_WARNING_EVENT_MIG_ROUTINE:
+        case CHECK_WARNING_EVENT_SPAN_ONLY:
+        case CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF:
+        case CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF:
+        case CHECK_WARNING_EVENT_INDEPENDENT_POINTER:
+        case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
+        case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -636,6 +644,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             uint32_t length = 0;
             const uint32_t count = parser->tokens.count;
             const bool argued = event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ||
+                                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED || event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ||
                                 event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER || event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL;
             for (uint32_t token = payload->token; argued && token < count &&
                  (parser->tokens.kinds[token] == PARSE_KIND_STRING || (token == payload->token && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER));
@@ -682,9 +691,17 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL ?
                 check_warning_text(scratch, "'%.*s%s%.*s' attribute argument '%s' not supported on a global variable", (int)scope.length, scope.pointer,
                                    scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
-                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ?
-                check_warning_text(scratch, "'%.*s%s%.*s' attribute argument not supported: %s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
-                                   (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED ?
+                check_warning_text(scratch, event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ? "'%.*s%s%.*s' attribute argument not supported: %s" :
+                                                                                                     "'%.*s%s%.*s' attribute argument not supported: '%s'",
+                                   (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ?
+                check_warning_text(scratch, "'lifetime_capture_by(%s)' is deprecated; use 'lifetime_capture_by_%s' instead", argument, argument) :
+                event->kind == CHECK_WARNING_EVENT_MIG_ROUTINE ? "'mig_server_routine' attribute only applies to routines that return a kern_return_t" :
+                event->kind == CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF ? "'NSObject' attribute may be put on a typedef only; attribute is ignored" :
+                event->kind == CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF ? "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" :
+                event->kind == CHECK_WARNING_EVENT_INDEPENDENT_POINTER ?
+                "'objc_independent_class' attribute may be put on Objective-C object pointer type only; attribute is ignored" :
                 check_warning_text(scratch,
                                         event->kind == CHECK_WARNING_EVENT_TYPE_POSITION ? "attribute '%.*s%s%.*s' ignored, because it cannot be applied to a type" :
                                         event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS ? "'%.*s%s%.*s' attribute only applies to return values that are pointers" :
@@ -702,6 +719,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                             "'%.*s%s%.*s' attribute only applies to return values that are pointers or references" :
                                         event->kind == CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE ? "GCC does not allow the '%.*s%s%.*s' attribute to be written on a type" :
                                         event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ? "'%.*s%s%.*s' calling convention is not supported for this target" :
+                                        event->kind == CHECK_WARNING_EVENT_IBOUTLET ? "'%.*s%s%.*s' attribute can only be applied to instance variables or properties" :
+                                        event->kind == CHECK_WARNING_EVENT_SPAN_ONLY ? "'%.*s%s%.*s' attribute only applies to functions that return span-like structures" :
                                         "'%.*s%s%.*s' attribute ignored",
                                         (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
             break;
@@ -777,6 +796,17 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
         {
             const String8 noted = check_driver_warning_name(pp, note->payload.name);
             result = check_warning_text(scratch, "'%.*s' has been explicitly marked deprecated here", (int)noted.length, noted.pointer);
+            break;
+        }
+        case CHECK_WARNING_NOTE_SPAN_REASON:
+        {
+            static const char* const places[] = { "", "1st", "2nd" };
+            const uint32_t reason = note->payload.data & 0xffu;
+            const uint32_t number = note->payload.data >> 8;
+            result = reason == 1 ? "returned type is incomplete" : reason == 2 ? "returned type is not a struct type" :
+                     reason == 3 ? check_warning_text(scratch, "returned struct has %u fields, expected 2", number) :
+                     reason == 4 ? check_warning_text(scratch, "%s field is expected to be an integer", places[number < 3 ? number : 0]) :
+                     "returned struct fields are not a supported combination for a span-like type (expected pointer/integer or pointer/pointer)";
             break;
         }
         case CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD:

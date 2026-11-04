@@ -5550,6 +5550,31 @@ arguments against the function. The checker now gives these as clang does.
   `clang::`, and a function effect there is "cannot be applied to a
   declaration".
 
+  Static analyses' and Objective-C's annotations change nothing in C either,
+  with their handlers' checks (`check_input_attribute_annotations`):
+  `acquire_handle`'s integer parameter ("attribute only applies to output
+  parameters"); `mig_server_routine`'s function whose result isn't
+  `kern_return_t` (the last typedef of its spelling) of `int`, warned of at
+  the declaration's first token; `malloc_span`'s function of no span-like
+  result, warned of with clang's note why (incomplete, no struct, not two
+  fields, an expected integer field, no pointer/integer or pointer/pointer
+  pair: `check_input_span_reason`); `iboutlet`'s and `iboutletcollection`'s
+  warning anywhere in C; `type_visibility`, of a tag its visibility ("argument
+  not supported"), of a typedef "attribute ignored", of anything else "only
+  applies to types and namespaces"; `param_typestate`'s and
+  `return_typestate`'s state (unknown, consumed, unconsumed); the
+  `lifetime_capture_by` family (no argument, `this`, the parameter's own name,
+  an argument of no identifier, `global`'s, `unknown`'s and `this`'s
+  -Wdeprecated-attributes warning, the spellings' arguments, and the names of
+  no parameter checked once the function's parameters are known:
+  `check_input_capture_names`); the ownerships' identifier, counts, pointer
+  result and parameter indices (evaluated where they are read: out of bounds,
+  of another type, or another kind's); `NSObject`'s and
+  `objc_independent_class`'s warnings at the declaration's name
+  (`-WNSObject-attribute`, `-WIndependentClass-attribute`), NSObject's typedef
+  of no pointer to void or a record an error; `objc_precise_lifetime`'s error,
+  no C type being retainable; and `enforce_read_only_placement`'s subjects.
+
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
   `stdcall` is: clang's "calling convention is not supported for this target"

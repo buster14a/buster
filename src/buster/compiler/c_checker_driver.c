@@ -300,6 +300,29 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED:
             snprintf(text, capacity, "requested alignment is less than minimum alignment of %u for type %.*s", number, (int)literal.length, literal.pointer);
             break;
+        case CHECK_ARGUMENT_OUTPUT_PARAMETER: snprintf(text, capacity, "attribute only applies to output parameters"); break;
+        case CHECK_ARGUMENT_TYPES_NAMESPACES: snprintf(text, capacity, "'%s' attribute only applies to types and namespaces", parsed); break;
+        case CHECK_ARGUMENT_NO_CAPTURE: snprintf(text, capacity, "'%s' attribute specifies no capturing entity", parsed); break;
+        case CHECK_ARGUMENT_CAPTURE_UNKNOWN:
+            // The argument as written (the report's literal).
+            snprintf(text, capacity, "'%s' attribute argument '%.*s' is not a known function parameter; must be a function parameter, 'this', 'global' or 'unknown'",
+                     parsed, (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_CAPTURE_ITSELF: snprintf(text, capacity, "'lifetime_capture_by' argument references itself"); break;
+        case CHECK_ARGUMENT_CAPTURE_THIS: snprintf(text, capacity, "'lifetime_capture_by' argument references unavailable implicit 'this'"); break;
+        case CHECK_ARGUMENT_IMPLICIT_OBJECT: snprintf(text, capacity, "'%s' attribute requires an implicit object parameter", parsed); break;
+        case CHECK_ARGUMENT_OWNERSHIP_RETURN: snprintf(text, capacity, "'%s' attribute only applies to functions that return a pointer", parsed); break;
+        case CHECK_ARGUMENT_OWNERSHIP_TYPE: snprintf(text, capacity, "'%s' attribute only applies to %s arguments", parsed, number == 1 ? "integer" : "pointer"); break;
+        case CHECK_ARGUMENT_OWNERSHIP_CONFLICT:
+        {
+            const String8 other = check_driver_attribute_spelling(parser, pp, (uint32_t)value, false);
+            snprintf(text, capacity, "'%s' and '%.*s' attributes are not compatible", parsed, (int)other.length, other.pointer);
+            break;
+        }
+        case CHECK_ARGUMENT_NSOBJECT_POINTER: snprintf(text, capacity, "'NSObject' attribute is for pointer types only"); break;
+        case CHECK_ARGUMENT_PRECISE_LIFETIME:
+            snprintf(text, capacity, "objc_precise_lifetime only applies to retainable types; type here is %.*s", (int)literal.length, literal.pointer);
+            break;
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
@@ -1828,7 +1851,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const CheckInputReport* report = input->reports + index;
                             const uint64_t type_mark = scratch->length;
                             // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
-                            const bool typed = (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED && report->type != 0;
+                            const bool typed = ((report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED || (report->detail & 0xffu) == CHECK_ARGUMENT_PRECISE_LIFETIME) &&
+                               report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
                             spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
@@ -1838,9 +1862,18 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 spell.lengths[s] = intern_length(pp->table, s);
                             }
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            // (lifetime_capture_by's argument as written: its token's spelling.)
+                            const bool captured = (report->detail & 0xffu) == CHECK_ARGUMENT_CAPTURE_UNKNOWN && report->value < count;
+                            const uint32_t at = captured ? parser->tokens.sources[report->value] : 0;
+                            uint8_t* spelling_buffer = captured ? arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 :
+                                                                                 (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1) : NULL;
+                            const uint8_t* spelling_bytes = NULL;
+                            const uint32_t spelling_length = spelling_buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at],
+                                                                                                   spelling_buffer, &spelling_bytes) : 0;
                             const String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
                                                     spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
-                                                              (String8){ "", 0 };
+                                                    captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
+                                                    captured ? (String8){ (char*)spelling_bytes, spelling_length } : (String8){ "", 0 };
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
                             const bool matched = report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN && report->note_token < count;
                             const PPOutputDiagnosticNote note = {

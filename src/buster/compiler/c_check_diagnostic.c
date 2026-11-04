@@ -89,6 +89,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wdeprecated-attributes", "-Wdeprecated", "specifying vector types with the 'mode' attribute is deprecated" },
     { "-Wunknown-sanitizers", NULL, "unknown sanitizer ignored" },
     { "-Woverflow-behavior-attribute-ignored", NULL, "'overflow_behavior' attribute is ignored because it is not enabled" },
+    { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
+    { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

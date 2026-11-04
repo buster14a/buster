@@ -42,6 +42,8 @@ enum
     CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES = 50,
     CHECK_WARNING_ID_UNKNOWN_SANITIZERS = 51,
     CHECK_WARNING_ID_OVERFLOW_BEHAVIOR = 52,
+    CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 53,
+    CHECK_WARNING_ID_INDEPENDENT_CLASS = 54,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -175,6 +177,17 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_TYPE_ON_DECLARATION,
     // AMDGPU's num_sgpr and num_vgpr (#147, -Wdeprecated-declarations), at the attribute.
     CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED,
+    // Static analyses' and Objective-C's attributes' warnings (#147, check_input_attribute_annotations): iboutlet's,
+    // mig_server_routine's, malloc_span's (with its CHECK_WARNING_NOTE_SPAN_REASON), NSObject's, objc_independent_class's
+    // two, lifetime_capture_by's deprecated arguments, and return_typestate's quoted unsupported argument.
+    CHECK_WARNING_EVENT_IBOUTLET,
+    CHECK_WARNING_EVENT_MIG_ROUTINE,
+    CHECK_WARNING_EVENT_SPAN_ONLY,
+    CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF,
+    CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF,
+    CHECK_WARNING_EVENT_INDEPENDENT_POINTER,
+    CHECK_WARNING_EVENT_CAPTURE_DEPRECATED,
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -195,6 +208,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD,
     CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE,
     CHECK_WARNING_NOTE_DEPRECATED_HERE,
+    // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
+    CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

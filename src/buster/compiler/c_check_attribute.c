@@ -541,6 +541,30 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_ALIGNAS_DECLARATION,
     CHECK_ARGUMENT_ALIGNAS_SUBJECT,
     CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED,
+    // Static analyses' and Objective-C's handlers (check_input_attribute_annotations): acquire_handle's on an integer
+    // parameter, "attribute only applies to output parameters"; type_visibility's off a type, "'X' attribute only applies
+    // to types and namespaces"; lifetime_capture_by's of no argument, "'X' attribute specifies no capturing entity", of an
+    // argument that names no parameter, "'X' attribute argument 'A' is not a known function parameter; must be a function
+    // parameter, 'this', 'global' or 'unknown'" (at it), of its own parameter's name, "'lifetime_capture_by' argument
+    // references itself", of `this`, "'lifetime_capture_by' argument references unavailable implicit 'this'";
+    // lifetime_capture_by_this's "'X' attribute requires an implicit object parameter"; ownership_returns' function of no
+    // pointer result, "'X' attribute only applies to functions that return a pointer", an ownership's parameter of another
+    // type, "'X' attribute only applies to pointer arguments" (1 "integer"), two of other kinds of one parameter, "'X' and
+    // 'Y' attributes are not compatible" (Y's token in CheckInputReport.value); NSObject's typedef of no pointer to void or a
+    // record, "'NSObject' attribute is for pointer types only", at its name; objc_precise_lifetime's, "objc_precise_lifetime
+    // only applies to retainable types; type here is 'T'" (CheckInputReport.type).
+    CHECK_ARGUMENT_OUTPUT_PARAMETER,
+    CHECK_ARGUMENT_TYPES_NAMESPACES,
+    CHECK_ARGUMENT_NO_CAPTURE,
+    CHECK_ARGUMENT_CAPTURE_UNKNOWN,
+    CHECK_ARGUMENT_CAPTURE_ITSELF,
+    CHECK_ARGUMENT_CAPTURE_THIS,
+    CHECK_ARGUMENT_IMPLICIT_OBJECT,
+    CHECK_ARGUMENT_OWNERSHIP_RETURN,
+    CHECK_ARGUMENT_OWNERSHIP_TYPE,
+    CHECK_ARGUMENT_OWNERSHIP_CONFLICT,
+    CHECK_ARGUMENT_NSOBJECT_POINTER,
+    CHECK_ARGUMENT_PRECISE_LIFETIME,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2478,6 +2502,11 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // The GPU kernels' sizes and registers, of kernels alone (check_input_attribute_kernels).
         "reqd_work_group_size", "work_group_size_hint", "intel_reqd_sub_group_size", "amdgpu_flat_work_group_size", "amdgpu_waves_per_eu",
         "amdgpu_num_sgpr", "amdgpu_num_vgpr",
+        // Static analyses' and other languages' annotations, whose handlers' checks in C are check_input_attribute_handled's.
+        "acquire_handle", "mig_server_routine", "malloc_span", "iboutlet", "iboutletcollection", "enforce_read_only_placement", "type_visibility",
+        "param_typestate", "return_typestate", "lifetime_capture_by", "lifetime_capture_by_global", "lifetime_capture_by_this",
+        "lifetime_capture_by_unknown", "ownership_holds", "ownership_returns", "ownership_takes", "NSObject", "objc_independent_class",
+        "objc_precise_lifetime",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -4182,6 +4211,389 @@ static bool check_input_attribute_handled(CheckInputReader* reader, CheckInputAt
     return valid;
 }
 
+
+// The function an ownership attribute's subject has (#147): a function's type, or a pointer to one's.
+static TypeId check_input_ownership_function(const TypeTable* types, TypeId bare)
+{
+    const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId pointee = pointer ? type_strip_aligned(types, types->types.base[type_index(bare)]) : 0;
+    return bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_FUNCTION ? bare : pointee != 0 && type_kind(types, pointee) == BUSTER_TYPE_KIND_FUNCTION ? pointee : 0;
+}
+
+// Whether ownership_returns' function (`returns`) returns no pointer (#147, clang's err_ownership_takes_return_type).
+static bool check_input_ownership_no_pointer(const TypeTable* types, TypeId bare, bool returns)
+{
+    const TypeId function = check_input_ownership_function(types, bare);
+    return returns && function != 0 && type_kind(types, type_strip_aligned(types, type_return(types, function))) != BUSTER_TYPE_KIND_POINTER;
+}
+
+static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token, uint32_t end);;
+
+// The place clang's D->getLocation() is (#147): a declaration's name, a tag's (its keyword's, `begin`, for one of none), or
+// the declaration's first token.
+static uint32_t check_input_attribute_located(CheckInputReader* reader, uint32_t declaration, uint32_t name, uint32_t begin)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool tag = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
+    const uint32_t after = tag && begin + 1 < count ? check_input_skip_attributes(parser, begin + 1, count) : count;
+    const uint32_t tag_name = after < count && parser->tokens.kinds[after] == PARSE_KIND_IDENTIFIER ? after : begin;
+    return name < count ? name : tag ? tag_name : begin;
+}
+
+// A named attribute's warning (check_input_attribute_named_event) with a note at the attribute (`note`, its data `data`).
+static void check_input_attribute_noted_event(CheckInputReader* reader, const CheckInputAttribute* attribute, CheckWarningEventKind kind, CheckWarningNoteKind note,
+                                              uint32_t data)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+    const CheckWarningEvent event =
+    {
+        .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+        .kind = kind,
+        .token = attribute->first,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = attribute->first,
+        .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                     .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
+    };
+    const CheckWarningNote noted =
+    {
+        .kind = note,
+        .token = attribute->first,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = data },
+    };
+    check_input_warning_event(reader, &event, &noted, 1);
+}
+
+// Why a function's result is no span-like structure, as clang's CheckSpanLikeType decides (#147, malloc_span): 0 for one
+// that is, else the note's reason (CHECK_WARNING_NOTE_SPAN_REASON's data): 1 incomplete, 2 no struct, 3 not two fields
+// (their count from the 8th bit), 4 an expected integer field (its place from the 8th bit), 5 no pointer/integer or
+// pointer/pointer pair. A pointer is one to no function; an integer one of no enumeration.
+static uint32_t check_input_span_reason(const TypeTable* types, TypeId result)
+{
+    const TypeId bare = type_strip_aligned(types, result);
+    const uint8_t kind = type_kind(types, bare);
+    uint32_t reason = 0;
+    if (!type_is_complete(types, bare))
+    {
+        reason = 1;
+    }
+    else if (kind != BUSTER_TYPE_KIND_STRUCT)
+    {
+        reason = 2;
+    }
+    else
+    {
+        const uint32_t tag = types->types.index[type_index(bare)];
+        const uint32_t first = types->tags.member_begin[tag];
+        const uint32_t fields = types->tags.member_count[tag];
+        bool pointers[2] = { false, false };
+        bool integers[2] = { false, false };
+        for (uint32_t i = 0; fields == 2 && i < 2; i += 1)
+        {
+            const TypeId field = type_strip_aligned(types, types->members.type[first + i]);
+            const uint8_t field_kind = type_kind(types, field);
+            const bool pointer = field_kind == BUSTER_TYPE_KIND_POINTER;
+            pointers[i] = pointer && type_kind(types, type_strip_aligned(types, types->types.base[type_index(field)])) != BUSTER_TYPE_KIND_FUNCTION;
+            integers[i] = field_kind == BUSTER_TYPE_KIND_INTEGER;
+        }
+        reason = fields != 2 ? 3u | fields << 8 : pointers[0] && pointers[1] ? 0u : pointers[0] ? (integers[1] ? 0u : 4u | 2u << 8) :
+                 pointers[1] ? (integers[0] ? 0u : 4u | 1u << 8) : 5u;
+    }
+    return reason;
+}
+
+// Whether `type` (a parameter's) is clang's isIntegerType: an integer's, a character's, bool's or an enumeration's.
+static bool check_input_attribute_integer_type(const TypeTable* types, TypeId type)
+{
+    const uint8_t kind = type_kind(types, type_strip_aligned(types, type));
+    return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM;
+}
+
+// Static analyses' and Objective-C's attributes past their subjects (#147), as clang's handlers make them in C, changing
+// nothing here: acquire_handle's integer parameter; mig_server_routine's function whose result isn't kern_return_t, a
+// typedef of int (the last of its spelling's typedefs), its warning at the declaration's first token (`begin`);
+// malloc_span's function of no span-like result, its warning with a note why (check_input_span_reason); iboutlet's and
+// iboutletcollection's warning anywhere in C; type_visibility's, of a tag its visibility, of a typedef ignored, of
+// anything else an error; param_typestate's and return_typestate's state (unknown, consumed, unconsumed), another's
+// warning ("argument not supported: X", return_typestate's quoted); lifetime_capture_by's arguments (the parameters'
+// names are checked where its function's declarator ends: check_input_capture_names), with -Wdeprecated-attributes'
+// warning of `global`, `unknown` and `this`, and its spellings' (_global, _unknown, _this) of no arguments; the ownerships'
+// identifier, counts, result and parameter indices (out of bounds, of another type, or another kind's); NSObject's and
+// objc_independent_class's warnings at the declaration's place (check_input_attribute_located), NSObject's typedef of no
+// pointer to void or a record an error; objc_precise_lifetime's error. Whether the declaration goes on.
+static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration,
+                                              TypeId type, uint32_t name, uint32_t begin)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t count = parser->tokens.count;
+    const String8 spelled = check_input_attribute_name(reader, attribute->name);
+    const TypeId bare = type != 0 ? type_strip_aligned(types, type) : 0;
+    const bool function = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool parameter = (declaration & BUSTER_CHECK_SUBJECT_PARAMETER) != 0;
+    const bool typedef_name = (declaration & BUSTER_CHECK_SUBJECT_TYPEDEF) != 0;
+    const bool tag = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
+    const uint32_t located = check_input_attribute_located(reader, declaration, name, begin);
+    // The first argument's sole identifier, or BUSTER_CHECK_NONE.
+    const bool lone = attribute->argument_count >= 1 && attribute->argument_first + 1 <= attribute->argument_end &&
+                      parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_IDENTIFIER &&
+                      (attribute->argument_first + 1 == attribute->argument_end || parser->tokens.kinds[attribute->argument_first + 1] == PARSE_KIND_COMMA);
+    const String8 word = lone ? check_input_attribute_name(reader, parser->tokens.names[attribute->argument_first]) : (String8){ 0 };
+    const bool capture = check_input_attribute_equal(spelled, "lifetime_capture_by");
+    const bool capture_this = check_input_attribute_equal(spelled, "lifetime_capture_by_this");
+    const bool capture_other = check_input_attribute_equal(spelled, "lifetime_capture_by_global") || check_input_attribute_equal(spelled, "lifetime_capture_by_unknown");
+    const bool returns = check_input_attribute_equal(spelled, "ownership_returns");
+    const bool ownership = returns || check_input_attribute_equal(spelled, "ownership_holds") || check_input_attribute_equal(spelled, "ownership_takes");
+    bool valid = true;
+    if (attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+    {
+        // Its count's error comes first (check_input_attribute_subjects).
+    }
+    else if (check_input_attribute_equal(spelled, "acquire_handle") && parameter && check_input_attribute_integer_type(types, bare))
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OUTPUT_PARAMETER, 0);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "mig_server_routine") && function)
+    {
+        // The last typedef of its result's spelling (a declarator's own may add to it), and the result itself.
+        uint32_t spelling = name < count ? check_input_typedef_spelling(reader->output, parser, name) : 0;
+        bool kern = false;
+        for (uint32_t step = 0; spelling != 0 && step < 64; step += 1)
+        {
+            kern = check_input_attribute_equal(check_input_attribute_name(reader, parser->tokens.names[spelling]), "kern_return_t");
+            spelling = check_input_typedef_spelling(reader->output, parser, spelling);
+        }
+        if (!kern || type_return(types, bare) != BUSTER_TYPE_INT)
+        {
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_MIG_ROUTINE, begin, begin);
+            attribute->ignored = true;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "malloc_span") && function)
+    {
+        const uint32_t reason = check_input_span_reason(types, type_return(types, bare));
+        if (reason != 0)
+        {
+            check_input_attribute_noted_event(reader, attribute, CHECK_WARNING_EVENT_SPAN_ONLY, CHECK_WARNING_NOTE_SPAN_REASON, reason);
+            attribute->ignored = true;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "iboutlet") || check_input_attribute_equal(spelled, "iboutletcollection"))
+    {
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_IBOUTLET);
+        attribute->ignored = true;
+    }
+    else if (check_input_attribute_equal(spelled, "type_visibility") && tag)
+    {
+        const bool string = attribute->argument_first < attribute->argument_end && parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING &&
+                            check_input_attribute_string(reader, attribute->argument_first, attribute->argument_end, &attribute->text);
+        if (string && !check_input_attribute_equal(attribute->text, "default") && !check_input_attribute_equal(attribute->text, "hidden") &&
+            !check_input_attribute_equal(attribute->text, "protected"))
+        {
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED,
+                                                 attribute->argument_first, attribute->argument_first);
+            attribute->ignored = true;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "type_visibility") && typedef_name)
+    {
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+        attribute->ignored = true;
+    }
+    else if (check_input_attribute_equal(spelled, "type_visibility"))
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_TYPES_NAMESPACES, 0);
+        valid = false;
+    }
+    else if ((check_input_attribute_equal(spelled, "param_typestate") || check_input_attribute_equal(spelled, "return_typestate")) && attribute->argument_count == 1)
+    {
+        if (!lone)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_IDENTIFIER, 0);
+            valid = false;
+        }
+        else if (!check_input_attribute_equal(word, "unknown") && !check_input_attribute_equal(word, "consumed") && !check_input_attribute_equal(word, "unconsumed"))
+        {
+            const bool quoted = check_input_attribute_equal(spelled, "return_typestate");
+            check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                                                 quoted ? CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED : CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED,
+                                                 attribute->argument_first, attribute->argument_first);
+            attribute->ignored = true;
+        }
+    }
+    else if ((capture_this || capture_other) && attribute->argument_count != 0)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT);
+        valid = false;
+    }
+    else if (capture_this)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_IMPLICIT_OBJECT, 0);
+        valid = false;
+    }
+    else if (capture && attribute->argument_count == 0)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_NO_CAPTURE, 0);
+        valid = false;
+    }
+    else if (capture)
+    {
+        // Each argument: `global`, `unknown` and `this` deprecated, `this` unavailable here, the parameter's own name
+        // itself, and no identifier no parameter's name; another identifier is checked once the parameters are known.
+        uint32_t first = attribute->argument_first;
+        while (valid && first < attribute->argument_end)
+        {
+            uint32_t stop = first;
+            while (stop < attribute->argument_end && parser->tokens.kinds[stop] != PARSE_KIND_COMMA)
+            {
+                stop = check_input_attribute_after_group(parser, stop, attribute->argument_end);
+            }
+            const bool identifier = stop == first + 1 && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+            const String8 argument = identifier ? check_input_attribute_name(reader, parser->tokens.names[first]) : (String8){ 0 };
+            const bool global = identifier && (check_input_attribute_equal(argument, "global") || check_input_attribute_equal(argument, "unknown"));
+            const bool self = identifier && check_input_attribute_equal(argument, "this");
+            if (global || self)
+            {
+                check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_CAPTURE_DEPRECATED, first, first);
+            }
+            if (self)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_CAPTURE_THIS, 0);
+                valid = false;
+            }
+            else if (identifier && !global && name < count && parser->tokens.names[first] == parser->tokens.names[name])
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_CAPTURE_ITSELF, 0);
+                valid = false;
+            }
+            else if (!identifier)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_CAPTURE_UNKNOWN, 0);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].value = first;
+                }
+                valid = false;
+            }
+            first = stop + 1;
+        }
+    }
+    else if (ownership && !lone)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_IDENTIFIER, 1);
+        valid = false;
+    }
+    else if (ownership && !returns && attribute->argument_count < 2)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_LEAST | 2u << 8);
+        valid = false;
+    }
+    else if (returns && attribute->argument_count > 2)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_MOST | 2u << 8);
+        valid = false;
+    }
+    else if (ownership && check_input_ownership_no_pointer(types, bare, returns))
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OWNERSHIP_RETURN, 0);
+        valid = false;
+    }
+    else if (ownership)
+    {
+        // Its parameter indices (CheckInputAttribute.constants, from the second argument), as clang's
+        // checkFunctionOrMethodParameterIndex reads them ("parameter N", the argument's place from 0), each of a pointer
+        // (an integer for ownership_returns), and none an index another kind of ownership names.
+        const TypeId target = check_input_ownership_function(types, bare);
+        uint32_t parameters = 0;
+        const TypeId* parameter_types = target != 0 ? type_parameters(types, target, &parameters) : NULL;
+        for (uint32_t i = 1; valid && i < attribute->argument_count && i < 8; i += 1)
+        {
+            const bool constant = ((attribute->constants >> i) & 1u) != 0 && attribute->argument_values != NULL;
+            const int64_t index = constant ? attribute->argument_values[i] : 0;
+            const bool bounded = constant && index >= 1 && (uint64_t)index <= parameters;
+            const TypeId parameter_type = bounded && parameter_types != NULL ? parameter_types[index - 1] : 0;
+            const uint8_t parameter_kind = parameter_type != 0 ? type_kind(types, type_strip_aligned(types, parameter_type)) : 0;
+            if (!constant)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PARAMETER_INTEGER, i);
+                valid = false;
+            }
+            else if (!bounded)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OUT_OF_BOUNDS, i);
+                valid = false;
+            }
+            else if (returns ? !check_input_attribute_integer_type(types, parameter_type) : parameter_kind != BUSTER_TYPE_KIND_POINTER)
+            {
+                check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OWNERSHIP_TYPE, returns ? 1u : 0u);
+                valid = false;
+            }
+            for (uint32_t j = 0; valid && attributes != NULL && j < attributes->count && attributes->records + j != attribute; j += 1)
+            {
+                const CheckInputAttribute* earlier = attributes->records + j;
+                const String8 earlier_name = earlier->kind == CHECK_ATTRIBUTE_UNKNOWN && !earlier->keyword ? check_input_attribute_name(reader, earlier->name) : (String8){ 0 };
+                const bool owner = check_input_attribute_equal(earlier_name, "ownership_holds") || check_input_attribute_equal(earlier_name, "ownership_takes") ||
+                                   check_input_attribute_equal(earlier_name, "ownership_returns");
+                bool same = false;
+                for (uint32_t k = 1; owner && !earlier->ignored && earlier->argument_values != NULL && k < earlier->argument_count && k < 8; k += 1)
+                {
+                    same |= ((earlier->constants >> k) & 1u) != 0 && earlier->argument_values[k] == index;
+                }
+                if (same && !check_input_attribute_equal(earlier_name, spelled.pointer))
+                {
+                    const uint32_t before = reader->output->report_count;
+                    check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OWNERSHIP_CONFLICT, 0);
+                    if (reader->output->report_count > before)
+                    {
+                        reader->output->reports[before].value = earlier->first;
+                    }
+                    valid = false;
+                }
+            }
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "NSObject") && typedef_name)
+    {
+        // A pointer to void or a record (clang's isCARCBridgableType).
+        const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+        const uint8_t pointee = pointer ? type_kind(types, type_strip_aligned(types, types->types.base[type_index(bare)])) : 0;
+        if (!pointer || (pointee != BUSTER_TYPE_KIND_VOID && pointee != BUSTER_TYPE_KIND_STRUCT && pointee != BUSTER_TYPE_KIND_UNION))
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, located, CHECK_ARGUMENT_NSOBJECT_POINTER, 0);
+            valid = false;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "NSObject"))
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE, CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF, located, located);
+        attribute->ignored = true;
+    }
+    else if (check_input_attribute_equal(spelled, "objc_independent_class"))
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_INDEPENDENT_CLASS,
+                                             typedef_name ? CHECK_WARNING_EVENT_INDEPENDENT_POINTER : CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF, located, located);
+        attribute->ignored = true;
+    }
+    else if (check_input_attribute_equal(spelled, "objc_precise_lifetime"))
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PRECISE_LIFETIME, 0);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].type = type;
+            reader->output->reports[before].type_spelling = name < count ? check_input_typedef_spelling(reader->output, parser, name) : 0;
+        }
+        valid = false;
+    }
+    return valid;
+}
+
 // A function's GPU kernel attributes where it has no kernel's convention (amdgpu_kernel, device_kernel, nvptx_kernel), as
 // clang's ProcessDeclAttributeList ends (#147): the first of reqd_work_group_size, work_group_size_hint, vec_type_hint and
 // intel_reqd_sub_group_size, "attribute 'X' can only be applied to an OpenCL kernel function"; then the first of AMDGPU's
@@ -4450,6 +4862,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
         {
             valid = check_input_attribute_handled(reader, attributes, attribute, declaration, type, name);
+        }
+        if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
+        {
+            valid = check_input_attribute_annotations(reader, attributes, attribute, declaration, type, name, begin);
         }
         // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
         if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)
