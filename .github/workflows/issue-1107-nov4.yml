@@ -77,16 +77,21 @@ jobs:
           git apply "$RUNNER_TEMP/implementation.patch"
           for patch in "$RUNNER_TEMP/iterations/"*.patch; do git apply "$patch"; done
           git diff --check
-          git switch -c agent/1107-semantic-diagnostics
+          git switch -c agent/1107-clang-semantic-diagnostics
           git config user.name 'David Gonzalez Martin'
           git config user.email 'davidgmbb@gmail.com'
           sh .githooks/enable-sign-off.sh --maintainer-session
           git add src/buster/compiler docs/commands/checker.md
           git commit -m 'fix(checker): report common semantic constraints with context' -m 'Preserve diagnostic causes and converted case values, render common semantic errors with names and types, and retain static-assert requirements and decoded messages. Share the renderer between the driver and corpus without changing publication order. Check exact Clang columns/messages, valid twins and parser recovery on both paths. Fixes #1107.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          tested_tree=$(git rev-parse 'HEAD^{tree}')
+          git rebase 692510699dc5f0fb6c28d1296975a84c61b020e9
+          test "$(git rev-parse 'HEAD^{tree}')" = "$tested_tree"
           git log -1 --format=fuller > "$RUNNER_TEMP/publication/commit.txt"
+          git log -1 --format=%B | git interpret-trailers --parse > "$RUNNER_TEMP/publication/trailers.txt"
+          test "$(cat "$RUNNER_TEMP/publication/trailers.txt")" = 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
           git diff --stat HEAD^ > "$RUNNER_TEMP/publication/stat.txt"
           git diff HEAD^ > "$RUNNER_TEMP/publication/implementation.patch"
-          git push origin HEAD:refs/heads/agent/1107-semantic-diagnostics
+          git push origin HEAD:refs/heads/agent/1107-clang-semantic-diagnostics
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
