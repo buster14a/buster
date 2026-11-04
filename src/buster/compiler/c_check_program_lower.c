@@ -605,6 +605,7 @@ struct CheckLowerWriter
     uint32_t* vla_identities;
     uint32_t* save_locals;
     uint8_t* indirect;
+    // Each initializer's node's declaration, by node, written only at those nodes: read through check_lower_initializer_of.
     uint32_t* initializer_declarations;
     uint8_t* local_classes;
     uint8_t* local_flags;
@@ -733,6 +734,9 @@ struct CheckLowerWriter
     // Whether the program's type table has a _BitInt type, the only one whose operations can have narrow operands
     // (check_lower_computed): a conversion, a constant, an update and a compare test their types for one only then.
     bool bit_ints;
+    // Whether the program may have overloaded functions (CheckLowerShared.overloads): an operand tests its overload set and
+    // its selected overload's address only then.
+    bool overloads;
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
@@ -745,6 +749,10 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
+    // Whether the vector path tries #624's two- and three-node fragments (check_lower_batch_expression): only where its
+    // caller asks, as its test does (c_check_program_batch_test.c). No compile does: on the 9700X, sqlite3.c's statements
+    // took 0.32 ms less without them (#1048, docs/c-lowering.md's "The vector path's fast paths").
+    bool fragments;
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
@@ -820,6 +828,18 @@ static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t ob
     return writer->locals == NULL || check_program_bit(writer->locals, object) ? writer->local_map[object] : BUSTER_CHECK_NONE;
 }
 
+// The declaration whose initializer `node` is, or none (CheckLowerWriter.initializer_declarations). The preparation writes
+// the map only at the initializers' nodes, without clearing it first (#1048: 0.04 ms of sqlite3.c's preparation on the
+// 9700X), and a slot's token is the node's declaration only where initializer_nodes maps it back to the node, which a
+// stale slot's can't: every token whose initializer is a node is among the declaring tokens that write the map
+// (check_program_declaring).
+static inline uint32_t check_lower_initializer_of(const CheckLowerWriter* writer, uint32_t node)
+{
+    const uint32_t token = writer->initializer_declarations[node];
+    const bool valid = token < writer->program->input->token_count && check_sparse_get(writer->program->input->initializer_nodes, token) == node;
+    return valid ? token : BUSTER_CHECK_NONE;
+}
+
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
 // its object's references read where an array's take LOCAL_ADDRESS; and allocated, once its CHECK_CONTROL_ALLOCATE
@@ -829,12 +849,24 @@ static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t ob
 #define BUSTER_CHECK_LOWER_VLA_DECLARED 1
 #define BUSTER_CHECK_LOWER_VLA_ALLOCATED 2
 
+// A writer's token that is an expression node's (check_lower_expand's and check_lower_plain's), the node marked by the top
+// bit (no unit has 2^31 nodes, and BUSTER_CHECK_NONE is no node), which a failure (check_lower_fail) and the part's end
+// (CheckLowerPart.final_token) read as the node's token (check_lower_writer_token): nothing else reads the token, so each
+// node needn't read the tokens' column (#1048: 0.07 ms of sqlite3.c's lowering on the 9700X).
+#define BUSTER_CHECK_LOWER_TOKEN_NODE 0x80000000u
+
+static uint32_t check_lower_writer_token(const CheckLowerWriter* writer)
+{
+    const uint32_t token = writer->token;
+    return token != BUSTER_CHECK_NONE && (token & BUSTER_CHECK_LOWER_TOKEN_NODE) != 0 ? writer->program->input->graph.tokens[token & ~BUSTER_CHECK_LOWER_TOKEN_NODE] : token;
+}
+
 static void check_lower_fail(CheckLowerWriter* writer, CheckProgramStatus status)
 {
     if (writer->output->status == CHECK_PROGRAM_OK)
     {
         writer->output->status = status;
-        writer->output->token = writer->token;
+        writer->output->token = check_lower_writer_token(writer);
     }
 }
 
@@ -1458,6 +1490,23 @@ static uint32_t check_lower_bit_int_shift(const TypeTable* types, TypeId type)
 static uint8_t check_lower_value_class(const CheckLowerWriter* writer, TypeId type)
 {
     return check_lower_aggregate(writer, type) ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
+}
+
+// A type's class and facts in one word, CheckLowerShared.type_templates' layout (the vector path's alone, which has the
+// table), and whether they are a plain scalar's: a class from I8 to F64 (or VOID, where `void_ok`), and none of the facts
+// whose rules go elsewhere (an aggregate's, a complex value's, an atomic's, a _BitInt's).
+static inline __attribute__((always_inline)) uint32_t check_lower_type_info(const CheckLowerWriter* writer, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    return index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
+}
+
+static inline __attribute__((always_inline)) bool check_lower_plain_scalar(uint32_t info, bool void_ok)
+{
+    const uint8_t class = (uint8_t)info;
+    const uint8_t facts = (uint8_t)(info >> 8);
+    const bool classed = (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64) || (void_ok && class == BUSTER_TYPED_CLASS_VOID);
+    return classed && (facts & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ATOMIC | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
 }
 
 // A type's half-precision format (CheckHalf, c_check_program_half.c's values): an _Atomic one's value's too, as its class
@@ -2134,10 +2183,13 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
     }
 }
 
+// An operand pushed with its conversion. A pending overload set's leaf (its value's overload head) is refused; a unit
+// without overload sets has none, and its operands don't read their payload rows for it (#1048: on the 9700X that read
+// cost sqlite3.c's statements 0.38 ms, docs/c-lowering.md's "The operands' overload tests").
 static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
-    if (node < program->stream->count && check_stream_overload_head(program->stream, node) == 0)
+    if (node < program->stream->count && (!writer->overloads || check_stream_overload_head(program->stream, node) == 0))
     {
         // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
         // bit-field (an update's too) leaves no value. A discarded comma discards its right operand in its place.
@@ -2160,13 +2212,60 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
     }
 }
 
-// Pending overload leaves carry a lexical placeholder. Only the checked consuming edge supplies an address.
+// Pending overload leaves carry a lexical placeholder. Only the checked consuming edge supplies an address. In a unit
+// without overload sets, the operand is pushed here, as check_lower_expression pushes it: its void context's tests only in
+// a void context, its conversion's test in place and its EXPRESSION task packed directly (#1048: 0.23 ms of sqlite3.c's
+// statements on the 9700X, docs/c-lowering.md's "The operands' push").
 static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_t operand, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckOverloadResult* selected = check_program_overload_address(program, node, operand);
-    if (selected != NULL)
+    const CheckOverloadResult* selected = writer->overloads ? check_program_overload_address(program, node, operand) : NULL;
+    if (!writer->overloads)
+    {
+        const CheckStream* stream = program->stream;
+        const uint32_t child = operand == 0 ? graph->operand0[node] : operand == 1 ? graph->operand1[node] : operand == 2 ? graph->operand2[node] :
+                               operand - 3 < graph->argument_counts[node] ? graph->argument_nodes[graph->argument_offsets[node] + operand - 3] : BUSTER_CHECK_NONE;
+        if (child < stream->count)
+        {
+            // check_lower_expression's discard: a statement's aggregate assignment, a bit-field's store or update, a comma.
+            bool discard = false;
+            if (!address && target == BUSTER_TYPE_VOID)
+            {
+                const CheckOp op = graph->ops[child];
+                const bool store = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE;
+                const uint32_t destination = graph->operand0[child];
+                const bool bit_field = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && destination < stream->count &&
+                                       (check_stream_flags(stream, destination) & BUSTER_CHECK_BIT_FIELD) != 0;
+                discard = (store && check_lower_aggregate(writer, check_stream_type(stream, child))) || bit_field || op == CHECK_OP_COMMA;
+            }
+            if (!address && !discard && target != 0)
+            {
+                const TypeId from = check_stream_type(stream, child);
+                if (from != target && !check_lower_conversion_empty(writer, from, target))
+                {
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target });
+                }
+            }
+            if (writer->depth < writer->capacity)
+            {
+                // check_lower_task_pack's EXPRESSION task.
+                writer->tasks[writer->depth++] = (CheckLowerTaskPacked){
+                    .control = child | (uint64_t)CHECK_LOWER_EXPRESSION << 32 | (uint64_t)address << 40 | (uint64_t)discard << 42,
+                    .payload = 0,
+                };
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    else if (selected != NULL)
     {
         if (!check_program_overload_valid(program, selected))
         {
@@ -5559,11 +5658,26 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
     // its address, and its bytes go where abi_assign puts them), after the callee's calling convention.
     const char* passed = check_lower_convention(types, type, true);
-    for (uint32_t a = 0; a < parameters && passed == NULL; a += 1)
+    // A plain call: a source call whose parameters and arguments are all plain scalars (check_lower_plain_scalar), none a
+    // transparent union's, and whose result is one or void, which passes every check below and records its arguments by
+    // their packed classes and facts alone, on the vector path (#1048: 0.05 ms of sqlite3.c's lowering on the 9700X,
+    // docs/c-lowering.md's "Plain calls and compact locals"). Any other takes each type's helpers, the scalar path's too.
+    const TypeId result = check_stream_type(stream, node);
+    bool plain = writer->type_templates != NULL && !halves && !builtin && omitted == 0 && check_lower_plain_scalar(check_lower_type_info(writer, result), true);
+    for (uint32_t a = 0; plain && a < parameters; a += 1)
+    {
+        plain = check_lower_plain_scalar(check_lower_type_info(writer, parameter_types[a]), false);
+    }
+    for (uint32_t a = 0; plain && a < count; a += 1)
+    {
+        const CheckConversion* conversion = stream->argument_conversions + first + a;
+        plain = check_lower_plain_scalar(check_lower_type_info(writer, conversion->type), false) && (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0;
+    }
+    for (uint32_t a = 0; !plain && a < parameters && passed == NULL; a += 1)
     {
         passed = halves ? check_lower_passed(writer, parameter_types[a]) : check_lower_call_passed(writer, parameter_types[a]);
     }
-    for (uint32_t kept = 0; kept < count && passed == NULL; kept += 1)
+    for (uint32_t kept = 0; !plain && kept < count && passed == NULL; kept += 1)
     {
         const uint32_t a = kept + (kept >= omit ? omitted : 0);
         const TypeId argument = stream->argument_conversions[first + a].type;
@@ -5571,10 +5685,9 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     }
     // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
     // 128-bit integer's and a vector's, which LOCAL then reads.
-    const TypeId result = check_stream_type(stream, node);
-    const bool aggregate_result = check_lower_aggregate(writer, result);
-    const bool wide_result = check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0;
-    const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
+    const bool aggregate_result = !plain && check_lower_aggregate(writer, result);
+    const bool wide_result = !plain && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0);
+    const char* returned = plain ? NULL : aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
@@ -5622,7 +5735,15 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         abi->variadic[abi->count++] = variadic;
         // Whether an argument is a transparent union's, which the operands' loop asks again only then.
         bool transparent = false;
-        for (uint32_t kept = 0; kept < count; kept += 1)
+        // A plain call's arguments: each its own type, a value of its class.
+        for (uint32_t kept = 0; plain && kept < count; kept += 1)
+        {
+            const TypeId argument = stream->argument_conversions[first + kept].type;
+            abi->arguments[abi->argument_count++] = argument;
+            writer->argument_sizes[writer->argument_count] = 0;
+            writer->argument_classes[writer->argument_count++] = (uint8_t)check_lower_type_info(writer, argument);
+        }
+        for (uint32_t kept = 0; !plain && kept < count; kept += 1)
         {
             const uint32_t a = kept + (kept >= omit ? omitted : 0);
             // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made, and a
@@ -5666,7 +5787,11 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         }
         check_lower_instruction(writer, tail ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL,
                                 tail || aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : result_class, call);
-        for (uint32_t kept = count; kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        for (uint32_t kept = count; plain && kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            check_lower_operand(writer, node, kept + 3, false, stream->argument_conversions[first + kept].type);
+        }
+        for (uint32_t kept = count; !plain && kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const uint32_t a = kept + (kept >= omit ? omitted : 0);
             const CheckConversion* conversion = stream->argument_conversions + first + a;
@@ -9641,7 +9766,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     const bool aggregate = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
     const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
     const uint8_t class = aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, value->type);
-    writer->token = graph->tokens[node];
+    writer->token = node | BUSTER_CHECK_LOWER_TOKEN_NODE;
     const bool constant = value->constant_kind != CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // An expression of a _BitInt goes to check_lower_bit_int_node first, out of line, which may push it again for what
@@ -10081,7 +10206,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const TypeId destination = op == CHECK_OP_ASSIGN ? check_stream_type(stream, a) :
                                    declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
         const bool volatile_copy = check_lower_copy_node_volatile(writer, op == CHECK_OP_INITIALIZE ? a : b, destination) ||
@@ -10103,7 +10228,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE)
     {
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
         const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
         const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
@@ -10253,6 +10378,33 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
 }
 
+// The expansion's cases of the ops past CHECK_OP_SELECT (the builtins, statement values, va_arg, VLAs' extents, the
+// complex parts and bit casts) out of line, a copy of the whole expansion of its own (check_lower_expand_rare), so that
+// the tasks' loop's copies, which inline the expansion, keep the other ops' cases alone (#1048: the plain copy's code went
+// from 17 KB to 14 KB, and sqlite3.c's statements took 0.27 ms less on the 9700X, docs/c-lowering.md's "The tasks' loop's
+// code").
+static __attribute__((noinline)) void check_lower_expand_rare(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
+                                                              bool bit_int)
+{
+    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+}
+
+static inline __attribute__((always_inline)) void check_lower_expand_split(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard,
+                                                                           bool bit_ints, bool bit_int)
+{
+    const CheckOp op = writer->program->input->graph.ops[node];
+    if (op > CHECK_OP_SELECT)
+    {
+        check_lower_expand_rare(writer, node, address, initialized, discard, bit_ints, bit_int);
+    }
+    else
+    {
+        // What lets clang leave those ops' cases out of the copy inlined here.
+        __builtin_assume(op <= CHECK_OP_SELECT);
+        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+    }
+}
+
 #include "c_check_program_batch.c"
 #include "c_check_program_templates.c"
 
@@ -10369,17 +10521,18 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             {
                 // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
                 // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
+                // Nor does any other node take #624's leaf path (check_lower_value, which its test still compares with the
+                // expansion): on the 9700X, sqlite3.c's lowering took 0.20 ms less without it (#1048, docs/c-lowering.md's
+                // "The leaf path and the runtimes' names"). The wrappers' and truth tests' path pays, and stays.
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
-                                    check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
-                const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
-                                     check_lower_batch_expression(writer, node);
+                const bool plain = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
+                                     writer->type_templates != NULL && (flags & 5) == 0 && check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
-                    if (!simple && !plain)
+                    if (!plain)
                     {
-                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
                     }
                     expression_nodes += 1;
                 }
@@ -11493,7 +11646,22 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
-    if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
+    // An expression statement and a branch, most of the controls, first: they are the chain's last case below, which
+    // tested every other kind before them (#1048: 0.14 ms of sqlite3.c's statements on the 9700X, docs/c-lowering.md's
+    // "The operands' overload tests").
+    if (control.kind == CHECK_CONTROL_EVALUATE || control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
+    {
+        if (control.kind != CHECK_CONTROL_EVALUATE)
+        {
+            check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32,
+                                    control.target);
+        }
+        if (control.node != BUSTER_CHECK_NONE)
+        {
+            check_lower_expression(writer, control.node, false, control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0);
+        }
+    }
+    else if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
     }
@@ -11613,14 +11781,9 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         {
             check_lower_instruction(writer, BUSTER_TYPED_RETURN, check_lower_class(writer, writer->result), 0);
         }
-        else if (control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
-        {
-            check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE,
-                                    BUSTER_TYPED_CLASS_I32, control.target);
-        }
         if (control.node != BUSTER_CHECK_NONE)
         {
-            check_lower_expression(writer, control.node, false, control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0);
+            check_lower_expression(writer, control.node, false, 0);
         }
     }
 }
@@ -11765,6 +11928,10 @@ struct CheckLowerShared
     uint32_t type_count;
     // Whether the program's type table has a _BitInt type (CheckLowerWriter.bit_ints).
     bool bit_ints;
+    // Whether an operand may name an overload set or take a selected overload's address (CheckLowerWriter.overloads): only
+    // in a unit that has the overloadable attribute's sets (CheckInput.overload_heads, which every overload set's head comes
+    // from), or whose stream records an overload's address or holds its values whole (a hand-built one).
+    bool overloads;
     uint32_t* initializer_declarations;
     // local_map's entries and the objects whose entries are kept, the bodies' parameters' and locals' (CheckLowerWriter).
     uint32_t* local_map;
@@ -11772,8 +11939,15 @@ struct CheckLowerShared
     uint32_t* switch_locals;
     uint32_t* vla_identities;
     uint32_t* save_locals;
-    uint32_t* local_first;
-    uint32_t* local_next;
+    // Each body's locals, its own objects' declarations, a slice of `local_tokens` in token order from local_start[b + 1] to
+    // local_start[b + 2], and their objects in `local_objects` alike: arrays its walks read in order, where a list linked
+    // through every token cost each local a dependent load (#1048). `opening_bodies` and `local_bodies` are the
+    // preparation's maps of a body's opening token to its index and of a declaring token to its body's.
+    uint32_t* local_start;
+    uint32_t* local_tokens;
+    uint32_t* local_objects;
+    uint32_t* opening_bodies;
+    uint32_t* local_bodies;
     // Each body's own signature, its index in its part's batch, and whether the body starts its variadic list.
     uint32_t* signatures;
     uint8_t* incoming;
@@ -11866,49 +12040,54 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
     *lowered = (CheckProgramLowered){ .status = status, .token = token, .backend_node = backend_node, .reason = reason };
 }
 
-// `declaring` is check_program_declaring's source-ordered list, including initializer-only tokens. Its logical
-// length is declaring_count; no padding is read here and the original declaration/linkage predicates still apply.
-// The normal path reuses that already-built compact list; the scalar oracle retains the independent full-token
-// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared. The names
-// are the `spelled` runtime functions' the unit spells, `identifiers[s]` runtime function `runtimes[s]`'s.
-static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers,
-                                          const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols, bool scalar)
+// Whether `declaration` declares one of the `spelled` runtime functions the unit spells (`identifiers`, their runtimes in
+// `runtimes`), as a declaration with linkage of an object: the first one's symbol becomes the runtime's.
+static inline __attribute__((always_inline)) void check_lower_declared_runtime(const CheckProgram* program, uint32_t declaration, const IdentId* names,
+                                                                              const IdentId* identifiers, const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols)
 {
     const CheckInput* input = program->input;
-    const uint32_t* declarations = input->declarations;
-    const uint32_t* objects = input->objects;
-    const IdentId* names = program->parser->tokens.names;
-    const uint8_t* declaration_bits = input->declaration_bits;
-    const SymbolId* object_symbols = program->object_symbols;
-    const uint32_t object_count = program->object_count;
-    const uint32_t count = scalar ? input->token_count : declaring_count;
-    for (uint32_t d = 0; d < count; d += 1)
+    // The linkage and the declaration's own token first, which the locals' test loads too, and the object and the name
+    // only for a declaration with external linkage, few of a unit's (#1048: 0.07 ms of sqlite3.c's preparation on the
+    // 9700X, docs/c-lowering.md's "The leaf path and the runtimes' names").
+    if (check_input_linkage(input->declaration_bits, declaration) == 2 && input->declarations[declaration] == declaration && names[declaration] != 0 &&
+        input->objects[declaration] != 0 && input->objects[declaration] < program->object_count)
     {
-        const uint32_t declaration = scalar ? d : declaring[d];
-        const uint32_t object = objects[declaration];
+        const uint32_t object = input->objects[declaration];
         const IdentId name = names[declaration];
-        if (name != 0 && declarations[declaration] == declaration && check_input_linkage(declaration_bits, declaration) == 2 && object != 0 && object < object_count)
+        // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
+        bool any = false;
+        for (uint32_t s = 0; s < spelled; s += 1)
         {
-            // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
-            bool any = false;
-            for (uint32_t s = 0; s < spelled; s += 1)
+            any |= identifiers[s] == name;
+        }
+        for (uint32_t s = 0; any && s < spelled; s += 1)
+        {
+            const uint32_t r = runtimes[s];
+            if (identifiers[s] == name && symbols[r] == 0)
             {
-                any |= identifiers[s] == name;
-            }
-            for (uint32_t s = 0; any && s < spelled; s += 1)
-            {
-                const uint32_t r = runtimes[s];
-                if (identifiers[s] == name && symbols[r] == 0)
-                {
-                    symbols[r] = object_symbols[object];
-                }
+                symbols[r] = program->object_symbols[object];
             }
         }
     }
 }
 
-// Whether `token` declares a body's own object, which its body's locals' list holds (CheckLowerShared.local_first): the
-// list's links and the clearing of its heads before them test the same tokens.
+// The runtime functions' declarations, the scalar path's pass over every token: the twin of the vector path's, which
+// takes them in the preparation's pass over check_program_declaring's source-ordered list of the declaring tokens
+// (including initializer-only ones), with the same per-token test (check_lower_declared_runtime). `declaring` is that list,
+// declaring_count long, which a vector-path caller without that pass passes. All borrowed columns are immutable during
+// this pass, and symbols belongs to CheckLowerShared. The names are the `spelled` runtime functions' the unit spells,
+// `identifiers[s]` runtime function `runtimes[s]`'s.
+static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers,
+                                          const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols, bool scalar)
+{
+    const uint32_t count = scalar ? program->input->token_count : declaring_count;
+    for (uint32_t d = 0; d < count; d += 1)
+    {
+        check_lower_declared_runtime(program, scalar ? d : declaring[d], program->parser->tokens.names, identifiers, runtimes, spelled, symbols);
+    }
+}
+
+// Whether `token` declares a body's own object, which its body's locals' slice holds (CheckLowerShared.local_tokens).
 static bool check_lower_local_declaration(const CheckProgram* program, uint32_t token)
 {
     const CheckInput* input = program->input;
@@ -12127,6 +12306,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         shared->bit_ints = memchr(types->types.kind, BUSTER_TYPE_KIND_BIT_INT, types->types.count) != NULL;
+        shared->overloads = input == 0 || program->stream == NULL || input->overload_heads != NULL || program->stream->overload_address_count != 0 ||
+                            program->stream->dense_values != NULL;
     }
     if (valid && !check_lower_init_pools(&lowered->initializers, program, shared->type_facts, shared->type_count, output, scratch))
     {
@@ -12226,13 +12407,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
-    shared->local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    shared->local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->opening_bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->local_bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->local_start = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 2) : 0;
     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
-    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->local_first != 0 && shared->local_next != 0 && declaring != 0 &&
+    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
             (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
@@ -12240,7 +12422,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     if (valid)
     {
-        memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
         memset(shared->locals, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
         // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
@@ -12266,55 +12447,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         const uint32_t declaring_count = check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
-        // Each body's locals' list is empty before the links below, where it is read (each body's, at its opening) and
-        // where it is written (each local's body), rather than at every token (#877).
-        for (uint32_t b = 0; b < program->body_count; b += 1)
-        {
-            shared->local_first[program->bodies[b].opening] = BUSTER_CHECK_NONE;
-        }
-        for (uint32_t d = 0; d < declaring_count; d += 1)
-        {
-            if (check_lower_local_declaration(program, declaring[d]))
-            {
-                shared->local_first[check_sparse_get(input->declaration_bodies, declaring[d])] = BUSTER_CHECK_NONE;
-            }
-        }
-        // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
-        for (uint32_t d = declaring_count; d-- > 0;)
-        {
-            const uint32_t token = declaring[d];
-            if (check_sparse_get(input->initializer_nodes, token) < nodes)
-            {
-                shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
-            }
-            const uint32_t body = check_sparse_get(input->declaration_bodies, token);
-            if (check_lower_local_declaration(program, token))
-            {
-                shared->local_next[token] = shared->local_first[body];
-                shared->local_first[body] = token;
-            }
-        }
-        // The objects whose local_map entries a body writes, its parameters' and its locals' (check_lower_part sets them as
-        // the body starts and puts them back to none as it ends): each cleared and marked in `locals` before any body is
-        // lowered, after which the bodies' writers only read the bits (#877). Every other object's entry, which nothing
-        // writes, reads as none without being cleared.
-        for (uint32_t b = 0; b < program->body_count; b += 1)
-        {
-            const uint32_t opening = program->bodies[b].opening;
-            for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
-            {
-                check_lower_local_keep(shared, input->objects[parameter], count);
-            }
-            for (uint32_t declaration = shared->local_first[opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
-            {
-                check_lower_local_keep(shared, input->objects[declaration], count);
-            }
-        }
-        // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
-        // name with linkage that has one (the errno accessor's is check_lower_runtime_symbols' already). The names are the
-        // lowering's own functions' and those of the library builtins the unit calls (#148), of which the ones the unit
-        // spells are listed, `spelled` of them, and one pass over the declarations, which only such a unit takes, matches
-        // each declaration's name with them.
         shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
         uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
         for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
@@ -12343,7 +12475,90 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 spelled += identifier != 0;
             }
         }
-        if (spelled != 0)
+        // On the vector path, the runtimes' declarations are found in the locals' first pass below, which loads the same
+        // declaring tokens' columns (#1048: 0.02 ms of sqlite3.c's preparation on the 9700X); the scalar path's own pass
+        // over every token (check_lower_declared_runtimes) is its twin.
+        const bool runtimes_merged = !BUSTER_SCALAR_PATH(scalar) && spelled != 0 && program->parser != NULL;
+        const IdentId* token_names = runtimes_merged ? program->parser->tokens.names : NULL;
+        // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
+        // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            shared->opening_bodies[program->bodies[b].opening] = b;
+        }
+        memset(shared->local_start, 0, ((uint64_t)program->body_count + 2) * sizeof(uint32_t));
+        // Each declaring token that declares a local (check_lower_local_declaration), tested once (#1048: its loads are a
+        // declaration's first touches), its body's index in `local_bodies` (none for every other token, and for a local
+        // whose body isn't lowered) and counted in local_start[b + 1]. The objects whose local_map entries a body writes,
+        // its parameters' and its locals' (check_lower_part sets them as the body starts and puts them back to none as it
+        // ends), are each cleared and marked in `locals` before any body is lowered, after which the bodies' writers only
+        // read the bits (#877): every local's whatever its body (one no writer lowers keeps an entry that reads as none
+        // either way), and the parameters' of each body below. Every other object's entry, which nothing writes, reads as
+        // none without being cleared.
+        uint32_t local_count = 0;
+        for (uint32_t d = 0; d < declaring_count; d += 1)
+        {
+            const uint32_t token = declaring[d];
+            if (runtimes_merged)
+            {
+                check_lower_declared_runtime(program, token, token_names, identifiers, spelled_runtimes, spelled, shared->declared_runtimes);
+            }
+            const uint32_t opening = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
+            const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
+            const uint32_t b = candidate < program->body_count && program->bodies[candidate].opening == opening ? candidate : BUSTER_CHECK_NONE;
+            shared->local_bodies[token] = b;
+            if (opening != BUSTER_CHECK_NONE)
+            {
+                check_lower_local_keep(shared, input->objects[token], count);
+            }
+            if (b != BUSTER_CHECK_NONE)
+            {
+                shared->local_start[b + 1] += 1;
+                local_count += 1;
+            }
+        }
+        // The counts' prefix sums, each body's end (local_start[b + 1]), which the placing below moves back to its first.
+        for (uint32_t b = 1; b <= program->body_count; b += 1)
+        {
+            shared->local_start[b + 1] += shared->local_start[b];
+        }
+        shared->local_tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)local_count + 1);
+        shared->local_objects = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)local_count + 1);
+        if (shared->local_tokens == 0 || shared->local_objects == 0)
+        {
+            lowered->status = CHECK_PROGRAM_RESOURCE;
+        }
+        // In reverse, so that a node's declaration is its first token and each body's locals are placed back from its end,
+        // in token order.
+        for (uint32_t d = declaring_count; lowered->status == CHECK_PROGRAM_OK && d-- > 0;)
+        {
+            const uint32_t token = declaring[d];
+            if (check_sparse_get(input->initializer_nodes, token) < nodes)
+            {
+                shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
+            }
+            const uint32_t b = shared->local_bodies[token];
+            if (b != BUSTER_CHECK_NONE)
+            {
+                const uint32_t k = --shared->local_start[b + 1];
+                shared->local_tokens[k] = token;
+                shared->local_objects[k] = input->objects[token];
+            }
+        }
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            const uint32_t opening = program->bodies[b].opening;
+            for (uint32_t parameter = check_sparse_get(input->parameters, opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
+            {
+                check_lower_local_keep(shared, input->objects[parameter], count);
+            }
+        }
+        // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
+        // name with linkage that has one (the errno accessor's is check_lower_runtime_symbols' already). The names are the
+        // lowering's own functions' and those of the library builtins the unit calls (#148), of which the ones the unit
+        // spells are listed, `spelled` of them, and one pass over the declarations, which only such a unit takes, matches
+        // each declaration's name with them.
+        if (spelled != 0 && !runtimes_merged)
         {
             check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, spelled_runtimes, spelled, shared->declared_runtimes,
                                           BUSTER_SCALAR_PATH(scalar));
@@ -12404,6 +12619,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .class_limit = BUSTER_TYPED_CLASSES,
         .target = program->target,
         .bit_ints = shared->bit_ints,
+        .overloads = shared->overloads,
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
@@ -12509,65 +12725,6 @@ static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool so
     CheckProgramLowered status;
     Arena measure = arena_measure();
     return check_lower_writer_begin(&writer, &abi, &status, shared, sources, &measure) ? measure.length : UINT64_MAX;
-}
-
-// The most nodes a statement's prefetch takes (check_lower_prefetch): its root's and those just before it, the first the
-// tasks' loop expands.
-#define BUSTER_CHECK_LOWER_PREFETCH_NODES 64u
-
-// Prefetches the checked values and conversions of the nodes from `from` to `node`, a statement's root (the last
-// BUSTER_CHECK_LOWER_PREFETCH_NODES of them): a statement's nodes come before its root in the graph, and the tasks' loop
-// waited on its first touch of each node's checked value and 32 bytes of conversions (#531): the value's columns, and its
-// payload row's index (a row itself is wherever the run wrote it, #628). Returns the node after the last one prefetched, or
-// `from` for a root that isn't past it.
-static uint32_t check_lower_prefetch(const CheckProgram* program, uint32_t from, uint32_t node)
-{
-    uint32_t result = from;
-    if (node != BUSTER_CHECK_NONE && node < program->stream->count && node >= from)
-    {
-        const uint32_t first = node - from >= BUSTER_CHECK_LOWER_PREFETCH_NODES ? node + 1 - BUSTER_CHECK_LOWER_PREFETCH_NODES : from;
-        const CheckStream* stream = program->stream;
-        const bool dense = stream->dense_values != NULL;
-        const uintptr_t ranges[][2] = {
-            {
-                (uintptr_t)(stream->conversions + first),
-                (uintptr_t)(stream->conversions + node + 1),
-            },
-            {
-                dense ? (uintptr_t)(stream->dense_values + first) : (uintptr_t)(stream->value_types + first),
-                dense ? (uintptr_t)(stream->dense_values + node + 1) : (uintptr_t)(stream->value_types + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_flags + first),
-                dense ? 0 : (uintptr_t)(stream->value_flags + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_objects + first),
-                dense ? 0 : (uintptr_t)(stream->value_objects + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->payload_rows + first),
-                dense ? 0 : (uintptr_t)(stream->payload_rows + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_categories + first),
-                dense ? 0 : (uintptr_t)(stream->value_categories + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_constants + first),
-                dense ? 0 : (uintptr_t)(stream->value_constants + node + 1),
-            },
-        };
-        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(ranges); r += 1)
-        {
-            for (uintptr_t line = ranges[r][0] & ~(uintptr_t)63; line < ranges[r][1]; line += 64)
-            {
-                _mm_prefetch((const char*)line, _MM_HINT_T0);
-            }
-        }
-        result = node + 1;
-    }
-    return result;
 }
 
 // Lowers `part`'s bodies, in order, with `writer` (check_lower_writer_begin's), each into the program's Tier0Function, its
@@ -12748,42 +12905,65 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const bool named = parameter != BUSTER_CHECK_NONE && check_sparse_get(input->parameters, parameter) == p;
             const TypeId declared_type = named ? input->declared_types[parameter] : parameter_types[p];
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
-            const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
-            // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
-            const CheckInputAttributes* attributes = named && !promoted ? check_input_attributes_at(input, parameter) : NULL;
-            // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
-            // realigned frame, or where they arrive).
-            const bool aggregate = check_lower_aggregate(writer, parameter_type);
-            const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
-            const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
-            const char* passed = check_lower_passed(writer, parameter_type);
-            // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
-            // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
-            // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
-            const bool object = aggregate || check_lower_memory(writer, parameter_type) || alignment > 3;
-            writer->token = named ? parameter : body.declaration;
-            if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+            // A plain scalar parameter of a prototype is a temporary of its class, as a plain scalar local is (below), and
+            // check_lower_passed takes its type.
+            const uint32_t info = !kr && writer->type_templates != NULL ? check_lower_type_info(writer, parameter_type) : UINT8_MAX;
+            const bool plain = check_lower_plain_scalar(info, false) && ((info >> 8) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) == 0;
+            const CheckInputAttributes* plain_attributes = plain && named ? check_input_attributes_at(input, parameter) : NULL;
+            if (plain && (plain_attributes == 0 || plain_attributes->alignment_log2 == 0) && type_alignment_log2(types, parameter_type) <= 3)
             {
-                check_lower_unsupported(writer, "parameters aligned past 1 GB");
+                writer->token = named ? parameter : body.declaration;
+                const uint32_t local = check_lower_temporary(writer, (uint8_t)info);
+                if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+                {
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                if (named)
+                {
+                    writer->local_map[input->objects[parameter]] = local;
+                    parameter = check_sparse_get(input->parameter_next, parameter);
+                }
+                abi->arguments[abi->argument_count++] = parameter_type;
             }
-            if (passed != NULL)
+            else
             {
-                check_lower_unsupported(writer, passed);
+                const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
+                // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
+                const CheckInputAttributes* attributes = named && !promoted ? check_input_attributes_at(input, parameter) : NULL;
+                // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
+                // realigned frame, or where they arrive).
+                const bool aggregate = check_lower_aggregate(writer, parameter_type);
+                const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+                const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
+                const char* passed = check_lower_passed(writer, parameter_type);
+                // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
+                // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
+                // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
+                const bool object = aggregate || check_lower_memory(writer, parameter_type) || alignment > 3;
+                writer->token = named ? parameter : body.declaration;
+                if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+                {
+                    check_lower_unsupported(writer, "parameters aligned past 1 GB");
+                }
+                if (passed != NULL)
+                {
+                    check_lower_unsupported(writer, passed);
+                }
+                const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
+                                                check_lower_temporary(writer, check_lower_class(writer, parameter_type));
+                if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                                  type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+                {
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                if (named)
+                {
+                    writer->local_map[input->objects[parameter]] = local;
+                    parameter = check_sparse_get(input->parameter_next, parameter);
+                }
+                // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
+                abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
             }
-            const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
-                                            check_lower_temporary(writer, check_lower_class(writer, parameter_type));
-            if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
-                              type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
-            {
-                writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-            }
-            if (named)
-            {
-                writer->local_map[input->objects[parameter]] = local;
-                parameter = check_sparse_get(input->parameter_next, parameter);
-            }
-            // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
-            abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
             function->parameter_count += 1;
             declared += 1;
         }
@@ -12868,77 +13048,99 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             writer->result_object = check_lower_temporary_of(writer, result);
         }
-        for (uint32_t declaration = bare ? BUSTER_CHECK_NONE : shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
+        for (uint32_t slot = bare ? 0 : shared->local_start[b + 1]; !bare && slot < shared->local_start[b + 2]; slot += 1)
         {
-            if (check_lower_local_of(writer, input->objects[declaration]) == BUSTER_CHECK_NONE)
+            const uint32_t declaration = shared->local_tokens[slot];
+            const uint32_t declared_object = shared->local_objects[slot];
+            if (check_lower_local_of(writer, declared_object) == BUSTER_CHECK_NONE)
             {
                 const TypeId local_type = input->declared_types[declaration];
-                const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
-                const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
-                // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
-                // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
-                // compound literal, which takes its type's.
-                const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
-                const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
-                                                    !check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && type_large_array(types, local_type) ? 4 : 0;
-                const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
-                uint32_t local = BUSTER_CHECK_NONE;
-                writer->token = declaration;
-                if (check_action_runtime_size(types, local_type))
+                // A plain scalar's local (check_lower_plain_scalar, neither an array's nor a function's) of no attribute's
+                // alignment, nor one past 8 bytes, is a temporary of its class, as the rules below make it, by its packed
+                // class and facts on the vector path (#1048: 0.08 ms of sqlite3.c's bodies on the 9700X), rather than by
+                // their queries of the type table.
+                const uint32_t info = writer->type_templates != NULL ? check_lower_type_info(writer, local_type) : UINT8_MAX;
+                const bool plain = check_lower_plain_scalar(info, false) && ((info >> 8) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) == 0;
+                const CheckInputAttributes* plain_attributes = plain ? check_input_attributes_at(input, declaration) : NULL;
+                if (plain && (plain_attributes == 0 || plain_attributes->alignment_log2 == 0) && type_alignment_log2(types, local_type) <= 3)
                 {
-                    // A variable-length array lives on the stack from its declaration (CHECK_CONTROL_ALLOCATE) to its
-                    // block's end: its local holds its address.
-                    local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-                    if (local < writer->local_count)
+                    writer->token = declaration;
+                    const uint32_t local = check_lower_temporary(writer, (uint8_t)info);
+                    if ((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
                     {
-                        writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_DECLARED;
+                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
                     }
-                }
-                else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ATOMIC || check_lower_aggregate(writer, local_type))
-                {
-                    // Arrays, structs, unions, complex values and __float128s are frame objects (aligned past 16 bytes, in a
-                    // realigned frame). An incomplete type has no size at all.
-                    if (!type_is_complete(types, local_type))
-                    {
-                        check_lower_unsupported(writer, "local objects of incomplete type");
-                    }
-                    local = check_lower_object(writer, type_size(types, local_type), alignment);
-                }
-                else if (check_lower_memory(writer, local_type))
-                {
-                    // A memory class's value is a frame object too (check_lower_memory_class), aligned to 16.
-                    local = check_lower_object(writer, type_size(types, local_type), alignment);
-                }
-                else if (check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && check_lower_classless_vector(writer, local_type))
-                {
-                    // A compound literal of a vector Tier 0 has no class for (of 2, 4 or 8 bytes) has no local: a
-                    // narrowing shuffle reads its constants at compile time (the intrinsics' (__v4qi){0, 0, 0, 0}:
-                    // check_lower_constant_bytes), and its evaluation is refused anywhere else (check_lower_expand).
-                }
-                else if (!type_kind_is_array(kind) && check_lower_class(writer, local_type) == UINT8_MAX)
-                {
-                    // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
-                    check_lower_unsupported(writer, check_lower_type_feature(types, local_type));
-                }
-                else if (type_kind_is_array(kind))
-                {
-                    check_lower_unsupported(writer, "local values aligned past 8 bytes");
-                }
-                else if (alignment > 3)
-                {
-                    // A value aligned past 8 bytes, whose slot would be aligned to 8: a frame object of its alignment, which
-                    // LOCAL, STORE_LOCAL and SET_LOCAL of its class read and write (tier0_value_object).
-                    local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    writer->local_map[declared_object] = local;
                 }
                 else
                 {
-                    local = check_lower_temporary(writer, check_lower_class(writer, local_type));
+                    const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
+                    const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
+                    // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
+                    // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
+                    // compound literal, which takes its type's.
+                    const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
+                    const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
+                                                        !check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && type_large_array(types, local_type) ? 4 : 0;
+                    const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
+                    uint32_t local = BUSTER_CHECK_NONE;
+                    writer->token = declaration;
+                    if (check_action_runtime_size(types, local_type))
+                    {
+                        // A variable-length array lives on the stack from its declaration (CHECK_CONTROL_ALLOCATE) to its
+                        // block's end: its local holds its address.
+                        local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                        if (local < writer->local_count)
+                        {
+                            writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_DECLARED;
+                        }
+                    }
+                    else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ATOMIC || check_lower_aggregate(writer, local_type))
+                    {
+                        // Arrays, structs, unions, complex values and __float128s are frame objects (aligned past 16 bytes, in a
+                        // realigned frame). An incomplete type has no size at all.
+                        if (!type_is_complete(types, local_type))
+                        {
+                            check_lower_unsupported(writer, "local objects of incomplete type");
+                        }
+                        local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    }
+                    else if (check_lower_memory(writer, local_type))
+                    {
+                        // A memory class's value is a frame object too (check_lower_memory_class), aligned to 16.
+                        local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    }
+                    else if (check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && check_lower_classless_vector(writer, local_type))
+                    {
+                        // A compound literal of a vector Tier 0 has no class for (of 2, 4 or 8 bytes) has no local: a
+                        // narrowing shuffle reads its constants at compile time (the intrinsics' (__v4qi){0, 0, 0, 0}:
+                        // check_lower_constant_bytes), and its evaluation is refused anywhere else (check_lower_expand).
+                    }
+                    else if (!type_kind_is_array(kind) && check_lower_class(writer, local_type) == UINT8_MAX)
+                    {
+                        // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
+                        check_lower_unsupported(writer, check_lower_type_feature(types, local_type));
+                    }
+                    else if (type_kind_is_array(kind))
+                    {
+                        check_lower_unsupported(writer, "local values aligned past 8 bytes");
+                    }
+                    else if (alignment > 3)
+                    {
+                        // A value aligned past 8 bytes, whose slot would be aligned to 8: a frame object of its alignment, which
+                        // LOCAL, STORE_LOCAL and SET_LOCAL of its class read and write (tier0_value_object).
+                        local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    }
+                    else
+                    {
+                        local = check_lower_temporary(writer, check_lower_class(writer, local_type));
+                    }
+                    if (((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+                    {
+                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                    }
+                    writer->local_map[declared_object] = local;
                 }
-                if (((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
-                {
-                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-                }
-                writer->local_map[input->objects[declaration]] = local;
             }
         }
         // #1048's node templates: the body's nodes' contexts and closed subtrees' entries, before its statements.
@@ -12947,9 +13149,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             check_lower_template_body(writer, program->bodies + b);
         }
-        // Each statement's nodes are prefetched a statement before the tasks' loop expands them, the first two's before the
-        // first (check_lower_prefetch).
-        uint32_t prefetched = 0;
+        // The statements' nodes aren't prefetched: #531's prefetch of each next statement's checked values and conversions
+        // paid while the values were 96-byte records, and once they were columns (#628) its own work cost the 9700X more
+        // than its misses did (#1048: docs/c-lowering.md, "The statements' prefetch").
         const uint64_t statements_start = timed ? __rdtsc() : 0;
         for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
@@ -12957,10 +13159,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 // A statement's entries are its token's (check_lower_task_source sets a nested one's).
                 check_lower_change_source(writer, program->controls[body.first + i].token);
-            }
-            for (uint32_t ahead = i == 0 ? 0 : 1; ahead < 2 && i + ahead < body.entry_count; ahead += 1)
-            {
-                prefetched = check_lower_prefetch(program, prefetched, program->controls[body.first + i + ahead].node);
             }
             check_lower_control(writer, i);
             if (sources)
@@ -13173,9 +13371,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->call_count = writer->call_count;
         function->argument_count = writer->argument_count;
         part->entries += writer->count;
-        for (uint32_t declaration = shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
+        for (uint32_t slot = shared->local_start[b + 1]; slot < shared->local_start[b + 2]; slot += 1)
         {
-            writer->local_map[input->objects[declaration]] = BUSTER_CHECK_NONE;
+            writer->local_map[shared->local_objects[slot]] = BUSTER_CHECK_NONE;
         }
         for (uint32_t parameter = check_sparse_get(input->parameters, body.opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
         {
@@ -13185,7 +13383,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     const uint64_t walked = timed ? __rdtsc() : 0;
     part->body_ticks = walked - walk_start - part->statement_ticks;
     part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_BODY : CHECK_LOWER_STAGE_NONE;
-    part->final_token = writer->token;
+    part->final_token = check_lower_writer_token(writer);
     AbiLocation* locations = part->stage == CHECK_LOWER_STAGE_NONE ? BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, (uint64_t)abi->argument_count + 1) : 0;
     AbiCall* calls = part->stage == CHECK_LOWER_STAGE_NONE ? BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, (uint64_t)abi->count + 1) : 0;
     part->stage = part->stage == CHECK_LOWER_STAGE_NONE && (locations == 0 || calls == 0) ? CHECK_LOWER_STAGE_ROOM : part->stage;

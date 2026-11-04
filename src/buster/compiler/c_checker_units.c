@@ -1792,6 +1792,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+            .helper_reporting = command->helper_report != NULL,
             .units_lane = lane,
             .helper_forms = command->helper_forms,
         };

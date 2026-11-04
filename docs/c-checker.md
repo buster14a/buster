@@ -3348,7 +3348,9 @@ small one.
   waited on its first touch of each node's checked value and conversions, two
   arrays too large for the caches. A statement's nodes come before its root in
   the graph, so before each statement the lowering prefetches the next one's,
-  up to its root (`check_lower_prefetch`, its last 64 nodes at most).
+  up to its root (`check_lower_prefetch`, its last 64 nodes at most). #1048
+  removed it once the values were columns (#628), when its own work cost more
+  than the misses it hid ([the lowering guide](c-lowering.md)).
 
 The objects are the same bytes. On the 9700X, against main at `ad408cf2`
 (medians: the whole compile's of 10 rounds of `perf stat -r 3`, the two in

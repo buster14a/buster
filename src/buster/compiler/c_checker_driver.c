@@ -2971,8 +2971,9 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
-    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), and
-    // --helper-forms' families, whose operations take their helpers (CheckProgramOptions.helper_forms).
+    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
+    // option, when no unit makes its report; and --helper-forms' families, whose operations take their helpers
+    // (CheckProgramOptions.helper_forms).
     CheckHelperReport* helper_report;
     uint32_t helper_forms;
 };
@@ -3956,6 +3957,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--helper-report") == 0)
         {
             helper_report = true;
+            lanes.helper_reporting = true;
         }
         else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
         {
@@ -4194,7 +4196,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
-        .helper_report = &lanes.helper_report,
+        .helper_report = helper_report ? &lanes.helper_report : NULL,
         .helper_forms = lanes.helper_forms,
     };
     if (worker_budget.dry_run)
