@@ -543,8 +543,8 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
         kernel->referenced = kernel->count;
         kernel->records[kernel->count++] = (X86Instruction){ .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP };
     }
-    // The result, by its type: a floating one from xmm0, a narrow one zero-extended from al or ax, an I32 by a 32-bit move
-    // (which zero-extends), a 64-bit one moved where it isn't in rax.
+    // The result, by its type: a floating one from xmm0, a narrow one zero-extended from al or ax, any other moved where it
+    // isn't in rax. An I32 in rax has no move: its bits past its 32 are unspecified in Tier 1 (#1116), as above.
     const uint32_t result_type = function->type[node];
     const uint32_t narrow = result_type == IR_I1 || result_type == IR_I8 ? 1 : result_type == IR_I16 ? 2 : 0;
     const uint32_t reg = destination % 32;
@@ -566,7 +566,7 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
             {
                 kernel->records[kernel->count++] = (X86Instruction){ .form = narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = (uint8_t)reg, .rm = X86_REGISTER_RAX };
             }
-            else if (valid && (reg != X86_REGISTER_RAX || result_type == IR_I32))
+            else if (valid && reg != X86_REGISTER_RAX)
             {
                 kernel->records[kernel->count++] = tier1_emit_move(X86_REGISTER_RAX, reg, tier1_select_width(result_type));
             }

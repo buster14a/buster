@@ -363,7 +363,7 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
 }
 
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
-                                      bool scalar, Arena* output, Arena* scratch)
+                                      bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -605,6 +605,85 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
         valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+        // An input section a __start_ or __stop_ reference bounds needs all of its members (#1122): the reference
+        // names the section, not a member, so no edge reaches the members nothing else does, as GNU ld's and lld's
+        // still place them. After each reachability pass the needed objects' bound names root their sections'
+        // members, to a fixpoint; a kept unit's placements are all rooted instead, since a bound of another unit's
+        // may name them. An object's bound name is its linkage name: an asm label from any of its declarations, as
+        // check_program_emit names its symbol, or else its identifier. Each object's section is found once, before the
+        // fixpoint; each pass lists the needed objects' sections, few, which each placement compares.
+        const CheckInputSections* sections = input->sections;
+        const Preprocessor* pp = full->parser->preprocessor;
+        const Parser* parser = full->parser;
+        bool grow = valid && mode == C_LOWERING_REACHABLE && pp != 0 && sections != 0 && sections->placement_count != 0;
+        String8* object_bounds = grow && !keep_sectioned ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
+        String8* needed_bounds = object_bounds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
+        valid = valid && (!grow || keep_sectioned || needed_bounds != 0);
+        if (needed_bounds != 0)
+        {
+            memset(object_bounds, 0, (uint64_t)objects * sizeof(String8));
+            for (uint32_t token = 0; token < input->token_count; token += 1)
+            {
+                const uint32_t object = input->objects[token];
+                const CheckInputAttributes* attributes = object != 0 && object < objects && input->declarations[token] == token &&
+                                                         !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
+                for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + i;
+                    object_bounds[object] = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && object_bounds[object].length == 0 ? attribute->text : object_bounds[object];
+                }
+            }
+            for (uint32_t object = 1; object < objects; object += 1)
+            {
+                const uint32_t declaration = full->object_declarations[object];
+                const IdentId name = declaration != BUSTER_CHECK_NONE ? parser->tokens.names[declaration] : 0;
+                const String8 label = object_bounds[object];
+                object_bounds[object] = label.length != 0 ? link_bound_suffix_bytes((const uint8_t*)label.pointer, (uint32_t)label.length, 0) :
+                                        name != 0 ? link_bound_suffix_bytes(intern_bytes(pp->table, name), intern_length(pp->table, name), 0) : (String8){ 0 };
+            }
+        }
+        while (valid && grow)
+        {
+            grow = false;
+            memset(needed, 0, objects);
+            for (uint32_t selected = 0; selected < plan.selected_count; selected += 1)
+            {
+                const uint32_t definition = plan.selected[selected];
+                const uint32_t raw = (uint32_t)order[definition];
+                needed[definition_objects[definition]] = 1;
+                const uint32_t first = raw < full->body_count ? full->bodies[raw].reference_first : data->reference_offsets[raw - full->body_count];
+                const uint32_t count = raw < full->body_count ? full->bodies[raw].reference_count : data->reference_counts[raw - full->body_count];
+                const uint32_t* references = raw < full->body_count ? full->references : data->references;
+                for (uint32_t reference = 0; reference < count; reference += 1)
+                {
+                    needed[references[first + reference]] = 1;
+                }
+            }
+            uint32_t bound_count = 0;
+            for (uint32_t object = 1; needed_bounds != 0 && object < objects; object += 1)
+            {
+                needed_bounds[bound_count] = object_bounds[object];
+                bound_count += needed[object] != 0 && object_bounds[object].length != 0;
+            }
+            for (uint32_t p = 0; p < sections->placement_count; p += 1)
+            {
+                const String8 section = sections->placements[p].name;
+                bool bound = keep_sectioned;
+                for (uint32_t b = 0; !bound && b < bound_count; b += 1)
+                {
+                    const String8 suffix = needed_bounds[b];
+                    bound = suffix.length == section.length && memcmp(suffix.pointer, section.pointer, section.length) == 0;
+                }
+                const uint32_t member = bound ? input->objects[sections->placements[p].token] : 0;
+                const uint32_t definition = member < objects ? object_definitions[member] : 0;
+                if (definition != 0 && (plan.definition_flags[definition - 1] & BUSTER_C_LOWERING_USED) == 0)
+                {
+                    plan.definition_flags[definition - 1] |= BUSTER_C_LOWERING_USED;
+                    grow = true;
+                }
+            }
+            valid = !grow || (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+        }
         if (valid)
         {
             for (uint32_t selected = 0; selected < plan.selected_count; selected += 1)
@@ -769,7 +848,7 @@ static bool check_program_select(CheckProgramSelection* result, const CheckProgr
 {
     (void)scalar;
 
-    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, BUSTER_SCALAR_PATH(scalar), output, scratch);
+    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, BUSTER_SCALAR_PATH(scalar), false, output, scratch);
 }
 
 #endif

@@ -2421,6 +2421,9 @@ static void check_driver_executable_failure(const Link* link, const Runtime* run
             case EXECUTABLE_CAUSE_UNSUPPORTED_VERSION:
                 fprintf(out, "error: can't link %s: symbol '%s' has unavailable version %" PRIu64 "\n", path, unsupported, result->value);
                 break;
+            case EXECUTABLE_CAUSE_UNSUPPORTED_BOUND:
+                fprintf(out, "error: can't link %s: '%s' bounds an input section whose atoms one output section can't hold\n", path, unsupported);
+                break;
             default: fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path, unsupported); break;
         }
     }
@@ -2929,6 +2932,10 @@ struct CheckDriverCommand
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
+    // --units-memory=BYTES, #1109's test option: the memory the units' lanes may hold at once, by their estimates, in
+    // place of what the process may take, and the command reports how many units waited for it, after the units'
+    // diagnostics (c_checker_units.c). 0 without it.
+    uint64_t units_memory;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2951,12 +2958,15 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
-    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report).
+    // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), and
+    // --helper-forms' families, whose operations take their helpers (CheckProgramOptions.helper_forms).
     CheckHelperReport* helper_report;
+    uint32_t helper_forms;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
+static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
 // preprocessed, parsed and checked, its diagnostics printed through the preprocessor's stream and the driver's own to
@@ -3026,6 +3036,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
+        // One of several units (#1109): the unit's estimated peak, from its tokens, out of the memory the units' lanes
+        // share, before the parse and the checker take it; it may wait for another lane's units to give theirs back.
+        if (lanes != NULL && lanes->units_lane != NULL)
+        {
+            check_units_admit(lanes->units_lane, pp->output.count);
+        }
         if (ready)
         {
             ready = parse_translation_unit(parser, pp);
@@ -3133,6 +3149,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     .verify = verify,
                     .transitions = command->check_transitions,
                     .verify_transitions = verify,
+                    // The run is the output arena's first user in the unit, through no copy of it: past its length it is
+                    // as the kernel mapped it unless an earlier unit's pushes reached there (arena_untouched).
+                    .fresh_output = true,
                 };
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
@@ -3329,6 +3348,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .scalar = scalar,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
+                        .asm_helpers = lanes != NULL && lanes->tier1,
+                        .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                     });
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&
@@ -3381,7 +3402,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         kept != NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3405,7 +3426,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckProgramSelection selected;
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         output_arena, scratch);
+                                                                         false, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
@@ -3695,9 +3716,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
-    // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
+    // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
+    // (CheckDriverCommand's).
     bool poison_arenas = false;
     bool shared_parts = false;
+    uint64_t units_memory = 0;
+    bool invalid_units_memory = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -3744,6 +3768,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     lanes.slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
     lanes.slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
+    bool invalid_helper_forms = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
     // function Tier 0 compiled with the step that refused it, on standard error; --tier1-no-rematerialize compiles Tier
@@ -3919,6 +3944,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             helper_report = true;
         }
+        else if (strncmp(arguments[i], "--helper-forms=", 15) == 0)
+        {
+            // #1059's paired measurements: the families, by --helper-report's names (or `all`), whose operations take
+            // their helpers where they have a direct form.
+            const uint32_t forms = check_helper_forms_parse(arguments[i] + 15);
+            if (forms == 0)
+            {
+                fprintf(stderr, "error: --helper-forms= takes a comma-separated list of fence, atomic-access, atomic-rmw and asm, or all\n");
+            }
+            invalid_helper_forms |= forms == 0;
+            lanes.helper_forms = forms;
+        }
         else if (strcmp(arguments[i], "--tier1-no-rematerialize") == 0)
         {
             lanes.tier1_no_rematerialize = true;
@@ -3964,6 +4001,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--shared-parts") == 0)
         {
             shared_parts = true;
+        }
+        else if (strncmp(arguments[i], "--units-memory=", 15) == 0)
+        {
+            char* end = NULL;
+            units_memory = strtoull(arguments[i] + 15, &end, 10);
+            invalid_units_memory |= end == arguments[i] + 15 || *end != 0 || units_memory == 0 || arguments[i][15] == '-';
         }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
@@ -4075,7 +4118,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_helper_forms && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || (stdin_count != 0 && !options.explicit_language)))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c when compiling\n");
@@ -4123,6 +4166,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_order = id_order,
         .poison_arenas = poison_arenas,
         .shared_parts = shared_parts,
+        .units_memory = units_memory,
         .emit_object = emit_object,
         .link = link,
         .runtime_kind = runtime_kind,
@@ -4138,6 +4182,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
         .helper_report = &lanes.helper_report,
+        .helper_forms = lanes.helper_forms,
     };
     if (worker_budget.dry_run)
     {
@@ -4167,8 +4212,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] "
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is

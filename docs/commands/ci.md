@@ -105,6 +105,20 @@ there at a time, so everything takes one lock:
   measured what it changes, and the full set took the job past its 10 minutes.
   The daily and dispatched runs, and the nightly snapshot's, have 25 minutes;
   a nightly backlog run has a pull request's 20.
+- A pull request that changes the checker's sources (the `changes` job's
+  `checker` output isn't `false`) also compares `-c sqlite3.c` by its base and
+  by its tree ("Compare check-expressions with the pull request's base over
+  placements", #1050). Each is built at four placements of
+  `main_unit_checker.c` (`./build.sh shifts`). The step then runs:
+  - `time-runs` over the placements, with the base's executables again as the
+    floor;
+  - each placement's `measure-compile` stages;
+  - `perf stat`'s counters, with failed store-to-load forwards;
+  - the checker's functions' samples;
+  - the forwarding failures by function.
+
+  The objects must be the same bytes. It takes about 90 s
+  (`docs/c-checker.md`, "The per-node machinery").
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
   before it decides, and fails the job (so that `test` runs everything) when
@@ -184,12 +198,16 @@ manual dispatch. It samples the latest 100 main CI workflow runs and reports the
 median and nearest-rank p95 separately for PR, main-push, nightly targeted and
 full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
 run name. Besides queue and execution, it reports the host's occupation, from
-the job's first step (after the runner hook took the lock) to its end. It keeps
+the job's first step (after the runner hook took the lock) to its end. It also
+reports the shared lock's wait and hold, which it reads from the runner hooks'
+lines in each job's log. It keeps
 the raw API responses and normalized observations as workflow artifacts. It
 does not run benchmarks, weaken the hardware gate, or change any schedule.
 
-Read `docs/ci.md` for metric definitions and limitations. In particular, runner
-hook duration includes overhead and is not an exact shared-lock wait; missing
-timestamps are unknown rather than zero. Run its network-free fixtures with
+Read `docs/ci.md` for metric definitions and limitations. In particular, the
+runner hook's step duration includes its overhead. The shared-lock wait and
+hold (`lock-wait`, `lock-hold`) come from the hooks' own log lines, which
+bracket the lock operations to within tens of milliseconds.
+Missing timestamps are unknown rather than zero. Run its network-free fixtures with
 `bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
 in this repository's retired `docs/measurements` path.

@@ -658,6 +658,9 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a rotating order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
+// measure-helpers (#1059): the direct forms against the helpers they replace (--helper-forms=all), by both tiers, as
+// whole processes in a rotating order: the primitives' kernels and speedtest1.
+#include "buster/compiler/helpers_measure.c"
 
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
 // order) and its tests, for the parallel and test-parallel commands.
@@ -1584,6 +1587,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_tier1_programs_measure(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-helpers") == 0)
+    {
+        result = run_helpers_measure(argc - 1, argv + 1);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {
         result = run_profile_tests(argc - 2, argv + 2);
@@ -1628,6 +1635,8 @@ extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const ui
 #endif
 static int main_driver(int argc, char** argv)
 {
+    // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
+    arena_page_policy(getenv("BUSTER_HUGE_PAGES"));
 #if BUSTER_SANITIZER_RESOURCES
     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
     lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;

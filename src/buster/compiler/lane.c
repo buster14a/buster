@@ -75,13 +75,15 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
 
 // CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
-// them where the build's target has mwaitx, __MWAITX__).
+// them where the build's target has mwaitx, __MWAITX__); cpuid.h, the hypervisor bit (arena_page_policy).
 #include <x86intrin.h>
+#include <cpuid.h>
 
 // Resource-exhaustion fixtures must leave the detector runtime free to allocate
 // shadow/fake-stack memory and start its own threads. Diagnostic builds inject
@@ -231,6 +233,12 @@ static _Thread_local ArenaPool* arena_pool;
 #endif
 // Unmaps the arenas `pool` holds, and leaves it empty.
 static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
+// The process's pages (#1109), set once at its start, before any arena is reserved: on a virtual machine (CPUID's
+// hypervisor bit), transparent huge pages off for the whole process (PR_SET_THP_DISABLE, which MADV_HUGEPAGE doesn't
+// override, and which the processes it starts inherit), so that the arenas take base pages. `setting`,
+// BUSTER_HUGE_PAGES's value, decides instead when it is "0" (off) or "1" (on, as the arenas ask, even where the process
+// that started this one turned them off). Elsewhere the process keeps what it was started with.
+static __attribute__((unused)) void arena_page_policy(const char* setting);
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
 // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
@@ -640,6 +648,29 @@ static __attribute__((unused)) uint32_t arena_capacity_shift(uint64_t largest)
 static Arena arena_reserve(uint64_t capacity)
 {
     return arena_reserve_small(capacity, BUSTER_ARENA_SMALL_BYTES);
+}
+
+// A huge page's first touch on a virtual machine made the host back all of it, whatever the arena used of it: on #1109's
+// 4-core VM a fault took about 1 ms, and the C driver's checking of main.c ran 2 to 4 times as long as with base pages, a
+// small unit 30% longer at the median and up to 7 times at the tail. On the 9700X a huge page clears in about 40 µs, and
+// a large unit's arenas fill theirs (docs/translation-units.md, "Memory").
+static void arena_page_policy(const char* setting)
+{
+    uint32_t eax = 0;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
+    const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
+    const bool off = setting != 0 && strcmp(setting, "0") == 0;
+    const bool on = setting != 0 && strcmp(setting, "1") == 0;
+    if (off || (virtual_machine && !on))
+    {
+        prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
+    else if (on)
+    {
+        prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0);
+    }
 }
 
 static Arena arena_measure(void)

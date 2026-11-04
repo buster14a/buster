@@ -384,6 +384,16 @@ static const ChangesModule changes_modules[] = {
         .sources = "tier1_programs_measure|profile|compile_measure|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
                    "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|tier1_[a-z0-9_]*",
     },
+    // #1059's paired measurements (measure-helpers): the primitives' kernels and speedtest1 by both tiers, each as the
+    // compiler lowers them and with --helper-forms=all, where what they compare changes (the direct forms' admission and
+    // the helpers' planning: the helper planner, the atomic builtins' and the asm statements' plans, and the x86
+    // semantics rows a placed statement's forms are admitted by) or the measurement does (its harness, the speedtest1
+    // build it shares with measure-tier1-programs, and profile.c's and compile_measure.c's timing and files). The daily
+    // and dispatched runs measure main.
+    {
+        .name = "helpers",
+        .sources = "helpers_measure|tier1_programs_measure|profile|compile_measure|c_check_program_helpers|c_check_program_atomic|c_check_program_asm|x86_semantics",
+    },
 };
 
 #define BUSTER_CHANGES_MODULE_COUNT (sizeof(changes_modules) / sizeof(changes_modules[0]))
@@ -1573,6 +1583,22 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/tier1_programs_measure.c src/buster/compiler/profile.c src/buster/compiler/c_check_program_lower.c "
                  "src/buster/compiler/tier1_select.c src/buster/compiler/ir_lower.c",
         .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the helpers' measurement: its harness",
+        .files = "src/buster/compiler/helpers_measure.c",
+        .outputs_true = "code helpers",
+    },
+    {
+        .name = "the asm statements' plans alone run the helpers' measurement",
+        .files = "src/buster/compiler/c_check_program_asm.c",
+        .outputs_true = "code helpers",
+    },
+    {
+        .name = "the helpers' tests alone start no helpers measurement",
+        .files = "src/buster/compiler/c_check_program_helpers_test.c src/buster/compiler/c_check_program_asm_test.c",
+        .outputs_true = "code",
+        .outputs_false = "helpers",
     },
     {
         .name = "the timing alone runs Tier 1's program measurement",

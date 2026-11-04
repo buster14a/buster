@@ -365,6 +365,8 @@ struct CheckTier1Report
     uint32_t stages[CHECK_TIER1_STAGE_COUNT];
     uint32_t operations[BUSTER_CHECK_TIER1_OPERATIONS];
     uint32_t emission[BUSTER_CHECK_TIER1_OPERATIONS];
+    // The refused calls by kind (CheckTier1CallKind), a call counted under each kind it has (#1116).
+    uint32_t calls[CHECK_TIER1_CALL_KIND_COUNT];
     // The counts of Tier 1's bodies, summed.
     uint64_t records;
     uint64_t spill_stores;
@@ -386,7 +388,7 @@ struct CheckTier1Report
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
 // family's direct forms in the lowered code (an atomic access's LOAD, STORE or SET with its marker, a builtin's or an
 // implicit _Atomic object's; an atomic read/modify/write's ATOMIC_RMW; a fence's FENCE, but a seq_cst store's own after
-// it), its helpers' call sites (a builtin's, an
+// it; an asm statement placed in its caller, its X86 entry), its helpers' call sites (a builtin's, an
 // implicit _Atomic access's, a generic form's and an asm statement's alike: each call site once), the helpers planned,
 // the units lowered, and those whose lowering refused an operation by name (CHECK_PROGRAM_UNSUPPORTED: a builtin or a
 // statement no form takes, which -c and the direct path then refuse whole).
@@ -424,6 +426,11 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             store = access && kind != BUSTER_TYPED_LOAD && (function->values[e] & BUSTER_TYPED_FENCE_ORDER) == BUSTER_TYPED_FENCE_SEQ_CST;
         }
     }
+    // An asm statement placed in its caller (#1059): its X86 entry, once per statement as its helper's call would be.
+    for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < program->input->asm_count; s += 1)
+    {
+        report->direct[CHECK_PROGRAM_HELPER_ASM] += lowered->asms.plans[s].planned && lowered->asms.plans[s].row != 0;
+    }
     for (uint32_t h = 0; lowered_all && h < lowered->helpers.count; h += 1)
     {
         report->planned[check_program_helper_family(&lowered->helpers.items[h])] += 1;
@@ -441,6 +448,38 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             }
         }
     }
+}
+
+// --helper-forms' families (#1059's paired measurements, CheckProgramOptions.helper_forms): a comma-separated list of the
+// families that have a direct form (CheckProgramHelperContract.direct), by --helper-report's names (fence,
+// atomic-access, atomic-rmw, asm), or `all` of them, as a bit each; 0 for an empty list, an empty name, or a name of
+// another family or of none.
+static uint32_t check_helper_forms_parse(const char* text)
+{
+    uint32_t direct = 0;
+    for (uint32_t f = 0; f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+    {
+        direct |= check_program_helper_contracts[f].direct != NULL ? 1u << f : 0;
+    }
+    uint32_t forms = 0;
+    bool valid = text[0] != 0;
+    const char* at = text;
+    while (valid && *at != 0)
+    {
+        const size_t length = strcspn(at, ",");
+        uint32_t found = length == 3 && memcmp(at, "all", 3) == 0 ? direct : 0;
+        for (uint32_t f = 0; found == 0 && f < CHECK_PROGRAM_HELPER_FAMILIES; f += 1)
+        {
+            const char* name = check_program_helper_contracts[f].name;
+            found = (direct >> f & 1u) != 0 && strlen(name) == length && memcmp(name, at, length) == 0 ? 1u << f : 0;
+        }
+        forms |= found;
+        // A comma takes a name after it.
+        const bool comma = at[length] == ',';
+        valid = found != 0 && (!comma || at[length + 1] != 0);
+        at += length + (comma ? 1 : 0);
+    }
+    return valid ? forms : 0;
 }
 
 // --helper-report's lines on `stream`: the totals, then a line per family.
@@ -515,6 +554,9 @@ struct CheckProgramLanes
     // In a command of several units' flow (#905, c_checker_units.c), the rounds of the units' run, the link's merge,
     // check and write. Null elsewhere.
     struct CheckUnitsFlow* units_flow;
+    // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
+    // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
+    struct CheckUnitsLane* units_lane;
     // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first item, as
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
@@ -551,6 +593,8 @@ struct CheckProgramLanes
     FILE* tier1_refusals;
     // Every emission's plan of its helpers' operations, summed (#1059, --helper-report).
     CheckHelperReport helper_report;
+    // --helper-forms' families (CheckProgramOptions.helper_forms): each one's operations take their helpers.
+    uint32_t helper_forms;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
@@ -3549,6 +3593,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             lanes->tier1_report.operations[operation] += 1;
         }
+        for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+        {
+            lanes->tier1_report.calls[k] += (outcome.call_kinds >> k) & 1;
+        }
         if (stage == CHECK_TIER1_EMISSION && outcome.emission_error != 0 && outcome.emission_error < BUSTER_CHECK_TIER1_OPERATIONS)
         {
             lanes->tier1_report.emission[outcome.emission_error] += 1;
@@ -3713,6 +3761,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             for (uint32_t a = 0; a < code->asm_atom_count; a += 1)
             {
                 descriptors[code->asm_atoms[a]] = code->asm_sections[a];
+                valid = valid && link_set_atom_section(link, code->asm_atoms[a], code->asm_sections[a].name);
             }
             // A prioritized constructor's or destructor's entry (#147) is in .init_array.N or .fini_array.N, as clang's
             // object has it (TargetLoweringObjectFileELF's getStaticCtorSection), of its array's type and flags.
@@ -3725,11 +3774,13 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 const int length = valid ? snprintf(name, 24, "%s.%u", object_class_sections[class].name, (unsigned)link->priorities.priority[p]) : 0;
                 descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = name, .length = (uint64_t)length }, .type = object_class_sections[class].type,
                                                          .flags = object_class_sections[class].flags };
+                valid = valid && link_set_atom_section(link, atom, descriptors[atom].name);
             }
             code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
             for (uint32_t a = 0; a < code->unit_atom_count; a += 1)
             {
                 descriptors[code->unit_atoms[a]] = code->unit_sections[a];
+                valid = valid && link_set_atom_section(link, code->unit_atoms[a], code->unit_sections[a].name);
             }
             *table = descriptors;
         }
@@ -3803,6 +3854,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                     }
                 }
                 descriptors[atom] = descriptor;
+                valid = valid && link_set_atom_section(link, atom, descriptor.name);
             }
         }
         // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
@@ -3825,6 +3877,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 memcpy(spelled + prefix + 1, link->names.bytes[name], link->names.length[name]);
                 descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = spelled, .length = prefix + 1 + link->names.length[name] }, .type = format->type,
                                                          .flags = format->flags, .entry_size = format->entry_size };
+                valid = valid && link_set_atom_section(link, atom, descriptors[atom].name);
             }
             if (valid && format != NULL)
             {

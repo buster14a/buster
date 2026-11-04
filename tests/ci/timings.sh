@@ -38,6 +38,30 @@ JSON
         printf '%s\n' '{"jobs":[{"id":51,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-04T03:00:00Z","started_at":"2026-11-04T03:00:30Z","completed_at":"2026-11-04T03:04:30Z"}]}' ;;
     *runs/6/jobs\?per_page=100\&filter=latest)
         printf '%s\n' '{"jobs":[{"id":61,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-04T09:00:00Z","started_at":"2026-11-04T09:00:20Z","completed_at":"2026-11-04T09:20:20Z"}]}' ;;
+    # The runner hooks' lines in the jobs' logs: a whole cycle (11), a wait behind another holder (51), none of them
+    # (23, 32), a log that can't be read (31), and one without its release, its first line behind the byte-order mark (61).
+    *jobs/11/logs)
+        printf '%s\n' "2026-11-03T01:00:10.1000000Z Current runner version: '2.338.0'" \
+            '2026-11-03T01:00:10.2000000Z A job started hook has been configured by the self-hosted runner administrator' \
+            "2026-11-03T01:00:10.2500000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'" \
+            '2026-11-03T01:00:10.2600000Z ##[endgroup]' \
+            '2026-11-03T01:00:19.8000000Z buster-9700x: this job has the machine' \
+            '2026-11-03T01:00:20.0000000Z ##[group]Run test "$(uname -s)" = Linux' \
+            "2026-11-03T01:01:59.8000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-completed.sh'" \
+            '2026-11-03T01:01:59.9000000Z buster-9700x: gave the machine back' ;;
+    *jobs/51/logs)
+        printf '%s\n' "2026-11-04T03:00:30.4000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'" \
+            '2026-11-04T03:00:30.4100000Z buster-9700x: waiting for the machine, held by: 2026-11-04T02:59:00+00:00 someone: taskset -c 2 ./build/compiler benchmark-lexer src' \
+            '2026-11-04T03:00:38.4000000Z buster-9700x: this job has the machine' \
+            '2026-11-04T03:04:29.6000000Z buster-9700x: gave the machine back' ;;
+    *jobs/23/logs|*jobs/32/logs)
+        printf '%s\n' '2026-11-03T01:00:00.0000000Z Current runner version: '"'2.338.0'" ;;
+    *jobs/31/logs)
+        printf '{"message":"Not Found","status":"404"}\n'
+        exit 1 ;;
+    *jobs/61/logs)
+        printf '\xef\xbb\xbf%s\n' "2026-11-04T09:00:20.0000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'"
+        printf '%s\n' '2026-11-04T09:00:21.0000000Z buster-9700x: this job has the machine' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
 esac
 SH
@@ -60,8 +84,26 @@ cat > "$work/expected.tsv" <<'TSV'
 51	targeted	execution	240
 61	full	queue	20
 61	full	execution	1200
+11	pr	lock-wait	10
+11	pr	lock-hold	100
+51	targeted	lock-wait	8
+51	targeted	lock-hold	231
+61	full	lock-wait	1
 TSV
 cmp "$work/expected.tsv" "$work/report/observations.tsv"
+grep -Fq '| nightly targeted | lock-wait | 1 | 8.0 | 8 |' "$work/report/summary.md"
+grep -Fq '| PR | lock-hold | 1 | 100.0 | 100 |' "$work/report/summary.md"
+grep -Fq '| full (daily, dispatched, snapshot) | lock-wait | 1 | 1.0 | 1 |' "$work/report/summary.md"
+if grep -Fq '| full (daily, dispatched, snapshot) | lock-hold |' "$work/report/summary.md"; then
+    echo 'a log without its release gave a lock hold' >&2
+    exit 1
+fi
+test ! -e "$work/report/job.log" || { echo 'a job log was kept' >&2; exit 1; }
+# The collector run again into the same directory reports the same observations, none of the first run's lock lines
+# replayed.
+PATH="$work/bin:$PATH" GITHUB_REPOSITORY=buster14a/buster bash tools/ci/timings.sh "$work/report" > /dev/null
+cmp "$work/expected.tsv" "$work/report/observations.tsv" || { echo 'a second run into the same directory replayed rows' >&2; exit 1; }
+test "$(wc -l < "$work/report/locks.tsv")" -eq 5 || { echo 'the lock lines were not started afresh' >&2; exit 1; }
 grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work/report/summary.md"
 grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
 grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"
@@ -74,4 +116,4 @@ if "$work/timings" < "$work/invalid.tsv" > "$work/invalid.md" 2> /dev/null; then
     exit 1
 fi
 test ! -s "$work/invalid.md"
-printf 'timings extraction: successful, failed, missing timestamps and paginated jobs checked\n'
+printf 'timings extraction: successful, failed, missing timestamps, paginated jobs and the lock lines of job logs checked\n'

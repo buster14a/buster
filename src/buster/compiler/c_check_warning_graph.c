@@ -89,6 +89,38 @@ static inline __attribute__((always_inline)) void check_warning_graph_null(Check
     }
 }
 
+// Whether node `operand`'s value can be a pointer once converted as an operand (check_action_operand): a pointer, an array
+// or a function, which decay to one, an atomic type, whose value has its base type, or a type that isn't valid. An ordered
+// comparison warns only where exactly one operand is a pointer (check_warning_ordered_event), so one of two other operands
+// needs no action built, which read every operand's whole value (#1050).
+static bool check_warning_graph_pointer_operand(const TypeTable* types, const CheckStream* stream, uint32_t operand)
+{
+    const TypeId type = check_stream_type(stream, operand);
+    bool result = true;
+    if (type_is_valid(types, type))
+    {
+        const uint8_t kind = check_action_kind(types, type);
+        result = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC || type_kind_is_array(kind);
+    }
+    return result;
+}
+
+// Whether node `source`'s value can be a null pointer constant that warns (check_warning_null_integer): an integer constant
+// expression of value zero without a fault. Its constant kind and flags, two of its narrow columns, say whether it is one,
+// and then its payload row, which a value of columns alone hasn't (its integer is zero, its fault none), its value and
+// fault, all before its conversion's record or its whole value is read. On sqlite3.c's -c those two reads were most of
+// this pass, as the records are no longer in the caches when it runs (#1050).
+static bool check_warning_graph_null_candidate(const CheckGraph* graph, const CheckStream* stream, uint32_t source)
+{
+    bool result = source < graph->count && check_stream_constant_kind(stream, source) == CHECK_CONSTANT_INTEGER && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0;
+    if (result && (stream->dense_values != NULL || stream->payload_rows[source] != 0))
+    {
+        const CheckValue value = check_stream_value(stream, source);
+        result = value.integer == 0 && value.fault == CHECK_FAULT_NONE;
+    }
+    return result;
+}
+
 static bool check_input_warning_graph(CheckInput* input, const Parser* parser, TypeTable* types, const CheckStream* stream, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -145,7 +177,8 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
             {
                 const uint32_t token = graph->tokens[node];
                 const uint32_t completion = graph->source_positions[node];
-                if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL)
+                if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL &&
+                    (check_warning_graph_pointer_operand(types, stream, graph->operand0[node]) || check_warning_graph_pointer_operand(types, stream, graph->operand1[node])))
                 {
                     CheckAction action;
                     check_graph_action(graph, stream, node, NULL, &action);
@@ -171,15 +204,21 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     const uint32_t lvalue = op == CHECK_OP_INITIALIZE ? graph->tokens[node] :
                         op == CHECK_OP_ASSIGN && lvalue_node < graph->count ? graph->tokens[lvalue_node] : 0;
                     const TypeId declared = op == CHECK_OP_INITIALIZE ? graph->types[node] : 0;
-                    check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion);
+                    if (check_warning_graph_null_candidate(graph, stream, source))
+                    {
+                        check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion);
+                    }
                 }
                 else if (op == CHECK_OP_CALL)
                 {
                     const uint32_t begin = graph->argument_offsets[node];
                     for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                     {
-                        check_warning_graph_null(&reader, stream, graph->argument_nodes[begin + i], stream->argument_conversions[begin + i].type,
-                                                 0, 0, token);
+                        const uint32_t argument = graph->argument_nodes[begin + i];
+                        if (check_warning_graph_null_candidate(graph, stream, argument))
+                        {
+                            check_warning_graph_null(&reader, stream, argument, stream->argument_conversions[begin + i].type, 0, 0, token);
+                        }
                     }
                 }
             }

@@ -119,6 +119,7 @@ jobs:
       files: ${{ steps.files.outputs.files }}
       compile_time: ${{ steps.files.outputs.compile_time }}
       tier1_programs: ${{ steps.files.outputs.tier1_programs }}
+      helpers: ${{ steps.files.outputs.helpers }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
@@ -1604,10 +1605,12 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
-          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions), alone and after scalar work
-          # as its regions (`vector`) are.
+          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions) and with its regions in
+          # postorder batches (opt-in, CheckOptions.regions), alone and after scalar work as its node order (`vector`) is.
           taskset -c 2 ./build/compiler benchmark-checker-source --only transitions "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only transitions --after-scalar 100 "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only regions "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only regions --after-scalar 100 "${source[@]}"
           # A second corpus, every path: musl's regcomp.c, with the per-file jobs' musl options.
           musl="$corpus/libc/musl"
           taskset -c 2 ./build/compiler benchmark-checker-source -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
@@ -1626,6 +1629,86 @@ jobs:
             taskset -c 2 perf stat -r 11 -e cycles:u,instructions:u,branch-misses:u,cache-references:u,cache-misses:u \
               -- ./build/compiler $transitions "${options[@]}" -o "$RUNNER_TEMP/counted.o"
           done
+
+      - name: Compare check-expressions with the pull request's base over placements
+        # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
+        # (./build.sh shifts) from two fresh copies apiece, with the base's executables again as the comparison's floor
+        # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
+        # functions' samples. The objects must be the same bytes.
+        if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
+        timeout-minutes: 6
+        env:
+          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          ab="$RUNNER_TEMP/check-expressions-ab"
+          rm -rf "$ab"
+          mkdir -p "$ab"
+          # The shallow checkout may lack the base: fetch that public commit alone, without credentials, into a
+          # worktree of its own, which leaves this checkout as it is.
+          if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
+              GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
+                  --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
+          fi
+          git worktree add --detach "$ab/base" "$AB_BASE_SHA"
+          trap 'git worktree remove --force "$ab/base"' EXIT
+          shifts=(0 1088 2112 3136)
+          (cd "$ab/base" && taskset -c 0-7 ./build.sh shifts --config Release "$ab/main" main_unit_checker.c "${shifts[@]}")
+          taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
+          "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
+          "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
+          cmp "$ab/main.o" "$ab/head.o"
+          builds=()
+          for build in main:main head:head main-again:main; do
+              for shift in "${shifts[@]}"; do
+                  builds+=(--build "${build%%:*}" "$ab/${build#*:}/compiler-$shift")
+              done
+          done
+          taskset -c 2 ./build/compiler time-runs --runs 5 --copies 2 "${builds[@]}" --list "${options[@]}" -o "$ab/runs.o"
+          # Each placement's stages, the base's and this tree's in turn: placement 0's in full, and every placement's
+          # graph run, lowering and program check, the stages' span and the default runs' wall time and peak.
+          for shift in "${shifts[@]}"; do
+              for build in main head; do
+                  taskset -c 2 "$ab/$build/compiler-$shift" measure-compile --runs 11 -- "${options[@]}" > "$ab/$build-$shift-stages.txt"
+                  if [ "$shift" = 0 ]; then
+                      echo "== $build: --time-stages' stages, medians of 11"
+                      cat "$ab/$build-$shift-stages.txt"
+                  fi
+              done
+          done
+          echo "== each placement's stages, medians of 11 (ms; the default runs' wall ms and wait4 peak KiB)"
+          for shift in "${shifts[@]}"; do
+              for build in main head; do
+                  awk -v name="$build-$shift" '
+                      $1 ~ /^(check-expressions|lower|check-program|span)$/ { line = line " " $1 " " $2 }
+                      $1 == "default:" { wall = $5; peak = $17 }
+                      END { printf "%-10s%s wall %s peak %s\n", name, line, wall, peak }
+                  ' "$ab/$build-$shift-stages.txt"
+              done
+          done
+          for build in main head; do
+              echo "== $build: counters"
+              taskset -c 2 perf stat -r 11 -e cycles:u,instructions:u,branch-misses:u,ls_bad_status2.stli_other:u \
+                  -- "$ab/$build/compiler-0" "${options[@]}" -o "$ab/counted.o"
+          done
+          for build in main head; do
+              echo "== $build: the checker's and the type table's functions in a profile of five compiles"
+              taskset -c 2 perf record -q -F 20000 -o "$ab/$build.data" -- \
+                  bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile "$ab/$build/compiler-0" "${options[@]}" -o "$ab/profiled.o"
+              perf report -i "$ab/$build.data" --stdio --no-children --sort symbol --percent-limit 0.15 > "$ab/$build-symbols.txt"
+              awk '/ (check|type)_/ && shown++ < 40' "$ab/$build-symbols.txt"
+          done
+          # Where this tree's loads fail to take a store's data (ls_bad_status2.stli_other), one sample in 500, by function.
+          # awk reads all of perf's output, which no closed pipe may stop under pipefail.
+          echo "== head: store-to-load forwarding's failures by function"
+          taskset -c 2 perf record -q -e ls_bad_status2.stli_other:u -c 500 -o "$ab/forwarding.data" -- \
+              "$ab/head/compiler-0" "${options[@]}" -o "$ab/forwarding.o"
+          perf report -i "$ab/forwarding.data" --stdio --no-children --sort symbol --percent-limit 0.3 > "$ab/forwarding-symbols.txt"
+          awk '/%/ && shown++ < 40' "$ab/forwarding-symbols.txt"
 
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g
@@ -1996,6 +2079,30 @@ jobs:
           clang --version | head -1
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler measure-tier1-programs --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+
+      - name: Time the direct forms against their helpers by both tiers
+        # #1059's paired measurements: the primitives' kernels (reference counts, a spin lock, a sequence lock, flags, a
+        # running maximum, inline asm) and speedtest1, each built by this compiler's Tier 0 and --tier1 as it lowers them
+        # and with --helper-forms=all, which gives every operation of a direct form its helper's call. Every build's output
+        # must be the first's; then each source's -c compile in each of 5 rounds and each program's run in each of 11, in an
+        # order that rotates by round, as whole processes on one CPU with their user cycles and instructions, beside each
+        # object's helper calls, executable bytes and Tier 1's spill and call stores and loads
+        # (docs/c-builtins-integration.md has the results). Where `changes` doesn't rule it out (the direct forms' and the
+        # helpers' planning, and the measurement: `helpers`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.helpers != 'false'
+        timeout-minutes: 5
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          # SQLite 3.53.2's test/speedtest1.c (#136's), by its hash, as measure-tier1-programs' step takes it.
+          inputs="$RUNNER_TEMP/helpers-programs"
+          mkdir -p "$inputs"
+          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
+          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" | sha256sum --check
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler measure-helpers --runs 11 --compiles 5 --sqlite "$sqlite" --speedtest "$inputs" --directory /tmp
 
       - name: Benchmark the verified Tier 1 optimization passes
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')

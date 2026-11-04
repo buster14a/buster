@@ -2571,8 +2571,10 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
         {
             const uint32_t absolute = (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S);
             const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
-            // The general- and local-dynamic kinds, which only imported objects have.
-            const uint32_t imported = (1u << BUSTER_LINK_FIXUP_TLSGD) | (1u << BUSTER_LINK_FIXUP_TLSLD) | (1u << BUSTER_LINK_FIXUP_DTPOFF32);
+            // The general- and local-dynamic kinds and the 64-bit TLS offsets, which only imported objects and the assembler
+            // have.
+            const uint32_t imported = (1u << BUSTER_LINK_FIXUP_TLSGD) | (1u << BUSTER_LINK_FIXUP_TLSLD) | (1u << BUSTER_LINK_FIXUP_DTPOFF32) |
+                                      (1u << BUSTER_LINK_FIXUP_TPOFF64) | (1u << BUSTER_LINK_FIXUP_DTPOFF64);
             // A shared library has no local-exec access.
             const uint32_t local_exec = options[i].shared ? 1u << BUSTER_LINK_FIXUP_TPOFF32 : 0;
             const uint32_t expected =
@@ -2657,6 +2659,8 @@ static const char* const link_test_relocations[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_TLSGD] = "R_X86_64_TLSGD",
     [BUSTER_LINK_FIXUP_TLSLD] = "R_X86_64_TLSLD",
     [BUSTER_LINK_FIXUP_DTPOFF32] = "R_X86_64_DTPOFF32",
+    [BUSTER_LINK_FIXUP_TPOFF64] = "R_X86_64_TPOFF64",
+    [BUSTER_LINK_FIXUP_DTPOFF64] = "R_X86_64_DTPOFF64",
 };
 
 // A symbol's name in the source: its own, or .Lsym_ and its id without one (a label that stays out of the object's
