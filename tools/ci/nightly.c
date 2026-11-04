@@ -77,6 +77,9 @@
 // The window, in Europe/Madrid local time: hardware work starts at or after 04:00 and ends by 07:00.
 #define BUSTER_NIGHTLY_WINDOW_START_HOUR 4
 #define BUSTER_NIGHTLY_WINDOW_END_HOUR 7
+// A cycle's snapshot is pinned no earlier than this before its window (22:00 Europe/Madrid), so that the coordinator's
+// earlier schedules, there for GitHub's hours-late scheduled starts, pin nothing hours ahead.
+#define BUSTER_NIGHTLY_PIN_LEAD 21600
 // A pull request's run older than this at its push is stale evidence: the host's unpinned packages (GCC, glibc, the
 // kernel) could have changed since, and the nightly snapshot rechecks native correctness daily anyway.
 #define BUSTER_NIGHTLY_REUSE_AGE 86400
@@ -2256,7 +2259,13 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
                 cycle.snapshot = cycle.snapshot < 0 ? -2 : cycle.snapshot;
             }
         }
-        if (cycle.snapshot == -1)
+        // Before the pin's lead, a step pins and plans nothing, unless a person's override admits work now.
+        const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
+        if (cycle.snapshot == -1 && input->now < cycle.window.start - BUSTER_NIGHTLY_PIN_LEAD && !overridden)
+        {
+            failure = "it is before 22:00 Europe/Madrid, 6 hours before the window: the cycle's snapshot isn't pinned yet";
+        }
+        else if (cycle.snapshot == -1)
         {
             cycle.snapshot = nightly_state_index(states, input->main);
             cycle.pinned_now = cycle.snapshot >= 0;
@@ -3342,6 +3351,24 @@ static void nightly_test_plan(NightlyTest* test)
     snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t20261104.900.2.defer\t%s\n", scenario->states.items[0].sha, scenario->states.items[5].sha);
     nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 3, "the oldest states' hosted rows are prepared, three at a time");
     nightly_expect(test, nightly_count(scenario, "dispatch\t") == 4 && nightly_count(scenario, "dispatch\tbacklog\tadmit") == 0 && nightly_has(scenario, "done\tprepared"), "nothing is admitted before 04:00");
+    nightly_scenario_free(scenario);
+
+    // The earlier schedules' steps, there for hours-late scheduled starts: before 22:00 the cycle pins and dispatches
+    // nothing; from 22:00, 6 hours before the window, it pins and prepares; an override pins at any hour.
+    scenario = nightly_scenario(6, committed);
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 21, 59));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0 && nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tit is before 22:00 Europe/Madrid") && strstr(scenario->report, "No plan: it is before 22:00") != NULL, "a step before 22:00 pins nothing and plans nothing");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0 && nightly_count(scenario, "dispatch\t") == 0, "nor at 16:07, the earliest schedule");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 22, 0));
+    snprintf(line, sizeof(line), "pin\tcycle\t2026-11-04\t%s\t900\t", scenario->states.items[5].sha);
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 1, "from 22:00 the cycle pins and prepares");
+    scenario->override = "validating the coordinator";
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
+    nightly_expect(test, nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tsnapshot\tdefer") == 1, "an override pins at any hour, and prepares (the snapshot has no hosted rows yet)");
+    scenario->dry_run = true;
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "a dry run's override pins nothing early either");
     nightly_scenario_free(scenario);
 
     // Inside the window, the hosted rows qualified and the snapshot prepared: its comprehensive run first.

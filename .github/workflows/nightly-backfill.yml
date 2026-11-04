@@ -7,13 +7,22 @@ name: Nightly main measurements
 # targeted measurements. It never holds the shared lock itself: each dispatched run's job takes it, and the job's own
 # timeout and window check keep it inside the window.
 #
-# GitHub starts scheduled runs late, by hours at busy times (the daily run's 07:23 UTC started after 12:39 UTC every
-# day of the week before this): several schedules give the cycle chances, each run prepares and then waits up to 5
-# hours 40 minutes for the window in its `prepare` job, and a later run waits in the concurrency group and, past the
-# window, reports. Until vars.BUSTER_NIGHTLY is `on`, every run is a dry run: it harvests, plans and reports, and
-# dispatches nothing; the old daily run of 9700x.yml keeps its place.
+# GitHub starts this repository's scheduled runs hours late: in the week of 2026-10-28, 9700x.yml's 07:23 UTC run
+# started 6h22m to 9h53m late, and selfhost.yml's 05:47 UTC run 7h13m late. So the schedules run every two hours from
+# 16:07 to 04:07, then at 05:37 and 07:17: for any common delay up to about 14 hours, some run starts between 22:05 and
+# 06:35, and its `prepare` job either waits for the window (up to 5 hours 55 minutes) or is in it. A run that starts
+# before 22:00 (an earlier schedule on time) pins and plans nothing: the cycle pins its snapshot from 6 hours before the
+# window (tools/ci/nightly.c, BUSTER_NIGHTLY_PIN_LEAD). A later run waits in the concurrency group and, past the window,
+# reports. Until vars.BUSTER_NIGHTLY is `on`, every run is a dry run: it harvests, plans and reports, and dispatches
+# nothing; the old daily run of 9700x.yml keeps its place.
 on:
   schedule:
+    - cron: '7 16 * * *'
+      timezone: Europe/Madrid
+    - cron: '7 18 * * *'
+      timezone: Europe/Madrid
+    - cron: '7 20 * * *'
+      timezone: Europe/Madrid
     - cron: '7 22 * * *'
       timezone: Europe/Madrid
     - cron: '7 0 * * *'
@@ -84,7 +93,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Until main has tools/ci/nightly.c, whose first-parent commit is the epoch, the last two days' states.
           NIGHTLY_EPOCH_SINCE: 2 days ago
-        run: bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode dry-run
+        # As of 22:10 Europe/Madrid today, after the cycle's 22:00 pin: at any hour, the plan that evening's first
+        # step would make.
+        run: NIGHTLY_NOW=$(TZ=Europe/Madrid date -d '22:10' +%s) bash tools/ci/nightly.sh coordinate "$RUNNER_TEMP/nightly" --phase prepare --mode dry-run
       - name: Keep the planned ledger and report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

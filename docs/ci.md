@@ -362,7 +362,9 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    harvests the records of completed runs the ledger lacks. A record that
    disagrees with the API's job conclusions counts as nothing.
 2. **Pin.** The cycle (the night ahead, from noon) pins main's head as its
-   snapshot once. Every dispatch of the cycle names that pin, not main's head
+   snapshot once, from 22:00 Europe/Madrid, 6 hours before the window. A step
+   before then pins and plans nothing, unless an override admits work now.
+   Every dispatch of the cycle names that pin, not main's head
    at dispatch, which may have moved on. The worker checks the state's
    first-parent ancestry against the pin and records it.
 3. **Prepare.** Before the window, the coordinator dispatches the snapshot's
@@ -427,11 +429,20 @@ runs over, and the hook then releases the lock. The lock's protocol and its
 fairness to agent sessions are unchanged; nightly work is kept out of the day
 rather than given priority.
 
-**Late schedules.** GitHub starts scheduled runs late. In the week before this,
-the daily run's 07:23 UTC never started before 12:39 UTC. So the coordinator
-has six schedules, from 22:07 to 07:17. A run that prepares before the window
-waits for it when it opens within 5 hours 55 minutes of the job's start. Any
-other run waits in the concurrency group, or reports.
+**Late schedules.** GitHub starts this repository's scheduled runs hours late.
+In the week of 2026-10-28, the daily run's `23 7 * * *` started 6h22m to
+9h53m late, and `selfhost.yml`'s `47 5 * * *` started 7h13m late. So the
+coordinator has nine schedules:
+
+- every two hours from 16:07 to 04:07;
+- then 05:37 and 07:17.
+
+A run that prepares before the window waits for it when it opens within 5 hours
+55 minutes of the job's start. For any common delay up to about 14 hours, some
+run starts between 22:05 and 06:35, close enough to wait or still inside the
+window. Unless delayed, the earlier schedules start before 22:00: they harvest
+and report, and pin nothing (step 2). Any other run waits in the concurrency
+group, or reports.
 
 **Override.** Both workflows' manual dispatches take an `override` reason for
 deliberate out-of-window work. The window checks report the reason and never
