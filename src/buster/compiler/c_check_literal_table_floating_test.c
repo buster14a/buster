@@ -140,7 +140,7 @@ static void check_test_literal_floating_values(CheckTest* test)
     arena_release(&scratch);
 }
 
-// Which spellings check_literal_table_floating_integers takes for integers: no '.', no exponent ('e' in decimal, 'p' in
+// Which spellings check_literal_table_floating_integers converts as integers: no '.', no exponent ('e' in decimal, 'p' in
 // hexadecimal, where 'e' is a digit).
 static void check_test_literal_floating_integer_spellings(CheckTest* test)
 {
@@ -231,19 +231,37 @@ static void check_test_literal_floating_tails(CheckTest* test, bool wide)
         };
         const uint32_t width = wide ? 64 : 32;
         const TypeId element = wide ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_FLOAT;
-        for (uint32_t path = 0; path < 2; path += 1)
+        // The batch's elements as check_literal_table_floating gathers them, none converted before the batch.
+        const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+        uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+        uint64_t converted[1] = { 0 };
+        bool spelled = true;
+        for (uint32_t i = 0; spelled && i < found; i += 1)
+        {
+            spelled = check_input_spelling(&reader, tokens[i], &spellings[i], &lengths[i]);
+        }
+        check_test_expect(test, spelled, "floating tail fixture's spellings are made");
+        const CheckLiteralTableElements elements = {
+            .tokens = tokens,
+            .spellings = spellings,
+            .lengths = lengths,
+            .converted = converted,
+        };
+        const uint64_t spelled_length = scratch.length;
+        for (uint32_t path = 0; spelled && path < 2; path += 1)
         {
             parser.options.scalar = path != 0;
             for (uint32_t count = 0; count <= found; count += 1)
             {
                 const uint64_t bytes = (uint64_t)count * (width / 8);
                 uint8_t* destination = mapping + page - bytes;
-                const bool accepted = check_literal_table_floating_batch(&reader, tokens, count, element, width, destination);
+                const bool accepted = check_literal_table_floating_batch(&reader, &elements, 0, count, element, width, destination);
                 check_test_expect(test, accepted && (bytes == 0 || memcmp(destination, expected, bytes) == 0) &&
-                                       !input.resource && scratch.length == 0,
+                                       !input.resource && scratch.length == spelled_length,
                                   "every scalar/vector floating store tail equals dense bytes without touching the protected page");
             }
         }
+        arena_pop_to(&scratch, 0);
     }
     if (mapping != MAP_FAILED)
     {

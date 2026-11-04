@@ -285,93 +285,125 @@ static bool check_literal_table_integer_spelling(const uint8_t* spelling, uint32
     return integer;
 }
 
-// The refusals an integer's value makes (its precision lost in the element's format), found before any floating
-// conversion: one late in a table would otherwise come after every element before it was converted in vain, which the
-// ordinary path then converts again, 28% slower than main on a 200,000-element table refused at its last element on the
-// 9700X (#1210). Integers of three characters or fewer, at most 999 (0777 in octal, 0xff), are exact in both formats and
-// not tested. The other late refusals (a range warning, an imaginary, bit-precise or malformed constant) are code that
-// warns or fails, and keep their cost.
-static bool check_literal_table_floating_integers(CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId element)
+// A floating table's elements, gathered once before any is converted: each one's token and spelling
+// (check_input_spelling, kept in scratch until the table is decided, so that no spelling is made twice), and which ones
+// are already converted, into the payload.
+typedef struct CheckLiteralTableElements CheckLiteralTableElements;
+struct CheckLiteralTableElements
+{
+    uint32_t* tokens;
+    const uint8_t** spellings;
+    uint32_t* lengths;
+    uint64_t* converted;
+};
+
+// Gathers the elements of tokens [begin, end), `count` of them, and converts those spelled as integers (no '.', no
+// exponent) longer than three characters into `payload`, before any floating conversion: so the refusals an integer's
+// value makes (its precision lost in the element's format) come first. One late in a table would otherwise come after
+// every element before it was converted in vain, which the ordinary path then converts again: 28% slower than main on
+// a 200,000-element table refused at its last element on the 9700X (#1210). Integers of three characters or fewer, at
+// most 999 (0777 in octal, 0xff), are exact in both formats, and the batches convert them. The other late refusals (a
+// range warning, an imaginary, bit-precise or malformed constant) are code that warns or fails, and keep their cost.
+static bool check_literal_table_floating_integers(CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId element, uint32_t width,
+                                                  uint8_t* payload, const CheckLiteralTableElements* elements)
 {
     const uint8_t* kinds = reader->parser->tokens.kinds;
+    const uint32_t unit = width / 8;
+    uint32_t index = 0;
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
     {
-        const uint64_t mark = reader->scratch->length;
-        const uint8_t* spelling = NULL;
-        uint32_t length = 0;
         if (kinds[token] == PARSE_KIND_NUMBER)
         {
-            valid = check_input_spelling(reader, token, &spelling, &length);
+            elements->tokens[index] = token;
+            valid = check_input_spelling(reader, token, &elements->spellings[index], &elements->lengths[index]);
+            const uint8_t* spelling = valid ? elements->spellings[index] : NULL;
+            const uint32_t length = valid ? elements->lengths[index] : 0;
+            if (valid && length > 3 && check_literal_table_integer_spelling(spelling, length))
+            {
+                const uint64_t mark = reader->scratch->length;
+                uint64_t bits = 0;
+                valid = check_literal_table_floating_value(reader, spelling, length, kinds[token - 1] == PARSE_KIND_MINUS, element, &bits);
+                arena_pop_to(reader->scratch, mark);
+                memcpy(payload + (uint64_t)index * unit, &bits, unit);
+                elements->converted[index / 64] |= (uint64_t)valid << (index % 64);
+            }
+            index += 1;
         }
-        if (valid && length > 3 && check_literal_table_integer_spelling(spelling, length))
-        {
-            uint64_t bits = 0;
-            valid = check_literal_table_floating_value(reader, spelling, length, kinds[token - 1] == PARSE_KIND_MINUS, element, &bits);
-        }
-        arena_pop_to(reader->scratch, mark);
     }
     return valid;
 }
 
-static bool check_literal_table_floating_batch(CheckInputReader* reader, const uint32_t* tokens, uint32_t count, TypeId element, uint32_t width, uint8_t* destination)
+// Converts the `count` elements from `first` (at most a batch) into `destination`, those `converted` marks being there
+// already.
+static bool check_literal_table_floating_batch(CheckInputReader* reader, const CheckLiteralTableElements* elements, uint32_t first, uint32_t count,
+                                               TypeId element, uint32_t width, uint8_t* destination)
 {
     uint32_t words[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
+    // The decoder reads 16 lengths whatever the batch's count: a copy, zero past it, rather than the shared column's end.
     uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
-    const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint32_t decoded[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint64_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH];
-    const uint64_t mark = reader->scratch->length;
-    // Spelling normalization only grows scratch; the parser's columns/options stay immutable and disjoint from output.
+    const uint32_t* tokens = elements->tokens + first;
+    const uint8_t* const* spellings = elements->spellings + first;
+    memcpy(lengths, elements->lengths + first, (uint64_t)count * sizeof(uint32_t));
+    // A batch is 16 elements from a multiple of 16, within one word of the bitset.
+    const uint32_t converted = (uint32_t)(elements->converted[first / 64] >> (first % 64)) & 0xffffu;
+    // The parser's columns/options stay immutable and disjoint from output.
     const bool scalar = reader->parser->options.scalar;
     const uint8_t* kinds = reader->parser->tokens.kinds;
     const uint32_t unit = width / 8;
     bool valid = true;
-    for (uint32_t lane = 0; valid && lane < count; lane += 1)
+    for (uint32_t lane = 0; lane < count; lane += 1)
     {
-        valid = check_input_spelling(reader, tokens[lane], &spellings[lane], &lengths[lane]);
-        if (valid && lengths[lane] <= sizeof(uint32_t))
+        if (lengths[lane] <= sizeof(uint32_t))
         {
             memcpy(words + lane, spellings[lane], lengths[lane]);
         }
     }
     const __mmask16 lanes = (__mmask16)((1u << count) - 1);
-    const __mmask16 small = valid && !scalar ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
+    const __mmask16 small = !scalar ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
     for (uint32_t lane = 0; valid && lane < count; lane += 1)
     {
         const bool negative = kinds[tokens[lane] - 1] == PARSE_KIND_MINUS;
-        if ((small & (1u << lane)) != 0)
+        values[lane] = 0;
+        if ((converted & (1u << lane)) != 0)
+        {
+            memcpy(values + lane, destination + (uint64_t)lane * unit, unit);
+        }
+        else if ((small & (1u << lane)) != 0)
         {
             // These int literals are at most 999, exactly representable in both formats. Negate as an int:
             // -0 is positive floating zero, unlike the floating literal -0.0.
             const int32_t number = negative ? -(int32_t)decoded[lane] : (int32_t)decoded[lane];
-            values[lane] = 0;
             if (width == 32)
             {
-                const float converted = (float)number;
-                memcpy(values + lane, &converted, sizeof(converted));
+                const float converted_value = (float)number;
+                memcpy(values + lane, &converted_value, sizeof(converted_value));
             }
             else
             {
-                const double converted = (double)number;
-                memcpy(values + lane, &converted, sizeof(converted));
+                const double converted_value = (double)number;
+                memcpy(values + lane, &converted_value, sizeof(converted_value));
             }
         }
         else
         {
+            const uint64_t mark = reader->scratch->length;
             valid = check_literal_table_floating_value(reader, spellings[lane], lengths[lane], negative, element, values + lane);
+            arena_pop_to(reader->scratch, mark);
         }
     }
     for (uint32_t lane = 0; valid && scalar && lane < count; lane += 1)
     {
         memcpy(destination + (uint64_t)lane * unit, values + lane, unit);
     }
-    for (uint32_t first = 0; valid && !scalar && first < count; first += 8)
+    for (uint32_t at = 0; valid && !scalar && at < count; at += 8)
     {
-        const uint32_t left = count - first;
+        const uint32_t left = count - at;
         const __mmask8 live = (__mmask8)((1u << (left < 8 ? left : 8)) - 1);
-        const __m512i representations = _mm512_maskz_loadu_epi64(live, values + first);
-        uint8_t* bytes = destination + (uint64_t)first * unit;
+        const __m512i representations = _mm512_maskz_loadu_epi64(live, values + at);
+        uint8_t* bytes = destination + (uint64_t)at * unit;
         if (width == 32)
         {
             _mm512_mask_cvtepi64_storeu_epi32(bytes, live, representations);
@@ -380,6 +412,33 @@ static bool check_literal_table_floating_batch(CheckInputReader* reader, const u
         {
             _mm512_mask_storeu_epi64(bytes, live, representations);
         }
+    }
+    return valid;
+}
+
+// A floating table's elements, gathered and their long integers converted (check_literal_table_floating_integers),
+// then converted a batch at a time into `payload`. Its scratch, the spellings among it, is popped once it is decided.
+static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t count, TypeId element, uint32_t width, uint8_t* payload)
+{
+    const uint64_t mark = reader->scratch->length;
+    const uint32_t words = (count + 63) / 64;
+    CheckLiteralTableElements elements = {
+        .tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count),
+        .spellings = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const uint8_t*, count),
+        .lengths = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count),
+        .converted = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words),
+    };
+    const bool reserved = elements.tokens != NULL && elements.spellings != NULL && elements.lengths != NULL && elements.converted != NULL;
+    reader->output->resource |= !reserved;
+    if (reserved)
+    {
+        memset(elements.converted, 0, (uint64_t)words * sizeof(uint64_t));
+    }
+    bool valid = reserved && check_literal_table_floating_integers(reader, begin, end, element, width, payload, &elements);
+    for (uint32_t first = 0; valid && first < count; first += BUSTER_CHECK_LITERAL_TABLE_BATCH)
+    {
+        const uint32_t batch = count - first < BUSTER_CHECK_LITERAL_TABLE_BATCH ? count - first : BUSTER_CHECK_LITERAL_TABLE_BATCH;
+        valid = check_literal_table_floating_batch(reader, &elements, first, batch, element, width, payload + (uint64_t)first * (width / 8));
     }
     arena_pop_to(reader->scratch, mark);
     return valid;
@@ -416,11 +475,11 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     const uint64_t bytes = (uint64_t)count * (width / 8);
     uint8_t* payload = eligible ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, bytes) : NULL;
     input->resource |= eligible && payload == NULL;
-    bool accepted = eligible && payload != NULL && (!floating || check_literal_table_floating_integers(reader, begin + 1, end - 1, element));
+    bool accepted = eligible && payload != NULL && (!floating || check_literal_table_floating(reader, begin + 1, end - 1, count, element, width, payload));
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint32_t batch = 0;
     uint32_t written = 0;
-    for (uint32_t token = begin + 1; accepted && token + 1 < end; token += 1)
+    for (uint32_t token = begin + 1; accepted && !floating && token + 1 < end; token += 1)
     {
         if (parser->tokens.kinds[token] == PARSE_KIND_NUMBER)
         {
@@ -429,8 +488,7 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
             if (batch == BUSTER_CHECK_LITERAL_TABLE_BATCH || written + batch == count)
             {
                 uint8_t* destination = payload + (uint64_t)written * (width / 8);
-                accepted = floating ? check_literal_table_floating_batch(reader, tokens, batch, element, width, destination) :
-                                      check_literal_table_batch(reader, tokens, batch, width, is_signed, destination);
+                accepted = check_literal_table_batch(reader, tokens, batch, width, is_signed, destination);
                 written += batch;
                 batch = 0;
             }
