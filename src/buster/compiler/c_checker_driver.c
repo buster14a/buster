@@ -3604,12 +3604,13 @@ struct CheckDriverCommand
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
-    // --tier1-no-lifetimes.
+    // --tier1-no-lifetimes; and --tier1-no-inline (#1282).
     bool tier1;
     bool tier1_strict;
     bool tier1_no_rematerialize;
     bool tier1_gvn;
     bool tier1_no_lifetimes;
+    bool tier1_no_inline;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
     // The report its units' emissions sum their helper plans into, atomically (#1059's --helper-report), null without the
@@ -4621,6 +4622,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes.tier1_no_rematerialize = true;
         }
+        else if (strcmp(arguments[i], "--tier1-no-inline") == 0)
+        {
+            lanes.tier1_no_inline = true;
+        }
         else if (strcmp(arguments[i], "--tier1-gvn") == 0)
         {
             lanes.tier1_gvn = true;
@@ -4840,6 +4845,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_rematerialize = lanes.tier1_no_rematerialize,
         .tier1_gvn = lanes.tier1_gvn,
         .tier1_no_lifetimes = lanes.tier1_no_lifetimes,
+        .tier1_no_inline = lanes.tier1_no_inline,
         .tier1_report = &lanes.tier1_report,
         .tier1_refusals = lanes.tier1_refusals,
         .helper_report = helper_report ? &lanes.helper_report : NULL,
@@ -4887,10 +4893,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         check_request_describe(stderr, &refusal);
         fprintf(stderr, "\n");
     }
-    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes) && !lanes.tier1)
+    else if ((lanes.tier1_strict || tier1_report || lanes.tier1_refusals != NULL || lanes.tier1_no_rematerialize || tier1_gvn || lanes.tier1_no_lifetimes || lanes.tier1_no_inline) &&
+             !lanes.tier1)
     {
         fprintf(stderr, "error: %s needs --tier1\n", lanes.tier1_strict ? "--tier1-strict" : tier1_report ? "--tier1-report" : lanes.tier1_refusals != NULL ? "--tier1-refusals" :
-                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" : "--tier1-no-lifetimes");
+                                                    lanes.tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
+                                                    lanes.tier1_no_lifetimes ? "--tier1-no-lifetimes" : "--tier1-no-inline");
     }
     else
     {

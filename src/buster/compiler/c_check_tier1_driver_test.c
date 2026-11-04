@@ -3005,6 +3005,111 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
     unlink(unit);
 }
 
+// #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
+// x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
+// split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
+// noinline one, which stays a call, beside them. By each path, with --verify's certificates, the build inlines (the
+// report's `inlined`), and runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4.
+static const char check_test_tier1_inline_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "typedef struct { long long a; int b; short c; } Triple;\n"
+    "static inline __attribute__((always_inline)) Triple twist(Triple t, long long k) { Triple r = { t.a * 3 + k, t.b ^ (int)k, (short)(t.c + 1) }; return r; }\n"
+    "static __attribute__((noinline)) int kept(int x) { return x * 7; }\n"
+    "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
+    "{\n"
+    "    __m512i x = _mm512_add_epi32(a, b);\n"
+    "    x = _mm512_xor_si512(x, _mm512_min_epu8(x, c));\n"
+    "    return _mm512_mask_sub_epi32(x, (__mmask16)0x5a5a, x, _mm512_set1_epi32(17));\n"
+    "}\n"
+    "__attribute__((noinline)) uint64_t count(const uint8_t* p, int n)\n"
+    "{\n"
+    "    __m512i acc = _mm512_setzero_si512();\n"
+    "    for (int i = 0; i + 64 <= n; i += 64)\n"
+    "    {\n"
+    "        __m512i v = _mm512_loadu_si512(p + i);\n"
+    "        __mmask64 m = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('a'));\n"
+    "        acc = _mm512_add_epi64(acc, _mm512_set1_epi64((long long)__builtin_popcountll(m)));\n"
+    "        acc = _mm512_mask_add_epi32(acc, (__mmask16)m, acc, _mm512_set1_epi32(3));\n"
+    "    }\n"
+    "    return (uint64_t)_mm512_reduce_add_epi64(acc);\n"
+    "}\n"
+    "__attribute__((noinline)) long long structs(int n)\n"
+    "{\n"
+    "    Triple t = { 5, 9, 2 };\n"
+    "    for (int i = 0; i < n; i += 1) t = twist(t, i);\n"
+    "    return t.a + t.b + t.c + kept(n);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    uint8_t buffer[640];\n"
+    "    for (int i = 0; i < 640; i += 1) buffer[i] = (uint8_t)(\"abcab\"[i % 5] + (i % 7 == 0));\n"
+    "    __m512i a = _mm512_set1_epi32(7);\n"
+    "    __m512i b = _mm512_set_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);\n"
+    "    __m512i c = _mm512_set1_epi8(9);\n"
+    "    long long out[8];\n"
+    "    _mm512_storeu_si512(out, mix(a, b, c));\n"
+    "    printf(\"%llx %llx %llu %lld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9));\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-inline.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-inline-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_inline_source, strlen(check_test_tier1_inline_source));
+    char* reference_arguments[] = { (char*)clang, "-O0", "-march=x86-64-v4", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
+    check_test_expect(test, ran, "clang's build of the inlining fixture runs");
+    for (uint32_t build = 0; ran && build < 4; build += 1)
+    {
+        // Builds 0 and 1 inline, by the vector path and the scalar twin; 2 and 3 keep every call (--tier1-no-inline).
+        const bool scalar = build % 2 != 0;
+        const bool inlining = build < 2;
+        char program[512];
+        char message[256];
+        snprintf(program, sizeof(program), "%s/tier1-inline-%u", directory, build);
+        char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", "-march=x86-64-v4" };
+        uint32_t count = 5;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (!inlining)
+        {
+            arguments[count++] = "--tier1-no-inline";
+        }
+        arguments[count++] = "-o";
+        arguments[count++] = program;
+        arguments[count++] = unit;
+        arguments[count] = NULL;
+        text = NULL;
+        const bool built = check_test_driver_spawn(arguments, &text) == 0;
+        uint64_t inlined = UINT64_MAX;
+        uint64_t internal = UINT64_MAX;
+        const bool reported = built && check_test_tier1_field(text, "inlined", &inlined) && check_test_tier1_field(text, "internal_failures", &internal);
+        free(text);
+        snprintf(message, sizeof(message), "--tier1 %s the wrappers' and the struct helper's calls, not the noinline one's (build %u)", inlining ? "inlines" : "keeps", build);
+        check_test_expect(test, reported && internal == 0 && (inlining ? inlined >= 10 : inlined == 0), message);
+        char actual[256] = { 0 };
+        snprintf(message, sizeof(message), "the inlining fixture by --tier1 runs as clang -O0's build does (build %u)", build);
+        check_test_expect(test, built && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+        unlink(program);
+    }
+    unlink(reference);
+    unlink(unit);
+}
+
 // The convention's rarer shapes' fixture (#141).
 static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {

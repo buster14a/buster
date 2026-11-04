@@ -63,8 +63,8 @@ GPR value or infer target permission from the compiler host. SSA promotion and
 SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
 stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
 guide](ir-simd.md)'s "Masks from the typed stream"), and one with vectors
-(#141), folding no vector; GVN, LICM, SROA and the inliner still refuse every
-SIMD function. Selection takes vectors (#141, the selection guide's
+(#141), folding no vector; GVN and LICM still refuse every SIMD function. The
+inliner and SROA take them (#1282): "Inlining", below. Selection takes vectors (#141, the selection guide's
 "Vectors"), and claims no throughput gain for them.
 
 ## Required evidence
@@ -312,6 +312,46 @@ operand). The scalar ones, BMI2's
 `pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
 [the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
 instruction of selection's `TIER1_RULE_INTRINSIC`.
+
+### Inlining (#1282)
+
+Between the lowering and SSA promotion, `--tier1` expands a body's calls of the
+unit's always_inline functions of internal linkage, the x86 intrinsics'
+wrappers above all (`c_check_tier1_inline.c`), and splits the aggregates' slots
+of a body with vectors or with expansions into fields that promotion makes
+values. The checker records each function's always_inline and noinline
+attributes (`CheckProgram.object_inline`); a function with both, or neither, is
+no callee. The emission then lowers every part before any part's code
+(`CheckEmitRun.tier1_inline`: the lanes meet between the halves, a growing
+team's code waits for every lowering, a board's share runs two epochs), so that
+a body's lane reads any callee's typed stream. Each lane prepares a callee once
+an emission, in a cache arena of its own: lowered at its own target, promoted
+and optimized, which leaves a wrapper a preheader and its body, one straight
+line. A callee whose target has a feature its caller's lacks stays a call.
+
+The unit of the caller and the callees its calls reach (up to 64) goes through
+`ir_optimize_inline` with no cost threshold, as clang inlines an always_inline
+function whatever its size, copies of 64-, 32- and 16-byte vectors taking the
+target's widths ([the inlining guide](ir-inlining.md)'s "SIMD callees and
+by-value vectors"). SROA, with its `simd` and `flagged` options ([the field
+splitting guide](ir-scalar-replacement.md)'s "#1282's options"), then makes the
+by-value vectors' slots typed vector slots, which promotion makes values: a
+wrapper's arguments, its own parameter objects and its result's bytes all leave
+memory. Tier 1's own entry and return of a function that takes or returns a
+vector by value, which its frame emitter stores into and reloads from frame
+objects, are unchanged. The typed stream's lowering copies an aggregate
+parameter that a vector register holds whole by one vector load and store
+rather than eight `i64`s (`ir_typed_vector_whole`), in a function with vectors
+and at a target with AVX-512, so that its object is one field.
+
+Any failure of the inlining or of SROA keeps the body as it was lowered: inlining
+is an optimization, never a refusal. `--tier1-report`'s `inlined` sums the
+calls expanded into the bodies Tier 1 compiled; `--tier1-no-inline` keeps every
+call, for comparison. `test-ir-inline` runs the inliner's SIMD and by-value
+fixtures, the latter on the IR's interpreter before and after inlining, SROA and
+promotion; `test-checker-driver`'s inlining fixture builds a program of
+intrinsics, a struct helper and a noinline function by each path, with and
+without inlining, against clang -O0's.
 
 ### The 128-bit integers
 
