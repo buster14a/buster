@@ -673,6 +673,9 @@ struct CheckLowerWriter
     const uint8_t* type_classes;
     const uint8_t* type_facts;
     const uint32_t* type_templates;
+    // #1048's experiment, temporary (#1235, bits 16 and 32): each node's value's type's class and facts, type_templates'
+    // low 16 bits, by node (CheckLowerShared.node_infos), or null.
+    const uint16_t* node_infos;
     uint32_t type_count;
     uint32_t hidden;
     // A variadic definition's (#137): va_start's offsets past the named registers, from the function's own call as
@@ -9720,7 +9723,7 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
 // (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
-                                                                     bool bit_int)
+                                                                     bool bit_int, bool informed)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -9733,12 +9736,16 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     const uint32_t b = graph->operand1[node];
     const TypeId type_a = stream->conversions[node].operands[0].type;
     const TypeId type_b = stream->conversions[node].operands[1].type;
-    const uint8_t facts = check_lower_facts(writer, value->type);
+    // #1048's experiment's bits 16 and 32 (`informed`): the node's class and facts by node (CheckLowerWriter.node_infos),
+    // or its type's from the table for a node of a payload row under bit 32 (UINT16_MAX).
+    const uint16_t info = informed ? writer->node_infos[node] : 0;
+    const bool known = informed && __builtin_expect(info != UINT16_MAX, 1);
+    const uint8_t facts = known ? (uint8_t)(info >> 8) : check_lower_facts(writer, value->type);
     // An aggregate's value is its address (U64); a function's, an array's or an aggregate's is its address, which nothing
     // loads through.
     const bool aggregate = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
     const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
-    const uint8_t class = aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, value->type);
+    const uint8_t class = aggregate ? BUSTER_TYPED_CLASS_U64 : known ? (uint8_t)info : check_lower_class(writer, value->type);
     writer->token = graph->tokens[node];
     const bool constant = value->constant_kind != CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
@@ -10359,11 +10366,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 static __attribute__((noinline)) void check_lower_expand_rare(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
                                                               bool bit_int)
 {
-    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int, false);
 }
 
 static inline __attribute__((always_inline)) void check_lower_expand_split(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard,
-                                                                           bool bit_ints, bool bit_int)
+                                                                           bool bit_ints, bool bit_int, bool informed)
 {
     const CheckOp op = writer->program->input->graph.ops[node];
     if (op > CHECK_OP_SELECT)
@@ -10374,7 +10381,7 @@ static inline __attribute__((always_inline)) void check_lower_expand_split(Check
     {
         // What lets clang leave those ops' cases out of the copy inlined here.
         __builtin_assume(op <= CHECK_OP_SELECT);
-        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int, informed);
     }
 }
 
@@ -10465,7 +10472,7 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // subtrees it splices. Constants in each but the sources' `bit_ints`, so that the plain loop does none of it: the tests
 // for a _BitInt took 3.9 million of sqlite3.c's instructions there (#137), and the templates' test would run on every
 // expression of every compile, which takes none of them.
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates, bool informed)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -10505,7 +10512,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 {
                     if (!plain)
                     {
-                        check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0, informed);
                     }
                     expression_nodes += 1;
                 }
@@ -10606,14 +10613,21 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, false);
+    check_lower_drain_body(writer, false, false, false, false);
+}
+
+// #1048's experiment, temporary (#1235, bits 16 and 32): the same loop whose expansion takes its node's class and facts by
+// node (CheckLowerWriter.node_infos).
+static __attribute__((noinline)) void check_lower_drain_informed(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false, false, false, true);
 }
 
 // The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
 // (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, true, false);
+    check_lower_drain_body(writer, false, true, false, false);
 }
 
 // The tasks' loop for a body whose node templates are ready (CheckLowerWriter.template_ready, #1048): a copy of its own
@@ -10621,7 +10635,7 @@ static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWrite
 // nor a _BitInt type (CheckLowerShared.templates_allowed).
 static __attribute__((noinline)) void check_lower_drain_templates(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, true);
+    check_lower_drain_body(writer, false, false, true, false);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
@@ -10631,7 +10645,7 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     {
         writer->owners->draining = true;
     }
-    check_lower_drain_body(writer, true, writer->bit_ints, false);
+    check_lower_drain_body(writer, true, writer->bit_ints, false, false);
     if (writer->owners != NULL)
     {
         writer->owners->draining = false;
@@ -11856,6 +11870,7 @@ struct CheckLowerShared
     uint8_t* type_classes;
     uint8_t* type_facts;
     uint32_t* type_templates;
+    uint16_t* node_infos;
     uint32_t type_count;
     // Whether the program's type table has a _BitInt type (CheckLowerWriter.bit_ints).
     bool bit_ints;
@@ -12335,6 +12350,31 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         {
             shared->type_templates[shared->type_count] = UINT8_MAX;
         }
+        // #1048's experiment, temporary (#1235, bits 16 and 32): each node's value's class and facts, 16 nodes at a time, its
+        // type the payload row's where it has one (check_stream_value's), one past the table's types having none. With bit
+        // 32, a node of a payload row is UINT16_MAX instead, for the expansion to take its type's from the table.
+        const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+        const uint32_t bits = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
+        const bool unrowed = (bits & 32) != 0;
+        const CheckStream* stream = program->stream;
+        const bool informed = (bits & 48) != 0 && shared->type_templates != NULL && stream != NULL && stream->dense_values == NULL && stream->value_types != NULL &&
+                              stream->payload_rows != NULL && nodes != 0;
+        shared->node_infos = informed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, (uint64_t)nodes + 16) : NULL;
+        for (uint32_t first = 0; shared->node_infos != NULL && first < nodes; first += 16)
+        {
+            const uint32_t count = nodes - first < 16 ? nodes - first : 16;
+            const __mmask16 active = (__mmask16)((1u << count) - 1);
+            const __m512i rows = _mm512_maskz_loadu_epi32(active, stream->payload_rows + first);
+            const __mmask16 payload = active & _mm512_test_epi32_mask(rows, rows) & _mm512_cmple_epu32_mask(rows, _mm512_set1_epi32((int)stream->payload_count));
+            const __m512i offsets = _mm512_mullo_epi32(_mm512_sub_epi32(rows, _mm512_set1_epi32(1)), _mm512_set1_epi32((int)sizeof(CheckValue)));
+            const __m512i columns = _mm512_maskz_loadu_epi32(active, stream->value_types + first);
+            const __m512i types = unrowed ? columns : _mm512_mask_i32gather_epi32(columns, payload, offsets, stream->payloads, 1);
+            const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
+            const __mmask16 typed = active & _mm512_cmplt_epu32_mask(indices, _mm512_set1_epi32((int)shared->type_count)) & (unrowed ? (__mmask16)~payload : (__mmask16)0xffff);
+            const __m512i fallback = _mm512_mask_mov_epi32(_mm512_set1_epi32(UINT8_MAX), unrowed ? payload : 0, _mm512_set1_epi32(UINT16_MAX));
+            const __m512i infos = _mm512_mask_i32gather_epi32(fallback, typed, indices, shared->type_templates, 4);
+            _mm256_mask_storeu_epi16(shared->node_infos + first, active, _mm512_cvtepi32_epi16(infos));
+        }
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
@@ -12555,6 +12595,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
         .type_templates = shared->type_templates,
+        .node_infos = shared->node_infos,
         .type_count = shared->type_count,
         .local_map = shared->local_map,
         .locals = shared->locals,
@@ -13060,6 +13101,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 check_lower_drain_templates(writer);
             }
+            else if (writer->node_infos != NULL)
+            {
+                check_lower_drain_informed(writer);
+            }
             else
             {
                 check_lower_drain(writer);
@@ -13106,6 +13151,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             else if (writer->template_ready)
             {
                 check_lower_drain_templates(writer);
+            }
+            else if (writer->node_infos != NULL)
+            {
+                check_lower_drain_informed(writer);
             }
             else
             {
