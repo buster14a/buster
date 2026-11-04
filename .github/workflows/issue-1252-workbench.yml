@@ -1,0 +1,21 @@
+name: Issue 1252 workbench
+on:
+  push:
+    branches: [chatgpt/issue-1252-direct-initializer]
+    paths: [.github/workflows/issue-1252-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Snapshot tracked source for bounded checker investigation
+        run: git archive --format=tar HEAD -o source.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-1252-source
+          path: source.tar
+          retention-days: 1
+          if-no-files-found: error
