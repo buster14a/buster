@@ -1760,6 +1760,38 @@ jobs:
           perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 > "$out/symbol.txt"
           grep -v '^#' "$out/dso.txt" | sed '/^$/d'
           grep -v '^#' "$out/symbol.txt" | sed -n '/^$/d; 1,80p'
+          # #1048's diagnostic, temporary (#1235): where the lowering's cycles go on Zen 5 now. The lowering of sqlite3.c
+          # 40 times over (benchmark-lowering-source, after one check), by a build with debug information for the source
+          # lines alone: the counters, samples of cycles by symbol and, in the lowering's hottest functions, by line, and
+          # of branch misses and L1D misses by symbol and in the tasks' loop by line. Never fails the step.
+          (
+              set +e
+              echo "::group::#1048 diagnostic: the lowering on Zen 5"
+              bench=(benchmark-lowering-source --passes 40 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+              cp build/compiler "$out/compiler-g0"
+              BUSTER_DEBUG_INFO=1 taskset -c 0-7 ./build.sh --config Release > "$out/build-g.txt" 2>&1
+              tail -n 2 "$out/build-g.txt"
+              cp build/compiler "$out/compiler-g"
+              cp "$out/compiler-g0" build/compiler
+              g="$out/compiler-g"
+              taskset -c 2 "$g" "${bench[@]}" | tail -n 1
+              taskset -c 2 perf stat -e cycles:u,instructions:u,branch-misses:u,L1-dcache-loads:u,L1-dcache-load-misses:u,L1-icache-load-misses:u -- "$g" "${bench[@]}" > /dev/null
+              taskset -c 2 perf record -q -e cycles:u -F 20000 -o "$out/lowering.data" -- "$g" "${bench[@]}" > /dev/null
+              echo "== cycles:u by symbol"
+              perf report -i "$out/lowering.data" --stdio --no-children --sort symbol --percent-limit 0.3 | grep -v '^#' | sed '/^$/d' | head -n 40
+              for symbol in check_lower_drain check_lower_operand check_lower_part check_lower_prepare check_lower_call_to; do
+                  echo "== cycles:u in $symbol by line"
+                  timeout 300 perf report -i "$out/lowering.data" --stdio --no-children --symbols "$symbol" --sort srcline --percent-limit 0.5 | grep -v '^#' | sed '/^$/d' | head -n 45
+              done
+              for event in branch-misses:u L1-dcache-load-misses:u; do
+                  taskset -c 2 perf record -q -e "$event" -c 500 -o "$out/lowering.data" -- "$g" "${bench[@]}" > /dev/null
+                  echo "== $event by symbol"
+                  perf report -i "$out/lowering.data" --stdio --no-children --sort symbol --percent-limit 0.5 | grep -v '^#' | sed '/^$/d' | head -n 25
+                  echo "== $event in check_lower_drain by line"
+                  timeout 300 perf report -i "$out/lowering.data" --stdio --no-children --symbols check_lower_drain --sort srcline --percent-limit 0.5 | grep -v '^#' | sed '/^$/d' | head -n 40
+              done
+              echo "::endgroup::"
+          ) || true
 
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
