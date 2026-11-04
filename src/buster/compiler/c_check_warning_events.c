@@ -56,6 +56,20 @@ enum
     CHECK_WARNING_ID_FORMAT_INSUFFICIENT_ARGS = 64,
     CHECK_WARNING_ID_FORMAT_INVALID_SPECIFIER = 65,
     CHECK_WARNING_ID_EMPTY_CASE_RANGE = 66,
+    CHECK_WARNING_ID_GCC_COMPAT = 67,
+    CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION = 68,
+    CHECK_WARNING_ID_DEPRECATED_DECLARATIONS = 69,
+    CHECK_WARNING_ID_CFSTRING_LITERAL = 70,
+    CHECK_WARNING_ID_UNSUPPORTED_AVAILABILITY_GUARD = 71,
+    CHECK_WARNING_ID_AVAILABILITY = 72,
+    CHECK_WARNING_ID_COUNTED_BY_ELEMENT = 73,
+    CHECK_WARNING_ID_EXTERN_INITIALIZER = 74,
+    CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES = 75,
+    CHECK_WARNING_ID_UNKNOWN_SANITIZERS = 76,
+    CHECK_WARNING_ID_OVERFLOW_BEHAVIOR = 77,
+    CHECK_WARNING_ID_NSOBJECT_ATTRIBUTE = 78,
+    CHECK_WARNING_ID_INDEPENDENT_CLASS = 79,
+    CHECK_WARNING_ID_ASSUME = 80,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -93,8 +107,138 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_UNUSED_VARIABLE,
     CHECK_WARNING_EVENT_UNUSED_FUNCTION,
     CHECK_WARNING_EVENT_UNUSED_PARAMETER,
+    // An attribute on a declaration of none of its subjects (#147, check_input_attribute_subjects): its payload as
+    // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's, -Wignored-attributes' warning.
+    CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT,
+    // A function type's attribute on a declarator of no function type (#147, check_input_attribute_function_types):
+    // payload.name the attribute's name, payload.first_type the declarator's type, payload.data its typedef spelling.
+    CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE,
+    CHECK_WARNING_EVENT_NONSTRING_TYPE,
+    CHECK_WARNING_EVENT_TRANSPARENT_UNION,
+    // A GNU attribute GCC knows after a function definition's declarator (clang's parser's warning, #147): payload.name
+    // its name as written.
+    CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
+    // nonnull's warnings (clang's handleNonNullAttr, #147): an index of a parameter that is no pointer, a function of no
+    // pointer parameter, and arguments on a parameter's. payload.name the attribute's name, payload.data its scope's
+    // (0 for none) with BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE.
+    CHECK_WARNING_EVENT_NONNULL_POINTERS,
+    CHECK_WARNING_EVENT_NONNULL_NO_POINTERS,
+    CHECK_WARNING_EVENT_NONNULL_PARAMETER_ARGUMENTS,
+    // A C23 declaration attribute after a declarator chunk (#147, check_input_standard_place); a gnu:: type attribute
+    // there (-Wgcc-compat); a calling convention x86-64 hasn't on a function; an attribute clang ignores in that syntax
+    // or place (noderef, vector_size). Payload as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's.
+    CHECK_WARNING_EVENT_TYPE_POSITION,
+    CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE,
+    CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED,
+    CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED,
+    // A tag declaration's attribute (#147, check_input_tag_attribute_warning): after a bare declaration's name (its tag's
+    // keyword in data: 0 struct, 1 union, 2 enum), or after the tag's definition (data as above, a note at it).
+    CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE,
+    CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED,
+    // A GNU declaration attribute in a type name (#147, check_input_attribute_in_type_name), named as written.
+    CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE,
+    // _Alignof or alignof of an expression (#147, check_input_alignof_expression): its keyword in the payload's name.
+    CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION,
+    // A use of what a deprecated attribute marks (#147, check_input_deprecated_uses): the used name, and the attribute's
+    // message's string token in the payload's token (or none).
+    CHECK_WARNING_EVENT_DEPRECATED_USE,
+    // A CFString builtin's literal that isn't UTF-8 (#148, check_input_cfstring_literal), at the literal.
+    CHECK_WARNING_EVENT_CFSTRING_TRUNCATED,
+    // A __builtin_available that guards nothing (#148, check_input_availability_prepare), at its keyword, and a version
+    // whose separators differ (`1.2_3`), at its number.
+    CHECK_WARNING_EVENT_UNGUARDED_AVAILABILITY,
+    CHECK_WARNING_EVENT_VERSION_SEPARATORS,
+    // A counted_by family attribute on a flexible array member of structs with flexible array members (#148,
+    // check_input_counted_by_member), which clang drops: payload.first_type the element's type, payload.name the
+    // attribute's kind less one.
+    CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT,
+    // -Wignored-attributes' warnings of attributes clang's handlers ignore (#147, check_input_attribute_subjects): weak_import
+    // on a definition, and internal_linkage on a parameter (named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are), at the
+    // attribute; internal_linkage on a variable of local storage, at the variable's name; nocf_check without -fcf-protection,
+    // at the attribute (check_input_attribute_read_item).
+    CHECK_WARNING_EVENT_ATTRIBUTE_DEFINITION,
+    CHECK_WARNING_EVENT_ATTRIBUTE_VARIABLES_FUNCTIONS,
+    CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL,
+    CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED,
+    // A file-scope extern variable's initializer (clang's warn_extern_init), at the variable's name.
+    CHECK_WARNING_EVENT_EXTERN_INITIALIZER,
+    // mode's vector mode (#147, check_input_attribute_mode: -Wdeprecated-attributes), at the attribute.
+    CHECK_WARNING_EVENT_VECTOR_MODE,
+    // alloc_size's and alloc_align's function that returns no pointer (#147, -Wignored-attributes), at the attribute, named
+    // as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_RETURN_POINTERS,
+    CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES,
+    // An argument clang's handler doesn't know (#147, -Wignored-attributes): visibility's string, at it, and format's kind,
+    // at the attribute; named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are, the argument's token in the payload's token
+    // (a string literal's, with those after it, or an identifier, without a keyword's underscores).
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED,
+    // format's first argument to check on a function that isn't variadic (#147, -Wgcc-compat), at the declaration's name,
+    // named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_GCC_VARIADIC,
+    // target's string clang's checkTargetAttr doesn't take (#147, check_input_target_warning), at the string: the string's
+    // first token in the payload's token, the warning's case and its piece of the string in its data.
+    CHECK_WARNING_EVENT_TARGET_UNSUPPORTED,
+    // no_sanitize's sanitizer clang doesn't know (-Wunknown-sanitizers), at its string, and one a variable of static
+    // storage can't take, at the variable's name (-Wignored-attributes): the string's first token in the payload's token,
+    // named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_UNKNOWN_SANITIZER,
+    CHECK_WARNING_EVENT_SANITIZER_GLOBAL,
+    // A function type's attribute on a tag's declaration (#147, check_input_attribute_subjects): "'X' attribute only applies
+    // to functions and methods", named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_FUNCTIONS_METHODS,
+    // The retain-ownership attributes' warnings (#147, check_input_attribute_ownership), at the declaration's first token
+    // (ns_returns_retained's of a function type at the attribute), named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are, the
+    // consumed ones' as their names alone.
+    CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT,
+    CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER,
+    CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF,
+    CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS,
+    CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS,
+    CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS,
+    CHECK_WARNING_EVENT_OWNERSHIP_RETAINED,
+    CHECK_WARNING_EVENT_CONSUMED_OBJECT,
+    CHECK_WARNING_EVENT_CONSUMED_POINTER,
+    // nomerge's variable of no function pointer type (#147, check_input_attribute_handled), at the attribute: the variable's
+    // name in the payload's token. overflow_behavior's without its experimental option, at the attribute.
+    CHECK_WARNING_EVENT_NOMERGE_POINTER,
+    CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR,
+    // A C23 type attribute that slides from a declaration to its specifiers (#147, -Wdeprecated-attributes), at it.
+    CHECK_WARNING_EVENT_TYPE_ON_DECLARATION,
+    // AMDGPU's num_sgpr and num_vgpr (#147, -Wdeprecated-declarations), at the attribute.
+    CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED,
+    // Static analyses' and Objective-C's attributes' warnings (#147, check_input_attribute_annotations): iboutlet's,
+    // mig_server_routine's, malloc_span's (with its CHECK_WARNING_NOTE_SPAN_REASON), NSObject's, objc_independent_class's
+    // two, lifetime_capture_by's deprecated arguments, and return_typestate's quoted unsupported argument.
+    CHECK_WARNING_EVENT_IBOUTLET,
+    CHECK_WARNING_EVENT_MIG_ROUTINE,
+    CHECK_WARNING_EVENT_SPAN_ONLY,
+    CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF,
+    CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF,
+    CHECK_WARNING_EVENT_INDEPENDENT_POINTER,
+    CHECK_WARNING_EVENT_CAPTURE_DEPRECATED,
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED,
+    // An assume statement's expression of (potential) side effects (#147, check_input_statement_attribute_kinds).
+    CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS,
+    // vec_type_hint's second one of another type (#147, -Wignored-attributes), at it.
+    CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS,
+    // nomerge on a statement that evaluates no call (#147, -Wignored-attributes), at the statement; GNU's noinline and
+    // always_inline there; and a statement's noinline or always_inline over a callee's always_inline, flatten or noinline.
+    CHECK_WARNING_EVENT_NO_CALLS,
+    CHECK_WARNING_EVENT_NOINLINE_STATEMENT,
+    CHECK_WARNING_EVENT_ALWAYS_INLINE_STATEMENT,
+    CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
+    CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
+    CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
+#define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
+#define BUSTER_CHECK_TRANSPARENT_EMPTY 2u
+#define BUSTER_CHECK_TRANSPARENT_FLOAT 3u
+#define BUSTER_CHECK_TRANSPARENT_VECTOR 4u
+#define BUSTER_CHECK_TRANSPARENT_SIZE 5u
+#define BUSTER_CHECK_TRANSPARENT_ALIGNMENT 6u
 
 typedef enum CheckWarningNoteKind
 {
@@ -102,6 +246,11 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_INLINE_LINKAGE,
     CHECK_WARNING_NOTE_USED_HERE,
     CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+    CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD,
+    CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE,
+    CHECK_WARNING_NOTE_DEPRECATED_HERE,
+    // Why malloc_span's function returns no span-like structure (check_input_span_reason's data).
+    CHECK_WARNING_NOTE_SPAN_REASON,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

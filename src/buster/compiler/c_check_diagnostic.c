@@ -103,6 +103,20 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wformat-insufficient-args", "-Wformat", "more '%' conversions than data arguments" },
     { "-Wformat-invalid-specifier", "-Wformat", "invalid conversion specifier" },
     { NULL, NULL, "empty case range specified" },
+    { "-Wgcc-compat", NULL, "GCC does not allow attribute in this position on a function definition" },
+    { "-Wgnu-alignof-expression", "-Wgnu", "alignof applied to an expression is a GNU extension" },
+    { "-Wdeprecated-declarations", "-Wdeprecated", "use of a deprecated declaration" },
+    { "-WCFString-literal", NULL, "input conversion stopped due to an input byte that does not belong to the input codeset UTF-8" },
+    { "-Wunsupported-availability-guard", NULL, "__builtin_available does not guard availability here; use if (__builtin_available) instead" },
+    { "-Wavailability", NULL, "use same version number separators '_' or '.'; as in 'major[.minor[.subminor]]'" },
+    { "-Wbounds-safety-counted-by-elt-type-unknown-size", NULL, "'counted_by' should not be applied to an array with element of unknown size" },
+    { "-Wextern-initializer", NULL, "'extern' variable has an initializer" },
+    { "-Wdeprecated-attributes", "-Wdeprecated", "specifying vector types with the 'mode' attribute is deprecated" },
+    { "-Wunknown-sanitizers", NULL, "unknown sanitizer ignored" },
+    { "-Woverflow-behavior-attribute-ignored", NULL, "'overflow_behavior' attribute is ignored because it is not enabled" },
+    { "-WNSObject-attribute", NULL, "'NSObject' attribute may be put on a typedef only; attribute is ignored" },
+    { "-WIndependentClass-attribute", NULL, "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" },
+    { "-Wassume", NULL, "assumption is ignored because it contains (potential) side-effects" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -337,6 +351,64 @@ static const char* check_diagnostic_x86_hard(const CheckInput* input, const Chec
         }
     }
     *location = result != NULL ? check_diagnostic_x86_token(input, report->node) : report->token;
+    return result;
+}
+
+// A varargs start whose function refuses it (CHECK_DIAG_CALL, check_varargs_one), as clang reports it (#148): its ABI's
+// error (checkVAStartABI: __builtin_ms_va_start out of an ms_abi function, any other start in one), or else "used in
+// function with fixed args", at the builtin's name, the token before the call's opening parenthesis: the token of
+// the call's role whose parent is the report's `)` (the scan is over the call's arguments, once per error reported).
+// Returns NULL for any other report, whose message and place are its own.
+static const char* check_diagnostic_varargs(const CheckInput* input, const Parser* parser, const TypeTable* types, const CheckReport* report, uint32_t* location)
+{
+    const CheckGraph* graph = &input->graph;
+    const char* result = NULL;
+    *location = report->token;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_CALL && report->node < graph->count &&
+                           graph->ops[report->node] == CHECK_OP_VARARGS && graph->varargs_calls != NULL && graph->argument_offsets[report->node] < graph->varargs_count;
+    if (candidate)
+    {
+        const CheckVarargsContext* context = &graph->varargs_calls[graph->argument_offsets[report->node]].context;
+        const bool function = type_is_valid(types, context->function_type) && type_kind(types, type_strip_aligned(types, context->function_type)) == BUSTER_TYPE_KIND_FUNCTION;
+        const bool win64 = function && type_function_abi_kind(types, type_strip_aligned(types, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
+        const bool microsoft = graph->members[report->node] == CBUILTIN_MS_VA_START;
+        result = microsoft && !win64 ? "'__builtin_ms_va_start' used in System V ABI function" : !microsoft && win64 ? "'va_start' used in Win64 ABI function" :
+                 "'va_start' used in function with fixed args";
+        const uint32_t closing = report->token;
+        uint32_t opening = closing < parser->tokens.count ? closing : 0;
+        while (opening > 0 && !(parser->tree.parents[opening] == closing &&
+                                (parser->tree.roles[opening] == PARSE_ROLE_OPEN_CALL || parser->tree.roles[opening] == PARSE_ROLE_OPEN_KEYWORD)))
+        {
+            opening -= 1;
+        }
+        *location = opening > 0 ? opening - 1 : report->token;
+    }
+    return result;
+}
+
+// __builtin_counted_by_ref's argument refused (#148, clang's BuiltinCountedByRef): no member access of a pointer or an
+// array, or one with side effects, worded as clang's, at the argument's first token past its parentheses.
+static const char* check_diagnostic_counted_ref(const CheckInput* input, const Parser* parser, const CheckReport* report, uint32_t* location)
+{
+    const CheckGraph* graph = &input->graph;
+    const char* result = NULL;
+    *location = report->token;
+    const bool candidate = report->message == CHECK_MESSAGE_ACTION && report->node < graph->count && graph->ops[report->node] == CHECK_OP_BUILTIN_MISC &&
+                           graph->members[report->node] == CBUILTIN_COUNTED_BY_REF && graph->argument_counts[report->node] == 1 &&
+                           (report->diagnostic == CHECK_DIAG_INVALID_TYPE || report->diagnostic == CHECK_DIAG_INCOMPATIBLE);
+    if (candidate)
+    {
+        result = report->diagnostic == CHECK_DIAG_INVALID_TYPE ? "'__builtin_counted_by_ref' argument must reference a member with the 'counted_by' attribute" :
+                                                                 "'__builtin_counted_by_ref' argument cannot have side-effects";
+        uint32_t first = graph->argument_tokens[graph->argument_offsets[report->node]];
+        uint32_t end = graph->tokens[report->node];
+        while (first + 1 < end && end < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == end - 1)
+        {
+            first += 1;
+            end -= 1;
+        }
+        *location = first;
+    }
     return result;
 }
 

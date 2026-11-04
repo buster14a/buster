@@ -647,6 +647,9 @@ typedef enum Tier0Error
     TIER0_ERROR_MEMORY,
     // tier0_validate's alone: the stream breaks a rule (`node` and Tier0Check.rule say which).
     TIER0_ERROR_INVALID,
+    // A function that calls __builtin_setjmp holds a value across one of its calls where another expression's code may
+    // write before a longjmp resumes after it (tier0_returns_twice_saves): `node` is that call.
+    TIER0_ERROR_RETURNS_TWICE,
 } Tier0Error;
 
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
@@ -4654,7 +4657,9 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     bool valid = offset <= INT32_MAX;
     frame->outgoing = valid ? (uint32_t)offset : 0;
     frame->save_area = valid ? (uint32_t)offset : 0;
-    offset += 8 * frame->save_slots;
+    // A function that calls __builtin_setjmp gives each call a save region of its own (tier0_emit_call), so that what a call
+    // saved below its arguments is still there when a longjmp resumes after it, whatever calls ran since.
+    offset += 8 * (uint64_t)frame->save_slots * (function->returns_twice ? function->call_count : 1u);
     valid = valid && offset <= INT32_MAX;
     frame->fixed_area = valid ? (uint32_t)offset : 0;
     offset += 8 * frame->fixed_slots;
@@ -5869,15 +5874,17 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     const uint32_t below = entries->depths[i] - integer_arguments - (indirect ? 1 : 0);
     const uint32_t arguments_base = below + (indirect ? 1 : 0);
     const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
-    // The depths below the arguments in callee-saved registers survive the call by themselves.
+    // The depths below the arguments in callee-saved registers survive the call by themselves. The others go to the save
+    // area, a region of the call's own in a function that calls __builtin_setjmp (tier0_layout_frame).
     const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+    const uint32_t region = frame->save_area + (function->returns_twice ? 8 * frame->save_slots * call : 0);
     for (uint32_t d = 0; d < saved; d += 1)
     {
-        tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, false);
+        tier0_spill(writer, frame, tier0_integer_depths[d], region + 8 * d, false);
     }
     for (uint32_t d = 0; d < floating_below; d += 1)
     {
-        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), false);
+        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), region + 8 * (saved + d), false);
     }
     // The masks in their registers (#179), which the call may overwrite, saved into their slots and loaded back.
     const uint32_t masks = memory ? tier0_saved_masks(entries, i) : 0;
@@ -6003,11 +6010,11 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         }
         for (uint32_t d = 0; d < saved; d += 1)
         {
-            tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, true);
+            tier0_spill(writer, frame, tier0_integer_depths[d], region + 8 * d, true);
         }
         for (uint32_t d = 0; d < floating_below; d += 1)
         {
-            tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), true);
+            tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), region + 8 * (saved + d), true);
         }
         for (uint32_t d = 0; d < masks; d += 1)
         {
@@ -9838,6 +9845,63 @@ static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choic
     }
 }
 
+// Whether every value a function that calls __builtin_setjmp holds across one of its calls is in a register the call saves
+// into its own region (tier0_emit_call), which nothing else writes, so that a longjmp's resumption after the call finds
+// it (#1242's review): the integer depths below the call's arguments, of no memory class and no vector (whose values live
+// in their depth's slot, which the expressions after the call share), and the floating ones, with no mask on the mask
+// stack (whose slots are its depths'); in a function with deep entries, none at all (whose depths live in their slots). Returns
+// the first call that holds another, or the count. An integer depth's class is the one of whichever entries left it last,
+// any of them, so that a value an entry may have left there counts: that can only refuse more.
+static uint32_t tier0_returns_twice_saves(const Tier0Function* function, const Tier0Entries* entries)
+{
+    uint8_t shared[256] = { 0 };
+    uint32_t failed = function->count;
+    const bool deep = entries->deep != 0;
+    for (uint32_t i = 0; failed == function->count && i < function->count; i += 1)
+    {
+        if (!entries->absorbed[i])
+        {
+            const uint32_t before = entries->depths[i];
+            const uint32_t after = (uint8_t)(before + (uint32_t)(int32_t)entries->integer_effects[i]);
+            if (function->kinds[i] == BUSTER_TYPED_CALL)
+            {
+                const uint32_t call = (uint32_t)function->values[i];
+                const uint32_t first = function->call_first[call];
+                uint32_t integer_arguments = 0;
+                uint32_t floating_arguments = 0;
+                for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+                {
+                    const bool floating = tier0_class_floating(function->argument_classes[first + a]);
+                    integer_arguments += floating ? 0 : 1;
+                    floating_arguments += floating ? 1 : 0;
+                }
+                const uint32_t pending = integer_arguments + (function->call_targets[call] == 0 ? 1u : 0u);
+                const uint32_t below = before > pending ? before - pending : 0;
+                bool kept = tier0_saved_masks(entries, i) == 0;
+                for (uint32_t d = 0; d < below; d += 1)
+                {
+                    kept &= shared[d] == 0;
+                }
+                // A deep function's values are in their depths' slots across a call (tier0_emit_deep_call): it may hold none.
+                const uint32_t integer_depth = deep ? entries->deep_depths[i] : before;
+                const uint32_t floating_depth = deep ? entries->deep_floating_depths[i] : entries->floating_depths[i];
+                kept &= !deep || (integer_depth <= pending && floating_depth <= floating_arguments);
+                failed = kept ? failed : i;
+            }
+            for (uint32_t d = after; d < before; d += 1)
+            {
+                shared[d] = 0;
+            }
+            const uint32_t class = function->classes[i];
+            if (after != 0)
+            {
+                shared[after - 1] |= tier0_class_memory(class) || tier0_class_vector(class) ? 1 : 0;
+            }
+        }
+    }
+    return failed;
+}
+
 // What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
@@ -9854,6 +9918,14 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
     {
         error = tier0_select_deep(function, entries, &frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
+    }
+    // A function that calls __builtin_setjmp, whose calls' saves are their own: each value it holds across a call must be in
+    // one of them (tier0_returns_twice_saves), and none in a deep entry's slot.
+    const uint32_t held = error == TIER0_OK && unsupported == function->count && function->returns_twice ? tier0_returns_twice_saves(function, entries) : function->count;
+    if (held != function->count)
+    {
+        error = TIER0_ERROR_RETURNS_TWICE;
+        code->node = held;
     }
     // The memory classes' slots, a function with their values' (whose long double result, if one, leaves st0 from slot 0),
     // and the vectors'.

@@ -84,6 +84,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_WEAK_LINKAGE: result = "weak declaration cannot have internal linkage"; break;
         case CHECK_INPUT_ALIAS_DEFINITION: result = "definition cannot also be an alias"; break;
         case CHECK_INPUT_IFUNC_DEFINITION: result = "definition cannot also be an ifunc"; break;
+        case CHECK_INPUT_ALIAS_TENTATIVE: result = "alias definition after tentative definition"; break;
         case CHECK_INPUT_WEAKREF_LINKAGE: result = "weakref declaration must have internal linkage"; break;
         case CHECK_INPUT_WEAKREF_CONTEXT: result = "weakref declaration must be in a global context"; break;
         case CHECK_INPUT_WEAKREF_ALIAS: result = "weakref declaration must also have an alias attribute"; break;
@@ -115,6 +116,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
         case CHECK_INPUT_LABEL_ATTRIBUTE: result = "attribute cannot be applied to a label"; break;
         case CHECK_INPUT_STATEMENT_ATTRIBUTE: result = "attribute cannot be applied to a statement"; break;
+        case CHECK_INPUT_ATTRIBUTE_SUBJECT: result = "attribute only applies to other declarations"; break;
         case CHECK_INPUT_FALLTHROUGH_STATEMENT: result = "'fallthrough' attribute only applies to empty statements"; break;
         case CHECK_INPUT_FALLTHROUGH_SWITCH: result = "fallthrough annotation is outside switch statement"; break;
         case CHECK_INPUT_FALLTHROUGH_PLACEMENT: result = "fallthrough annotation does not directly precede switch label"; break;
@@ -123,6 +125,25 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LONGJMP_INTEGER: result = "argument to '__builtin_longjmp' must be a constant integer"; break;
         case CHECK_INPUT_LONGJMP_ONE: result = "argument to __builtin_longjmp must be a constant 1"; break;
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
+        case CHECK_INPUT_INVOKE_ARGUMENTS: result = "too few arguments to function call, expected at least 1, have 0"; break;
+        case CHECK_INPUT_BUILTIN_NOT_CALLED: result = "builtin functions must be directly called"; break;
+        case CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS: result = "attribute parameter is out of bounds"; break;
+        case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
+        case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
+        case CHECK_INPUT_ATTRIBUTES_MISPLACED: result = "misplaced attributes; expected attributes here"; break;
+        case CHECK_INPUT_ENUM_NOT_REPRESENTABLE: result = "enumerator value is not representable in the underlying type"; break;
+        case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
+        case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
+        case CHECK_INPUT_VECTOR_BIT_INT: result = "'_BitInt' vector element width must be a power of 2"; break;
+        case CHECK_INPUT_VECTOR_CONSTANT: result = "vector_size attribute requires an integer constant"; break;
+        case CHECK_INPUT_VECTOR_NEGATIVE: result = "vector must have non-negative size"; break;
+        case CHECK_INPUT_VECTOR_TOO_LARGE: result = "vector size too large"; break;
+        case CHECK_INPUT_VECTOR_ZERO: result = "zero vector size"; break;
+        case CHECK_INPUT_VECTOR_MULTIPLE: result = "vector size not an integral multiple of component size"; break;
+        case CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT: result = "attribute takes another count of arguments"; break;
+        case CHECK_INPUT_ATTRIBUTE_EXCLUSION: result = "attributes are not compatible"; break;
+        case CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING: result = "expected string literal as argument of 'annotate' attribute"; break;
+        case CHECK_INPUT_UNAVAILABLE_USE: result = "use of an unavailable declaration"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
@@ -131,6 +152,38 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_SPECIFIER_SIGN: result = "type cannot be signed or unsigned"; break;
         case CHECK_INPUT_SPECIFIER_WIDTH: result = "invalid width for the type"; break;
         case CHECK_INPUT_SPECIFIER_COMPLEX: result = "invalid _Complex type"; break;
+        case CHECK_INPUT_AVAILABILITY_VERSION: result = "expected a version of the form 'major[.minor[.subminor]]'"; break;
+        case CHECK_INPUT_AVAILABILITY_ZERO: result = "version number must have non-zero major, minor, or sub-minor version"; break;
+        case CHECK_INPUT_AVAILABILITY_PLATFORM: result = "unrecognized platform name"; break;
+        case CHECK_INPUT_AVAILABILITY_APPLE: result = "invalid anyAppleOS version in availability check"; break;
+        case CHECK_INPUT_AVAILABILITY_REPEATED: result = "version for the platform already specified"; break;
+        case CHECK_INPUT_AVAILABILITY_STAR: result = "'*' query has already been specified"; break;
+        case CHECK_INPUT_AVAILABILITY_WILDCARD: result = "must handle potential future platforms with '*'"; break;
+        case CHECK_INPUT_COUNTED_UNION: result = "'counted_by' cannot be applied to a union member"; break;
+        case CHECK_INPUT_COUNTED_SUBJECT: result = "'counted_by' only applies to pointers or C99 flexible array members"; break;
+        case CHECK_INPUT_COUNTED_ARRAY: result = "'counted_by' on arrays only applies to C99 flexible array members"; break;
+        case CHECK_INPUT_COUNTED_POINTEE: result = "'counted_by' cannot be applied to a pointer with pointee of unknown size"; break;
+        case CHECK_INPUT_COUNTED_INTEGER: result = "'counted_by' requires a non-boolean integer type argument"; break;
+        case CHECK_INPUT_COUNTED_REFERENCE: result = "'counted_by' argument must be a simple declaration reference"; break;
+        case CHECK_INPUT_COUNTED_OUTSIDE: result = "field in 'counted_by' not inside structure"; break;
+        case CHECK_INPUT_COUNTED_UNION_FIELD: result = "'counted_by' argument cannot refer to a union member"; break;
+        case CHECK_INPUT_COUNTED_STRUCT: result = "'counted_by' field isn't within the same struct as the annotated flexible array"; break;
+        case CHECK_INPUT_COUNTED_REQUIRED: result = "argument required after attribute"; break;
+        case CHECK_INPUT_COUNTED_PAREN: result = "expected ')'"; break;
+        case CHECK_INPUT_COUNTED_REF_LEAK: result = "value returned by '__builtin_counted_by_ref' cannot be assigned to a variable"; break;
+        case CHECK_INPUT_COUNTED_REF_USE: result = "value returned by '__builtin_counted_by_ref' cannot be used in a binary expression"; break;
+        case CHECK_INPUT_LIFETIMEBOUND_VOID:
+            result = "'lifetimebound' attribute cannot be applied to a parameter of a function that returns void; did you mean 'lifetime_capture_by(X)'";
+            break;
+        case CHECK_INPUT_LIFETIMEBOUND_OBJECT: result = "'lifetimebound' attribute cannot be applied; non-member function has no implicit object parameter"; break;
+        case CHECK_INPUT_LOADER_INITIALIZER: result = "variable with 'loader_uninitialized' attribute cannot have an initializer"; break;
+        case CHECK_INPUT_LOADER_EXTERN: result = "variable cannot be declared both 'extern' and with the 'loader_uninitialized' attribute"; break;
+        case CHECK_INPUT_LOADER_REDECLARATION: result = "redeclaration cannot add 'loader_uninitialized' attribute"; break;
+        case CHECK_INPUT_INTERNAL_LINKAGE_FIRST: result = "attribute does not appear on the first declaration"; break;
+        case CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT: result = "expected string literal as argument of attribute"; break;
+        case CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL: result = "attribute requires parameter 1 to be int or bool"; break;
+        case CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS: result = "attribute parameter is out of bounds"; break;
+        case CHECK_INPUT_ATTRIBUTE_ARGUMENT: result = "invalid attribute argument"; break;
     }
     return result;
 }
@@ -158,6 +211,151 @@ static String8 check_driver_attribute_spelling(const Parser* parser, const Prepr
         }
     }
     return result;
+}
+
+static String8 check_warning_attribute_normalized(String8 name);
+
+// An attribute argument's error (#147, CHECK_INPUT_ATTRIBUTE_ARGUMENT: c_check_attribute.c's CheckAttributeArgumentError
+// in `detail`'s low byte, a parameter's place above it) as clang words it, the attribute named from its first token
+// (`first`) as each message names it: an applied attribute's normalized name (aligned's), the parsed attribute's (a GNU
+// one as written, a C23 one's scope and name normalized), or the parser's name as written, without its scope (a string
+// literal's); `literal` the string's text where the message quotes it (model's). Into `text`, `capacity` bytes.
+static void check_driver_attribute_argument(const Parser* parser, const Preprocessor* pp, uint32_t first, uint32_t detail, uint64_t value, String8 literal, char* text,
+                                            uint32_t capacity)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool scoped = first + 2 < count && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON;
+    const uint32_t at = !scoped ? first : parser->tokens.kinds[first + 2] == PARSE_KIND_COLON && first + 3 < count ? first + 3 : first + 2;
+    uint32_t opener = first;
+    while (opener > 0 && parser->tree.depths[opener - 1] >= parser->tree.depths[first])
+    {
+        opener -= 1;
+    }
+    const bool standard = opener > 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_L_SQUARE;
+    const String8 written = check_driver_attribute_spelling(parser, pp, at, false);
+    const String8 bare = check_warning_attribute_normalized(written);
+    String8 scope = scoped ? check_warning_attribute_normalized(check_driver_attribute_spelling(parser, pp, first, false)) : (String8){ "", 0 };
+    scope = check_input_attribute_equal(scope, "_Clang") ? (String8){ "clang", 5 } : scope;
+    char parsed[160];
+    snprintf(parsed, sizeof(parsed), "%.*s%s%.*s", (int)scope.length, scope.pointer, scoped ? "::" : "", (int)(standard ? bare : written).length,
+             (standard ? bare : written).pointer);
+    const uint32_t number = detail >> 8;
+    // mode's name, or a type argument's, as written, after the attribute's first token by `number`.
+    const String8 argument = first + number < count ? check_driver_attribute_spelling(parser, pp, first + number, false) : (String8){ "", 0 };
+    switch ((CheckAttributeArgumentError)(detail & 0xffu))
+    {
+        case CHECK_ARGUMENT_INTEGER_CONSTANT: snprintf(text, capacity, "'%.*s' attribute requires integer constant", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_AN_INTEGER_CONSTANT: snprintf(text, capacity, "'%s' attribute requires an integer constant", parsed); break;
+        case CHECK_ARGUMENT_PARAMETER_INTEGER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an integer constant", parsed, number); break;
+        case CHECK_ARGUMENT_EXT_VECTOR_INTEGER: snprintf(text, capacity, "ext_vector_type attribute requires an integer constant"); break;
+        case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "requested alignment is not a power of 2"); break;
+        case CHECK_ARGUMENT_ZERO_VECTOR: snprintf(text, capacity, "zero vector size"); break;
+        case CHECK_ARGUMENT_REGPARM_RANGE: snprintf(text, capacity, "'regparm' parameter must be between 0 and 6 inclusive"); break;
+        case CHECK_ARGUMENT_OUT_OF_BOUNDS: snprintf(text, capacity, "'%s' attribute parameter %u is out of bounds", parsed, number); break;
+        case CHECK_ARGUMENT_SENTINEL_NEGATIVE: snprintf(text, capacity, "'sentinel' parameter 1 less than zero"); break;
+        case CHECK_ARGUMENT_SENTINEL_NULL: snprintf(text, capacity, "'sentinel' parameter 2 not 0 or 1"); break;
+        case CHECK_ARGUMENT_PARAMETER_TYPE: snprintf(text, capacity, "'%s' attribute argument may only refer to a function parameter of integer type", parsed); break;
+        case CHECK_ARGUMENT_STRING_LITERAL: snprintf(text, capacity, "expected string literal as argument of '%.*s' attribute", (int)written.length, written.pointer); break;
+        case CHECK_ARGUMENT_STRING: snprintf(text, capacity, "'%s' attribute requires a string", parsed); break;
+        case CHECK_ARGUMENT_IDENTIFIER: snprintf(text, capacity, "'%s' attribute requires an identifier", parsed); break;
+        case CHECK_ARGUMENT_PARAMETER_IDENTIFIER: snprintf(text, capacity, "'%s' attribute requires parameter %u to be an identifier", parsed, number); break;
+        case CHECK_ARGUMENT_UNKNOWN_MODE: snprintf(text, capacity, "unknown machine mode '%.*s'", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_UNSUPPORTED_MODE: snprintf(text, capacity, "unsupported machine mode '%.*s'", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_MODE_ENUM_VECTOR: snprintf(text, capacity, "mode '%.*s' is not supported for enumeration types", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_MODE_PRIMITIVE: snprintf(text, capacity, "mode attribute only supported for integer and floating-point types"); break;
+        case CHECK_ARGUMENT_MODE_TYPE: snprintf(text, capacity, "type of machine mode does not match type of base type"); break;
+        case CHECK_ARGUMENT_MODE_COMPLEX_VECTOR: snprintf(text, capacity, "type of machine mode does not support base vector types"); break;
+        case CHECK_ARGUMENT_TLS_MODEL: snprintf(text, capacity, "tls_model must be \"global-dynamic\", \"local-dynamic\", \"initial-exec\" or \"local-exec\""); break;
+        case CHECK_ARGUMENT_FORMAT_STRING: snprintf(text, capacity, "format argument not a string type"); break;
+        case CHECK_ARGUMENT_FORMAT_RESULT: snprintf(text, capacity, "function does not return string type"); break;
+        case CHECK_ARGUMENT_STRFTIME: snprintf(text, capacity, "strftime format attribute requires 3rd parameter to be 0"); break;
+        case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
+        case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
+        case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
+        case CHECK_ARGUMENT_PCS_TYPE: snprintf(text, capacity, "invalid PCS type"); break;
+        case CHECK_ARGUMENT_DESTROY_STORAGE:
+            snprintf(text, capacity, "%s attribute can only be applied to a variable with static or thread storage duration", number != 0 ? "always_destroy" : "no_destroy");
+            break;
+        case CHECK_ARGUMENT_PERSONALITY: snprintf(text, capacity, "'personality' argument is not a function"); break;
+        case CHECK_ARGUMENT_CODE_MODEL: snprintf(text, capacity, "code model '%.*s' is not supported on this target", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_INVALID_ON_DECLARATION: snprintf(text, capacity, "'%s' attribute cannot be applied to a declaration", parsed); break;
+        case CHECK_ARGUMENT_EFFECT_CONSTANT: snprintf(text, capacity, "%.*s attribute requires an integer constant", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_NON_NEGATIVE: snprintf(text, capacity, "'%s' attribute requires a non-negative integral compile time constant expression", parsed); break;
+        case CHECK_ARGUMENT_GREATER_ZERO: snprintf(text, capacity, "'%s' attribute must be greater than 0", parsed); break;
+        case CHECK_ARGUMENT_PARAMETER_INTEGER_APPLIED:
+            snprintf(text, capacity, "'%.*s' attribute requires parameter %u to be an integer constant", (int)bare.length, bare.pointer, number);
+            break;
+        case CHECK_ARGUMENT_INVALID_MAX_ZERO:
+            snprintf(text, capacity, "'%.*s' attribute argument is invalid: max must be 0 since min is 0", (int)bare.length, bare.pointer);
+            break;
+        case CHECK_ARGUMENT_INVALID_MIN_MAX:
+            snprintf(text, capacity, "'%.*s' attribute argument is invalid: min must not be greater than max", (int)bare.length, bare.pointer);
+            break;
+        case CHECK_ARGUMENT_OPENCL_KERNEL: snprintf(text, capacity, "attribute '%.*s' can only be applied to an OpenCL kernel function", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_KERNEL_ONLY: snprintf(text, capacity, "'%.*s' attribute only applies to kernel functions", (int)bare.length, bare.pointer); break;
+        case CHECK_ARGUMENT_ALIGNAS_DECLARATION:
+            snprintf(text, capacity, "'%.*s' attribute cannot be applied to %s", (int)written.length, written.pointer,
+                     number == 1 ? "a variable with 'register' storage class" : number == 3 ? "a bit-field" : "a function parameter");
+            break;
+        case CHECK_ARGUMENT_ALIGNAS_SUBJECT: snprintf(text, capacity, "'%.*s' attribute only applies to variables and fields", (int)written.length, written.pointer); break;
+        case CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED:
+            snprintf(text, capacity, "requested alignment is less than minimum alignment of %u for type %.*s", number, (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_OUTPUT_PARAMETER: snprintf(text, capacity, "attribute only applies to output parameters"); break;
+        case CHECK_ARGUMENT_TYPES_NAMESPACES: snprintf(text, capacity, "'%s' attribute only applies to types and namespaces", parsed); break;
+        case CHECK_ARGUMENT_NO_CAPTURE: snprintf(text, capacity, "'%s' attribute specifies no capturing entity", parsed); break;
+        case CHECK_ARGUMENT_CAPTURE_UNKNOWN:
+            // The argument as written (the report's literal).
+            snprintf(text, capacity, "'%s' attribute argument '%.*s' is not a known function parameter; must be a function parameter, 'this', 'global' or 'unknown'",
+                     parsed, (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_CAPTURE_ITSELF: snprintf(text, capacity, "'lifetime_capture_by' argument references itself"); break;
+        case CHECK_ARGUMENT_CAPTURE_THIS: snprintf(text, capacity, "'lifetime_capture_by' argument references unavailable implicit 'this'"); break;
+        case CHECK_ARGUMENT_IMPLICIT_OBJECT: snprintf(text, capacity, "'%s' attribute requires an implicit object parameter", parsed); break;
+        case CHECK_ARGUMENT_OWNERSHIP_RETURN: snprintf(text, capacity, "'%s' attribute only applies to functions that return a pointer", parsed); break;
+        case CHECK_ARGUMENT_OWNERSHIP_TYPE: snprintf(text, capacity, "'%s' attribute only applies to %s arguments", parsed, number == 1 ? "integer" : "pointer"); break;
+        case CHECK_ARGUMENT_OWNERSHIP_CONFLICT:
+        {
+            const String8 other = check_driver_attribute_spelling(parser, pp, (uint32_t)value, false);
+            snprintf(text, capacity, "'%s' and '%.*s' attributes are not compatible", parsed, (int)other.length, other.pointer);
+            break;
+        }
+        case CHECK_ARGUMENT_NSOBJECT_POINTER: snprintf(text, capacity, "'NSObject' attribute is for pointer types only"); break;
+        case CHECK_ARGUMENT_PRECISE_LIFETIME:
+            snprintf(text, capacity, "objc_precise_lifetime only applies to retainable types; type here is %.*s", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_TARGET_FEATURE:
+            snprintf(text, capacity, "'%s' attribute is not supported on targets missing '%s'; specify an appropriate -march= or -mcpu=", parsed,
+                     number == 1 ? "zve32x" : "sve");
+            break;
+        case CHECK_ARGUMENT_BUILTIN_ALIAS: snprintf(text, capacity, "'%s' attribute can only be applied to a ARM, HLSL, SPIR-V or RISC-V builtin", parsed); break;
+        case CHECK_ARGUMENT_BLOCK_NONLOCAL: snprintf(text, capacity, "'__block' is not allowed on a %s variable", number == 1 ? "static local" : "nonlocal"); break;
+        case CHECK_ARGUMENT_NOT_ICE: snprintf(text, capacity, "expression is not an integer constant expression"); break;
+        case CHECK_ARGUMENT_CODE_ALIGN:
+            snprintf(text, capacity, "'%s' attribute requires an integer argument which is a constant power of two between 1 and 4096 inclusive; provided argument was %" PRId64,
+                     parsed, (int64_t)value);
+            break;
+        case CHECK_ARGUMENT_LOOP_ONLY: snprintf(text, capacity, "'%s' attribute only applies to 'for', 'while', and 'do' statements", parsed); break;
+        case CHECK_ARGUMENT_POSITIVE: snprintf(text, capacity, "'%s' attribute requires a positive integral compile time constant expression", parsed); break;
+        case CHECK_ARGUMENT_ATOMIC_OPTION:
+            snprintf(text, capacity, "invalid argument '%.*s' to atomic attribute; valid options are: 'remote_memory', 'fine_grained_memory', 'ignore_denormal_mode' "
+                                     "(optionally prefixed with 'no_')", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_COMPOUND_ONLY: snprintf(text, capacity, "'%s' attribute only applies to compound statements", parsed); break;
+        case CHECK_ARGUMENT_LOOP_CONFLICT: snprintf(text, capacity, "conflicting loop attribute '%s'", parsed); break;
+        case CHECK_ARGUMENT_EMPTY_ONLY: snprintf(text, capacity, "'%s' attribute only applies to empty statements", parsed); break;
+        case CHECK_ARGUMENT_ASSUME_PARENTHESES: snprintf(text, capacity, "use of this expression in an 'assume' attribute requires parentheses"); break;
+        case CHECK_ARGUMENT_NOT_BOOL: snprintf(text, capacity, "value of type %.*s is not contextually convertible to 'bool'", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_VEC_TYPE_HINT: snprintf(text, capacity, "a non-vector or non-vectorizable scalar type is an invalid argument to attribute '%s'", parsed); break;
+        case CHECK_ARGUMENT_INCOMPLETE_TYPE: snprintf(text, capacity, "incomplete type %.*s where a complete type is required", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_TOO_LARGE:
+            snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
+            break;
+        case CHECK_ARGUMENT_MATRIX_DISABLED: snprintf(text, capacity, "matrix types extension is disabled. Pass -fenable-matrix to enable it"); break;
+        case CHECK_ARGUMENT_KERNEL_FUNCTIONS: snprintf(text, capacity, "'%s' attribute only applies to functions", parsed); break;
+        case CHECK_ARGUMENT_VARIADIC_CONVENTION: snprintf(text, capacity, "variadic function cannot use %s calling convention", check_input_convention_name(number)); break;
+        default: snprintf(text, capacity, "invalid attribute argument"); break;
+    }
 }
 
 // clang's musttail attribute (#147) as clang's messages spell it, from its first token (`token`: GNU's name, or the
@@ -1277,6 +1475,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     uint32_t x86_location = BUSTER_CHECK_NONE;
                     const char* x86_message = phase == 1 ? check_diagnostic_x86_hard(input, stream, stream->reports + index, x86_text, sizeof(x86_text), &x86_location) :
                                                            NULL;
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_diagnostic_varargs(input, parser, types, stream->reports + index, &x86_location);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
                     if (source != BUSTER_CHECK_NONE)
                     {
                         uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
@@ -1298,7 +1504,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
                         }
-                        else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT) && named)
+                        else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ||
+                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT || kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_TYPES ||
+                                  kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT || kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION || kind == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL ||
+                                  kind == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS) && named)
                         {
                             // An attribute on a label or a statement that clang refuses there (#147), from its first token
                             // (a C23 one's scope), worded as clang's: a GNU one spelled as written, a C23 one as clang
@@ -1323,11 +1532,270 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                             : (String8){ "", 0 };
                             scope_text = check_input_attribute_equal(scope_text, "_Clang") ? (String8){ "clang", 5 } : scope_text;
                             const char* refusal = kind == CHECK_INPUT_LABEL_ATTRIBUTE ? check_input_label_refusal(bare) : NULL;
+                            // A declaration's subject error names the subjects of its row (check_input_attribute_subjects).
+                            const CheckInputSubjectRow* row = kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? check_input_subject_row(scope_text, bare, scope != 0, standard) : NULL;
+                            char subjects[224];
+                            snprintf(subjects, sizeof(subjects), "only applies to %s", row != NULL ? row->message : "other declarations");
+                            // An index of a function's parameters past them (#147, clang's checkFunctionOrMethodParameterIndex),
+                            // by its place among the attribute's arguments.
+                            char bounds[128];
+                            snprintf(bounds, sizeof(bounds), "parameter %u is out of bounds", input->reports[index].detail);
+                            // A thread-safety lock function's parameter index (#147, checkAttrArgsAreCapabilityObjs), with clang's
+                            // extra information: the argument's place, then the parameters' count.
+                            const uint32_t place = input->reports[index].detail & 0xffffu;
+                            const uint32_t parameters = input->reports[index].detail >> 16;
+                            if (kind == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS)
+                            {
+                                snprintf(bounds, sizeof(bounds), parameters == 0 ? "parameter %u is out of bounds: no parameters to index into" :
+                                         parameters == 1 ? "parameter %u is out of bounds: can only be 1, since there is one parameter" :
+                                                           "parameter %u is out of bounds: must be between 1 and %u", place, parameters);
+                            }
+                            // An argument count other than clang's (#147, BUSTER_CHECK_COUNT_*), as its three messages word it.
+                            const uint32_t detail = input->reports[index].detail;
+                            const uint32_t bound = detail >> 8;
+                            char arguments[64];
+                            snprintf(arguments, sizeof(arguments), (detail & 0xffu) == BUSTER_CHECK_COUNT_EXACT ?
+                                     (bound == 0 ? "takes no arguments" : bound == 1 ? "takes one argument" : "requires exactly %u arguments") :
+                                     (detail & 0xffu) == BUSTER_CHECK_COUNT_LEAST ? (bound == 1 ? "takes at least %u argument" : "takes at least %u arguments") :
+                                     (bound == 1 ? "takes no more than %u argument" : "takes no more than %u arguments"), bound);
+                            // A mutual exclusion names the attribute already there too, as clang names an applied one: a
+                            // GNU one without its keyword's underscores, a C23 one as above (check_input_attribute_excluding).
+                            const uint32_t other = kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION ? input->reports[index].note_token : count;
+                            char excluded[160] = { 0 };
+                            if (other < count)
+                            {
+                                const bool other_scoped = other + 2 < count && parser->tokens.kinds[other + 1] == PARSE_KIND_COLON;
+                                const uint32_t other_at = !other_scoped ? other : parser->tokens.kinds[other + 2] == PARSE_KIND_COLON && other + 3 < count ? other + 3 : other + 2;
+                                const uint32_t other_name = parser->tokens.names[other_at];
+                                const String8 other_bare = check_warning_attribute_normalized((String8){ (char*)intern_bytes(pp->table, other_name), intern_length(pp->table, other_name) });
+                                String8 other_scope = other_scoped ? check_warning_attribute_normalized((String8){ (char*)intern_bytes(pp->table, parser->tokens.names[other]),
+                                                                                                          intern_length(pp->table, parser->tokens.names[other]) }) :
+                                                                     (String8){ "", 0 };
+                                other_scope = check_input_attribute_equal(other_scope, "_Clang") ? (String8){ "clang", 5 } : other_scope;
+                                snprintf(excluded, sizeof(excluded), "and '%.*s%s%.*s' attributes are not compatible", (int)other_scope.length, other_scope.pointer,
+                                         other_scoped ? "::" : "", (int)other_bare.length, other_bare.pointer);
+                            }
                             const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT ? arguments :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_EXCLUSION ? excluded :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS || kind == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS ? bounds :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL ? "requires parameter 1 to be int or bool" :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_TYPES ? "cannot be applied to types" :
                                                  kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
+                                                 kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? subjects :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", (int)scope_text.length, scope_text.pointer,
-                                                 scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer, ending);
+                            const PPOutputDiagnosticNote conflicting = {
+                                .token = other < count ? parser->tokens.sources[other] : 0,
+                                .message = "conflicting attribute is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &conflicting, other < count ? 1u : 0u, "'%.*s%s%.*s' %s%s",
+                                                        (int)scope_text.length, scope_text.pointer, scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer,
+                                                        other < count ? "" : "attribute ", ending);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_UNAVAILABLE_USE && token < count)
+                        {
+                            // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
+                            // attribute's message, and the note at it.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t used = parser->tokens.names[token];
+                            const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
+                            char noted[160];
+                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, used), intern_bytes(pp->table, used));
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = noted,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
+                                                        (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
+                                                        (int)message.length, message.pointer);
+                        }
+                        else if (phase == 0 && kind >= CHECK_INPUT_AVAILABILITY_PLATFORM && kind <= CHECK_INPUT_AVAILABILITY_REPEATED && token < count)
+                        {
+                            // __builtin_available's specs (#148): a platform's name as written, an anyAppleOS version as
+                            // clang's VersionTuple prints it, and a repeated platform's canonical name.
+                            const uint32_t name = parser->tokens.names[token];
+                            const uint32_t platform = input->reports[index].detail;
+                            if (kind == CHECK_INPUT_AVAILABILITY_PLATFORM)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "unrecognized platform name %.*s", (int)intern_length(pp->table, name),
+                                                      intern_bytes(pp->table, name));
+                            }
+                            else if (kind == CHECK_INPUT_AVAILABILITY_REPEATED)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "version for '%s' already specified",
+                                                      check_availability_platforms[platform < BUSTER_ARRAY_LENGTH(check_availability_platforms) ? platform : 0]);
+                            }
+                            else
+                            {
+                                const uint32_t at = parser->tokens.sources[token];
+                                const uint64_t spelling_mark = scratch->length;
+                                uint8_t* buffer = arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1);
+                                const uint8_t* bytes = NULL;
+                                const uint32_t length = buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at], buffer, &bytes) : 0;
+                                const CheckAvailabilityVersion version = check_availability_version(bytes, length);
+                                char text[48];
+                                snprintf(text, sizeof(text), version.components == 1 ? "%u" : version.components == 2 ? "%u.%u" : "%u.%u.%u", version.major, version.minor,
+                                         version.subminor);
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid anyAppleOS version '%s' in availability check", text);
+                                arena_pop_to(scratch, spelling_mark);
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_AVAILABILITY_WILDCARD && token < count)
+                        {
+                            // Just past the last version, where clang's fix-it inserts ", *".
+                            const uint32_t at = parser->tokens.sources[token];
+                            const uint64_t spelling_mark = scratch->length;
+                            uint8_t* buffer = arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1);
+                            const uint8_t* bytes = NULL;
+                            const uint32_t length = buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at], buffer, &bytes) : 0;
+                            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, length, publication, "must handle potential future platforms with '*'");
+                            arena_pop_to(scratch, spelling_mark);
+                        }
+                        else if (phase == 0 && (kind == CHECK_INPUT_COUNTED_REF_LEAK || kind == CHECK_INPUT_COUNTED_REF_USE))
+                        {
+                            // __builtin_counted_by_ref's value where clang refuses it (#148).
+                            const uint32_t detail = input->reports[index].detail;
+                            static const char* const leaks[] = { "assigned to a variable", "passed into a function", "returned from a function" };
+                            if (kind == CHECK_INPUT_COUNTED_REF_LEAK)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "value returned by '__builtin_counted_by_ref' cannot be %s",
+                                                      leaks[detail < 3 ? detail : 0]);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "value returned by '__builtin_counted_by_ref' cannot be used in %s expression",
+                                                      detail == 0 ? "an array subscript" : "a binary");
+                            }
+                        }
+                        else if (phase == 0 && kind >= CHECK_INPUT_COUNTED_UNION && kind <= CHECK_INPUT_COUNTED_PAREN)
+                        {
+                            // The counted_by family's errors (#148), worded as clang's, by the attribute's kind; the count's
+                            // name is the report's token's, and its notes at the count's declaration or the attribute's `(`.
+                            const CheckInputReport* report = input->reports + index;
+                            const char* attribute = check_input_counted_names[(report->detail & 0xffu) < 4 ? (report->detail & 0xffu) + 1 : 1];
+                            const bool array = (report->detail & 0x100u) != 0;
+                            const uint32_t fault = report->detail >> 16;
+                            const uint32_t name = token < count ? parser->tokens.names[token] : 0;
+                            const int name_length = name != 0 ? (int)intern_length(pp->table, name) : 0;
+                            const char* name_bytes = name != 0 ? (const char*)intern_bytes(pp->table, name) : "";
+                            char noted[192];
+                            snprintf(noted, sizeof(noted), kind == CHECK_INPUT_COUNTED_PAREN ? "to match this '('" : "field '%.*s' declared here", name_length, name_bytes);
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = noted,
+                            };
+                            const uint32_t notes = report->note_token < count && report->note_kind != CHECK_INPUT_NOTE_NONE ? 1u : 0u;
+                            const uint64_t type_mark = scratch->length;
+                            String8 type = { 0 };
+                            if (kind == CHECK_INPUT_COUNTED_POINTEE)
+                            {
+                                CheckWarningSpelling spell = { .count = pp->table->count };
+                                spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                                spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                                for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                                {
+                                    spell.bytes[s] = intern_bytes(pp->table, s);
+                                    spell.lengths[s] = intern_length(pp->table, s);
+                                }
+                                const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                                type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, 0) : (String8){ 0 };
+                            }
+                            static const char* const faults[] = { "", "an incomplete type", "a sizeless type", "a function type", "a struct type with a flexible array member" };
+                            switch (kind)
+                            {
+                                case CHECK_INPUT_COUNTED_UNION:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' cannot be applied to a union member", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_SUBJECT:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' only applies to pointers%s%s", attribute,
+                                                          (report->detail & 0xffu) == 0 ? " or C99 flexible array members" : "", array ? "; did you mean to use 'counted_by'?" : "");
+                                    break;
+                                case CHECK_INPUT_COUNTED_POINTEE:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' cannot be applied to %s of unknown size because %.*s is %s", attribute,
+                                                          array ? "an array with element" : "a pointer with pointee", (int)type.length, type.pointer, faults[fault < 5 ? fault : 0]);
+                                    break;
+                                case CHECK_INPUT_COUNTED_INTEGER:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' requires a non-boolean integer type argument", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_REFERENCE:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' argument must be a simple declaration reference", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_OUTSIDE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "field '%.*s' in '%s' not inside structure", name_length,
+                                                                name_bytes, attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_UNION_FIELD:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' argument cannot refer to a union member", attribute);
+                                    break;
+                                case CHECK_INPUT_COUNTED_STRUCT:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "'%s' field '%.*s' isn't within the same struct as the annotated %s",
+                                                                attribute, name_length, name_bytes, array ? "flexible array" : "pointer");
+                                    break;
+                                case CHECK_INPUT_COUNTED_PAREN:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, notes, "expected ')'");
+                                    break;
+                                default:
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
+                                    break;
+                            }
+                            arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTES_MISPLACED && token < count)
+                        {
+                            // Just after the tag's keyword, where clang's fix-it puts the attributes.
+                            const uint32_t keyword = parser->tokens.names[token];
+                            pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, keyword != 0 ? intern_length(pp->table, keyword) : 0, publication, "%s", message);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE)
+                        {
+                            // The underlying type as clang prints it, its typedef's name first (check_driver_warning_type).
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
+                                                           (String8){ 0 };
+                            char value[32] = "";
+                            if (report->detail == 1)
+                            {
+                                snprintf(value, sizeof(value), " %" PRIu64, report->value);
+                            }
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "enumerator value%s is not representable in the underlying type %.*s", value,
+                                                  (int)type.length, type.pointer);
+                            arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
+                        {
+                            // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
+                                                           (String8){ 0 };
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid vector element type %.*s", (int)type.length, type.pointer);
+                            arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
+                        {
+                            // Two calling conventions on one function, by clang's names (check_input_attribute_conflict).
+                            const uint32_t detail = input->reports[index].detail;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s and %s attributes are not compatible", check_input_convention_name(detail & 0xffu),
+                                                 check_input_convention_name(detail >> 8 & 0xffu));
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
                         {
@@ -1447,6 +1915,19 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 }
                             }
                         }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)
+                        {
+                            // A variable's alias after a tentative definition (#147), named, with its note at the last one.
+                            const uint32_t name = parser->tokens.names[token];
+                            const uint32_t previous = input->reports[index].note_token;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = "previous definition is here",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                        "alias definition of '%.*s' after tentative definition", (int)intern_length(pp->table, name),
+                                                        intern_bytes(pp->table, name));
+                        }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                         {
@@ -1462,6 +1943,103 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                         label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
                                                         label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && input->reports[index].attribute < count)
+                        {
+                            // An attribute argument's error (#147) as clang's handler words it; a parser's "expected ')'" with
+                            // its note at the arguments' `(`.
+                            char text[320];
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
+                            const bool typed = ((report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED || (report->detail & 0xffu) == CHECK_ARGUMENT_PRECISE_LIFETIME ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL || (report->detail & 0xffu) == CHECK_ARGUMENT_INCOMPLETE_TYPE) &&
+                                               report->type != 0;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            // (lifetime_capture_by's argument as written: its token's spelling.)
+                            const bool captured = ((report->detail & 0xffu) == CHECK_ARGUMENT_CAPTURE_UNKNOWN || (report->detail & 0xffu) == CHECK_ARGUMENT_ATOMIC_OPTION) &&
+                                                  report->value < count;
+                            const uint32_t at = captured ? parser->tokens.sources[report->value] : 0;
+                            uint8_t* spelling_buffer = captured ? arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 :
+                                                                                 (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1) : NULL;
+                            const uint8_t* spelling_bytes = NULL;
+                            const uint32_t spelling_length = spelling_buffer != NULL ? pp_spelling(pp, pp->output.kinds[at], pp->output.values[at], pp->output.locations[at],
+                                                                                                   spelling_buffer, &spelling_bytes) : 0;
+                            const String8 literal = (report->detail & 0xffu) == CHECK_ARGUMENT_CODE_MODEL && token < count ? check_warning_string_text(parser, pp, token, scratch) :
+                                                    spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
+                                                    captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
+                                                    captured ? (String8){ (char*)spelling_bytes, spelling_length } : (String8){ "", 0 };
+                            check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
+                            // (An incomplete tag's declaration, named by its type alone: preferred_type's, #147.)
+                            const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && spelled;
+                            const String8 tag = forward ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, type_unqualified(report->type), 0) :
+                                                          (String8){ "", 0 };
+                            char declared[192];
+                            snprintf(declared, sizeof(declared), "forward declaration of %.*s", (int)tag.length, tag.pointer);
+                            const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE || forward) &&
+                                                 report->note_token < count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = matched ? parser->tokens.sources[report->note_token] : 0,
+                                .message = forward ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" : "to match this '('",
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
+                            arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT && input->reports[index].attribute < count)
+                        {
+                            // capability's name that is no string literal (#147), at the argument: the attribute by its name
+                            // without a keyword's underscores, as clang's message names it (its scope's token first where it has one).
+                            const uint32_t first = input->reports[index].attribute;
+                            const bool scoped = first + 2 < count && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON;
+                            const uint32_t at = !scoped ? first : parser->tokens.kinds[first + 2] == PARSE_KIND_COLON && first + 3 < count ? first + 3 : first + 2;
+                            const String8 written = check_driver_attribute_spelling(parser, pp, at, false);
+                            const String8 bare = check_warning_attribute_normalized(written);
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "expected string literal as argument of '%.*s' attribute", (int)bare.length, bare.pointer);
+                        }
+                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_LOADER_EXTERN || input->reports[index].message == CHECK_INPUT_LOADER_REDECLARATION ||
+                                                input->reports[index].message == CHECK_INPUT_INTERNAL_LINKAGE_FIRST) && token < count)
+                        {
+                            // loader_uninitialized's and internal_linkage's errors (#147), as clang's messages word them: an extern
+                            // variable named, and the others with their notes at the earlier declaration; internal_linkage named as
+                            // clang prints an attribute it applied, its scope as written and its name without a keyword's underscores
+                            // (the report's attribute its first token, its detail its name's plus one where it has a scope).
+                            const CheckInputReport* report = input->reports + index;
+                            const CheckInputMessage message = report->message;
+                            const uint32_t previous = report->note_kind != CHECK_INPUT_NOTE_NONE ? report->note_token : count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = message == CHECK_INPUT_LOADER_REDECLARATION ? "previous definition is here" : "previous declaration is here",
+                            };
+                            if (message == CHECK_INPUT_LOADER_EXTERN)
+                            {
+                                const uint32_t name = parser->tokens.names[token];
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "variable '%.*s' cannot be declared both 'extern' and with the 'loader_uninitialized' attribute",
+                                                      (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            }
+                            else if (message == CHECK_INPUT_LOADER_REDECLARATION)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                            "redeclaration cannot add 'loader_uninitialized' attribute");
+                            }
+                            else
+                            {
+                                const bool scoped = report->detail != 0 && report->detail - 1 < count && report->attribute < count;
+                                const String8 scope = scoped ? check_driver_attribute_spelling(parser, pp, report->attribute, false) : (String8){ "", 0 };
+                                const uint32_t name_token = scoped ? report->detail - 1 : report->attribute;
+                                const String8 attribute = check_warning_attribute_normalized(check_driver_attribute_spelling(parser, pp, name_token, false));
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                            "'%.*s%s%.*s' attribute does not appear on the first declaration", (int)scope.length, scope.pointer,
+                                                            scoped ? "::" : "", (int)attribute.length, attribute.pointer);
+                            }
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)

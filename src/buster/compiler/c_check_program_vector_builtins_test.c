@@ -6,7 +6,8 @@
 // stores and the bit casts, called directly on inputs from the call's argument and in the forms clang's headers write the
 // floating intrinsics in, with every defined result folded into the program's hash (a shuffle's undefined elements
 // aren't). The programs run where the host has the features their rows take (AVX-512F, BW, CD, DQ, VL, VBMI,
-// VBMI2, BITALG, VPOPCNTDQ, GFNI and BMI2, by x86_target_native's CPUID and XCR0); elsewhere they compile and link, as
+// VBMI2, BITALG, VPOPCNTDQ, GFNI, VPCLMULQDQ and BMI2, by x86_target_native's CPUID and XCR0); elsewhere they compile
+// and link, as
 // clang's builds do, and don't run. The floating functions past sqrt and fma run on inputs with both zeros,
 // infinities, NaNs of their own payloads and a signaling one among them, so that their NaN payloads and zeros' signs are
 // compared too. Include after c_check_program_x86_test.c, whose helpers' style it follows.
@@ -550,7 +551,9 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
         {
             // Bit reversal and the integer functions past the 23 observed spellings: trailing zero counts (of nonzero
             // elements alone with one operand, which clang leaves undefined for zero, and with zeros among them with
-            // two), bit deposits and extractions, of every element size at each width, and xor reductions.
+            // two), bit deposits and extractions and carry-less products (of each 16 bytes' quadwords where the
+            // elements' 64-bit extensions take 64 bytes at most, element by element past them), of every element size
+            // at each width, and xor reductions.
             "vector-integer-bits",
             "typedef unsigned char v4qu __attribute__((vector_size(4)));typedef unsigned char v8qu __attribute__((vector_size(8)));"
             "typedef unsigned short v2hu __attribute__((vector_size(4)));typedef unsigned short v4hu __attribute__((vector_size(8)));"
@@ -563,6 +566,7 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "#define EACH(M) M(b4)M(b8)M(b16)M(b32)M(b64)M(s2)M(s4)M(s8)M(s16)M(s32)M(i2)M(i4)M(i8)M(i16)M(q2)M(q4)M(q8)\n"
             "#define REV(v) U(bitreverse,v)\n"
             "#define DEP(v) B(pdep,v,w##v)B(pext,v,w##v)B(pdep,w##v,v)\n"
+            "#define CL(v) B(clmul,v,w##v)B(clmul,v,v)\n"
             "#define XOR(v) X(v)\n"
             "int tested(int n){unsigned h=2166136261u;v4qu b4,wb4;v8qu b8,wb8;v16qu b16,wb16;v32qu b32,wb32;v64qu b64,wb64;v2hu s2,ws2;v4hu s4,ws4;"
             "v8hu s8,ws8;v16hu s16,ws16;v32hu s32,ws32;v2su i2,wi2;v4su i4,wi4;v8su i8,wi8;v16su i16,wi16;v2du q2,wq2;v4du q4,wq4;v8du q8,wq8;"
@@ -571,12 +575,53 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "fill(&s16,32,n+16);fill(&ws16,32,n+17);fill(&s32,64,n+18);fill(&ws32,64,n+19);fill(&i2,8,n+20);fill(&wi2,8,n+21);fill(&i4,16,n+22);"
             "fill(&wi4,16,n+23);fill(&i8,32,n+24);fill(&wi8,32,n+25);fill(&i16,64,n+26);fill(&wi16,64,n+27);fill(&q2,16,n+28);fill(&wq2,16,n+29);"
             "fill(&q4,32,n+30);fill(&wq4,32,n+31);fill(&q8,64,n+32);fill(&wq8,64,n+33);"
-            "EACH(REV)EACH(DEP)EACH(XOR)"
+            "EACH(REV)EACH(DEP)EACH(CL)EACH(XOR)"
             "T(b4,0x80)T(b8,0x80)T(b16,0x80)T(b32,0x80)T(b64,0x80)T(s2,0x8000)T(s4,0x8000)T(s8,0x8000)T(s16,0x8000)T(s32,0x8000)"
             "T(i2,0x80000000u)T(i4,0x80000000u)T(i8,0x80000000u)T(i16,0x80000000u)T(q2,1ull<<63)T(q4,1ull<<63)T(q8,1ull<<63)"
             "{v16qs t=__builtin_elementwise_bitreverse((v16qs)b16);FOLD(t);v8ds c=__builtin_elementwise_ctzg((v8ds)q8|1);FOLD(c);"
-            "v8hs e=__builtin_elementwise_pext((v8hs)s8,(v8hs)ws8);FOLD(e);}"
+            "v8hs e=__builtin_elementwise_pext((v8hs)s8,(v8hs)ws8);FOLD(e);v4ss l=__builtin_elementwise_clmul((v4ss)i4,(v4ss)wi4);FOLD(l);"
+            "v8ds k=__builtin_elementwise_clmul((v8ds)q8,(v8ds)wq8);FOLD(k);}"
             "return (int)h;}",
+        },
+        {
+            // The masked memory builtins (#148), of masks read from random bytes (a vector of bools' bits, those past its
+            // lanes among them, which take no part), on memory of random bytes: loads and expanding loads of every element
+            // size at each width and of 2, 3 and 4 lanes, without a passthru (whose elements k1 leaves are undefined, set
+            // to 0 here) and with one, stores and compressing stores into it; gathers and scatters of 32- and 64-bit
+            // elements by indices of every size, negative ones among them (sign-extended, as a GEP's are), scatters
+            // scaled by the index's element (clang's code's GEP is of its type). The memory is folded after each round.
+            "vector-masked-memory",
+            "typedef _Bool m2 __attribute__((ext_vector_type(2)));typedef _Bool m3 __attribute__((ext_vector_type(3)));"
+            "typedef _Bool m4 __attribute__((ext_vector_type(4)));typedef _Bool m8 __attribute__((ext_vector_type(8)));"
+            "typedef _Bool m16 __attribute__((ext_vector_type(16)));typedef _Bool m32 __attribute__((ext_vector_type(32)));"
+            "typedef _Bool m64 __attribute__((ext_vector_type(64)));\n"
+            "#define V(t,e,n) typedef e t __attribute__((ext_vector_type(n)));\n"
+            "V(b8,unsigned char,8)V(b16,unsigned char,16)V(b64,signed char,64)V(h4,short,4)V(h8,short,8)V(h32,unsigned short,32)"
+            "V(i2,int,2)V(i3,int,3)V(i4,int,4)V(i8,unsigned,8)V(i16,int,16)V(q2,long long,2)V(q4,unsigned long long,4)V(q8,long long,8)"
+            "V(f4,float,4)V(d8,double,8)V(f16,float,16)V(c4,signed char,4)V(c8,signed char,8)V(s8,short,8)V(s16,short,16)"
+            "V(l2,long long,2)V(l4,long long,4)V(l8,long long,8)\n"
+            "#define MASK(mt) mt m;unsigned char raw[sizeof(mt)];fill(raw,sizeof raw,s++);__builtin_memcpy(&m,raw,sizeof raw);\n"
+            "#define SET(i) ((raw[(i)/8]>>((i)%8))&1)\n"
+            "#define LOAD(vt,mt,et,n) {MASK(mt) et*p=(et*)(memory+64);vt t;fill(&t,sizeof t,s++);vt a=__builtin_masked_load(m,p);"
+            "vt b=__builtin_masked_load(m,p,t);vt c=__builtin_masked_expand_load(m,p);vt d=__builtin_masked_expand_load(m,p,t);"
+            "for(int i=0;i<n;i++){if(!SET(i)){a[i]=0;c[i]=0;}}h=fold(h,&a,sizeof(et)*n);h=fold(h,&b,sizeof(et)*n);h=fold(h,&c,sizeof(et)*n);"
+            "h=fold(h,&d,sizeof(et)*n);vt v;fill(&v,sizeof v,s++);__builtin_masked_store(m,v,(et*)(memory+1024));"
+            "__builtin_masked_compress_store(m,v,(et*)(memory+2048));}\n"
+            "#define GATHER(vt,mt,it,et,n,k) {MASK(mt) et*p=(et*)(memory+1024);it x;unsigned char r[n];fill(r,n,s++);"
+            "for(int i=0;i<n;i++)x[i]=(__typeof__(x[0]))((int)(r[i]%64)-32);vt t;fill(&t,sizeof t,s++);vt a=__builtin_masked_gather(m,x,p);"
+            "vt b=__builtin_masked_gather(m,x,p,t);for(int i=0;i<n;i++){if(!SET(i))a[i]=0;}h=fold(h,&a,sizeof(et)*n);h=fold(h,&b,sizeof(et)*n);"
+            "vt v;fill(&v,sizeof v,s++);__builtin_masked_scatter(m,x,v,(et*)(memory+2048+512*k));}\n"
+            "static unsigned char memory[4096];\n"
+            "int tested(int n){unsigned h=2166136261u;unsigned s=(unsigned)n;for(int round=0;round<8;round++){fill(memory,sizeof memory,s++);"
+            "LOAD(b16,m16,unsigned char,16)LOAD(b64,m64,signed char,64)LOAD(b8,m8,unsigned char,8)LOAD(h8,m8,short,8)"
+            "LOAD(h32,m32,unsigned short,32)LOAD(h4,m4,short,4)LOAD(i2,m2,int,2)LOAD(i3,m3,int,3)LOAD(i4,m4,int,4)LOAD(i8,m8,unsigned,8)"
+            "LOAD(i16,m16,int,16)LOAD(q2,m2,long long,2)LOAD(q4,m4,unsigned long long,4)LOAD(q8,m8,long long,8)LOAD(f4,m4,float,4)"
+            "LOAD(d8,m8,double,8)"
+            "GATHER(i4,m4,i4,int,4,0)GATHER(i16,m16,i16,int,16,1)GATHER(f4,m4,c4,float,4,2)GATHER(i8,m8,s8,unsigned,8,3)"
+            "GATHER(q4,m4,i4,unsigned long long,4,4)GATHER(d8,m8,i8,double,8,5)GATHER(q2,m2,i2,long long,2,6)GATHER(i4,m4,l4,int,4,0)"
+            "GATHER(i8,m8,l8,unsigned,8,1)GATHER(i2,m2,l2,int,2,2)GATHER(q8,m8,l8,long long,8,3)GATHER(f16,m16,s16,float,16,4)"
+            "GATHER(d8,m8,c8,double,8,5)GATHER(i3,m3,i3,int,3,6)"
+            "h=fold(h,memory,sizeof memory);}return (int)h;}",
         },
         {
             "vector-nondeterministic",
@@ -784,10 +829,11 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64-v4", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_bitreverse(a);return (int)c[0];}", "vector bit reversal without GFNI", 2 },
         { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_bitreverse(a);return c[0];}", "vector bit reversal without GFNI",
           2 },
-        { "znver5", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
-          "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes", 3 },
-        { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
-          "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes", 3 },
+        { "x86-64-v3", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
+          "vector carry-less multiplication without AVX and PCLMUL", 3 },
+        { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
+          "vector carry-less multiplication without AVX and PCLMUL", 3 },
+        { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_clmul(n,n);}", "elementwise builtins of scalars", 0 },
         { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_ctzg(a);return c[0];}",
           "vector trailing zero counts of 8- and 16-bit elements without AVX-512 BITALG", 2 },
         { "x86-64-v4", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_ctzg(a);return (int)c[0];}",
@@ -810,12 +856,15 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64", "double tested(double x,double y){return __builtin_elementwise_maximum(x,y);}", "elementwise builtins of scalars without AVX-512F", 0 },
         { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_maximum(*p);}", "vector reductions of half-precision or bf16 elements", 0 },
         { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_in_order_fadd(*p,(_Float16)0);}", "vector reductions of half-precision or bf16 elements", 0 },
-        { "znver5", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef float e4 __attribute__((ext_vector_type(4)));"
-                    "void tested(b4* m,float* p,e4* r){*r=__builtin_masked_load(*m,p);}",
-          "masked vector memory builtins, whose masks are vectors of bools", 0 },
-        { "znver5", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef float e4 __attribute__((ext_vector_type(4)));"
-                    "void tested(b4* m,float* p,e4* v){__builtin_masked_scatter(*m,(v4ss){0,1,2,3},*v,p);}",
-          "masked vector memory builtins, whose masks are vectors of bools", 0 },
+        { "x86-64-v3", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef float e4 __attribute__((ext_vector_type(4)));"
+                       "void tested(b4* m,float* p,e4* r){*r=__builtin_masked_load(*m,p);}",
+          "masked vector memory builtins without AVX-512F and AVX-512VL", 0 },
+        { "znver5", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef short e4 __attribute__((ext_vector_type(4)));"
+                    "void tested(b4* m,short* p,e4* v){__builtin_masked_scatter(*m,(v4ss){0,1,2,3},*v,p);}",
+          "masked gathers and scatters of 8- and 16-bit elements, which no x86 instruction gathers or scatters", 0 },
+        { "x86-64-v4", "typedef _Bool b16 __attribute__((ext_vector_type(16)));typedef char e16 __attribute__((ext_vector_type(16)));"
+                       "void tested(b16* m,char* p,e16* r){*r=__builtin_masked_expand_load(*m,p);}",
+          "masked expanding loads and compressing stores of 8- and 16-bit elements without AVX-512 VBMI2", 0 },
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
         // A floating maximum or minimum of a vector its elements don't fill, which LLVM reduces in an order of its width's.
         { "znver5", "typedef float f7 __attribute__((ext_vector_type(7)));int tested(int n){f7 a={(float)n};float c=__builtin_reduce_minimum(a);return (int)c;}",
@@ -922,7 +971,7 @@ static __attribute__((noinline)) void check_test_program_vector_builtins(CheckTe
         const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) |
                                   BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512VBMI) |
                                   BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ) |
-                                  BUSTER_X86_FEATURE(GFNI) | BUSTER_X86_FEATURE(BMI2);
+                                  BUSTER_X86_FEATURE(GFNI) | BUSTER_X86_FEATURE(VPCLMULQDQ) | BUSTER_X86_FEATURE(BMI2);
         const X86Target native = x86_target_native();
         const bool run_native = (native.features & required) == required;
         if (!run_native)

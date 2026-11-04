@@ -697,6 +697,167 @@ static void check_vector_constant(Tier0Operation* row, CheckVectorConstants* con
     check_vector_constant_bytes(row, constants, pattern, bytes <= 8 ? bytes : 8, class, operand_bytes);
 }
 
+// The row of a masked memory builtin (#148), as clang's code computes llvm.masked.* with AVX-512: the mask, a vector of
+// bools, is an integer operand (its bits, which the lowering loads from its object and clears past its lanes where the
+// instruction has more: `*kept` is the lanes' bits then, else 0), moved into k1 (KMOVW, AVX-512BW's KMOVD and KMOVQ past
+// 16 lanes), and one instruction runs under k1:
+//   - __builtin_masked_load (mask, p[, passthru]): VMOVDQU8, 16, 32 or 64 from p, of the elements k1 has, the others
+//     zero or the passthru's;
+//   - __builtin_masked_expand_load: VPEXPANDB, W, D or Q (8- and 16-bit elements' AVX-512 VBMI2's) from p the same way,
+//     the elements k1 has taking p's consecutive ones;
+//   - __builtin_masked_store (mask, v, p) and _compress_store: VMOVDQU or VPCOMPRESS of v's elements k1 has to p;
+//   - __builtin_masked_gather (mask, index, p[, passthru]): VPGATHERDD, DQ, QD or QQ of p's elements at the index's
+//     elements, sign-extended to 32 bits where narrower (VPMOVSX), as a GEP's indices are, times the element's bytes,
+//     into zeros or the passthru;
+//   - __builtin_masked_scatter (mask, index, v, p): VPSCATTER of v's elements there, times the index's element's bytes,
+//     as clang 23's code has it (its GEP's element type is the index's).
+// Gathers and scatters of 8- and 16-bit elements, which no instruction has, are refused by name. Its operands are the
+// arguments, in their order; a loaded or gathered result is VECTOR(0)'s.
+static const char* check_vector_masked_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId value, TypeId index, TypeId mask, bool passthru,
+                                           Tier0Operation* row, uint64_t* kept)
+{
+    const bool gather = builtin == CBUILTIN_MASKED_GATHER;
+    const bool scatter = builtin == CBUILTIN_MASKED_SCATTER;
+    const bool addressed = gather || scatter;
+    const bool expands = builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_COMPRESS_STORE;
+    const bool loads = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD || gather;
+    const CheckVectorShape shape = check_vector_builtin_shape(types, value);
+    const CheckVectorShape indices = addressed ? check_vector_builtin_shape(types, index) : shape;
+    const uint32_t lanes = check_builtin_vector_lanes(types, mask);
+    const uint64_t mask_bytes = type_size(types, mask);
+    const uint32_t e = shape.element;
+    // The index's elements as the instruction takes them (8- and 16-bit ones sign-extended to 32 bits), and its bytes.
+    const uint32_t i = indices.element < 4 ? 4 : indices.element;
+    const uint32_t data_bytes = shape.bytes < 16 ? 16 : shape.bytes;
+    const uint32_t index_bytes = !addressed || lanes * i < 16 ? 16 : lanes * i;
+    // The instruction's lanes: the data's, or a narrowing gather's or scatter's (quadword indices, doubleword elements)
+    // its index's.
+    const uint32_t instruction_lanes = e == 0 ? 0 : addressed && e == 4 && i == 8 ? index_bytes / 8 : data_bytes / e;
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | (e <= 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
+                            (e <= 2 && expands ? BUSTER_X86_FEATURE(AVX512VBMI2) : 0);
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const char* reason = NULL;
+    memset(row, 0, sizeof(*row));
+    *kept = 0;
+    if (e == 0 || (addressed && indices.element == 0))
+    {
+        reason = "masked vector memory builtins of elements of other than 1, 2, 4 or 8 bytes";
+    }
+    else if (addressed && e <= 2)
+    {
+        reason = "masked gathers and scatters of 8- and 16-bit elements, which no x86 instruction gathers or scatters";
+    }
+    else if (lanes == 0 || lanes > instruction_lanes || (mask_bytes != 1 && mask_bytes != 2 && mask_bytes != 4 && mask_bytes != 8) || index_bytes > 64)
+    {
+        reason = "vector types of other than 4, 8, 16, 32 or 64 bytes";
+    }
+    else if ((target->features & needed) != needed)
+    {
+        reason = (target->features & (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL))) !=
+                         (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL)) ? "masked vector memory builtins without AVX-512F and AVX-512VL" :
+                 (target->features & BUSTER_X86_FEATURE(AVX512BW)) == 0 ? "masked vector memory builtins of 8- and 16-bit elements without AVX-512BW" :
+                                                                         "masked expanding loads and compressing stores of 8- and 16-bit elements without AVX-512 VBMI2";
+    }
+    else
+    {
+        static const CheckVectorForms expansions[4] = { BUSTER_CHECK_VECTOR_FORMS(VPEXPANDB_X_XM128, VPEXPANDB_Y_YM256, VPEXPANDB_Z_ZM512),
+                                                        BUSTER_CHECK_VECTOR_FORMS(VPEXPANDW_X_XM128, VPEXPANDW_Y_YM256, VPEXPANDW_Z_ZM512),
+                                                        BUSTER_CHECK_VECTOR_FORMS(VPEXPANDD_X_XM128, VPEXPANDD_Y_YM256, VPEXPANDD_Z_ZM512),
+                                                        BUSTER_CHECK_VECTOR_FORMS(VPEXPANDQ_X_XM128, VPEXPANDQ_Y_YM256, VPEXPANDQ_Z_ZM512) };
+        static const CheckVectorForms compressions[4] = { BUSTER_CHECK_VECTOR_FORMS(VPCOMPRESSB_XM128_X, VPCOMPRESSB_YM256_Y, VPCOMPRESSB_ZM512_Z),
+                                                          BUSTER_CHECK_VECTOR_FORMS(VPCOMPRESSW_XM128_X, VPCOMPRESSW_YM256_Y, VPCOMPRESSW_ZM512_Z),
+                                                          BUSTER_CHECK_VECTOR_FORMS(VPCOMPRESSD_XM128_X, VPCOMPRESSD_YM256_Y, VPCOMPRESSD_ZM512_Z),
+                                                          BUSTER_CHECK_VECTOR_FORMS(VPCOMPRESSQ_XM128_X, VPCOMPRESSQ_YM256_Y, VPCOMPRESSQ_ZM512_Z) };
+        // By the elements' bytes and the indices' (4 and 4, 8 and 4, 4 and 8, 8 and 8), at the data's width but a
+        // narrowing one's, at its index's.
+        static const CheckVectorForms gathers[4] = { BUSTER_CHECK_VECTOR_FORMS(VPGATHERDD_X_VM32X, VPGATHERDD_Y_VM32Y, VPGATHERDD_Z_VM32Z),
+                                                     BUSTER_CHECK_VECTOR_FORMS(VPGATHERDQ_X_VM32X, VPGATHERDQ_Y_VM32X, VPGATHERDQ_Z_VM32Y),
+                                                     BUSTER_CHECK_VECTOR_FORMS(VPGATHERQD_X_VM64X, VPGATHERQD_X_VM64Y, VPGATHERQD_Y_VM64Z),
+                                                     BUSTER_CHECK_VECTOR_FORMS(VPGATHERQQ_X_VM64X, VPGATHERQQ_Y_VM64Y, VPGATHERQQ_Z_VM64Z) };
+        static const CheckVectorForms scatters[4] = { BUSTER_CHECK_VECTOR_FORMS(VPSCATTERDD_VM32X_X, VPSCATTERDD_VM32Y_Y, VPSCATTERDD_VM32Z_Z),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPSCATTERDQ_VM32X_X, VPSCATTERDQ_VM32X_Y, VPSCATTERDQ_VM32Y_Z),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPSCATTERQD_VM64X_X, VPSCATTERQD_VM64Y_X, VPSCATTERQD_VM64Z_Y),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPSCATTERQQ_VM64X_X, VPSCATTERQQ_VM64Y_Y, VPSCATTERQQ_VM64Z_Z) };
+        static const CheckVectorForms extensions[2] = { BUSTER_CHECK_VECTOR_FORMS(VPMOVSXBD_X_XM32_EVEX, VPMOVSXBD_Y_XM64_EVEX, VPMOVSXBD_Z_XM128),
+                                                        BUSTER_CHECK_VECTOR_FORMS(VPMOVSXWD_X_XM64_EVEX, VPMOVSXWD_Y_XM128_EVEX, VPMOVSXWD_Z_YM256) };
+        static const CheckVectorForms zeros = BUSTER_CHECK_VECTOR_PACKED(VPXORD);
+        const uint32_t size = e == 1 ? 0 : e == 2 ? 1 : e == 4 ? 2 : 3;
+        const uint32_t width = check_vector_builtin_width(data_bytes);
+        const uint32_t pair = (e == 8 ? 1u : 0u) | (i == 8 ? 2u : 0u);
+        const uint32_t pair_width = pair == 2 ? check_vector_builtin_width(index_bytes) : width;
+        const uint8_t mask_class = mask_bytes == 8 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+        // The pointer's operand, and the value's or the passthru's.
+        const uint32_t pointer = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD ? 1 : addressed && !scatter ? 2 : addressed ? 3 : 2;
+        const uint8_t source = BUSTER_TIER0_ROLE_VECTOR(scatter ? 2 : 1);
+        const uint8_t merged = BUSTER_TIER0_ROLE_VECTOR(gather ? 3 : 2);
+        uint8_t indexed = BUSTER_TIER0_ROLE_VECTOR(1);
+        uint32_t r = 0;
+        *kept = lanes < instruction_lanes ? (UINT64_C(1) << lanes) - 1 : 0;
+        row->records[r++] = check_x86_lower_record(mask_bytes == 8 ? X86_FORM_KMOVQ_K_R64 : check_x86_lower_mask_in(instruction_lanes <= 16 ? 16 : 32), 1, 0,
+                                                   BUSTER_TIER0_ROLE_INTEGER(0));
+        if (addressed && indices.element < 4)
+        {
+            indexed = BUSTER_TIER0_ROLE_VECTOR(4);
+            row->records[r++] = check_vector_lower_record(extensions[indices.element == 1 ? 0 : 1].forms[check_vector_builtin_width(index_bytes)], indexed, 0,
+                                                          BUSTER_TIER0_ROLE_VECTOR(1));
+        }
+        if (loads && passthru)
+        {
+            row->records[r++] = check_x86_lower_move_result(data_bytes, merged);
+        }
+        else if (gather)
+        {
+            row->records[r++] = check_vector_lower_record(zeros.forms[width], v0, v0, v0);
+        }
+        if (addressed)
+        {
+            const uint32_t scale = gather ? e : indices.element;
+            const uint32_t form = gather ? gathers[pair].forms[pair_width] : scatters[pair].forms[pair_width];
+            row->records[r++] = (X86Instruction){ .form = (uint16_t)form, .reg = gather ? v0 : source, .rm = BUSTER_TIER0_ROLE_INTEGER(pointer), .index = indexed,
+                                                  .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale == 1 ? 0 : scale == 2 ? 1 : scale == 4 ? 2 : 3), .decorations = 1 };
+        }
+        else
+        {
+            const uint32_t form = loads ? (expands ? expansions[size].forms[width] : check_x86_lower_move(e, width, false)) :
+                                          (expands ? compressions[size].forms[width] : check_x86_lower_move(e, width, true));
+            row->records[r] = check_x86_lower_memory(form, loads ? v0 : source, BUSTER_TIER0_ROLE_INTEGER(pointer));
+            row->records[r++].decorations = (uint8_t)(1 | (loads && !passthru ? BUSTER_X86_DECORATION_ZEROING : 0));
+        }
+        row->record_count = (uint8_t)r;
+        row->operand_count = (uint8_t)(addressed ? 3 + (scatter || passthru ? 1 : 0) : 2 + (passthru || !loads ? 1 : 0));
+        row->operand_classes[0] = mask_class;
+        row->operand_classes[pointer] = BUSTER_TYPED_CLASS_U64;
+        if (addressed)
+        {
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = (uint8_t)indices.bytes;
+        }
+        if (!loads)
+        {
+            row->operand_classes[scatter ? 2 : 1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[scatter ? 2 : 1] = (uint8_t)shape.bytes;
+        }
+        else if (passthru)
+        {
+            row->operand_classes[gather ? 3 : 2] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[gather ? 3 : 2] = (uint8_t)shape.bytes;
+        }
+        row->result_class = loads ? BUSTER_TYPED_CLASS_VECTOR : BUSTER_TYPED_CLASS_VOID;
+        row->result_bytes = loads ? (uint8_t)shape.bytes : 0;
+    }
+    return reason;
+}
+
+// Whether __builtin_elementwise_clmul of `vector`, a vector of integers, is check_vector_elementwise_row's: its elements
+// zero-extended to 64 bits take 64 bytes at most, and the target has VPCLMULQDQ and AVX-512VL (EVEX's forms at every
+// width). Else the lowering takes its elements one by one (check_lower_vector_lanes).
+static bool check_vector_clmul_packed(const TypeTable* types, const X86Target* target, TypeId vector)
+{
+    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(VPCLMULQDQ);
+    return shape.integer && shape.element != 0 && shape.bytes * (8 / shape.element) <= 64 && (target->features & needed) == needed;
+}
+
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading and
 // trailing zero counts (clzg's and ctzg's second operands the elements a zero element takes) and funnel shifts; of
@@ -808,9 +969,41 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
     {
-        // VPCLMULQDQ, the one instruction of carry-less products, is no form x86_semantics.c covers, which Tier 0's rows
-        // take alone (tier0_operation_form_valid).
-        reason = "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes";
+        // Each element zero-extended to 64 bits (VPMOVZX, where it is narrower), the products of each 16 bytes' first
+        // quadwords and of their second ones (VPCLMULQDQ by 0x00 and 0x11), their low quadwords put back into their
+        // places (VSHUFPD by 0, which takes each 16 bytes' first quadword of each, as clang's VPUNPCKLQDQ does: EVEX's
+        // VPUNPCKLQDQ is no form x86_semantics.c covers), then truncated to the elements (VPMOV): an element's
+        // product's low bits are the product's of its operands' bits alone, as llvm.clmul's are, which clang's code
+        // computes the same way for 64-bit elements. Wider extensions than 64 bytes are check_vector_clmul_packed's to
+        // refuse: the lowering takes them element by element (check_lower_vector_lanes).
+        static const CheckVectorForms extend[3] = { BUSTER_CHECK_VECTOR_FORMS(VPMOVZXBQ_X_XM16_EVEX, VPMOVZXBQ_Y_XM32_EVEX, VPMOVZXBQ_Z_XM64),
+                                                    BUSTER_CHECK_VECTOR_FORMS(VPMOVZXWQ_X_XM32_EVEX, VPMOVZXWQ_Y_XM64_EVEX, VPMOVZXWQ_Z_XM128),
+                                                    BUSTER_CHECK_VECTOR_FORMS(VPMOVZXDQ_X_XM64_EVEX, VPMOVZXDQ_Y_XM128_EVEX, VPMOVZXDQ_Z_YM256) };
+        // The form's rm is its destination.
+        static const CheckVectorForms truncate[3] = { BUSTER_CHECK_VECTOR_FORMS(VPMOVQB_XM16_X, VPMOVQB_XM32_Y, VPMOVQB_XM64_Z),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPMOVQW_XM32_X, VPMOVQW_XM64_Y, VPMOVQW_XM128_Z),
+                                                      BUSTER_CHECK_VECTOR_FORMS(VPMOVQD_XM64_X, VPMOVQD_XM128_Y, VPMOVQD_YM256_Z) };
+        static const CheckVectorForms products = BUSTER_CHECK_VECTOR_FORMS(VPCLMULQDQ_X_X_XM128_IMM8_EVEX, VPCLMULQDQ_Y_Y_YM256_IMM8_EVEX,
+                                                                           VPCLMULQDQ_Z_Z_ZM512_IMM8);
+        static const CheckVectorForms interleaves = BUSTER_CHECK_VECTOR_FORMS(VSHUFPD_X_X_XM128_IMM8_EVEX, VSHUFPD_Y_Y_YM256_IMM8_EVEX, VSHUFPD_Z_Z_ZM512_IMM8);
+        const uint32_t e = shape.element == 1 ? 0 : shape.element == 2 ? 1 : 2;
+        const uint32_t wide = check_vector_builtin_width(shape.bytes * (8 / shape.element));
+        uint32_t r = 0;
+        if (shape.element < 8)
+        {
+            row->records[r++] = check_vector_lower_record(extend[e].forms[wide], v0, 0, v0);
+            row->records[r++] = check_vector_lower_record(extend[e].forms[wide], v1, 0, v1);
+        }
+        row->records[r++] = check_vector_lower_record(products.forms[wide], v2, v0, v1);
+        row->records[r] = check_vector_lower_record(products.forms[wide], v0, v0, v1);
+        row->records[r++].immediate = 0x11;
+        row->records[r++] = check_vector_lower_record(interleaves.forms[wide], v0, v2, v0);
+        if (shape.element < 8)
+        {
+            row->records[r++] = check_vector_lower_record(truncate[e].forms[wide], v0, 0, v0);
+        }
+        row->record_count = (uint8_t)r;
+        reason = check_vector_clmul_packed(types, target, vector) ? NULL : "vector carry-less multiplication without AVX-512VL and VPCLMULQDQ";
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_CTZG)
     {

@@ -49,9 +49,8 @@
 
 // Exact source spellings and audited source capabilities. A zero entry is recognized but has no complete native
 // source path. The scoped families (__scoped_atomic_*, __hip_atomic_* and __opencl_atomic_*) are their base builtins'
-// operations with a scope (c_check_builtin_atomic_c11.c). CHECKER alone is a builtin the checker checks as clang does
-// but no lowering takes: __builtin_elementwise_clmul (VPCLMULQDQ is no form Tier 0's rows cover) and the masked memory
-// builtins (their masks are vectors of bools, which the lowering has no class for). The matrix ones are SOURCE: every
+// operations with a scope (c_check_builtin_atomic_c11.c). CHECKER alone would be a builtin the checker checks as clang
+// does but no lowering takes (none is now). The matrix ones are SOURCE: every
 // call is an error, as clang's is without -fenable-matrix (no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
 // published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, its typed overflow builtins
@@ -330,7 +329,7 @@
     X(ELEMENTWISE_MINIMUMNUM, 0x341u, "__builtin_elementwise_minimumnum", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_LDEXP, 0x342u, "__builtin_elementwise_ldexp", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_CTZG, 0x343u, "__builtin_elementwise_ctzg", BUSTER_CBUILTIN_SOURCE) \
-    X(ELEMENTWISE_CLMUL, 0x344u, "__builtin_elementwise_clmul", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(ELEMENTWISE_CLMUL, 0x344u, "__builtin_elementwise_clmul", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_PDEP, 0x345u, "__builtin_elementwise_pdep", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_PEXT, 0x346u, "__builtin_elementwise_pext", BUSTER_CBUILTIN_SOURCE) \
     X(REDUCE_XOR, 0x350u, "__builtin_reduce_xor", BUSTER_CBUILTIN_SOURCE) \
@@ -338,12 +337,12 @@
     X(REDUCE_MINIMUM, 0x352u, "__builtin_reduce_minimum", BUSTER_CBUILTIN_SOURCE) \
     X(REDUCE_ASSOC_FADD, 0x353u, "__builtin_reduce_assoc_fadd", BUSTER_CBUILTIN_SOURCE) \
     X(REDUCE_IN_ORDER_FADD, 0x354u, "__builtin_reduce_in_order_fadd", BUSTER_CBUILTIN_SOURCE) \
-    X(MASKED_LOAD, 0x360u, "__builtin_masked_load", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_STORE, 0x361u, "__builtin_masked_store", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_EXPAND_LOAD, 0x362u, "__builtin_masked_expand_load", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_COMPRESS_STORE, 0x363u, "__builtin_masked_compress_store", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_GATHER, 0x364u, "__builtin_masked_gather", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(MASKED_SCATTER, 0x365u, "__builtin_masked_scatter", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(MASKED_LOAD, 0x360u, "__builtin_masked_load", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_STORE, 0x361u, "__builtin_masked_store", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_EXPAND_LOAD, 0x362u, "__builtin_masked_expand_load", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_COMPRESS_STORE, 0x363u, "__builtin_masked_compress_store", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_GATHER, 0x364u, "__builtin_masked_gather", BUSTER_CBUILTIN_SOURCE) \
+    X(MASKED_SCATTER, 0x365u, "__builtin_masked_scatter", BUSTER_CBUILTIN_SOURCE) \
     X(MATRIX_TRANSPOSE, 0x370u, "__builtin_matrix_transpose", BUSTER_CBUILTIN_SOURCE) \
     X(MATRIX_COLUMN_MAJOR_LOAD, 0x371u, "__builtin_matrix_column_major_load", BUSTER_CBUILTIN_SOURCE) \
     X(MATRIX_COLUMN_MAJOR_STORE, 0x372u, "__builtin_matrix_column_major_store", BUSTER_CBUILTIN_SOURCE) \
@@ -461,7 +460,27 @@
     X(PTRAUTH_STRIP, 0x44eu, "__builtin_ptrauth_strip", BUSTER_CBUILTIN_SOURCE) \
     X(CPU_INIT, 0x44fu, "__builtin_cpu_init", BUSTER_CBUILTIN_SOURCE) \
     X(CPU_IS, 0x450u, "__builtin_cpu_is", BUSTER_CBUILTIN_SOURCE) \
-    X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE)
+    X(CPU_SUPPORTS, 0x451u, "__builtin_cpu_supports", BUSTER_CBUILTIN_SOURCE) \
+    X(PRESERVE_ACCESS_INDEX, 0x452u, "__builtin_preserve_access_index", BUSTER_CBUILTIN_SOURCE) \
+    X(HLSL_RESOURCE_GETPOINTER_TYPED, 0x453u, "__builtin_hlsl_resource_getpointer_typed", BUSTER_CBUILTIN_SOURCE) \
+    X(CLEAR_PADDING, 0x454u, "__builtin_clear_padding", BUSTER_CBUILTIN_SOURCE) \
+    X(INVOKE, 0x455u, "__builtin_invoke", BUSTER_CBUILTIN_SOURCE) \
+    X(EH_RETURN, 0x456u, "__builtin_eh_return", BUSTER_CBUILTIN_SOURCE) \
+    X(CFSTRING_MAKE_CONSTANT_STRING, 0x457u, "__builtin___CFStringMakeConstantString", BUSTER_CBUILTIN_SOURCE) \
+    X(NSSTRING_MAKE_CONSTANT_STRING, 0x458u, "__builtin___NSStringMakeConstantString", BUSTER_CBUILTIN_SOURCE) \
+    X(MS_VA_START, 0x459u, "__builtin_ms_va_start", BUSTER_CBUILTIN_SOURCE) \
+    X(MS_VA_END, 0x45Au, "__builtin_ms_va_end", BUSTER_CBUILTIN_SOURCE) \
+    X(MS_VA_COPY, 0x45Bu, "__builtin_ms_va_copy", BUSTER_CBUILTIN_SOURCE) \
+    X(ZOS_VA_START, 0x45Cu, "__builtin_zos_va_start", BUSTER_CBUILTIN_SOURCE) \
+    X(ZOS_VA_END, 0x45Du, "__builtin_zos_va_end", BUSTER_CBUILTIN_SOURCE) \
+    X(ZOS_VA_COPY, 0x45Eu, "__builtin_zos_va_copy", BUSTER_CBUILTIN_SOURCE) \
+    X(INFER_ALLOC_TOKEN, 0x45Fu, "__builtin_infer_alloc_token", BUSTER_CBUILTIN_CONSTANT) \
+    X(CALL_WITH_STATIC_CHAIN, 0x4B0u, "__builtin_call_with_static_chain", BUSTER_CBUILTIN_SOURCE) \
+    X(OS_LOG_FORMAT_BUFFER_SIZE, 0x4B1u, "__builtin_os_log_format_buffer_size", BUSTER_CBUILTIN_CONSTANT) \
+    X(OS_LOG_FORMAT, 0x4B2u, "__builtin_os_log_format", BUSTER_CBUILTIN_SOURCE) \
+    X(DUMP_STRUCT, 0x4B3u, "__builtin_dump_struct", BUSTER_CBUILTIN_SOURCE) \
+    X(AVAILABLE, 0x4B4u, "__builtin_available", BUSTER_CBUILTIN_SOURCE) \
+    X(COUNTED_BY_REF, 0x4B5u, "__builtin_counted_by_ref", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -482,6 +501,10 @@ typedef enum CBuiltinId
     CBUILTIN_STDC_LIBRARY_FIRST = 0x460,
     CBUILTIN_STDC_LIBRARY_LAST = 0x460 + (CBUILTIN_STDC_BIT_CEIL - CBUILTIN_STDC_LEADING_ZEROS + 1) * 5 - 1,
 } CBuiltinId;
+
+// The miscellaneous builtins past the stdc library builtins' identities (#148) start at 0x4b0, after them.
+_Static_assert(CBUILTIN_INFER_ALLOC_TOKEN < CBUILTIN_STDC_LIBRARY_FIRST && CBUILTIN_STDC_LIBRARY_LAST < CBUILTIN_CALL_WITH_STATIC_CHAIN,
+               "the miscellaneous builtins' identities stay clear of the stdc library builtins'");
 
 // The parameter types of the stdc library builtins' names, in their identities' order, and their suffixes.
 #define BUSTER_CBUILTIN_STDC_LIBRARY_TYPES 5u
@@ -745,7 +768,17 @@ static __attribute__((unused)) void cbuiltin_bits_arity(uint32_t id, uint32_t* m
 // around the scoped atomics' (0x400 to 0x43c), which a range of ids from the first to the last would take in.
 static __attribute__((unused)) bool cbuiltin_misc_last(uint32_t id)
 {
-    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CPU_SUPPORTS);
+    return (id >= CBUILTIN_ARITHMETIC_FENCE && id <= CBUILTIN_XRAY_TYPEDEVENT) || (id >= CBUILTIN_WARN_MEMSET_ZERO_LEN && id <= CBUILTIN_CLEAR_PADDING) ||
+           (id >= CBUILTIN_EH_RETURN && id <= CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) || id == CBUILTIN_INFER_ALLOC_TOKEN ||
+           (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_COUNTED_BY_REF);
+}
+
+// The Microsoft and z/OS va_list builtins (#148, __builtin_ms_va_start to __builtin_zos_va_copy), which take the
+// varargs actions (check_varargs), as va_start's, va_end's and va_copy's do.
+static __attribute__((unused)) bool cbuiltin_varargs_foreign(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_MS_VA_START && id <= CBUILTIN_ZOS_VA_COPY;
+    return result;
 }
 
 static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
@@ -756,11 +789,15 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
 
 // Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
 // fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's, and the literal and
-// function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is and cpu_supports.
+// function name witnesses of allow_runtime_check, allow_sanitize_check, annotation, function_start, cpu_is, cpu_supports and
+// __builtin___CFStringMakeConstantString, __builtin_infer_alloc_token's token, __builtin_call_with_static_chain's call,
+// the os_log builtins' formats, __builtin_available's specs and __builtin_counted_by_ref's place.
 static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY) || (id >= CBUILTIN_ALLOW_RUNTIME_CHECK && id <= CBUILTIN_ANNOTATION) ||
-                        id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS;
+                        id == CBUILTIN_FUNCTION_START || id == CBUILTIN_CPU_IS || id == CBUILTIN_CPU_SUPPORTS || id == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING ||
+                        id == CBUILTIN_INFER_ALLOC_TOKEN || (id >= CBUILTIN_CALL_WITH_STATIC_CHAIN && id <= CBUILTIN_OS_LOG_FORMAT) || id == CBUILTIN_AVAILABLE ||
+                        id == CBUILTIN_COUNTED_BY_REF;
     return result;
 }
 

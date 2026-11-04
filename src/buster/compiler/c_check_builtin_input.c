@@ -6,7 +6,7 @@
 
 static bool check_input_vararg_id(uint16_t builtin)
 {
-    return builtin >= CBUILTIN_VA_START && builtin <= CBUILTIN_VA_END;
+    return (builtin >= CBUILTIN_VA_START && builtin <= CBUILTIN_VA_END) || cbuiltin_varargs_foreign(builtin);
 }
 
 static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t keyword, uint16_t builtin)
@@ -153,6 +153,58 @@ static void check_input_vararg_type(CheckInputReader* reader, uint32_t token)
 // read too (`one ? 0.5 : 0.25`): it never runs, so its subtree is checked as a constant context's
 // (BUSTER_CHECK_CONTEXT_VALUE, which reports no constraint of its own). Out of line, so that check_input_expressions'
 // walk keeps its frame and registers: inlined, the evaluator's state took the walk's frame from 376 to 904 bytes.
+// clang's -WCFString-literal (#148, CheckObjCString): __builtin___CFStringMakeConstantString's ordinary literal that isn't UTF-8 as LLVM's
+// strict conversion reads it (pp_utf8_sequence: an overlong form, a surrogate, past U+10FFFF, or cut short), at the
+// literal, once the call is read (its closing parenthesis `closing`). A rare builtin's rare literal: scalar.
+static void check_input_cfstring_literal(CheckInputReader* reader, const CheckBuiltinCall* evidence, uint32_t closing)
+{
+    uint32_t at = 0;
+    uint32_t length = 1;
+    while (at < evidence->nan_payload_length && length != 0)
+    {
+        uint32_t code_point = 0;
+        length = pp_utf8_sequence(evidence->nan_payload + at, evidence->nan_payload_length - at, &code_point);
+        at += length;
+    }
+    if (length == 0)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_CFSTRING_LITERAL,
+            .kind = CHECK_WARNING_EVENT_CFSTRING_TRUNCATED,
+            .token = evidence->nan_payload_token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = closing,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// Whether call `close` (its `)`) calls a builtin, as clang's getBuiltinCallee finds one through the callee's
+// parentheses (#148): a catalog builtin or a header builtin's leaf, which the reader claims at the call, or the unit's
+// declaration, with external linkage, of a library builtin's name (pp_library_builtin, `abs` or `strlen` declared).
+static bool check_input_builtin_callee(const CheckInputReader* reader, uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    uint32_t callee = reader->first_child[close];
+    for (uint32_t depth = 0; depth < 64 && callee < parser->tokens.count && parser->tree.roles[callee] == PARSE_ROLE_CLOSE_GROUP; depth += 1)
+    {
+        const uint32_t opener = reader->first_child[callee];
+        callee = opener < parser->tokens.count ? reader->next_child[opener] : BUSTER_CHECK_NONE;
+    }
+    const bool named = callee < parser->tokens.count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER;
+    const uint32_t declaration = named ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
+    const bool function = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                          check_input_linkage(reader->declaration_bits, declaration) == 2;
+    const IdentId name = named ? parser->tokens.names[callee] : 0;
+    const bool library = function && name != 0 &&
+                         pp_library_builtin(&reader->pp->options, intern_bytes(reader->pp->table, name), intern_length(reader->pp->table, name));
+    const bool intrinsic = reader->output->intrinsic_ids != NULL && reader->output->intrinsic_ids[close] != 0;
+    return reader->builtins[close] != CBUILTIN_NONE || intrinsic || library;
+}
+
 static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader* reader, uint32_t node, uint32_t token, uint32_t count, uint32_t end,
                                                                 CheckBuiltinCall* evidence)
 {
@@ -172,6 +224,46 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
     {
         check_input_annotation_evidence(reader, end, token, evidence);
+    }
+    if (builtin == CBUILTIN_CALL_WITH_STATIC_CHAIN && count == 2 && end < token && end > 0)
+    {
+        // clang's BuiltinCallWithStaticChain: a CallExpr as written, without parentheses around it (whose node is a
+        // grouping's), the root of its argument, of no builtin.
+        const Parser* parser = reader->parser;
+        const uint32_t close = end - 1;
+        const uint32_t keyword = reader->first_child[token];
+        const uint32_t begin = keyword < token ? keyword + 2 : token;
+        const uint32_t parent = parser->tree.parents[close];
+        const bool call = close >= begin && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && (parent < begin || parent >= end);
+        evidence->static_chain_call = call && !check_input_builtin_callee(reader, close);
+    }
+    if (builtin == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || builtin == CBUILTIN_OS_LOG_FORMAT)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        check_input_os_log_evidence(reader, keyword < token ? keyword + 2 : token, token, builtin == CBUILTIN_OS_LOG_FORMAT, count, evidence);
+    }
+    if (builtin == CBUILTIN_COUNTED_BY_REF)
+    {
+        check_input_counted_ref_context(reader, token);
+    }
+    if (builtin == CBUILTIN_AVAILABLE)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        bool silent = false;
+        if (keyword < token)
+        {
+            check_input_availability_specs(reader, keyword, token, false, &silent);
+        }
+        evidence->availability_silent = silent;
+    }
+    if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
+    {
+        const uint32_t keyword = reader->first_child[token];
+        check_input_alloc_token_evidence(reader, keyword < token ? keyword + 2 : token, token, NULL, 0, 0, evidence);
+    }
+    if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING && count == 1 && evidence->nan_payload_known && !evidence->nan_payload_utf8)
+    {
+        check_input_cfstring_literal(reader, evidence, token);
     }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)

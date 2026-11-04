@@ -153,9 +153,11 @@ always is in C23; and at file scope a declarator without specifiers (`(x);`,
 `*p;`) has an implicit int too. Selection and iteration statements are blocks, and so is
 each of their substatements (C 6.8.4p3, 6.8.5p5): what a condition declares
 ends with its statement, and what a then-statement or a do's body declares ends
-with it. `__builtin_offsetof`'s member designator and `_Static_assert`'s
-message have grammars of their own, as clang reads them: members' names,
-whatever the ordinary names mean, `.` and subscripts; and string literals. So
+with it. `__builtin_offsetof`'s member designator, `_Static_assert`'s
+message and `__builtin_available`'s specs (#148) have grammars of their own, as
+clang reads them: members' names, whatever the ordinary names mean, `.` and
+subscripts; string literals; and a `*` or a platform's name, whatever the
+ordinary names mean, and its version, a number, separated by commas. So
 do an asm statement's sections, as clang's `ParseAsmStatement` reads them: the
 template, the outputs and inputs (each a symbolic name in `[...]`, a constraint
 and its operand in parentheses), the clobbers and asm goto's labels, all of
@@ -172,7 +174,13 @@ every unary operator after `goto` that role, by one blend per block, and its
 checks send the others than `*` to the scalar parser's error. A C23 attribute list's items are a name,
 perhaps in a scope (`gnu::unused`) and with an argument clause, a balanced run
 of tokens, separated by commas; its items and a GNU attribute list's may be
-empty, the last one too.
+empty, the last one too. A GNU attribute's arguments are expressions, but those
+of clang's type-argument attributes (`attributeIsTypeArgAttr`: `preferred_type`,
+`vec_type_hint` and six others, by name, known or not) are a type name where a
+type starts them (`parse_scalar_type_argument_attribute`), an abstract
+declaration in the call's group, whose missing `)` clang's
+`ParseAttributeWithTypeArg` expects at the token; the vector path flags such a
+type and leaves the declaration to the scalar parser.
 
 GNU attributes at a block boundary now retain the choice between declaration
 and statement syntax until their following token is known. Attributes after a

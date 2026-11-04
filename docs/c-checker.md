@@ -2564,7 +2564,30 @@ What the lowering covers past scalars (#145's programs):
     VMOVDQU16). pdep and pext are each element's BMI2 PDEP or PEXT (no vector
     instruction deposits or extracts bits), of 32-bit zero extensions of 8- and
     16-bit ones, through frame objects of the vectors
-    (`check_lower_vector_deposit`);
+    (`check_lower_vector_lanes`). clmul (#148) is each element's carry-less
+    product's low bits: with AVX-512VL and VPCLMULQDQ, where the elements'
+    64-bit zero extensions take 64 bytes at most (`check_vector_clmul_packed`),
+    VPMOVZX to quadwords, VPCLMULQDQ of each 16 bytes' first quadwords (0x00)
+    and second ones (0x11), VSHUFPD by 0 for their low quadwords (clang's
+    VPUNPCKLQDQ, whose EVEX forms `x86_semantics.c` doesn't cover) and VPMOV
+    back to the elements, as clang computes 64-bit elements' (an element's
+    product's low bits are its operands' bits' alone); else element by element
+    through frame objects, as pdep's, VMOVD or VMOVQ into a vector register,
+    VPCLMULQDQ and back (EVEX's with AVX-512VL and VPCLMULQDQ, else VEX's, of
+    AVX and PCLMUL);
+  - the masked memory builtins (#148, `check_vector_masked_row`) are clang's
+    llvm.masked.* code with AVX-512: the mask, a vector of bools (its object's
+    address, as a transport vector's value is), is its bits, loaded and cleared
+    past its lanes where the instruction has more (a vector of 2 or 3 lanes, or
+    of 4 or 8 bytes), moved into k1 by KMOVW (KMOVD or KMOVQ past 16 lanes); then
+    one instruction under k1: a load's VMOVDQU8, 16, 32 or 64, zeroing the lanes
+    k1 leaves or merging into the passthru's; an expanding load's VPEXPANDB, W,
+    D or Q; a store's VMOVDQU and a compressing store's VPCOMPRESS; a gather's
+    VPGATHERDD, DQ, QD or QQ by its elements' and its indices' sizes, into zeros
+    or the passthru, its indices of 8 or 16 bits sign-extended first (VPMOVSX),
+    as a GEP's are, scaled by the element's bytes; a scatter's VPSCATTER, scaled
+    by the index's element's bytes, as clang 23's code has it (its GEP's
+    element type is the index's, `CGBuiltin.cpp`);
   - the floating functions clang -O0's code computes by instructions are clang's
     sequences, operand for operand, so that NaN payloads and zeros' signs are
     clang's (`check_vector_floating_row`, of vectors of floats and doubles, and
@@ -2633,9 +2656,11 @@ What the lowering covers past scalars (#145's programs):
   minimum, maximumnum and minimumnum (x87 sequences in clang's code) and its
   ldexp by a 64-bit exponent; a scalar's roundings, round, canonicalize,
   copysign, maximum and minimum functions and ldexp without AVX-512F; ldexp by
-  an exponent wider than 64 bits; carry-less products (clmul: VPCLMULQDQ is no
-  form `x86_semantics.c` covers); the masked memory builtins (their masks are
-  vectors of bools, which the lowering has no class for); a shuffle by a vector
+  an exponent wider than 64 bits; carry-less products without AVX and PCLMUL;
+  the masked memory builtins without AVX-512F and AVX-512VL, of 8- and 16-bit
+  elements without AVX-512BW (expanding loads and compressing stores without
+  AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
+  instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the leading
   zero counts of 8- and 16-bit elements; the integer elementwise functions of
@@ -3119,11 +3144,14 @@ What the lowering covers past scalars (#145's programs):
   linkage, in a block, without a target or on a typedef. A static variable's
   alias or weakref is no tentative definition, and an alias, ifunc or weakref
   target defines its entity for later redeclarations, functions' and
-  variables'. Refused by name: an alias whose thread-local storage isn't its
-  definition's, and an alias variable that the unit also defines tentatively
-  (before it clang's error "alias definition of 'w' after tentative
-  definition", which the reader doesn't make; after it clang takes the
-  declaration as the alias's). Not modeled: clang's warnings at them (an alias
+  variables'. A variable's alias right after a tentative definition (the
+  previous declaration one, as clang's `getActingDefinition` requires) is
+  clang's "alias definition of 'w' after tentative definition" at its name,
+  with "previous definition is here" at the last one
+  (`check_input_alias_tentative`). Refused by name: an alias whose
+  thread-local storage isn't its definition's, and at `-c` an alias variable
+  the unit defines tentatively after it (clang takes the declaration as the
+  alias's). Not modeled: clang's warnings at them (an alias
   of a weak alias, a section on an alias, different types, an ifunc on a
   variable, which is ignored), and the redefinition's own message (the
   generic "conflicting declaration"). `__has_attribute` and
@@ -3840,7 +3868,9 @@ declarator, at file scope and for a member), the ungrouped plain `_Complex` assu
 `-Wgnu-variable-sized-type-not-at-end`, `-Wstatic-local-in-inline` with its `static` note, the
 `-Wmany-braces-around-scalar-init` excess brace, `-Winitializer-overrides` with its prior-initialization note,
 `-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
-for an unnamed parameter before C23. Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+for an unnamed parameter before C23. Since then (#147), `-Wextern-initializer` warns of a file-scope extern
+variable's initializer at its name, after its attributes' warnings, as clang's `AddInitializerToDecl` does (a block
+scope's is an error). Command-line options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
 compares the driver's complete diagnostics with clang's for every producer and policy, and
@@ -5142,6 +5172,46 @@ change, it refused such a declaration by name.
   name, but a member's "type name requires a specifier or qualifier" after
   C23 ones, which clang's specifiers don't hold (GNU ones count as
   specifiers there).
+- **Statement attributes' handlers.** As clang's SemaStmtAttr takes them
+  (`check_input_statement_attribute_kinds`), each with -Wignored-attributes'
+  warning at the statement's first token: GNU's `noinline` and
+  `always_inline` (`gnu::`'s too), a function's alone, "attribute is ignored
+  on this statement as it only applies to functions; use
+  '[[clang::noinline]]' on statements"; clang's (and `msvc::noinline`), its
+  `CheckStmtInlineAttr`'s (`check_input_statement_inline_calls`): a statement
+  without a call, and at each call of a function any of whose declarations up
+  to the visible one has the attribute it overrides (`always_inline` for
+  `noinline`, `noinline` for `always_inline`) or `flatten`, "statement
+  attribute 'X' has higher precedence than function attribute 'Y'" with
+  "conflicting attribute is here" at that declaration's first token;
+  `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
+  because there exists no call expression inside the statement". The calls
+  are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
+  `(` (not a declarator's parameters') or an asm statement's, outside
+  `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
+  arguments, to the statement's end (`check_input_loop_statement_end`). The
+  callee is its name through parentheses and the prefix `*`, `&` and `+`
+  (`(f)()`, `(*f)()`, `(&f)()`), as clang's `getCalleeDecl` finds it
+  (`check_input_callee_name`).
+- **Selections in statement attributes.** clang's `CallExprFinder` and
+  `HasSideEffects` visit a `_Generic`'s or a `__builtin_choose_expr`'s
+  selected arm alone, so a call or a side effect in another arm, or in
+  `_Generic`'s controlling expression, counts for none of `nomerge`,
+  `noinline`, `always_inline` and `assume` (`check_input_unselected`). An
+  assumption's argument is evaluated where it is read, and the evaluator
+  records the arm it takes (`CheckInputReader.selection_arms`). A statement
+  with a selection is checked once the reader's selections are read
+  (`check_input_statement_defer` and `check_input_statement_deferred`), with
+  its callees' declarations as the bindings resolved them: a speculative
+  evaluation as the statement is read would append binding events out of
+  their order.
+  MSVC's `forceinline` and `forceinline_calls` are ignored off its ABI with
+  "'X' attribute ignored", at the statement or, on a function, at the
+  attribute after its subject's check. An asm statement's C23 attributes are
+  each "'X' attribute ignored" at its first token, unknown ones too, and read
+  no further (`check_input_asm_statement_attributes`); its GNU ones, but a
+  label's, are the parser's "an attribute list cannot appear here" at the
+  first (clang's `ProhibitAttributes`).
 - **Differences left.**
   - Several `__clang__` scopes in one declaration's attributes: clang gives
     its parser's warnings first, then its unknown-attribute ones; the
@@ -5205,6 +5275,762 @@ Its `ATTR_NAME` and `ATTR_SCOPE_NAME` lines, in order, are the file's
 `BUSTER_CHECK_CLANG_C23_ATTRIBUTE("spelling")`), under its header; update
 THIRD_PARTY_NOTICES.md's record, the counts `test-checker` checks, and
 compare the lists with `Attr.td` before taking them.
+
+## Attributes on declarations they don't apply to (#147)
+
+Clang checks each attribute's subject before its handler runs: on a
+declaration of none of its subjects, it warns "'X' attribute only applies to
+SUBJECTS" (`-Wignored-attributes`) and keeps nothing of the attribute, or, for
+some attributes, gives an error of the same words. The checker used to refuse
+such a declaration, or keep the attribute where clang drops it. It now does as
+clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
+
+- **The table.** `c_check_attribute_subjects.inc` is clang's
+  `diagAppertainsToDecl` for C, one row per GNU and C23 spelling: the C
+  declarations the attribute takes (`BUSTER_CHECK_SUBJECT_*`), whether
+  another is clang's error, and the subjects its message names. It is derived
+  LLVM data: `tools/generate_attribute_subjects.c` generates it from
+  `clang-tblgen --gen-clang-attr-parsed-attr-impl` of `Attr.td`. The
+  generator maps each of clang's subject predicates to the C declarations it
+  takes, and a predicate it doesn't know fails it. For example,
+  `GlobalVar` takes a variable of global storage and `FunctionPointer` a
+  declaration of a function pointer's type. A predicate of no C declaration
+  (Objective-C's, C++'s, HLSL's) takes none. The lookup is a binary search by
+  spelling: a GNU name without its underscores, or a C23 spelling with its
+  scope normalized.
+- **Declarations' subjects.** Each place that reads attributes says what its
+  declaration is:
+  - a function, inline or not;
+  - a variable of global storage (thread-local or shared, external at file
+    scope) or local storage;
+  - a parameter;
+  - a member, a bit-field or not;
+  - a typedef, a struct, union or enum, an enumerator, or a label.
+
+  Each of these is also function-like, prototyped, or a function pointer, by
+  its type: a parameter by its adjusted type.
+- **The handlers' own subjects.** Two attributes are checked by their
+  handlers, not by the generated code, and rows of
+  `check_input_subject_handlers` give them:
+  - `sentinel` takes functions and variables (parameters too) of a function
+    pointer's type: "functions, methods and blocks".
+  - `transparent_union` takes unions and typedefs of a union's type:
+    "unions".
+- **Each declarator.** The specifiers' attributes are shared by the
+  declarators of their declaration, and each declarator checks them again.
+  `int __attribute__((cold)) a, b, f(void);` warns at `a` and at `b`, and
+  `f` keeps `cold`. The record a declarator ignored is marked so
+  (`subject_ignored`), and the next declarator decides afresh.
+- **Function types' attributes.** A calling convention, `regparm` or GNU's
+  `noreturn` on a declarator whose type isn't a function's, or a pointer's,
+  array's or aligned typedef's to one, gets clang's "'X' only applies to
+  function types; type here is 'T'" (`check_input_attribute_function_types`).
+  The warning is at the attribute's first token, a C23 one's scope; the name
+  is written without its scope, and the type is as clang spells it, its
+  typedef first ('T' (aka 'int')). This covers the specifiers' attributes too,
+  for each declarator.
+- **`nonstring`.** On a variable, parameter or field whose type is no pointer
+  to a character type or array of one (through arrays of arrays), clang's
+  handler warns "'X' attribute only applies to fields or variables of
+  character array type; type is 'T'". The warning is at the declaration's
+  first token, past `__extension__` and C23 attributes, as
+  `Decl::getBeginLoc` places it (`check_input_attribute_begin`).
+- **`transparent_union`'s own warnings.** These follow
+  `handleTransparentUnionAttr` (`check_input_transparent_union_warning`):
+  - an incomplete union, or one of no fields: a warning at the attribute;
+  - a first field of a floating or vector type: a warning at that field;
+  - a field of another size than the first's, or of a greater alignment: a
+    warning at that field, with a note of the first field's size or
+    alignment at it.
+
+  Each union's member tokens are kept from its completion
+  (`CheckInputUnionTokens`), for a typedef that applies the attribute later.
+  A field of incomplete type (a flexible array member) leaves the attribute
+  ignored without a word, as clang's does. A field less aligned than the
+  first is fine (`type_mark_transparent_union`). It used to make the union no
+  transparent one, which refused calls through it that clang takes.
+- **Vector types in messages.** A vector type printed without an a.k.a. is
+  described as clang's `ConvertTypeToDiagnosticString` describes it:
+  "'T' (vector of N 'E' values)" (`check_driver_warning_type`).
+- **Differences left.**
+  - An attribute clang knows that the checker neither has a rule for nor takes
+    generically (the next section's "Attributes without a rule") is refused by
+    name before its subject is checked: `int v __attribute__((selectany));` is
+    refused, where clang takes it.
+  - The checker stops at a declaration's first error. So a later
+    declaration's warnings, which clang gives too, are missing after an error
+    row's error (`int e __attribute__((error("x")));`), as after any other
+    error.
+- **Tests.** `test-checker` checks the table's order and lookups
+  (`c_check_attribute_test.c`): the counts, a row of each kind, `_Clang`'s
+  scope, and an attribute whose handler checks itself. It also checks
+  `type_mark_transparent_union`'s statuses
+  (`c_check_transparent_type_test.c`). `test-checker-driver` compares the
+  whole output with clang's on both paths (`check_test_driver_unknown_attributes`'s
+  statements) for:
+  - variables, functions, parameters, members, bit-fields, typedefs, tags,
+    enumerators and labels, by GNU's and C23's spellings;
+  - error rows, each in a unit of its own;
+  - function types' attributes on other types, and shared specifiers;
+  - `sentinel`, `transparent_union` and `nonstring`;
+  - `transparent_union`'s own warnings, and a call through a union with a
+    less aligned field.
+
+The table is regenerated from the installed clang's tag, in the directory of
+`Attr.td` and the files it includes (the spelling list's, above):
+
+```sh
+clang-tblgen --gen-clang-attr-parsed-attr-impl -I . clang/Basic/Attr.td -o parsed.inc
+clang-tblgen --gen-clang-attr-parsed-attr-kinds -I . clang/Basic/Attr.td -o kinds.inc
+cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_attribute_subjects.c -o build/generate_attribute_subjects
+build/generate_attribute_subjects --self-test
+build/generate_attribute_subjects parsed.inc kinds.inc "clang/include/clang/Basic/Attr.td at llvmorg-X (sha256 ...), by clang-tblgen VERSION" > src/buster/compiler/c_check_attribute_subjects.inc
+```
+
+Then update THIRD_PARTY_NOTICES.md's record and the counts `test-checker`
+checks.
+
+`c_check_attribute_arguments.inc`, how clang's parser reads each attribute's
+arguments (`check_input_arguments_row`), is made the same way from clang's
+parser switches, by `tools/generate_attribute_arguments.c`:
+
+```sh
+clang-tblgen --gen-clang-attr-parser-string-switches -I . clang/Basic/Attr.td -o switches.inc
+cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_attribute_arguments.c -o build/generate_attribute_arguments
+build/generate_attribute_arguments --self-test
+build/generate_attribute_arguments switches.inc "clang/include/clang/Basic/Attr.td at llvmorg-X (sha256 ...), by clang-tblgen VERSION; see THIRD_PARTY_NOTICES.md" > src/buster/compiler/c_check_attribute_arguments.inc
+```
+
+A list's value that is a condition is evaluated for GNU's and C23's syntax on
+x86-64; the generator fails on a condition it doesn't know.
+
+## Attributes' places, GCC's positions and their handlers' checks (#147)
+
+Clang reads an attribute's place before its subject: where a C23 list stands
+decides whether it is the declaration's or a type's, and its parser and Sema
+give their own diagnostics for some places. Several handlers also check their
+arguments against the function. The checker now gives these as clang does.
+
+- **The facts table.** `c_check_attribute_subjects.inc` also has a
+  `BUSTER_CHECK_FACT_*` row for each spelling clang has on x86-64 Linux, from
+  the same `ParsedAttrInfo` and from
+  `clang-tblgen --gen-clang-attr-parsed-attr-kinds`:
+  - whether GCC knows the attribute (`IsKnownToGCC`), and whether it isn't
+    C's (its `acceptsLangOpts`, of which C holds only `!CPlusPlus`);
+  - whether clang's generated handler applies it with nothing more
+    (`SimpleHandler`), whether it is a type's or a statement's, and whether
+    its arguments are parsed its own way;
+  - whether clang ignores it wherever it is (`IgnoredAttribute`: `bounded`,
+    `nv_weak` and two others);
+  - its least and most arguments, and whether its last is variadic.
+
+  The generator evaluates `existsInTarget` for x86-64 Linux, so a spelling of
+  another target's is none. There are 366 GNU spellings and 283 C23 ones, as
+  many as clang's vocabulary has (`check_input_fact_row`). A C-only
+  attribute's condition (`!CPlusPlus`) is C's; the generator used to read it as
+  another language's.
+- **The exclusions table.** `BUSTER_CHECK_EXCLUSION` rows are clang's
+  generated `diagMutualExclusion` pairs, by GNU spelling, where both
+  attributes exist on x86-64: 44 of them (`check_input_exclusions`).
+- **GCC's positions.** On a function's definition, each GNU attribute after
+  the declarator that GCC knows gets clang's parser warning "GCC does not
+  allow 'X' attribute in this position on a function definition"
+  (`-Wgcc-compat`, `check_input_attribute_gcc_position`), at its name.
+- **nonnull's indices.** As `handleNonNullAttr` checks them
+  (`check_input_attribute_function`):
+  - an index of no parameter is the error "'nonnull' attribute parameter N is
+    out of bounds", N being the argument's place, at the attribute;
+  - an index of a parameter of no pointer type (a pointer, or a transparent
+    union with a pointer member) is the warning "'nonnull' attribute only applies to pointer
+    arguments", and the index is dropped;
+  - with no pointer index left, a function of no pointer parameter warns
+    "'nonnull' attribute applied to function with no pointer arguments",
+    unless it is variadic or a macro wrote the attribute;
+  - on a parameter, arguments are the warning "'nonnull' attribute when used
+    on parameters takes no arguments", unless the parameter is a function
+    pointer; without them, a parameter of no pointer type warns as above.
+
+  The warnings come before the error, in argument order: each is published
+  at the attribute's token and the error after it
+  (`check_input_report_argument`).
+- **A C23 list's place** (`check_input_standard_place`). A list after a
+  function declarator's `)`, an array's `]` or a pointer's `*` is the
+  declarator chunk's type's; one right after the specifiers (a type, a tag's
+  body, `_Atomic(T)`) is their type's; a list right after another stands where
+  that one does. There, as clang's `processTypeAttrs` and parser take them:
+  - a `gnu::` attribute of a declaration after a chunk, even one clang doesn't
+    know, is ignored with "attribute 'gnu::X' ignored, because it cannot be
+    applied to a type" (`-Wignored-attributes`);
+  - a `gnu::` attribute of a type there is applied, with "GCC does not allow
+    the 'gnu::X' attribute to be written on a type" (`-Wgcc-compat`);
+  - any other attribute of a declaration there, or any after the specifiers,
+    is the error "'X' attribute cannot be applied to types"; so is
+    `nocf_check` after the specifiers, as clang's parser has it;
+  - `clang::noderef` is ignored anywhere in this syntax, and `vector_size`
+    after the specifiers, with "'X' attribute ignored";
+  - a list after a pointer's qualifiers (`int * const [[gnu::unused]] p`) is
+    the parser's error "an attribute list cannot appear here".
+- **Lists before a declarator's suffixes.** C23's direct-declarator takes a
+  list after the name and after each suffix, before the next one:
+  `int x [[gnu::unused]] [2];` and `void f [[gnu::cold]] (void) {}`. The
+  parser used to reject these. After a GNU attribute, the declarator has
+  ended, so a suffix or a C23 list there is still an error
+  (`parse_scalar_after_declarator`).
+- **Calling conventions x86-64 hasn't.** `stdcall`, `fastcall`, `thiscall`
+  and `pascal`, in any spelling, get clang's warning "'X' calling convention
+  is not supported for this target" where they meet a function's type: a
+  declaration's, a pointer's, a typedef's or a parameter's
+  (`check_input_attribute_conventions`). A specifier's is warned of once for
+  its declaration (`CheckInputReader.convention_warned`). On another type
+  there is no such warning, as in clang.
+- **Conflicting conventions.** Two conventions meeting one function are
+  checked in source order, where they meet it, as clang's
+  `handleFunctionTypeAttr` does: the second that differs is the error "A and
+  B attributes are not compatible", by clang's names. Here `sysv_abi` and the
+  conventions x86-64 hasn't are `cdecl`. A typedef's convention counts as an
+  earlier one. On another type, conflicting conventions are no error; each
+  gets the function-types warning. They used to be the generic error, also
+  on other types, and a convention x86-64 hasn't conflicted with none.
+- **Calling conventions starting a declarator.** One may start a declarator
+  in parentheses (`void (__cdecl *f)(void)`), but not a later declarator of a
+  declaration (`int a, __cdecl b;`), which is clang's parser error.
+- **A tag declaration's attributes** (`check_input_tag_attributes`), as
+  clang's `ParseClassSpecifier` and `ActOnTag` take them:
+  - The attributes before a tag's name are the tag's. On a declaration or a
+    reference that isn't its definition, they are checked as the tag's
+    subject. Then they are kept for the definition, which takes them before
+    its own: `struct __attribute__((packed)) B; struct B { char c; int i; };`
+    is 5 bytes, and `aligned` takes the largest. The checker used to drop
+    them, which changed such a struct's layout.
+  - On a declaration after the definition, each attribute the definition
+    lacks is warned of as "attribute declaration must precede definition",
+    with a note at the definition, and ignored. C23's `deprecated`,
+    `maybe_unused` and `nodiscard` may come after it.
+  - An enum reference's attributes (`enum __attribute__((x)) E e;`) are
+    ignored without a word.
+  - The attributes after a reference's name are its declarators', as if they
+    were written before `struct`: `struct S __attribute__((aligned(16))) v;`
+    aligns `v`. The checker used to drop them too.
+  - After a bare declaration's name (`struct S __attribute__((x));`), each is
+    ignored with "attribute 'x' is ignored, place it after "struct" to apply
+    attribute to type declaration".
+  - A `transparent_union` of no definition is ignored with clang's warning,
+    which clang gives twice.
+  - A C23 list before a reference's name is the parser's error "an attribute
+    list cannot appear here", at its first attribute. So is one after a bare
+    declaration's name, at its `[[`. One after a reference's name is in the
+    specifiers' place.
+- **Type names.** A GNU attribute of a declaration in a type name (a cast's,
+  `sizeof`'s or `_Alignof`'s, a compound literal's, `typeof`'s, `_Atomic`'s, a
+  builtin's type argument, `_Generic`'s association) is ignored with "'X'
+  attribute ignored when parsing type" (`check_input_attribute_in_type_name`),
+  once. `sizeof(int __attribute__((mode(DI))))` used to be 8, where clang's
+  is 4. A function type's attribute there on another type gets the
+  function-types warning. A GNU attribute after a type name's declarator
+  (`sizeof(int [2] __attribute__((x)))`) is the parser's "expected ')'". A
+  parameter's is still its own.
+- **`vector_size`** (`check_input_vector_size`), checked in the order of
+  clang's `BuildVectorType`, each its error at the attribute:
+  - an element of no builtin integer type but `bool`, no real floating type
+    and no `_BitInt`: "invalid vector element type 'T'", the type as clang
+    prints it with its typedef. Struct, union and enum elements used to be
+    accepted;
+  - a `_BitInt` whose width is no power of 2;
+  - a size of no integer constant, negative (at the argument), of 2^61 bytes
+    or more, zero, or no multiple of the element's size, or more than 2^32 - 1
+    elements.
+
+  A size the checker's types can't hold is still refused.
+- **`-Wgnu-alignof-expression`.** C11's `_Alignof` and C23's `alignof` of an
+  expression get clang's "'_Alignof' applied to an expression is a GNU
+  extension" at the keyword (`check_input_alignof_expression`), once whichever
+  evaluation reaches it. GNU's `__alignof__` doesn't.
+- **Attributes after a definition.** A function's or variable's declaration
+  after the entity's definition may carry a declaration attribute that the
+  definition lacks: the definition's own and those it took from earlier
+  declarations. As clang's `checkNewAttributesAfterDef` does, the checker warns
+  "attribute declaration must precede definition", with a note at the
+  definition, and ignores the attribute
+  (`check_input_attribute_after_kind`, beside `check_input_attribute_late`'s
+  seven kinds). An ignored alignment no longer aligns the object:
+  `int v = 1; extern int v __attribute__((aligned(16)));` keeps `v` at 4,
+  where the checker used to give it 16.
+
+  Some attributes are left alone, as clang leaves them: type attributes, the
+  machine mode, the alias family, multiversioning's, `overloadable`, the
+  keywords, statements' and locals' attributes, and C23's `deprecated`,
+  `maybe_unused` and `nodiscard`. A tentative definition is no definition
+  here. The check runs on the serial path: a body that a lane checks gets
+  none.
+- **Deprecated and unavailable uses** (`check_input_deprecated_uses`). A use
+  of a function, variable, typedef, tag or enumerator after a declaration
+  that a `deprecated` attribute marks gets clang's "'X' is deprecated"
+  (`-Wdeprecated-declarations`), or "'X' is deprecated: MESSAGE" with its
+  string, and a note "'X' has been explicitly marked deprecated here" at the
+  attribute. An `unavailable` one's use is clang's error "'X' is
+  unavailable", with its note at the declaration. An enumerator of a
+  deprecated enum is deprecated by its enum, which the note names. As clang's
+  context rules have it, there is none in the body of a function itself
+  deprecated (by any declaration before its body), in the specifiers of a
+  declaration whose declarator is deprecated, or in a bare declaration of a
+  tag. The pass runs after the bindings, only in a unit where some
+  `deprecated` or `unavailable` attribute was read: the uses are the tokens
+  bound to another declaration, and each marked declaration is found once by
+  the declaration its uses count by (its object's first, its tag's first).
+- **Attributes without a rule** (`check_input_attribute_generic`). An
+  attribute clang knows that the checker has no rule for is taken by its facts:
+  - one clang ignores everywhere (`bounded`) is ignored without a word;
+  - another language's (CUDA's `device`, `trivial_abi`, `called_once`) gets
+    clang's "'X' attribute ignored";
+  - one clang's generated handler applies with nothing more (`nouwtable`,
+    `disable_tail_calls`, `xray_never_instrument`, the analyses' and
+    Objective-C's) is kept with no effect, for its subject's check and its
+    argument count's;
+  - so are some whose own handlers check what is checked here: `minsize`,
+    `optnone`, `noescape`, `annotate`, `uninitialized`, `gcc_struct`,
+    `no_sanitize_memory`, `analyzer_noreturn` and `carries_dependency`. With
+    them come their handlers' warnings: `noescape` on a parameter of no
+    pointer type, and `optnone` taking over `always_inline` and `minsize`,
+    "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
+    argument must be a string literal;
+  - one of no C subject (Objective-C's, C++'s, the consumed analysis's:
+    `objc_runtime_name`, `callable_when`, `vecreturn` and the others), whose
+    subject's diagnostic is all clang gives in C;
+  - and these, whose handlers change nothing in C past their subjects,
+    counts and arguments' kinds: `available_only_in_default_eval_method`
+    (whose `#pragma clang fp eval_method` the checker refuses),
+    `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
+    `-frandomize-layout-seed`), `objc_boxable`, `objc_bridge_mutable`,
+    Fuchsia's `use_handle` and `release_handle`, `suppress`, `swift_bridge`,
+    `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`.
+
+  Every attribute's arguments are read first as clang's parser reads them,
+  by their kinds (`check_input_arguments_row`, from
+  `c_check_attribute_arguments.inc`): an identifier first argument of one
+  that takes an identifier is one; an argument it reads as an unevaluated
+  string literal that is none is "expected string literal as argument of 'X'
+  attribute" at it, wherever the attribute is; a type argument that starts
+  no type is "unknown type name" (an identifier) or "expected a type" and
+  "expected ')'" (see "Type arguments" below); and a generic attribute's expressions' names must name
+  something where the attribute is (`check_input_thread_names`): an earlier
+  declaration, a struct's earlier member, and a function declarator's
+  parameters only for the attributes clang parses in the function's scope or
+  after the declaration (`enable_if`, `diagnose_if`, the thread-safety
+  analysis's). An attribute whose arguments clang parses its own way
+  (`availability`, `counted_by` and the like) is its own.
+
+  Five have rules of their own, with their handlers' checks and effects:
+  - `lifetimebound` changes nothing in C. On a parameter of a function that
+    returns void it is clang's error, at the attribute; a C23 one after a
+    function's declarator is its type's, clang's "non-member function has no
+    implicit object parameter" error; elsewhere its subjects' error.
+  - `loader_uninitialized`'s variable is a definition without an initializer,
+    in `.bss`, never common: where common linkage would be clang's (`-fcommon`,
+    or `common`, without `nocommon` or a section) a weak one, as clang's code
+    makes it for an initializer that isn't zero. An initializer, `extern`, an
+    incomplete type, and adding it after the variable's definition are clang's
+    errors (the last with its note at the definition).
+  - `weak_import`'s declaration is a weak reference where the unit doesn't
+    define its entity. On a variable's definition (a tentative one, a local's
+    or a parameter's) it is clang's warning "cannot be specified on a
+    definition", and on other declarations its subjects' ("variables and
+    functions"), both of which ignore it.
+  - `internal_linkage` gives its declaration internal linkage: a local
+    symbol, with `-Wundefined-internal` for a function used and never
+    defined. A redeclaration that its entity's first declaration hasn't is
+    clang's error, with its note there; on a parameter and on a variable of
+    local storage, clang's warnings, which ignore it.
+  - `nocf_check` is clang's "ignored; use -fcf-protection" warning wherever it
+    is, whatever its arguments: the driver refuses `-fcf-protection`.
+
+  clang's thread-safety analysis's attributes (`guarded_by`,
+  `requires_capability`, `acquire_capability`, `capability` and the others,
+  `check_input_thread_rows`) change nothing here past their handlers'
+  checks (`c_check_thread_safety_input.c`). Their arguments are
+  expressions that clang's parser reads where the attribute is, so each of
+  their names must be the scope's there: an earlier declaration (not the
+  one being declared), a struct's earlier member, or a function
+  declarator's own parameter; one that names nothing is clang's "use of
+  undeclared identifier", before any of the declaration's attributes is
+  applied. Then, after their subjects and counts (with the handlers' "at
+  least 1 argument"): `capability`'s name a string literal; a trylock's
+  first argument an int or a bool; a lock function's integer literal
+  argument an index of its function's parameters, with clang's "out of
+  bounds" error and its extra information.
+
+  The retain-ownership attributes (`cf_consumed`, `ns_consumed`,
+  `os_consumed`, `cf_returns_retained`, `cf_returns_not_retained`,
+  `ns_returns_retained`, `ns_returns_not_retained`,
+  `ns_returns_autoreleased`, `os_returns_retained`, `os_returns_not_retained`,
+  `os_returns_retained_on_zero`, `os_returns_retained_on_non_zero`) change
+  nothing in C. Their handlers' checks are clang's
+  (`check_input_attribute_ownership`): no C type is an Objective-C object or
+  points to a C++ record, so CF's take a pointer (a parameter's pointee a
+  pointer, for a returns' one) and NS's and OS's nothing; each warns where its
+  subject is no type it takes, at the declaration's first token (a tag's
+  keyword), and is ignored: "cf_consumed attribute only applies to pointer
+  parameters", "'X' attribute only applies to functions that return a
+  pointer", "... pointer-to-CF-pointer parameters", "... functions, methods,
+  and parameters" and the others. `ns_returns_retained` is a function type's
+  too: "'ns_returns_retained' attribute only applies to functions that return
+  an Objective-C object" at the attribute, and "only applies to function
+  types" off one.
+
+  More have their handlers' checks and change nothing here
+  (`check_input_attribute_handled`): `btf_type_tag`, `swift_attr` and
+  `no_field_protection` (debug information's and other languages' type
+  attributes); `vec_type_hint`; the function effects (`nonblocking`,
+  `nonallocating`, `blocking`, `allocating`, whose analysis warns of nothing by
+  default: an argument that is no integer constant is clang's "nonblocking
+  attribute requires an integer constant") and `cfi_unchecked_callee`, function
+  types' ("only applies to function types" off one); `init_priority`, a C++
+  one, "'init_priority' attribute ignored"; `always_destroy` and `no_destroy`,
+  clang's error at a variable's name of no static storage; `nomerge` on a
+  variable of no function pointer type, "'nomerge' attribute is ignored
+  because 'x' is not a function pointer"; `abi_tag`'s least argument;
+  `matrix_type`, "matrix types extension is disabled. Pass -fenable-matrix to
+  enable it" (and its subject's or count's error after it);
+  `overflow_behavior`, its warning that it is ignored without its
+  experimental option (`-Woverflow-behavior-attribute-ignored`), but on a tag
+  its subject's; `xray_log_args`'s index of the function's parameters;
+  `personality`'s function; `function_return`'s, `zero_call_used_regs`'s and
+  `model`'s strings, an unknown one warned of ("argument not supported") or
+  clang's "code model 'M' is not supported on this target", and those that
+  change the code (`thunk-extern`, any zeroing, the large model) refused by
+  name. A C23 type attribute before a declaration is clang's: `btf_type_tag`
+  slides to the specifiers, with `-Wdeprecated-attributes`' warning under
+  `clang::`, and a function effect there is "cannot be applied to a
+  declaration".
+
+  Static analyses' and Objective-C's annotations change nothing in C either,
+  with their handlers' checks (`check_input_attribute_annotations`):
+  `acquire_handle`'s integer parameter ("attribute only applies to output
+  parameters"); `mig_server_routine`'s function whose result isn't
+  `kern_return_t` (the last typedef of its spelling) of `int`, warned of at
+  the declaration's first token; `malloc_span`'s function of no span-like
+  result, warned of with clang's note why (incomplete, no struct, not two
+  fields, an expected integer field, no pointer/integer or pointer/pointer
+  pair: `check_input_span_reason`); `iboutlet`'s and `iboutletcollection`'s
+  warning anywhere in C; `type_visibility`, of a tag its visibility ("argument
+  not supported"), of a typedef "attribute ignored", of anything else "only
+  applies to types and namespaces"; `param_typestate`'s and
+  `return_typestate`'s state (unknown, consumed, unconsumed); the
+  `lifetime_capture_by` family (no argument, `this`, the parameter's own name,
+  an argument of no identifier, `global`'s, `unknown`'s and `this`'s
+  -Wdeprecated-attributes warning, the spellings' arguments, and the names of
+  no parameter checked once the function's parameters are known:
+  `check_input_capture_names`); the ownerships' identifier, counts, pointer
+  result and parameter indices (evaluated where they are read: out of bounds,
+  of another type, or another kind's); `NSObject`'s and
+  `objc_independent_class`'s warnings at the declaration's name
+  (`-WNSObject-attribute`, `-WIndependentClass-attribute`), NSObject's typedef
+  of no pointer to void or a record an error; `objc_precise_lifetime`'s error,
+  no C type being retainable; and `enforce_read_only_placement`'s subjects.
+  Other targets' vector types (`arm_sve_vector_bits`, `riscv_rvv_vector_bits`)
+  are clang's target error wherever a declarator's type takes them ("is not
+  supported on targets missing 'sve'"), a tag's subject's error elsewhere;
+  `clang_builtin_alias` is always its error on x86-64 ("can only be applied to a
+  ARM, HLSL, SPIR-V or RISC-V builtin"); `blocks(byref)` is a local variable's
+  (another argument warned of, a static local's or a nonlocal one's an error).
+  The statements' hints, which change nothing at -O0, are clang's
+  (`check_input_statement_attribute_kinds`): `code_align` and
+  `opencl_unroll_hint` before a `for`, `while` or `do` ("only applies to 'for',
+  'while', and 'do' statements" elsewhere), code_align a power of two from 1 to
+  4096, opencl_unroll_hint positive, an argument of no integer constant
+  "expression is not an integer constant expression", and a second code_align
+  "conflicting loop attribute" noted at the first; `atomic` before a compound
+  statement, its options `remote_memory`, `fine_grained_memory` and
+  `ignore_denormal_mode` (each with `no_` or not). On a declaration each is
+  "cannot be applied to a declaration". GNU's `assume` is an empty
+  statement's ("only applies to empty statements" elsewhere): one argument, a
+  conditional expression (an assignment or a comma at its top is "use of this
+  expression in an 'assume' attribute requires parentheses", at it), read as
+  clang's Sema reads it (a name that names nothing first, a structure's or
+  union's value "is not contextually convertible to 'bool'"), and dropped with
+  -Wassume's "assumption is ignored because it contains (potential)
+  side-effects" where it has them (an increment, an assignment, a volatile
+  read, a call of other than a const or pure function; an operand of sizeof or
+  typeof aside: `check_input_assume_effects`). Left: clang's -Wunused-value
+  warnings inside it, which come from its expression's walk.
+
+  Other targets' calling conventions (`aarch64_sve_pcs`,
+  `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
+  `stdcall` is: clang's "calling convention is not supported for this target"
+  warning where they meet a function, which ignores them, and "only applies to
+  function types" off one; `pcs`'s argument is checked first where it meets a
+  function or a tag ("'pcs' attribute takes one argument", "invalid PCS
+  type"). The GPU kernels' (`amdgpu_kernel`, `device_kernel`,
+  `nvptx_kernel`) are a function declaration's: the same warning on one, and
+  "'X' attribute only applies to functions" (an error) on any other
+  declaration. A convention on a tag's declaration, or GNU's `noreturn`, is
+  "'X' attribute only applies to functions and methods" (after an unsupported
+  convention's warning), as clang's handlers give it to a declaration without a
+  declarator; a bit-field's after its width meets its type
+  ("only applies to function types"). A variadic function's `vectorcall` or
+  `regcall` is clang's "variadic function cannot use vectorcall calling
+  convention". A definition's `-Wgcc-compat` warning comes before Sema's
+  diagnostics of the same attribute.
+
+  The GPU kernels' attributes change nothing here but have their handlers'
+  checks, their arguments evaluated where the attributes are read (a tag's
+  subjects are reached from the constant evaluator): `reqd_work_group_size`'s
+  and `work_group_size_hint`'s three sizes ("requires parameter N to be an
+  integer constant"; a negative one's "requires a non-negative integral
+  compile time constant expression", which goes on; "must be greater than 0"
+  where some but not all are 0), `intel_reqd_sub_group_size`'s,
+  `amdgpu_flat_work_group_size`'s and `amdgpu_waves_per_eu`'s ("argument is
+  invalid: max must be 0 since min is 0", "min must not be greater than
+  max"), and `amdgpu_num_sgpr`'s and `amdgpu_num_vgpr`'s, with their
+  `-Wdeprecated-declarations` warning. An argument wider than 32 bits at its
+  type's width is clang's "integer constant expression evaluates to value V
+  that cannot be represented in a 32-bit unsigned integer type"
+  (`check_input_constant_u32`). On a function no kernel's convention makes one,
+  the first of the OpenCL group is "attribute 'X' can only be applied to an
+  OpenCL kernel function" and then the first of AMDGPU's "'X' attribute only
+  applies to kernel functions", at the function's name and after the
+  attributes' own diagnostics (`check_input_attribute_kernels`). An error clang
+  places at an argument's expression is at its `Expr::getExprLoc`
+  (`check_input_expression_location`, from the parse tree's root of it): a
+  binary operator's at the operator, a member access at the member's name, a
+  postfix operator's at it, a subscript's at its base's, any other at its
+  first token. The checker stops at a declaration's first attribute error,
+  where clang goes on to the next declaration's.
+
+  The rest stay refused by name: `selectany` (a COMDAT),
+  `no_caller_saved_registers` (a calling convention), and the attributes
+  whose handlers clang has its own (`pass_object_size`, `ms_struct`,
+  `interrupt` and others).
+- **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
+  (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
+  and C++'s `Owner`, `Pointer`, `contained_type` and
+  `sycl_kernel_entry_point`, known or not in that syntax) take a type name,
+  which the parser reads as one in a GNU list where a type starts the argument
+  (`parse_scalar_type_argument_attribute`; the vector path leaves such a
+  declaration to it), and a missing `)` is expected at the token; a C23 list's
+  argument stays a run of tokens. `preferred_type`'s and `vec_type_hint`'s type
+  is read where their attributes are (`CheckInputAttribute.argument_type`, a
+  C23 list's lone typedef name by its binding) and checked past the subject as
+  their handlers check it (`check_input_attribute_annotations`):
+  `preferred_type` without one is "'preferred_type' attribute takes one
+  argument", and its incomplete type (a function's is none) "incomplete type
+  'T' where a complete type is required" at the type past its leading
+  qualifiers, spelled as written, with a tag's "forward declaration of 'struct
+  S'" note at its declaration; `vec_type_hint`'s type must be an extended
+  vector's, a floating one (complex too) or an integer one (a complete
+  enumeration's, `_BitInt`'s, not `bool`'s), else "a non-vector or
+  non-vectorizable scalar type is an invalid argument to attribute 'X'" at the
+  attribute, and a second one of another type is ignored with
+  -Wignored-attributes' "attribute 'vec_type_hint' is already applied with
+  different arguments". In a C23 list, a type argument that starts no type is
+  "expected a type" alone, and a second argument "expected ')'" without its
+  note, as clang's balanced reading of it gives them.
+- **Argument counts.** An attribute's count of arguments other than clang's
+  is clang's error, worded as clang's three messages: "'X' attribute takes no
+  arguments", "takes one argument", "requires exactly N arguments", "takes at
+  least N arguments", "takes no more than N arguments". A generic attribute's
+  is checked after its subject, as clang checks it; a supported one's as its
+  arguments are read. `cleanup`'s is checked after its subject already, and an
+  attribute whose arguments clang parses its own way isn't counted.
+- **Arguments' errors** (`CHECK_INPUT_ATTRIBUTE_ARGUMENT`, with
+  c_check_attribute.c's `CheckAttributeArgumentError` in its detail). An
+  argument a handler refuses is clang's error, in clang's words and at its
+  place, where it used to be the generic "invalid or unsupported
+  declaration":
+  - An argument that is no integer constant: "'aligned' attribute requires
+    integer constant" (aligned's and align_value's, at the argument), "'X'
+    attribute requires an integer constant" (regparm, constructor,
+    destructor, assume_aligned's alignment), "'X' attribute requires
+    parameter N to be an integer constant" (the parameter indices', format's,
+    assume_aligned's offset) and "ext_vector_type attribute requires an
+    integer constant", at the attribute; a name in it that names nothing is
+    clang's parser's "use of undeclared identifier"
+    (`check_input_attribute_constant_error`, from both evaluators: the
+    reader's and the constant path's).
+  - Values: "requested alignment is not a power of 2" (aligned's, 0
+    included, align_value's and assume_aligned's), "zero vector size",
+    "'regparm' parameter must be between 0 and 6 inclusive", "'X' attribute
+    parameter N is out of bounds" (alloc_align's and format_arg's index,
+    format's indices as clang's `checkUInt32Argument` reads a negative int),
+    "'sentinel' parameter 1 less than zero" and "'sentinel' parameter 2 not 0
+    or 1". assume_aligned's offset is any integer, as clang keeps it.
+  - Strings and identifiers: clang's parser reads a string argument as an
+    unevaluated string literal, so one that is none is "expected string
+    literal as argument of 'X' attribute" at it, wherever the attribute is
+    (before a C23 one's place is decided); visibility's identifier is its
+    handler's "'visibility' attribute requires a string"; "'mode' attribute
+    requires an identifier" and format's "requires parameter 1 to be an
+    identifier" at the attribute; tls_model's other string is its
+    "tls_model must be ..." at the argument.
+  - Parameters: alloc_size's and alloc_align's index of a parameter of no
+    integer type is "'X' attribute argument may only refer to a function
+    parameter of integer type" at the argument; format's and format_arg's of
+    no pointer to a character type (char, signed or unsigned) "format argument
+    not a string type", format_arg's function's result "function does not
+    return string type", and a strftime format's third argument other than 0
+    "strftime format attribute requires 3rd parameter to be 0".
+  - `mode` is clang's `AddModeAttr` (`check_input_attribute_mode`): the name
+    without a keyword's underscores; a vector mode (V, a power of two, a
+    mode) with -Wdeprecated-attributes' warning, for each declarator; the
+    width's integer type of the base's signedness, or its floating type
+    (HF `__fp16`, XF `long double`, TF and KF `__float128`, IF none), complex
+    for a C mode, a vector of it by the mode's count or the base vector's
+    bytes; the declaration's qualifiers dropped, as clang's `setType` drops
+    them; `word`, `byte`, `pointer` and `unwind_word`. Its errors, in clang's
+    order: "unknown machine mode 'M'", "mode 'M' is not supported for
+    enumeration types", "mode attribute only supported for integer and
+    floating-point types", "type of machine mode does not match type of base
+    type", "unsupported machine mode 'M'" and "type of machine mode does not
+    support base vector types".
+  - `mode` on an enum gives it the mode's integer type, signed (an enum of no
+    integer type yet takes `int`'s, as clang's `AddModeAttr` defaults it).
+    Before its body, as clang's `EnumDecl::setIntegerType` makes it, the enum
+    is complete from that type and each explicit value must be representable
+    in it, its enumerators otherwise a plain enum's
+    (`BUSTER_CHECK_ENUM_MODED`); after its body, clang's `ActOnEnumBody`
+    takes it for the enum's type. A value no fixed or moded type represents
+    is clang's "enumerator value is not representable in the underlying type
+    'T'" (`CHECK_INPUT_ENUM_NOT_REPRESENTABLE`), the base spelled as written
+    ("'T' (aka 'signed char')"), and a fixed type's value after its greatest
+    names the value.
+
+  And the handlers' warnings, each of which ignores its attribute
+  (-Wignored-attributes): "'X' attribute argument not supported: Y" (a
+  visibility clang doesn't know, at the string; a format kind it doesn't
+  know, at the attribute: its ignored `gcc_diag` kinds are silent), "'X'
+  attribute only applies to return values that are pointers" (alloc_size)
+  and "... pointers or references" (alloc_align, and assume_aligned's before
+  its arguments' errors), "'visibility' attribute
+  ignored" on a typedef, target's strings clang's `checkTargetAttr` doesn't
+  take ("unsupported 'F' in the 'target' attribute string; 'target'
+  attribute ignored", its unknown CPU and tune CPU, a duplicate `arch=` or
+  `tune=`, `fpmath=` and `branch-protection=`: `check_input_target_warning`),
+  and no_sanitize's "'no_sanitize' attribute argument 'S' not supported on a
+  global variable" (but address, hwaddress and memtag, at the variable's
+  name); with no_sanitize's "unknown sanitizer 'S' ignored"
+  (-Wunknown-sanitizers) and format's "GCC requires a function with the
+  'format' attribute to be variadic" (-Wgcc-compat) at the declaration's
+  name. A cleanup's name that names nothing is clang's parser's error alone:
+  the attribute is dropped, its subject unchecked.
+- **Subject before arguments** (`CheckInputAttribute.deferred`). The
+  handlers clang runs once an attribute's subject takes it give their
+  arguments' errors only then: tls_model's model, constructor's, destructor's
+  and assume_aligned's integers. The reader evaluates them where it reads them
+  (a tag's subjects are reached from the constant evaluator) and moves the
+  error into the attribute (`check_input_attribute_defer`), which
+  `check_input_attribute_subjects` gives after the subject, the exclusions and
+  the count; a use of an undeclared name, clang's parser's error, stays. The
+  type attributes clang leaves to a declarator's type (regparm,
+  ext_vector_type) are ignored on a tag's declaration without a word, their
+  arguments unread (`CheckInputReader.tag_attributes`).
+- **Declarations of no declarator** (`check_input_free_standing`). clang's
+  `ParsedFreeStandingDeclSpec` applies none of the specifiers' attributes. Their
+  GNU lists and alignment specifiers are read as its parser reads them alone
+  (`check_input_attribute_ignored_lists`: an argument that must be a string
+  literal, and a name in an expression that names nothing, are its errors), and
+  on a tag's declaration each is warned of after the storage class's warnings:
+  "attribute 'X' is ignored, place it after "struct" to apply attribute to type
+  declaration" (named as written), "'_Alignas' attribute ignored". A bare tag
+  declaration's attributes after its name are read the same way. C23 lists that
+  begin such a declaration are clang's parser's error, "misplaced attributes;
+  expected attributes here" just after a file-scope tag declaration's keyword,
+  else "an attribute list cannot appear here", with "declaration does not
+  declare anything" at the specifiers after them.
+- **Alignment specifiers** (`check_input_alignas_error`, C11 6.7.5). On a
+  parameter, a `register` variable or a bit-field, "'_Alignas' attribute cannot
+  be applied to a function parameter" (and the others); on a typedef or a
+  function, "'_Alignas' attribute only applies to variables and fields"; an
+  alignment below the declared type's, "requested alignment is less than
+  minimum alignment of N for type 'T'", the greatest of all the declaration's
+  alignments (GNU aligned's too) against its declarator's type, not its
+  specifiers' (`check_input_alignas_underaligned`). Two declarators of one
+  `_Alignas` are clang's error twice, here once: the checker stops at a
+  declaration's first attribute error (as for `aligned(n)` on two
+  declarations).
+- **Mutual exclusions** (`check_input_attribute_excluding`). After an
+  attribute's subject check, one that an attribute already on the declaration
+  excludes is clang's error "'cold' and 'hot' attributes are not compatible",
+  with "conflicting attribute is here" at the other. The new attribute is
+  named as written, the earlier one as clang names an applied attribute: a GNU
+  one without its keyword's underscores, a C23 one with its scope. A
+  redeclaration's attribute is checked against its entity's earlier
+  declarations' (`check_input_attribute_merge_exclusions`) after the
+  attributes it drops after the definition, as clang's `mergeDeclAttributes`
+  does.
+- **Differences left.**
+  - A C23 function type's attribute after the specifiers
+    (`void [[gnu::ms_abi]] f(void);`) applies to the function. Clang applies
+    it to the specifiers' type and warns "'ms_abi' only applies to function
+    types; type here is 'void'".
+  - The checker stops at a declaration's first error. So clang's later errors
+    of the same declaration are missing: a second list's, and its parser's
+    recovery errors and their "to match this '('" notes.
+  - GNU's `noderef` is refused by name.
+  - A thread-safety attribute's argument is checked for its names alone: an
+    expression of other errors (`g.x` of an `int`) is taken, where clang
+    gives its error; a trylock's first argument's type is worked out from a
+    literal or a name alone. Their `-Wthread-safety-attributes` warnings,
+    off by default, aren't made.
+  - A `loader_uninitialized` variable's incomplete type is the generic
+    "object has incomplete type", and a definition after one the generic
+    "conflicting declaration", as every incomplete object's and redefinition's
+    are here, where clang names the type and the variable (with notes). With a
+    `section` attribute too, clang's object marks its section read-only
+    (LLVM's kind of an undefined initializer), which a write faults in; its
+    section here is writable.
+  - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
+    "an attribute list cannot appear here".
+  - An argument's undeclared name after a type's keyword or a `sizeof` stays
+    the generic error, which comes first, where clang's parser gives the
+    type's errors in turn and then the name's. A format kind's warning, and
+    alloc_size's and alloc_align's of a function that returns no pointer,
+    come after the arguments are evaluated: an argument that is no constant
+    is its error first, where clang's handler warns and stops. `mode`'s base
+    of the wrong type is one error, where clang goes on to "unsupported
+    machine mode" where both apply. A string argument with escapes names the
+    piece of target's string from its spelling.
+  - A function definition's attribute whose argument count is wrong
+    (`regparm`, `pcs`) is the count's error alone: clang's parser's
+    `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
+    made (nor `-Wreturn-type` but for a function returning an aggregate).
+  - `annotate`'s arguments after its string must be constant expressions,
+    clang's error with its evaluator's notes otherwise; they are taken here.
+  - `int x _Alignas(3);` stops at clang's "expected ';' after top level
+    declarator", where clang's recovery also reads `_Alignas(3);` as a
+    declaration that declares nothing (-Wmissing-declarations).
+  - When a GNU attribute of a declaration and a calling convention keyword
+    on another type share the specifiers, the two warnings come in the
+    attributes' order. Clang gives the type's first.
+  - A field's use (`m.x`) of a deprecated field gets no warning: its
+    declaration is found by the expression's type, which the uses' pass
+    doesn't have. Nor does an overloadable function's call that resolves to a
+    deprecated overload, which clang warns of (it doesn't at an address taken
+    through the overload set, and neither does the checker).
+  - A body checked on a lane doesn't warn of attributes after a definition, nor
+    check mutual exclusions across redeclarations.
+  - An argument count of a supported attribute is checked as its arguments are
+    read, before its subject. So `int x __attribute__((cold(1)));` is the
+    count's error, where clang warns of the subject and ignores it.
+- **Tests.** `test-checker` checks the facts table's order and bounds, its
+  counts and five rows, and conflicting conventions on a function and on
+  another type (`c_check_attribute_test.c`). `test-checker-driver` compares
+  the whole output with clang's on both paths
+  (`check_test_driver_unknown_attributes`' statements) for:
+  - GCC's positions on definitions;
+  - nonnull's warnings, and its out-of-bounds error;
+  - C23 lists in each place, and lists before suffixes;
+  - the conventions x86-64 hasn't, and each kind of conflict;
+  - tag declarations' attributes, with the layouts they give, checked by
+    `_Static_assert`;
+  - attributes in type names, `vector_size`'s errors, and
+    `-Wgnu-alignof-expression`;
+  - attributes after a definition, with the alignment they no longer give;
+  - attributes without a rule of each kind, argument counts, and mutual
+    exclusions on one declaration, through a specifier's list and across
+    redeclarations;
+  - deprecated and unavailable uses of each kind, and their context rules.
+
+  `test-checker` checks the exclusions table's order and pairs, and that the
+  facts tell C's attributes from another language's.
 
 ## Ignorable and unsupported pragmas
 

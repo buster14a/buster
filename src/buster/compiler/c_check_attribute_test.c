@@ -66,8 +66,9 @@ static void check_test_attribute_storage(CheckTest* test)
                       merged.calling_convention == CHECK_CALL_MICROSOFT && common.count == 65 && merged.records != common.records,
                       "common and postfix attribute merge retains layout and calling ABI");
     common.calling_convention = CHECK_CALL_SYSV;
-    check_test_expect(test, !check_input_attribute_merge(&reader, &common, &suffix, &merged) && merged.error == CHECK_ATTRIBUTE_ERROR_CONFLICT &&
-                      merged.error_first == 70 && merged.error_end == 71, "cross-position ABI conflicts retain the suffix's exact range");
+    check_test_expect(test, check_input_attribute_merge(&reader, &common, &suffix, &merged) && merged.error == CHECK_ATTRIBUTE_ERROR_NONE &&
+                      merged.calling_convention == CHECK_CALL_SYSV && merged.count == 66 && merged.records[65].first == 70,
+                      "a cross-position convention merges after the common one's, for the function they meet to check (#147)");
     Arena exhausted = { 0 };
     reader.arena = &exhausted;
     CheckInputAttributes unavailable = { 0 };
@@ -139,7 +140,10 @@ static void check_test_attribute_arguments(CheckTest* test)
                 check_test_expect(test, check_input_attribute_copy(&reader, &attributes, &copied) && copied.records != &attribute &&
                                   copied.records[0].argument_ends == attribute.argument_ends,
                                   "attribute copies share immutable arena-owned boundaries");
-                check_test_expect(test, !check_input_attribute_argument_value(&reader, &attributes, 0, count - 1, 0) &&
+                // (Any integer is a nonnull index here, which the function's check bounds: a negative one of another
+                // integer list's attribute fails, a malloc's index among them.)
+                attribute.kind = CHECK_ATTRIBUTE_MALLOC;
+                check_test_expect(test, !check_input_attribute_argument_value(&reader, &attributes, 0, count - 1, -1) &&
                                   attributes.error == CHECK_ATTRIBUTE_ERROR_INTEGER && attributes.error_first == (count - 1) * TOKENS_PER_ARGUMENT &&
                                   attributes.error_end == count * TOKENS_PER_ARGUMENT - 1,
                                   "late invalid numeric argument preserves its exact full grouped range");
@@ -222,6 +226,20 @@ static void check_test_attribute_abis(CheckTest* test)
                                   "spelling ABI provenance distinguishes explicit SysV from implicit default without changing canonical types");
             }
         }
+        CheckInputAttribute pair[2] =
+        {
+            { .first = 60, .end = 61, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_SYSV },
+            { .first = 70, .end = 74, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_MICROSOFT },
+        };
+        CheckInputAttributes conflicting = { .records = pair, .count = 2, .calling_convention = CHECK_CALL_SYSV };
+        input.report_count = 0;
+        check_test_expect(test, check_input_attribute_abi(&reader, &conflicting, integer) == integer && conflicting.error == CHECK_ATTRIBUTE_ERROR_NONE &&
+                               input.report_count == 0,
+                          "conflicting conventions on no function are no error, as clang's (#147)");
+        check_test_expect(test, check_input_attribute_abi(&reader, &conflicting, wrapped) == 0 && conflicting.error == CHECK_ATTRIBUTE_ERROR_CONFLICT &&
+                               conflicting.error_first == 70 && conflicting.error_end == 74 && input.report_count == 1 && reports[0].token == 70 &&
+                               reports[0].detail == (CHECK_CALL_MICROSOFT | CHECK_CALL_SYSV << 8),
+                          "the second of conflicting conventions on a function is clang's error, naming both (#147)");
         CheckInputAttribute record = { .first = 80, .end = 84, .kind = CHECK_ATTRIBUTE_CALLING_CONVENTION, .value = CHECK_CALL_MICROSOFT };
         CheckInputAttributes attributes = { .records = &record, .count = 1, .calling_convention = CHECK_CALL_MICROSOFT };
         const uint64_t capacity = scratch.capacity;
@@ -355,7 +373,10 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
         if (valid && result != 0)
         {
             result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef, false);
-            valid = result != 0 && check_input_attribute_function(&reader, &attributes, result);
+            valid = result != 0 && check_input_attribute_function(&reader, &attributes, result, BUSTER_CHECK_NONE);
+            // Calling conventions meet the function, which checks that they agree (#147).
+            result = valid ? check_input_attribute_abi(&reader, &attributes, result) : 0;
+            valid = result != 0;
         }
         snprintf(description, sizeof(description), "%s: exact attribute diagnosis", fixture->name);
         check_test_expect(test, ready && attributes.error == fixture->error && valid == (fixture->error == CHECK_ATTRIBUTE_ERROR_NONE), description);
@@ -432,6 +453,151 @@ static void check_test_attribute_vocabulary(CheckTest* test)
         }
         check_test_expect(test, (count > 256 || (standard == 3 && count == 9)) && unordered == 0 && found == count,
                           "attribute vocabulary: ordered, bounded and each name found");
+    }
+    // The subject rows (c_check_attribute_subjects.inc): each list in its spellings' byte order, without repeats.
+    for (uint32_t standard = 0; standard < 2; standard += 1)
+    {
+        const CheckInputSubjectRow* list = standard != 0 ? check_input_subject_c23 : check_input_subject_gnu;
+        const uint32_t count = standard != 0 ? BUSTER_ARRAY_LENGTH(check_input_subject_c23) : BUSTER_ARRAY_LENGTH(check_input_subject_gnu);
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t shorter = i != 0 && list[i - 1].length < list[i].length ? list[i - 1].length : list[i].length;
+            const int order = i != 0 ? memcmp(list[i - 1].spelling, list[i].spelling, shorter) : -1;
+            unordered += order > 0 || (order == 0 && list[i - 1].length >= list[i].length) ? 1u : 0u;
+            found += check_input_subject_find(list, count, (String8){ (char*)list[i].spelling, list[i].length }) == list + i ? 1u : 0u;
+        }
+        check_test_expect(test, count > 200 && unordered == 0 && found == count, "attribute subjects: rows ordered and each found");
+    }
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_subject_gnu) == 304 && BUSTER_ARRAY_LENGTH(check_input_subject_c23) == 225,
+                      "attribute subjects: clang 23.1.5's 304 GNU spellings and 225 C23 ones with subjects");
+    // The arguments rows (#147): clang 23.1.5's parser switches' 160 names, in byte order, each found by its search; a
+    // name of none is none.
+    {
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        const uint32_t count = BUSTER_ARRAY_LENGTH(check_input_arguments_rows);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            unordered += i != 0 && strcmp(check_input_arguments_rows[i - 1].name, check_input_arguments_rows[i].name) >= 0 ? 1u : 0u;
+            const String8 name = { (char*)check_input_arguments_rows[i].name, strlen(check_input_arguments_rows[i].name) };
+            found += check_input_arguments_row(name) == check_input_arguments_rows + i ? 1u : 0u;
+        }
+        const CheckInputArgumentsRow* format = check_input_arguments_row((String8){ "format", 6 });
+        const CheckInputArgumentsRow* deprecated = check_input_arguments_row((String8){ "deprecated", 10 });
+        const CheckInputArgumentsRow* typed = check_input_arguments_row((String8){ "preferred_type", 14 });
+        const CheckInputArgumentsRow* enable_if = check_input_arguments_row((String8){ "enable_if", 9 });
+        check_test_expect(test, count == 160 && unordered == 0 && found == count && check_input_arguments_row((String8){ "aligned", 7 }) == NULL &&
+                          check_input_arguments_row((String8){ "", 0 }) == NULL && format != NULL && format->flags == BUSTER_CHECK_ARGUMENTS_IDENTIFIER &&
+                          deprecated != NULL && deprecated->strings == 3 && typed != NULL && typed->flags == BUSTER_CHECK_ARGUMENTS_TYPE &&
+                          enable_if != NULL && enable_if->flags == BUSTER_CHECK_ARGUMENTS_FUNCTION_SCOPE && enable_if->strings == 2,
+                          "attribute arguments: clang 23.1.5's 160 names, ordered, each found, with their lists and string places");
+    }
+    // The facts rows (#147): each spelling clang has for x86-64 Linux, as its vocabulary has them, in byte order.
+    for (uint32_t standard = 0; standard < 2; standard += 1)
+    {
+        const CheckInputFactRow* list = standard != 0 ? check_input_fact_c23 : check_input_fact_gnu;
+        const uint32_t count = standard != 0 ? BUSTER_ARRAY_LENGTH(check_input_fact_c23) : BUSTER_ARRAY_LENGTH(check_input_fact_gnu);
+        uint32_t unordered = 0;
+        uint32_t found = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t shorter = i != 0 && list[i - 1].length < list[i].length ? list[i - 1].length : list[i].length;
+            const int order = i != 0 ? memcmp(list[i - 1].spelling, list[i].spelling, shorter) : -1;
+            unordered += order > 0 || (order == 0 && list[i - 1].length >= list[i].length) || list[i].minimum > list[i].maximum ? 1u : 0u;
+            found += check_input_fact_find(list, count, (String8){ (char*)list[i].spelling, list[i].length }) == list + i ? 1u : 0u;
+        }
+        check_test_expect(test, unordered == 0 && found == count, "attribute facts: rows ordered, bounded and each found");
+    }
+    const CheckInputFactRow* cold_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "cold", 4 }, false, false);
+    const CheckInputFactRow* nonnull_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "nonnull", 7 }, false, false);
+    const CheckInputFactRow* noderef_fact = check_input_fact_row((String8){ "_Clang", 6 }, (String8){ "noderef", 7 }, true, true);
+    const CheckInputFactRow* vector_fact = check_input_fact_row((String8){ "__gnu__", 7 }, (String8){ "vector_size", 11 }, true, true);
+    const CheckInputFactRow* bounded_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "bounded", 7 }, false, false);
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_fact_gnu) == 366 && BUSTER_ARRAY_LENGTH(check_input_fact_c23) == 283 && cold_fact != NULL &&
+                          cold_fact->flags == (BUSTER_CHECK_FACT_GCC | BUSTER_CHECK_FACT_SIMPLE) && nonnull_fact != NULL &&
+                          (nonnull_fact->flags & BUSTER_CHECK_FACT_VARIADIC) != 0 && nonnull_fact->maximum == UINT32_MAX && noderef_fact != NULL &&
+                          noderef_fact->flags == BUSTER_CHECK_FACT_TYPE && vector_fact != NULL && (vector_fact->flags & BUSTER_CHECK_FACT_TYPE) != 0 &&
+                          vector_fact->minimum == 1 && vector_fact->maximum == 1 && bounded_fact != NULL && (bounded_fact->flags & BUSTER_CHECK_FACT_IGNORED) != 0 &&
+                          check_input_fact_row((String8){ "clang", 5 }, (String8){ "cold", 4 }, true, true) == NULL,
+                      "attribute facts: clang 23.1.5's 366 GNU and 283 C23 spellings; cold's, nonnull's, clang::noderef's, gnu::vector_size's and bounded's");
+    // C's attributes aren't another language's (`(!LangOpts.CPlusPlus)` holds in C), and CUDA's are.
+    const CheckInputFactRow* counted_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "counted_by", 10 }, false, false);
+    const CheckInputFactRow* device_fact = check_input_fact_row((String8){ "", 0 }, (String8){ "device", 6 }, false, false);
+    check_test_expect(test, counted_fact != NULL && (counted_fact->flags & BUSTER_CHECK_FACT_NOT_C) == 0 && device_fact != NULL &&
+                          (device_fact->flags & BUSTER_CHECK_FACT_NOT_C) != 0,
+                      "attribute facts: counted_by is C's, device another language's");
+    // The mutual exclusions (#147): in byte order, both ways for hot and cold.
+    uint32_t exclusions_unordered = 0;
+    for (uint32_t i = 1; i < BUSTER_ARRAY_LENGTH(check_input_exclusions); i += 1)
+    {
+        const int order = strcmp(check_input_exclusions[i - 1].spelling, check_input_exclusions[i].spelling);
+        exclusions_unordered += order > 0 || (order == 0 && strcmp(check_input_exclusions[i - 1].excluded, check_input_exclusions[i].excluded) >= 0) ? 1u : 0u;
+    }
+    bool hot_cold = false;
+    bool cold_hot = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_input_exclusions); i += 1)
+    {
+        hot_cold |= strcmp(check_input_exclusions[i].spelling, "hot") == 0 && strcmp(check_input_exclusions[i].excluded, "cold") == 0;
+        cold_hot |= strcmp(check_input_exclusions[i].spelling, "cold") == 0 && strcmp(check_input_exclusions[i].excluded, "hot") == 0;
+    }
+    check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_exclusions) == 44 && exclusions_unordered == 0 && hot_cold && cold_hot,
+                      "attribute exclusions: clang 23.1.5's 44 pairs, ordered, hot's and cold's");
+    const CheckInputSubjectRow* cold = check_input_subject_row((String8){ "", 0 }, (String8){ "cold", 4 }, false, false);
+    const CheckInputSubjectRow* scoped = check_input_subject_row((String8){ "_Clang", 6 }, (String8){ "nomerge", 7 }, true, true);
+    check_test_expect(test, cold != NULL && cold->subjects == BUSTER_CHECK_SUBJECT_FUNCTION && !cold->error && scoped != NULL && scoped->error &&
+                          check_input_subject_row((String8){ "", 0 }, (String8){ "aligned", 7 }, false, false) == NULL,
+                      "attribute subjects: cold's, clang::nomerge's under _Clang, and none for aligned, whose handler checks it");
+    // The handlers' own rows: GNU's spelling and gnu::'s (__gnu__ too), and none under another scope or none.
+    const CheckInputSubjectRow* sentinel = check_input_subject_row((String8){ "", 0 }, (String8){ "sentinel", 8 }, false, false);
+    const CheckInputSubjectRow* transparent = check_input_subject_row((String8){ "__gnu__", 7 }, (String8){ "transparent_union", 17 }, true, true);
+    check_test_expect(test, sentinel != NULL && (sentinel->subjects & BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE) != 0 && transparent != NULL &&
+                          (transparent->subjects & BUSTER_CHECK_SUBJECT_UNION_TYPEDEF) != 0 &&
+                          check_input_subject_row((String8){ "clang", 5 }, (String8){ "transparent_union", 17 }, true, true) == NULL &&
+                          check_input_subject_row((String8){ "", 0 }, (String8){ "transparent_union", 17 }, false, true) == NULL,
+                      "attribute subjects: sentinel's and transparent_union's rows, which their handlers check, by their spellings alone");
+    // weak_import's (#147): GNU's spelling and clang::'s (_Clang too), and none under gnu::.
+    const CheckInputSubjectRow* weak_import = check_input_subject_row((String8){ "_Clang", 6 }, (String8){ "weak_import", 11 }, true, true);
+    check_test_expect(test, weak_import != NULL && weak_import->subjects == (BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_VARIABLE) &&
+                          check_input_subject_row((String8){ "", 0 }, (String8){ "weak_import", 11 }, false, false) != NULL &&
+                          check_input_subject_row((String8){ "gnu", 3 }, (String8){ "weak_import", 11 }, true, true) == NULL,
+                      "attribute subjects: weak_import's row, which its handler checks, by its spellings alone");
+    TypeTestTable storage;
+    const bool ready = type_test_table_open(&storage, 4096);
+    check_test_expect(test, ready, "attribute subjects: nonstring's type table opens");
+    if (ready)
+    {
+        // nonstring's types (handleNonStringAttr): a pointer to a character type or an array of one through arrays, qualified
+        // or not, and nothing else.
+        TypeTable* table = &storage.table;
+        const TypeId char_array = type_array(table, BUSTER_TYPE_CHAR, 4);
+        const TypeId fits[] = {
+            char_array,
+            type_array(table, type_array(table, BUSTER_TYPE_SCHAR, 2), 3),
+            type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)),
+            type_pointer(table, BUSTER_TYPE_UCHAR),
+            type_incomplete_array(table, BUSTER_TYPE_CHAR),
+        };
+        const TypeId misfits[] = {
+            BUSTER_TYPE_CHAR,
+            BUSTER_TYPE_INT,
+            type_array(table, BUSTER_TYPE_INT, 2),
+            type_array(table, BUSTER_TYPE_BOOL, 2),
+            type_pointer(table, type_pointer(table, BUSTER_TYPE_CHAR)),
+            type_pointer(table, char_array),
+        };
+        bool all = true;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fits); i += 1)
+        {
+            all &= check_input_nonstring_type(table, fits[i]);
+        }
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(misfits); i += 1)
+        {
+            all &= !check_input_nonstring_type(table, misfits[i]);
+        }
+        check_test_expect(test, all, "attribute subjects: nonstring takes character arrays and pointers to characters alone");
+        type_test_table_close(&storage);
     }
     check_test_expect(test, BUSTER_ARRAY_LENGTH(check_input_clang_gnu_attributes) == 366 && BUSTER_ARRAY_LENGTH(check_input_clang_c23_attributes) == 283 &&
                           BUSTER_ARRAY_LENGTH(check_input_clang_spellings) == 539 && BUSTER_ARRAY_LENGTH(check_input_clang_scopes) == 9,
@@ -584,8 +750,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "GNU zero alignment is invalid",
             .source = "int x __attribute__((aligned(0)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "0",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "aligned",
             .base = BUSTER_TYPE_INT,
             .rejected = true,
         },
@@ -713,7 +879,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "GNU vector machine mode requires power of two",
             .source = "typedef int V __attribute__((mode(V3SI)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_MODE,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
@@ -881,8 +1047,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "format non-string parameter rejected",
             .source = "int f(int,...) __attribute__((format(printf,1,2)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
-            .error_word = "1",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "format",
             .rejected = true,
             .values = { 1, 2 },
             .function_result = BUSTER_TYPE_INT,
@@ -893,7 +1059,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .name = "nonnull parameter index rejected",
             .source = "int f(char*) __attribute__((nonnull(2)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
-            .error_word = "2",
+            // clang's "parameter 1 is out of bounds" is at the attribute's name.
+            .error_word = "nonnull",
             .rejected = true,
             .values = { 2 },
             .function_result = BUSTER_TYPE_INT,
@@ -938,7 +1105,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "allocation floating parameter rejected",
             .source = "void *f(float,...) __attribute__((alloc_size(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "1",
             .rejected = true,
             .values = { 1 },
@@ -973,8 +1140,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "format_arg non-string return rejected",
             .source = "int f(char*,...) __attribute__((format_arg(1)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_PARAMETER,
-            .error_word = "1",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "format_arg",
             .rejected = true,
             .values = { 1 },
             .function_result = BUSTER_TYPE_INT,
@@ -999,23 +1166,24 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid alignment value",
             .source = "int x __attribute__((aligned(3)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "3",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "aligned",
             .rejected = true,
             .values = { 3 },
         },
         {
             .name = "negative alignment value",
             .source = "int x __attribute__((aligned(-8)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "-",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "aligned",
             .rejected = true,
             .values = { -8 },
         },
         {
             .name = "_Alignas cannot reduce alignment",
             .source = "_Alignas(1) int x;\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
+            // clang's "requested alignment is less than minimum alignment" (check_input_alignas_error, #147).
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "_Alignas",
             .base = BUSTER_TYPE_INT,
             .rejected = true,
@@ -1024,7 +1192,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "_Alignas cannot annotate typedef",
             .source = "_Alignas(16) typedef int I;\n",
-            .error = CHECK_ATTRIBUTE_ERROR_SUBJECT,
+            // clang's "'_Alignas' attribute only applies to variables and fields" (check_input_alignas_error, #147).
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "_Alignas",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
@@ -1045,7 +1214,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .name = "zero vector element count",
             .source = "typedef int V __attribute__((vector_size(0)));\n",
             .error = CHECK_ATTRIBUTE_ERROR_VECTOR,
-            .error_word = "0",
+            // clang's "zero vector size" is at the attribute (check_input_vector_size).
+            .error_word = "vector_size",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
             .rejected = true,
@@ -1053,7 +1223,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid machine mode spelling",
             .source = "typedef int I __attribute__((mode(NO_SUCH_MODE)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_MODE,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
             .base = BUSTER_TYPE_INT,
             .is_typedef = true,
@@ -1062,7 +1232,7 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "wrong machine mode class",
             .source = "typedef float I __attribute__((mode(SI)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_MODE,
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
             .error_word = "mode",
             .base = BUSTER_TYPE_FLOAT,
             .is_typedef = true,
@@ -1071,15 +1241,17 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "invalid string attribute",
             .source = "int x __attribute__((section(3)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_STRING,
-            .error_word = "section",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "3",
             .rejected = true,
         },
         {
             .name = "invalid TLS model",
             .source = "__thread int x __attribute__((tls_model(\"invented\")));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
-            .error_word = "tls_model",
+            // Read, its model's error kept for after its subject's check (CheckInputAttribute.deferred, #147), which the
+            // driver test compares with clang's.
+            .count = 1,
+            .last_kind = CHECK_ATTRIBUTE_TLS_MODEL,
             .rejected = true,
         },
         {
@@ -1088,12 +1260,14 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
             .error = CHECK_ATTRIBUTE_ERROR_CONFLICT,
             .error_word = "sysv_abi",
             .rejected = true,
+            .function_result = BUSTER_TYPE_VOID,
+            .nonvariadic = true,
         },
         {
             .name = "invalid regparm count",
             .source = "void f(void) __attribute__((regparm(7)));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_INTEGER,
-            .error_word = "7",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "regparm",
             .rejected = true,
             .values = { 7 },
         },
@@ -1108,8 +1282,8 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         {
             .name = "align_value of a value other than a power of two",
             .source = "void f(void *p __attribute__((align_value(48))));\n",
-            .error = CHECK_ATTRIBUTE_ERROR_ALIGNMENT,
-            .error_word = "48",
+            .error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS,
+            .error_word = "align_value",
             .rejected = true,
             .values = { 48 },
         },

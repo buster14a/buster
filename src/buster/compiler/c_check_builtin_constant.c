@@ -14,9 +14,36 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     const uint32_t first = keyword + 2;
     const uint32_t end = check_constant_punctuation(reader->parser, first, closing, PARSE_KIND_COMMA);
     check_input_builtin_evidence(reader, first, end, &evidence);
+    if (builtin == CBUILTIN_INFER_ALLOC_TOKEN)
+    {
+        check_input_alloc_token_evidence(reader, first, closing, input->queries, input->first, input->end, &evidence);
+    }
+    if (builtin == CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE || builtin == CBUILTIN_OS_LOG_FORMAT)
+    {
+        check_input_os_log_evidence(reader, first, closing, builtin == CBUILTIN_OS_LOG_FORMAT, count, &evidence);
+    }
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < closing)
     {
         check_input_annotation_evidence(reader, end, closing, &evidence);
+    }
+    // __builtin_counted_by_ref's argument's member (#148), past parentheses: an access whose operator the bound evaluator
+    // read, with its base's type at the operator (input->queries).
+    CheckCountedMember counted = { .base = BUSTER_CHECK_NONE };
+    if (builtin == CBUILTIN_COUNTED_BY_REF && count == 1 && !input->raw)
+    {
+        const Parser* parser = reader->parser;
+        uint32_t inner = first;
+        uint32_t outer = end;
+        while (inner + 2 < outer && parser->tokens.kinds[inner] == PARSE_KIND_L_PAREN && parser->tree.parents[inner] == outer - 1)
+        {
+            inner += 1;
+            outer -= 1;
+        }
+        const uint32_t root = check_input_range_root(reader, inner, outer);
+        const bool access = root >= input->first && root + 1 < input->end && parser->tree.roles[root] == PARSE_ROLE_MEMBER_OPERATOR;
+        counted = access ? check_counted_lookup(reader->types, input->queries[root - input->first], parser->tokens.kinds[root] == PARSE_KIND_ARROW,
+                                                parser->tokens.names[root + 1]) :
+                           counted;
     }
     CheckActionResult result = { 0 };
     const CheckOp family = check_graph_builtin_op(builtin);
@@ -50,14 +77,23 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     }
     else if (family == CHECK_OP_BUILTIN_MISC)
     {
+        const bool constant_string = builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || builtin == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING;
         const CheckBuiltinMiscAction action =
         {
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
             .context = context,
             .pointer_object = evidence.base_object, .pointer_alignment = evidence.base_alignment,
             .string_known = evidence.nan_payload_known, .string_bytes = evidence.nan_payload, .string_length = evidence.nan_payload_length,
-            .string_cast = evidence.nan_payload_cast, .function_objects = evidence.function_objects,
+            .string_cast = evidence.nan_payload_cast, .string_utf8 = evidence.nan_payload_utf8, .function_objects = evidence.function_objects,
             .function_object_count = evidence.function_object_count,
+            .ns_constant_string = constant_string ? check_input_ns_constant_string(reader) : 0,
+            .alloc_token_known = evidence.alloc_token_known, .alloc_token = evidence.alloc_token,
+            .os_log_items = evidence.os_log_items, .os_log_count = evidence.os_log_count, .os_log_known = evidence.os_log_known,
+            .os_log_invalid_mask = evidence.os_log_invalid_mask,
+            .os_log_taken = { evidence.os_log_taken[0], evidence.os_log_taken[1], evidence.os_log_taken[2], evidence.os_log_taken[3] },
+            .counted_member = !counted.member ? BUSTER_CHECK_COUNTED_NONE :
+                              counted.kind == BUSTER_TYPE_COUNTED_BY && counted.count_found ? BUSTER_CHECK_COUNTED_COUNTED : BUSTER_CHECK_COUNTED_MEMBER,
+            .counted_type = counted.count_type,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);

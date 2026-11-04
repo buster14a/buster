@@ -1277,6 +1277,7 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
             const bool type_argument = valid && attribute->kind == CHECK_ATTRIBUTE_ALIGNAS &&
                                        (input->raw ? check_constant_raw_type_start(input, first) : check_constant_type_start(reader->parser, first));
             int64_t integer = 0;
+            bool unresolved = false;
             if (valid && type_argument)
             {
                 const TypeId type = check_constant_type(input, first, end);
@@ -1286,16 +1287,24 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
             else if (valid)
             {
                 CheckValue value = { 0 };
-                valid = (!input->raw || check_constant_raw_expression(input, first, end)) &&
-                        check_constant_range_value(input, first, end, &value) && check_input_integer_attribute(reader, &value) &&
-                        check_action_i64(reader->types, &value, &integer);
-                if (valid)
+                valid = (!input->raw || check_constant_raw_expression(input, first, end)) && check_constant_range_value(input, first, end, &value);
+                const bool integral = valid && check_input_integer_attribute(reader, &value) && check_action_i64(reader->types, &value, &integer);
+                // vector_size's size of no integer constant stays unresolved: its element type is checked first, then its
+                // size, with clang's error (check_input_vector_size, #147).
+                unresolved = valid && !integral && attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE;
+                // clang's errors of an argument that is no integer constant (#147), as the reader's evaluation gives them.
+                if (!integral && !unresolved)
+                {
+                    check_input_attribute_constant_error(reader, &job->parsed, attribute, scalar ? 0 : argument, first, end);
+                }
+                valid = integral || unresolved;
+                if (integral)
                 {
                     check_input_constant_warning(reader, first, end, &value, true);
                 }
             }
-            valid = valid && (scalar ? check_input_attribute_value(reader, &job->parsed, i, integer) :
-                                       check_input_attribute_argument_value(reader, &job->parsed, i, argument, integer));
+            valid = valid && (unresolved || (scalar ? check_input_attribute_value(reader, &job->parsed, i, integer) :
+                                                      check_input_attribute_argument_value(reader, &job->parsed, i, argument, integer)));
         }
     }
     if (valid && job->publish)
@@ -1333,6 +1342,44 @@ static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t i
     return builtin;
 }
 
+// The last token of a call's callee written as `token` in parentheses (`(name)(...)`, `((name))(...)`), which clang's call
+// takes through them (CallExpr's IgnoreParens), or `token` itself; `*first` gets the outermost '(' (`token` without one).
+static uint32_t check_input_callee_end(const Parser* parser, uint32_t token, uint32_t* first)
+{
+    uint32_t low = token;
+    uint32_t high = token;
+    while (low > 0 && high + 1 < parser->tokens.count && parser->tree.roles[low - 1] == PARSE_ROLE_OPEN_GROUP &&
+           parser->tree.roles[high + 1] == PARSE_ROLE_CLOSE_GROUP && parser->tree.parents[low - 1] == high + 1)
+    {
+        low -= 1;
+        high += 1;
+    }
+    *first = low;
+    return high;
+}
+
+// The name of a builtin's call and the parentheses around it (check_input_callee_end), within the input: its syntax.
+static void check_constant_callee_syntax(CheckConstantInput* input, uint32_t token)
+{
+    uint32_t group = token;
+    const uint32_t end = check_input_callee_end(input->reader->parser, token, &group);
+    for (uint32_t t = group >= input->first ? group : token; t <= end && t < input->end; t += 1)
+    {
+        input->syntax[t - input->first] = true;
+    }
+}
+
+// Whether the identifier at `token`, which no declaration binds, is __builtin_invoke's name before its call's '(' (in
+// parentheses or not), whose call is its first argument's (#148): the name is the call's syntax, as the reader drops it.
+static bool check_constant_invoke(CheckConstantInput* input, uint32_t token, uint32_t handle)
+{
+    const Parser* parser = input->reader->parser;
+    uint32_t group = token;
+    const uint32_t end = check_input_callee_end(parser, token, &group);
+    return handle == 0 && check_constant_builtin_name(input->reader, parser->tokens.names[token]) == CBUILTIN_INVOKE && end + 1 < input->end &&
+           parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
+}
+
 // Whether the identifier at `token`, bound to the declaration of binding `handle`, is a call of C23's <stdbit.h> function
 // `builtin` as clang's library builtin (#148, cbuiltin_stdc_library): the name a builtin of the unit (pp_library_builtin:
 // C23's, unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise), its declaration a function of external
@@ -1343,10 +1390,12 @@ static uint16_t check_constant_builtin_name(CheckInputReader* reader, uint32_t i
 static bool check_input_stdc_library_call(CheckInputReader* reader, uint32_t token, uint32_t handle, uint16_t builtin)
 {
     const Parser* parser = reader->parser;
-    const uint32_t close = token < parser->tokens.count ? parser->tree.parents[token] : parser->tokens.count;
-    const bool call = handle != 0 && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && token + 1 < close &&
-                      parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL && token + 2 < close &&
-                      check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA) == close;
+    uint32_t group = token;
+    const uint32_t end = token < parser->tokens.count ? check_input_callee_end(parser, token, &group) : token;
+    const uint32_t close = end < parser->tokens.count ? parser->tree.parents[end] : parser->tokens.count;
+    const bool call = handle != 0 && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && end + 1 < close &&
+                      parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL && end + 2 < close &&
+                      check_constant_punctuation(parser, end + 2, close, PARSE_KIND_COMMA) == close;
     const uint32_t declaration = call ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
     const IdentId name = parser->tokens.names[token];
     bool result = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
@@ -1370,7 +1419,10 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
-    const uint32_t open = token + 1;
+    // A name in parentheses calls its builtin too (check_input_callee_end), within the input.
+    uint32_t group = token;
+    const uint32_t end = check_input_callee_end(parser, token, &group);
+    const uint32_t open = group >= input->first ? end + 1 : token + 1;
     const uint32_t close = open < input->end ? parser->tree.parents[open] : input->end;
     uint16_t builtin = CBUILTIN_NONE;
     const bool called = open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
@@ -1402,7 +1454,9 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
         }
         builtin = library ? builtin : CBUILTIN_NONE;
     }
-    return builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT ? builtin : CBUILTIN_NONE;
+    // __builtin_invoke's call is its first argument's (check_input_declaration's walk), never a constant.
+    return builtin != CBUILTIN_INVOKE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT) ?
+           builtin : CBUILTIN_NONE;
 }
 
 // A deferred typeof region has already passed through the ordered declaration reader. Its declaration tokens
@@ -1639,6 +1693,18 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 valid = check_constant_type_builtin_prepare(input, token, keyword == C_NAME_BUILTIN_BIT_CAST ? CBUILTIN_BIT_CAST : CBUILTIN_CONVERTVECTOR);
             }
+            else if (valid && keyword == C_NAME_BUILTIN_AVAILABLE)
+            {
+                // __builtin_available (#148): its specs are syntax, which names nothing; the call takes no operand.
+                input->syntax[token - 1 - input->first] = true;
+                for (uint32_t item = token + 1; item < close; item += 1)
+                {
+                    input->syntax[item - input->first] = true;
+                }
+                check_input_rare_claim(reader, &reader->builtins[close]);
+                reader->builtins[close] = CBUILTIN_AVAILABLE;
+                check_input_availability_warning(reader, token - 1, close);
+            }
         }
         if (valid && input->syntax[index] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM))
         {
@@ -1649,10 +1715,11 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         {
             const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
-            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
-            if (builtin != CBUILTIN_NONE)
+            const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
+            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE && !invoke ? check_constant_intrinsic_type(input, token, handle) : 0;
+            if (builtin != CBUILTIN_NONE || invoke)
             {
-                input->syntax[index] = true;
+                check_constant_callee_syntax(input, token);
             }
             else if (input->cached || intrinsic != 0)
             {
@@ -1662,7 +1729,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
                 const bool is_typedef = reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
-                valid = is_typedef == (role == PARSE_ROLE_SPECIFIER);
+                valid = is_typedef == (role == PARSE_ROLE_SPECIFIER) && !check_input_use_shadowed(reader, token, handle);
                 if (valid)
                 {
                     reader->output->declarations[token] = declaration;
@@ -1671,7 +1738,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     {
                         reader->output->overload_heads[token] = reader->output->overload_heads[declaration];
                     }
-                    if (c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) == 0)
+                    if (c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) == 0)
                     {
                         reader->output->resource = true;
                         valid = false;
@@ -1718,6 +1785,17 @@ static TypeId check_constant_control_type(CheckInputReader* reader, const CheckV
     return type;
 }
 
+// The arm a selection's evaluation takes, from `first` to `end` (past its last), by its `)` (`close`), where an
+// assumption's check asks for it (#147, CheckInputReader.selection_arms).
+static void check_constant_record_arm(CheckInputReader* reader, uint32_t close, uint32_t first, uint32_t end)
+{
+    if (reader->selection_arms != NULL && close >= reader->selection_arm_base && close < reader->selection_arm_end)
+    {
+        reader->selection_arms[2 * (close - reader->selection_arm_base)] = first;
+        reader->selection_arms[2 * (close - reader->selection_arm_base) + 1] = end;
+    }
+}
+
 static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword, uint32_t first, uint32_t separator, uint32_t token, CheckValue* value, CheckValue* proof)
 {
     CheckInputReader* reader = input->reader;
@@ -1731,6 +1809,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         valid = next < token && check_input_integer_ice(reader, &control) && check_action_truth(reader->types, &control, &condition);
         if (valid)
         {
+            check_constant_record_arm(reader, token, condition ? separator + 1 : next + 1, condition ? next : token);
             valid = check_constant_range_value(input, condition ? separator + 1 : next + 1, condition ? next : token, value);
             if (valid)
             {
@@ -1800,6 +1879,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         valid &= chosen_first != BUSTER_CHECK_NONE;
         if (valid)
         {
+            check_constant_record_arm(reader, token, chosen_first, chosen_end);
             valid = check_constant_range_value(input, chosen_first, chosen_end, value);
             if (valid)
             {
@@ -2806,6 +2886,9 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             valid = count == 1 && token + 1 < input->end && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
             action.op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
             action.member = valid ? parser->tokens.names[token + 1] : 0;
+            // The access's base type, which __builtin_counted_by_ref's check reads at its operator (#148); queries are a
+            // type query's, which no operator token has.
+            input->queries[index] = valid ? action.operands[0].type : 0;
         }
         else if (role == PARSE_ROLE_POSTFIX)
         {
@@ -2831,6 +2914,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             else if (check_input_source_builtin(parser->tokens.names[reader->first_child[token]]))
             {
                 valid = check_constant_source_builtin(input, token, count, action.operands, &input->values[index]);
+                proof = input->values[index];
+            }
+            else if (reader->builtins[token] == CBUILTIN_AVAILABLE)
+            {
+                valid = count == 0 && check_constant_call(input, reader->first_child[token], token, CBUILTIN_AVAILABLE, 0, action.operands, 0, &input->values[index]);
                 proof = input->values[index];
             }
             else
@@ -2905,6 +2993,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         {
             if (action.op == CHECK_OP_ALIGNOF && action.type == 0 && count == 1)
             {
+                check_input_alignof_expression(reader, token);
                 const TypeId aligned = check_constant_object_alignment(reader, token, action.operands[0].type);
                 action.type = aligned != action.operands[0].type ? aligned : 0;
                 valid = aligned != 0;
@@ -3106,6 +3195,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
             }
             if (action.op == CHECK_OP_ALIGNOF && action.type == 0 && operation.arity == 1)
             {
+                check_input_alignof_expression(reader, operation.token);
                 const TypeId aligned = check_constant_object_alignment(reader, operation.token, action.operands[0].type);
                 action.type = aligned != action.operands[0].type ? aligned : 0;
                 valid = aligned != 0;
@@ -3262,6 +3352,9 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             valid = builtin != CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT);
             const bool type_builtin = builtin == CBUILTIN_CONVERTVECTOR || builtin == CBUILTIN_BIT_CAST;
             const TypeId destination = type_builtin ? input->queries[close - input->first] : 0;
+            // __builtin_available's specs are no operands (#148): its call takes none, read at its `)`.
+            const bool availability = builtin == CBUILTIN_AVAILABLE;
+            arguments = availability ? 0 : arguments;
             if (type_builtin)
             {
                 valid &= arguments == 2 && destination != 0;
@@ -3280,7 +3373,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
                 };
                 operators[operator_count++] = (CheckConstantOperator){ .token = open, .marker = 3 };
             }
-            token = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, open + 1, close, PARSE_KIND_COMMA) + 1 : open + 1;
+            token = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, open + 1, close, PARSE_KIND_COMMA) + 1 : availability ? close : open + 1;
         }
         else if (operand && kind == PARSE_KIND_IDENTIFIER && check_input_intrinsic_type(reader, token) != 0)
         {
@@ -3632,6 +3725,26 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 input->attribute_starts[index]->publish = false;
             }
         }
+        if (kind == PARSE_KIND_L_PAREN && token > input->first && parser->tokens.names[token - 1] == C_NAME_BUILTIN_AVAILABLE &&
+            parser->tokens.kinds[token - 1] == PARSE_KIND_TYPE_ARGUMENT)
+        {
+            // __builtin_available's specs (#148), which name nothing: syntax, up to the call's `)`, which takes no operand.
+            const uint32_t close = parser->tree.parents[token];
+            valid = close > token && close < input->end;
+            if (valid)
+            {
+                input->syntax[index - 1] = true;
+                for (uint32_t item = token; item < close; item += 1)
+                {
+                    input->syntax[item - input->first] = true;
+                }
+                check_input_rare_claim(reader, &reader->builtins[close]);
+                reader->builtins[close] = CBUILTIN_AVAILABLE;
+                check_input_availability_warning(reader, token - 1, close);
+                token = close - 1;
+            }
+            continue;
+        }
         if (kind == PARSE_KIND_L_PAREN)
         {
             const uint32_t close = parser->tree.parents[token];
@@ -3671,16 +3784,18 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
             const bool type = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
-            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
-            if (builtin != CBUILTIN_NONE)
+            const bool invoke = !input->syntax[index] && builtin == CBUILTIN_NONE && check_constant_invoke(input, token, handle);
+            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE && !invoke ? check_constant_intrinsic_type(input, token, handle) : 0;
+            if (builtin != CBUILTIN_NONE || invoke)
             {
-                input->syntax[index] = true;
+                check_constant_callee_syntax(input, token);
             }
             else
             {
                 valid = intrinsic != 0 || (input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
+            valid = valid && !(!input->cached && builtin == CBUILTIN_NONE && check_input_use_shadowed(reader, token, handle));
             if (valid && !input->cached && builtin == CBUILTIN_NONE && handle != 0)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
@@ -3690,7 +3805,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 {
                     reader->output->overload_heads[token] = reader->output->overload_heads[declaration];
                 }
-                valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0;
+                valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) != 0;
                 reader->output->resource |= !valid;
             }
         }
@@ -4097,6 +4212,29 @@ static __attribute__((unused)) bool check_input_constant_ice(CheckInputReader* r
     CheckValue value = { 0 };
     const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_const_rvalue(reader, end, &value) && check_input_integer_attribute(reader, &value) &&
                        check_action_i64(reader->types, &value, number);
+    if (valid)
+    {
+        check_input_constant_warning(reader, first, end, &value, true);
+    }
+    return valid;
+}
+
+// An attribute's integer argument clang reads in 32 bits (#147, makeAttributeArgExpr's and checkUInt32Argument's): whether
+// it is an integer constant expression, with its value (*number); and whether that needs more than 32 bits at its type's
+// width (*wide, clang's isIntN(32)), *number then those bits as clang's err_ice_too_large prints them, unsigned (their
+// low 64).
+static __attribute__((unused)) bool check_input_constant_u32(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number, bool* wide)
+{
+    CheckValue value = { 0 };
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_const_rvalue(reader, end, &value) && check_input_integer_attribute(reader, &value) &&
+                       value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE &&
+                       check_action_integer_type(reader->types, value.type, &width, &is_signed);
+    const unsigned __int128 bits = valid ? value.integer & check_action_mask(width) : 0;
+    int64_t fitted = 0;
+    *wide = (bits >> 32) != 0;
+    *number = valid && !*wide && check_action_i64(reader->types, &value, &fitted) ? fitted : (int64_t)(uint64_t)bits;
     if (valid)
     {
         check_input_constant_warning(reader, first, end, &value, true);

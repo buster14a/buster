@@ -312,34 +312,49 @@ static bool check_common_comparison_role(uint8_t role)
 }
 
 // An expression statement's terminator belongs to a block, body, label or case; a for header's semicolon doesn't.
-// A parenthesized expression's comparison or value climbs its group closers first.
+// A parenthesized expression's comparison or value climbs its group closers first. A GNU statement expression's last
+// statement is its value, discarded only where the statement expression is: its `;` climbs to the expression's `)`, as
+// clang's DiagnoseUnusedExprResult goes into a StmtExpr's last expression from the statement expression's own context.
 static bool check_common_statement_terminator(const Parser* parser, uint32_t token)
 {
+    const uint32_t count = parser->tokens.count;
     bool result = false;
+    bool climbing = true;
     uint32_t at = token;
-    for (uint32_t steps = 0; at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    for (uint32_t steps = 0; climbing && at < count && steps < count; steps += 1)
     {
         const uint8_t role = parser->tree.roles[at];
-        if (role == PARSE_ROLE_TERMINATOR)
+        const uint32_t owner = role == PARSE_ROLE_TERMINATOR ? parser->tree.parents[at] : count;
+        const uint8_t owner_role = owner < count ? parser->tree.roles[owner] : PARSE_ROLE_NONE;
+        // The block that owns the `;`, by its `}`: a statement expression's where a `)` closes the group right after it.
+        const uint32_t close = owner_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[owner] : owner_role == PARSE_ROLE_CLOSE_BLOCK ? owner : count;
+        const bool last_value = close < count && at + 1 == close && close + 1 < count && parser->tokens.kinds[close + 1] == PARSE_KIND_R_PAREN &&
+                                parser->tree.roles[close + 1] == PARSE_ROLE_CLOSE_GROUP;
+        if (last_value)
         {
-            const uint32_t owner = parser->tree.parents[at];
-            const uint8_t owner_role = owner < parser->tokens.count ? parser->tree.roles[owner] : PARSE_ROLE_NONE;
+            at = close + 1;
+        }
+        else if (role == PARSE_ROLE_TERMINATOR)
+        {
             // A block, a label or a control statement's un-braced head (`if (c) s;`, `else s;`, `do s;`)
             // owns the `;` that ends a discarded expression statement. A for's `)` owns both its head's
             // separators and its un-braced body's `;`: only the body's comes after the `)`.
-            result = owner < parser->tokens.count && (owner_role == PARSE_ROLE_OPEN_BLOCK || owner_role == PARSE_ROLE_CLOSE_BLOCK ||
-                                                       owner_role == PARSE_ROLE_OPEN_BODY || owner_role == PARSE_ROLE_CLOSE_BODY ||
-                                                       owner_role == PARSE_ROLE_LABEL || owner_role == PARSE_ROLE_OPEN_CASE ||
-                                                       owner_role == PARSE_ROLE_CLOSE_CASE || owner_role == PARSE_ROLE_CLOSE_CONDITION ||
-                                                       owner_role == PARSE_ROLE_ELSE || owner_role == PARSE_ROLE_DO ||
-                                                       (owner_role == PARSE_ROLE_CLOSE_FOR && at > owner));
-            break;
+            result = owner < count && (owner_role == PARSE_ROLE_OPEN_BLOCK || owner_role == PARSE_ROLE_CLOSE_BLOCK ||
+                                       owner_role == PARSE_ROLE_OPEN_BODY || owner_role == PARSE_ROLE_CLOSE_BODY ||
+                                       owner_role == PARSE_ROLE_LABEL || owner_role == PARSE_ROLE_OPEN_CASE ||
+                                       owner_role == PARSE_ROLE_CLOSE_CASE || owner_role == PARSE_ROLE_CLOSE_CONDITION ||
+                                       owner_role == PARSE_ROLE_ELSE || owner_role == PARSE_ROLE_DO ||
+                                       (owner_role == PARSE_ROLE_CLOSE_FOR && at > owner));
+            climbing = false;
         }
-        if (role != PARSE_ROLE_CLOSE_GROUP)
+        else if (role == PARSE_ROLE_CLOSE_GROUP)
         {
-            break;
+            at = parser->tree.parents[at];
         }
-        at = parser->tree.parents[at];
+        else
+        {
+            climbing = false;
+        }
     }
     return result;
 }
@@ -1267,7 +1282,10 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     break;
                 }
                 emission->emitted[node] = 1;
-                if (graph->ops[node] == CHECK_OP_COMMA)
+                // A comma the source writes; the reader's own (a variable length array's sizeof evaluating its operand,
+                // c_check_vla_input.c) is at the sizeof and has no operand of the comma operator's to warn of.
+                if (graph->ops[node] == CHECK_OP_COMMA && graph->tokens[node] < emission->parser->tokens.count &&
+                    emission->parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA)
                 {
                     check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_COMMA);
                 }

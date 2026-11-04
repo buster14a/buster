@@ -16839,6 +16839,8 @@ static const PPFeature pp_implemented_attribute[] = {
     { "cleanup", 1 },
     { "common", 1 },
     { "constructor", 1 },
+    { "counted_by", 1 },
+    { "counted_by_or_null", 1 },
     { "destructor", 1 },
     { "ext_vector_type", 1 },
     { "fallthrough", 1 },
@@ -16851,6 +16853,8 @@ static const PPFeature pp_implemented_attribute[] = {
     { "packed", 1 },
     { "retain", 1 },
     { "section", 1 },
+    { "sized_by", 1 },
+    { "sized_by_or_null", 1 },
     { "target", 1 },
     { "transparent_union", 1 },
     { "used", 1 },
@@ -16860,8 +16864,12 @@ static const PPFeature pp_implemented_attribute[] = {
     { "weakref", 1 },
 };
 static const PPFeature pp_implemented_c_attribute[] = {
+    { "clang::counted_by", 1 },
+    { "clang::counted_by_or_null", 1 },
     { "clang::ext_vector_type", 1 },
     { "clang::overloadable", 1 },
+    { "clang::sized_by", 1 },
+    { "clang::sized_by_or_null", 1 },
     { "fallthrough", 201910 },
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
@@ -17026,7 +17034,8 @@ static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, ui
 
 // buster's __has_builtin of a name (#806, #148): 1 for a builtin it implements, its source checking and Tier 0 lowering
 // shipped (the catalog's source capability, the x86 intrinsics' rows and leaves, the fortified builtins, the library
-// builtins compiled as calls of their functions and its own queries), that clang makes a builtin of the unit by its
+// builtins compiled as calls of their functions and its own queries), or whose source checking shipped and whose code -c
+// refuses by name (docs/c-builtins-integration.md's "Checked, refused in code"), that clang makes a builtin of the unit by its
 // language modes and whose required target features hold there, as clang answers (pp_builtin_language,
 // pp_builtin_features). Every __builtin_ library builtin is one of all of clang's languages without features, and a plain
 // one is a builtin where pp_library_builtin says so.

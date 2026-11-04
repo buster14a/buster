@@ -65,11 +65,53 @@ struct CheckVarargsResult
     uint32_t warnings;
     // va_end ends the list's semantic lifetime but does not fabricate a memory write.
     bool mutates_list;
+    // Whether the lists are Microsoft ones (#148): an ms builtin's, or va_arg's of an lvalue of exactly char *, whose
+    // addresses the operation takes (check_varargs_microsoft).
+    bool microsoft;
 };
 
 static bool check_varargs_start(CBuiltinId id)
 {
-    return id == CBUILTIN_VA_START || id == CBUILTIN_C23_VA_START;
+    return id == CBUILTIN_VA_START || id == CBUILTIN_C23_VA_START || id == CBUILTIN_MS_VA_START || id == CBUILTIN_ZOS_VA_START;
+}
+
+// Whether an operand is a Microsoft va_list as clang's va_arg reads one (#148): x86-64's __builtin_ms_va_list is char *,
+// and an lvalue of exactly that type (no qualifier on the pointer or on its char) is one.
+static bool check_varargs_microsoft_list(TypeTable* table, const CheckValue* operand)
+{
+    const TypeId list = type_pointer(table, BUSTER_TYPE_CHAR);
+    const bool result = list != 0 && operand->category == CHECK_LVALUE && type_is_valid(table, operand->type) && type_strip_aligned(table, operand->type) == list;
+    return result;
+}
+
+// A Microsoft builtin's list operand (#148), which clang binds as a char *&: an lvalue of exactly char *, never
+// converted, whose address the operation takes. Another type is clang's "cannot bind to a value of unrelated type" or
+// its qualifiers' errors, and an rvalue its "cannot bind to a temporary".
+static void check_varargs_microsoft(TypeTable* table, const CheckVarargsAction* input, CheckVarargsResult* output, uint32_t index)
+{
+    const CheckValue* operand = &input->operands[index];
+    CheckActionResult* result = &output->action;
+    const TypeId list = type_pointer(table, BUSTER_TYPE_CHAR);
+    if (list == 0)
+    {
+        check_action_diagnose(result, CHECK_DIAG_RESOURCE, index);
+    }
+    else if (!type_is_valid(table, operand->type) || operand->category > CHECK_FUNCTION)
+    {
+        check_action_diagnose(result, CHECK_DIAG_INVALID_TYPE, index);
+    }
+    else if (type_strip_aligned(table, operand->type) != list)
+    {
+        check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, index);
+    }
+    else if (operand->category != CHECK_LVALUE)
+    {
+        check_action_diagnose(result, CHECK_DIAG_LVALUE_REQUIRED, index);
+    }
+    else
+    {
+        check_action_inherit(&result->value, operand);
+    }
 }
 
 static bool check_varargs_source_complete(const TypeTable* table, TypeId type, const CheckVarargsAction* input)
@@ -195,9 +237,14 @@ static void check_varargs_one(TypeTable* table, const CheckVarargsContext* conte
     CheckActionResult* result = &output->action;
     const bool start = check_varargs_start(input->id);
     const bool argument = input->id == CBUILTIN_VA_ARG;
-    const bool copy = input->id == CBUILTIN_VA_COPY;
-    const bool end = input->id == CBUILTIN_VA_END;
+    const bool copy = input->id == CBUILTIN_VA_COPY || input->id == CBUILTIN_MS_VA_COPY || input->id == CBUILTIN_ZOS_VA_COPY;
+    const bool end = input->id == CBUILTIN_VA_END || input->id == CBUILTIN_MS_VA_END || input->id == CBUILTIN_ZOS_VA_END;
     const bool known = start || argument || copy || end;
+    // The Microsoft builtins' lists bind as char *&, and va_arg's is one where it is an lvalue of exactly char *; z/OS's
+    // are char ** parameters (#148).
+    const bool microsoft = input->id == CBUILTIN_MS_VA_START || input->id == CBUILTIN_MS_VA_END || input->id == CBUILTIN_MS_VA_COPY ||
+                           (argument && input->argument_count == 2 && check_varargs_microsoft_list(table, &input->operands[0]));
+    const bool zos = input->id == CBUILTIN_ZOS_VA_START || input->id == CBUILTIN_ZOS_VA_END || input->id == CBUILTIN_ZOS_VA_COPY;
     const uint32_t minimum = input->id == CBUILTIN_C23_VA_START || end ? 1 : 2;
     const uint32_t maximum = end ? 1 : 2;
     if (!known)
@@ -218,7 +265,28 @@ static void check_varargs_one(TypeTable* table, const CheckVarargsContext* conte
         check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0);
     }
     TypeId parameter = 0;
-    if (result->diagnostic == CHECK_DIAG_NONE)
+    if (result->diagnostic == CHECK_DIAG_NONE && start)
+    {
+        // clang's checkVAStartABI, first: on x86-64 Linux, __builtin_ms_va_start belongs to an ms_abi function alone
+        // ("'__builtin_ms_va_start' used in System V ABI function"), and every other start spelling to any other
+        // ("'va_start' used in Win64 ABI function").
+        const bool function = type_is_valid(table, context->function_type) && check_action_kind(table, context->function_type) == BUSTER_TYPE_KIND_FUNCTION;
+        const bool win64 = function && type_function_abi_kind(table, type_strip_aligned(table, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
+        if ((input->id == CBUILTIN_MS_VA_START) != win64)
+        {
+            check_action_diagnose(result, CHECK_DIAG_CALL, 0);
+        }
+    }
+    if (result->diagnostic == CHECK_DIAG_NONE && (microsoft || zos))
+    {
+        const TypeId list = type_pointer(table, BUSTER_TYPE_CHAR);
+        parameter = microsoft || list == 0 ? list : type_pointer(table, list);
+        if (parameter == 0)
+        {
+            check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+        }
+    }
+    else if (result->diagnostic == CHECK_DIAG_NONE)
     {
         const TypeId list = type_unqualified(type_strip_aligned(table, context->va_list_type));
         if (!type_kind_is_array(type_kind(table, list)))
@@ -246,10 +314,17 @@ static void check_varargs_one(TypeTable* table, const CheckVarargsContext* conte
         result->value.flags = BUSTER_CHECK_SIDE_EFFECT;
         output->evaluated_operands = copy ? 3 : 1;
         output->mutates_list = !end;
-        check_varargs_list(table, input, output, parameter, 0, argument);
-        if (copy)
+        output->microsoft = microsoft;
+        for (uint32_t index = 0; index < (copy ? 2u : 1u); index += 1)
         {
-            check_varargs_list(table, input, output, parameter, 1, false);
+            if (microsoft)
+            {
+                check_varargs_microsoft(table, input, output, index);
+            }
+            else
+            {
+                check_varargs_list(table, input, output, parameter, index, argument);
+            }
         }
         if (start)
         {

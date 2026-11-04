@@ -224,6 +224,16 @@ typedef enum TypeFunctionABI
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
 #define BUSTER_TYPE_MEMBER_BIT_FIELD 0x02
+// clang's counted_by family on a member (#148), its kind in the flags' bits 2 to 4 as TypeMember.count_kind has it, and
+// the count's member's name in TypeMembers.count.
+#define BUSTER_TYPE_MEMBER_COUNT_SHIFT 2
+#define BUSTER_TYPE_MEMBER_COUNT_MASK 0x1C
+// TypeMember.count_kind: none, or clang's CountAttributedType kinds plus one.
+#define BUSTER_TYPE_COUNT_NONE 0
+#define BUSTER_TYPE_COUNTED_BY 1
+#define BUSTER_TYPE_SIZED_BY 2
+#define BUSTER_TYPE_COUNTED_BY_OR_NULL 3
+#define BUSTER_TYPE_SIZED_BY_OR_NULL 4
 // TypeMember.bit_width of a member that isn't a bit-field.
 #define BUSTER_TYPE_NOT_BIT_FIELD UINT32_MAX
 
@@ -367,6 +377,8 @@ struct TypeMembers
     uint8_t* alignment_log2;
     uint8_t* flags;
     uint64_t* offset;
+    // The name of the member a counted_by family attribute names (#148), or 0.
+    uint32_t* count_name;
     uint32_t count;
     uint32_t capacity;
 };
@@ -468,6 +480,10 @@ struct TypeMember
     uint8_t alignment_log2;
     // __attribute__((packed)) on the member.
     bool packed;
+    // A counted_by family attribute's kind (BUSTER_TYPE_COUNTED_BY and the others, #148) and the name of its count's
+    // member; BUSTER_TYPE_COUNT_NONE and 0 for none.
+    uint8_t count_kind;
+    uint32_t count_name;
 };
 
 // A struct's or union's layout attributes: GNU's packed, #pragma pack's value (#124 gives it) and the aligned
@@ -566,6 +582,8 @@ typedef enum TypeTransparentUnionStatus
     TYPE_TRANSPARENT_UNION_FIRST_VECTOR,
     TYPE_TRANSPARENT_UNION_SIZE,
     TYPE_TRANSPARENT_UNION_ALIGNMENT,
+    // A field of incomplete type (a GNU flexible array member), which clang's handler leaves without a word.
+    TYPE_TRANSPARENT_UNION_INCOMPLETE_FIELD,
 } TypeTransparentUnionStatus;
 
 typedef struct TypeTransparentUnionResult TypeTransparentUnionResult;
@@ -606,8 +624,11 @@ struct TypeNames
     uint32_t anonymous_count;
 };
 
-// The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool).
+// The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
+// BUSTER_TYPE_PRINT_NO_TAG_KEYWORD prints a tag's name without its keyword, as clang's SuppressTagKeyword does (an
+// unnamed tag's row, `(unnamed struct at file:line:col)`, then carries its kind itself).
 #define BUSTER_TYPE_PRINT_C23 0x01
+#define BUSTER_TYPE_PRINT_NO_TAG_KEYWORD 0x02
 
 // At most how many bytes type_initialize pushes from its arena for `capacity`, and how many the index arena needs to
 // grow to the largest index those types can use.
@@ -988,8 +1009,8 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_RECORD_COLUMNS 9
 #define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 5 * sizeof(uint32_t) + 4 * sizeof(uint8_t))
 #define BUSTER_TYPE_TAG_COLUMNS 10
-#define BUSTER_TYPE_MEMBER_BYTES (sizeof(uint32_t) + sizeof(TypeId) + sizeof(uint32_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t))
-#define BUSTER_TYPE_MEMBER_COLUMNS 6
+#define BUSTER_TYPE_MEMBER_BYTES (sizeof(uint32_t) + sizeof(TypeId) + sizeof(uint32_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t) + sizeof(uint32_t))
+#define BUSTER_TYPE_MEMBER_COLUMNS 7
 // The index: four slots per 64-byte bucket, at most three quarters full, from 64 buckets (4 KB).
 #define BUSTER_TYPE_BUCKET_SLOTS 4
 #define BUSTER_TYPE_BUCKET_BYTES 64
@@ -1119,6 +1140,7 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
         result.members.alignment_log2 = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.alignment_log2), 1, &fits);
         result.members.flags = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.flags), 1, &fits);
         result.members.offset = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.offset), 1, &fits);
+        result.members.count_name = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.count_name), 1, &fits);
         result.lookup.buckets = type_push_column(arena, lookups, sizeof(*result.lookup.buckets), 1, &fits);
         result.index.slots = type_push_column(index_arena, BUSTER_TYPE_INITIAL_BUCKETS * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot),
                                               BUSTER_TYPE_INITIAL_BUCKETS * BUSTER_TYPE_BUCKET_SLOTS, &fits);
@@ -2923,8 +2945,10 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
             columns->type[begin + i] = member->type;
             columns->bit_width[begin + i] = bit_field ? member->bit_width : 0;
             columns->alignment_log2[begin + i] = member->alignment_log2;
-            columns->flags[begin + i] = (member->packed ? BUSTER_TYPE_MEMBER_PACKED : 0) | (bit_field ? BUSTER_TYPE_MEMBER_BIT_FIELD : 0);
+            columns->flags[begin + i] = (uint8_t)((member->packed ? BUSTER_TYPE_MEMBER_PACKED : 0) | (bit_field ? BUSTER_TYPE_MEMBER_BIT_FIELD : 0) |
+                                                  ((member->count_kind << BUSTER_TYPE_MEMBER_COUNT_SHIFT) & BUSTER_TYPE_MEMBER_COUNT_MASK));
             columns->offset[begin + i] = 0;
+            columns->count_name[begin + i] = member->count_kind != BUSTER_TYPE_COUNT_NONE ? member->count_name : 0;
         }
         columns->count += count;
         table->tags.member_begin[tag] = begin;
@@ -3543,12 +3567,16 @@ static TypeTransparentUnionResult type_mark_transparent_union(TypeTable* table, 
                 }
                 const uint64_t size = type_size(table, first);
                 const uint32_t alignment = type_alignment_log2(table, first);
-                for (uint32_t member = 1; result.status == TYPE_TRANSPARENT_UNION_APPLIED && member < count; member += 1)
+                // clang's handleTransparentUnionAttr: every field has the first's size and no greater alignment (a smaller
+                // one is fine), and an incomplete field's type (the first's included) ends the check without the attribute.
+                for (uint32_t member = 0; result.status == TYPE_TRANSPARENT_UNION_APPLIED && member < count; member += 1)
                 {
                     const TypeId type = table->members.type[begin + member];
-                    if (type_size(table, type) != size || type_alignment_log2(table, type) != alignment)
+                    const bool incomplete = !type_is_complete(table, type);
+                    if (incomplete || type_size(table, type) != size || type_alignment_log2(table, type) > alignment)
                     {
-                        result.status = type_size(table, type) != size ? TYPE_TRANSPARENT_UNION_SIZE : TYPE_TRANSPARENT_UNION_ALIGNMENT;
+                        result.status = incomplete ? TYPE_TRANSPARENT_UNION_INCOMPLETE_FIELD :
+                                        type_size(table, type) != size ? TYPE_TRANSPARENT_UNION_SIZE : TYPE_TRANSPARENT_UNION_ALIGNMENT;
                         result.member = member;
                     }
                 }
@@ -5561,16 +5589,20 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         const String8 spelling = printer->names != 0 && printer->names->anonymous != 0 &&
                                  table->types.index[index] < printer->names->anonymous_count ?
                                  printer->names->anonymous[table->types.index[index]] : (String8){ 0 };
+        const bool keyword = (printer->options & BUSTER_TYPE_PRINT_NO_TAG_KEYWORD) == 0;
         if (name != 0 && printer->names != 0 && name < printer->names->count)
         {
-            type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
+            if (keyword)
+            {
+                type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
+            }
             type_print_bytes(printer, (const char*)printer->names->bytes[name], printer->names->lengths[name]);
         }
         else if (spelling.length != 0)
         {
             // A `(unnamed at file:line:col)` row keeps the keyword; a typedef's own name replaces it, as clang's
             // `T` does for the record it names (#992).
-            if (spelling.length != 0 && *spelling.pointer == '(')
+            if (spelling.length != 0 && *spelling.pointer == '(' && keyword)
             {
                 type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
             }
@@ -6021,6 +6053,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->members.alignment_log2, source->members.alignment_log2, member_count * sizeof(*table->members.alignment_log2));
         memcpy(table->members.flags, source->members.flags, member_count * sizeof(*table->members.flags));
         memcpy(table->members.offset, source->members.offset, member_count * sizeof(*table->members.offset));
+        memcpy(table->members.count_name, source->members.count_name, member_count * sizeof(*table->members.count_name));
         table->members.count = source->members.count;
         memcpy(table->lookup.buckets, source->lookup.buckets, (uint64_t)source->lookup.count * sizeof(*table->lookup.buckets));
         table->lookup.count = source->lookup.count;

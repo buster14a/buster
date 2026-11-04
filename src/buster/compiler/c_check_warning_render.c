@@ -56,6 +56,30 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
+// The text of the string literal at parser token `token` as written, between its quotes (past an encoding prefix), in
+// `scratch`; empty for none.
+static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    String8 result = { 0 };
+    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : UINT32_MAX;
+    const PPTokens* output = &pp->output;
+    if (source < output->count)
+    {
+        const uint64_t capacity = (uint64_t)output->values[source] - output->locations[source] + 1;
+        uint8_t* buffer = capacity < (UINT64_C(1) << 20) ? arena_push(scratch, capacity, 1) : NULL;
+        const uint8_t* bytes = NULL;
+        const uint32_t length = buffer != NULL ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
+        uint32_t open = 0;
+        while (open < length && bytes[open] != '"')
+        {
+            open += 1;
+        }
+        const bool quoted = open + 1 < length && bytes[length - 1] == '"';
+        result = quoted ? (String8){ (char*)bytes + open + 1, length - open - 2 } : result;
+    }
+    return result;
+}
+
 // One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
 // the unit has unnamed tags, a `file:line:col` or typedef-name text by tag index. Both are built once before the
 // pass's events take their marks, so per-event release cannot invalidate them; `anonymous` stays empty where
@@ -268,7 +292,17 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
             }
             else if (sugared.length != 0)
             {
-                const char* quoted = check_warning_text(scratch, "'%.*s'", (int)sugared.length, sugared.pointer);
+                // Without an a.k.a., clang describes a vector type: "'T' (vector of N 'E' values)" (ConvertTypeToDiagnosticString).
+                const TypeId vector = type_strip_aligned(types, type);
+                const uint8_t kind = type_kind(types, vector);
+                const bool described = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+                const uint64_t count = described ? types->types.extent[type_index(vector)] : 0;
+                TypeNames plain = names;
+                plain.alias_count = 0;
+                const String8 element = described ? type_print(types, scratch, types->types.base[type_index(vector)], (String8){ 0 }, &plain, options) : (String8){ 0 };
+                const char* quoted = described ? check_warning_text(scratch, "'%.*s' (vector of %llu '%.*s' %s)", (int)sugared.length, sugared.pointer,
+                                                                    (unsigned long long)count, (int)element.length, element.pointer, count > 1 ? "values" : "value") :
+                                                 check_warning_text(scratch, "'%.*s'", (int)sugared.length, sugared.pointer);
                 result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
             }
         }
@@ -468,6 +502,316 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         (int)attribute.length, attribute.pointer, suggestion);
             break;
         }
+        case CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT:
+        {
+            // clang's "'X' attribute only applies to SUBJECTS", the attribute named as the unknown one's warning names it and
+            // its subjects its row's (check_input_attribute_subjects).
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const CheckInputSubjectRow* row = check_input_subject_row(scope, check_warning_attribute_normalized(name), scope_name != 0, standard);
+            result = row != NULL ? check_warning_text(scratch, "'%.*s%s%.*s' attribute only applies to %s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "",
+                                                      (int)attribute.length, attribute.pointer, row->message) :
+                                   NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to function types; type here is %.*s", (int)name.length, name.pointer,
+                                                           (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_NONSTRING_TYPE:
+        {
+            // clang's handleNonStringAttr's warning: the attribute named as the subject warning names it (its scope's token
+            // in the payload's, when it has one) and the declaration's type as clang spells it.
+            const bool standard = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE && payload->token < parser->tokens.count;
+            const String8 scope = standard ? check_warning_attribute_scope(check_driver_warning_name(pp, parser->tokens.names[payload->token])) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            result = type.length != 0 ? check_warning_text(scratch, "'%.*s%s%.*s' attribute only applies to fields or variables of character array type; type is %.*s",
+                                                           (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer,
+                                                           (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_TRANSPARENT_UNION:
+        {
+            // handleTransparentUnionAttr's warnings (check_input_transparent_union_warning).
+            const uint32_t which = payload->data & 0xffu;
+            const uint32_t bits = payload->data >> 8;
+            const bool size = which == BUSTER_CHECK_TRANSPARENT_SIZE;
+            if (which == BUSTER_CHECK_TRANSPARENT_INCOMPLETE)
+            {
+                result = "transparent_union attribute can only be applied to a union definition; attribute ignored";
+            }
+            else if (which == BUSTER_CHECK_TRANSPARENT_EMPTY)
+            {
+                result = "transparent union definition must contain at least one field; transparent_union attribute ignored";
+            }
+            else if (which == BUSTER_CHECK_TRANSPARENT_FLOAT || which == BUSTER_CHECK_TRANSPARENT_VECTOR)
+            {
+                const uint32_t spelling = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE ? payload->token : 0;
+                const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, spelling);
+                result = type.length != 0 ? check_warning_text(scratch, "first field of a transparent union cannot have %s type %.*s; transparent_union attribute ignored",
+                                                               which == BUSTER_CHECK_TRANSPARENT_FLOAT ? "floating point" : "vector", (int)type.length, type.pointer) : NULL;
+            }
+            else if (size || which == BUSTER_CHECK_TRANSPARENT_ALIGNMENT)
+            {
+                result = check_warning_text(scratch, "%s of field '%.*s' (%u bits) does not match the %s of the first field in transparent union; transparent_union attribute ignored",
+                                            size ? "size" : "alignment", (int)name.length, name.pointer, bits, size ? "size" : "alignment");
+            }
+            break;
+        }
+        case CHECK_WARNING_EVENT_NONNULL_POINTERS:
+        case CHECK_WARNING_EVENT_NONNULL_NO_POINTERS:
+        case CHECK_WARNING_EVENT_NONNULL_PARAMETER_ARGUMENTS:
+        {
+            // Named as the subject warning names an attribute (CHECK_WARNING_EVENT_ATTRIBUTE_SUBJECT's).
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            const char* ending = event->kind == CHECK_WARNING_EVENT_NONNULL_POINTERS ? "attribute only applies to pointer arguments" :
+                                 event->kind == CHECK_WARNING_EVENT_NONNULL_NO_POINTERS ? "attribute applied to function with no pointer arguments" :
+                                 "attribute when used on parameters takes no arguments";
+            result = check_warning_text(scratch, "'%.*s%s%.*s' %s", (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length,
+                                        attribute.pointer, ending);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
+        {
+            static const char* const keywords[] = { "struct", "union", "enum" };
+            result = check_warning_text(scratch, "attribute '%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)name.length,
+                                        name.pointer, keywords[payload->data < 3 ? payload->data : 0]);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED:
+        {
+            result = "attribute declaration must precede definition";
+            break;
+        }
+        case CHECK_WARNING_EVENT_DEPRECATED_USE:
+        {
+            // The message is the attribute's string as written, without its quotes or prefix.
+            const String8 message = check_warning_string_text(parser, pp, payload->token, scratch);
+            result = message.length != 0 ? check_warning_text(scratch, "'%.*s' is deprecated: %.*s", (int)name.length, name.pointer, (int)message.length, message.pointer) :
+                                          check_warning_text(scratch, "'%.*s' is deprecated", (int)name.length, name.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
+        {
+            result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_CFSTRING_TRUNCATED:
+        {
+            result = "input conversion stopped due to an input byte that does not belong to the input codeset UTF-8";
+            break;
+        }
+        case CHECK_WARNING_EVENT_UNGUARDED_AVAILABILITY:
+        {
+            result = "__builtin_available does not guard availability here; use if (__builtin_available) instead";
+            break;
+        }
+        case CHECK_WARNING_EVENT_VERSION_SEPARATORS:
+        {
+            result = "use same version number separators '_' or '.'; as in 'major[.minor[.subminor]]'";
+            break;
+        }
+        case CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0);
+            result = type.length != 0 ? check_warning_text(scratch, "'%s' should not be applied to an array with element of unknown size because %.*s is a struct type "
+                                                           "with a flexible array member. This will be an error in a future compiler version",
+                                                           check_input_counted_names[payload->name < 4 ? payload->name + 1 : 1], (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE:
+        {
+            result = check_warning_text(scratch, "'%.*s' attribute ignored when parsing type", (int)name.length, name.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_TYPE_POSITION:
+        case CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE:
+        case CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED:
+        case CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED:
+        case CHECK_WARNING_EVENT_RETURN_POINTERS:
+        case CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES:
+        case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED:
+        case CHECK_WARNING_EVENT_GCC_VARIADIC:
+        case CHECK_WARNING_EVENT_TARGET_UNSUPPORTED:
+        case CHECK_WARNING_EVENT_UNKNOWN_SANITIZER:
+        case CHECK_WARNING_EVENT_SANITIZER_GLOBAL:
+        case CHECK_WARNING_EVENT_FUNCTIONS_METHODS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT:
+        case CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER:
+        case CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF:
+        case CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_RETAINED:
+        case CHECK_WARNING_EVENT_CONSUMED_OBJECT:
+        case CHECK_WARNING_EVENT_CONSUMED_POINTER:
+        case CHECK_WARNING_EVENT_NOMERGE_POINTER:
+        case CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR:
+        case CHECK_WARNING_EVENT_TYPE_ON_DECLARATION:
+        case CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED:
+        case CHECK_WARNING_EVENT_IBOUTLET:
+        case CHECK_WARNING_EVENT_MIG_ROUTINE:
+        case CHECK_WARNING_EVENT_SPAN_ONLY:
+        case CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF:
+        case CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF:
+        case CHECK_WARNING_EVENT_INDEPENDENT_POINTER:
+        case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
+        case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
+        case CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS:
+        case CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS:
+        case CHECK_WARNING_EVENT_NO_CALLS:
+        case CHECK_WARNING_EVENT_NOINLINE_STATEMENT:
+        case CHECK_WARNING_EVENT_ALWAYS_INLINE_STATEMENT:
+        case CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE:
+        case CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN:
+        case CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE:
+        {
+            // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
+            const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
+            const bool standard = !target && (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = target ? 0 : payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            // An unsupported argument's text (#147): a string literal's, with the literals after it, or an identifier's
+            // without a keyword's underscores.
+            char argument[256] = { 0 };
+            uint32_t length = 0;
+            const uint32_t count = parser->tokens.count;
+            const bool argued = event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ||
+                                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED || event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ||
+                                event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER || event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL;
+            for (uint32_t token = payload->token; argued && token < count &&
+                 (parser->tokens.kinds[token] == PARSE_KIND_STRING || (token == payload->token && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER));
+                 token += 1)
+            {
+                const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING;
+                const String8 text = string ? check_warning_string_text(parser, pp, token, scratch) :
+                                              check_warning_attribute_normalized(check_driver_warning_name(pp, parser->tokens.names[token]));
+                const uint32_t copied = text.length < sizeof(argument) - 1 - length ? (uint32_t)text.length : (uint32_t)(sizeof(argument) - 1 - length);
+                memcpy(argument + length, text.pointer, copied);
+                length += copied;
+                token = string ? token : count;
+            }
+            // target's warning's piece of its string (check_input_target_warning's data).
+            const uint32_t offset = (payload->data >> 4) & 0x3fffu;
+            const uint32_t piece = offset <= length ? ((payload->data >> 18) & 0x3fffu) : 0u;
+            const uint32_t shown = offset <= length ? (piece < length - offset ? piece : length - offset) : 0u;
+            static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
+            static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
+            // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
+            const String8 plain = check_warning_attribute_normalized(name);
+            const String8 variable = event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER && payload->token < count ?
+                                     check_driver_warning_name(pp, parser->tokens.names[payload->token]) : (String8){ "", 0 };
+            result = event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETAINED ? "'ns_returns_retained' attribute only applies to functions that return an Objective-C object" :
+                event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute is ignored because '%.*s' is not a function pointer", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, (int)variable.length, variable.pointer) :
+                event->kind == CHECK_WARNING_EVENT_REGISTER_COUNT_DEPRECATED ?
+                check_warning_text(scratch, "the '%.*s%s%.*s' attribute is deprecated; use 'amdgpu_waves_per_eu' instead", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                event->kind == CHECK_WARNING_EVENT_TYPE_ON_DECLARATION ?
+                check_warning_text(scratch, "applying attribute '%.*s%s%.*s' to a declaration is deprecated; apply it to the type instead", (int)scope.length,
+                                   scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                event->kind == CHECK_WARNING_EVENT_OVERFLOW_BEHAVIOR ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute is ignored because it is not enabled; pass -Xclang -fexperimental-overflow-behavior-types",
+                                   (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer) :
+                event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT || event->kind == CHECK_WARNING_EVENT_CONSUMED_POINTER ?
+                check_warning_text(scratch, "%.*s attribute only applies to %s parameters", (int)plain.length, plain.pointer,
+                                   event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT ? "Objective-C object" : "pointer") :
+                event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ?
+                check_warning_text(scratch, "%s%s '%.*s' in the 'target' attribute string; 'target' attribute ignored", target_cases[payload->data & 3u],
+                                   target_places[(payload->data >> 2) & 3u], (int)shown, argument + (offset <= length ? offset : 0)) :
+                event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER ? check_warning_text(scratch, "unknown sanitizer '%s' ignored", argument) :
+                event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute argument '%s' not supported on a global variable", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED ?
+                check_warning_text(scratch, event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ? "'%.*s%s%.*s' attribute argument not supported: %s" :
+                                                                                                     "'%.*s%s%.*s' attribute argument not supported: '%s'",
+                                   (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ?
+                check_warning_text(scratch, "'lifetime_capture_by(%s)' is deprecated; use 'lifetime_capture_by_%s' instead", argument, argument) :
+                event->kind == CHECK_WARNING_EVENT_MIG_ROUTINE ? "'mig_server_routine' attribute only applies to routines that return a kern_return_t" :
+                event->kind == CHECK_WARNING_EVENT_NOINLINE_STATEMENT ?
+                "attribute is ignored on this statement as it only applies to functions; use '[[clang::noinline]]' on statements" :
+                event->kind == CHECK_WARNING_EVENT_ALWAYS_INLINE_STATEMENT ?
+                "attribute is ignored on this statement as it only applies to functions; use '[[clang::always_inline]]' on statements" :
+                event->kind == CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS ? "assumption is ignored because it contains (potential) side-effects" :
+                event->kind == CHECK_WARNING_EVENT_NSOBJECT_TYPEDEF ? "'NSObject' attribute may be put on a typedef only; attribute is ignored" :
+                event->kind == CHECK_WARNING_EVENT_INDEPENDENT_TYPEDEF ? "'objc_independent_class' attribute may be put on a typedef only; attribute is ignored" :
+                event->kind == CHECK_WARNING_EVENT_INDEPENDENT_POINTER ?
+                "'objc_independent_class' attribute may be put on Objective-C object pointer type only; attribute is ignored" :
+                check_warning_text(scratch,
+                                        event->kind == CHECK_WARNING_EVENT_TYPE_POSITION ? "attribute '%.*s%s%.*s' ignored, because it cannot be applied to a type" :
+                                        event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS ? "'%.*s%s%.*s' attribute only applies to return values that are pointers" :
+                                        event->kind == CHECK_WARNING_EVENT_GCC_VARIADIC ? "GCC requires a function with the '%.*s%s%.*s' attribute to be variadic" :
+                                        event->kind == CHECK_WARNING_EVENT_FUNCTIONS_METHODS || event->kind == CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS ?
+                                            "'%.*s%s%.*s' attribute only applies to functions and methods" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS ? "'%.*s%s%.*s' attribute only applies to functions, methods, and parameters" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT ?
+                                            "'%.*s%s%.*s' attribute only applies to functions that return an Objective-C object" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER ? "'%.*s%s%.*s' attribute only applies to functions that return a pointer" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF ? "'%.*s%s%.*s' attribute only applies to pointer-to-CF-pointer parameters" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS ?
+                                            "'%.*s%s%.*s' attribute only applies to pointer/reference-to-OSObject-pointer parameters" :
+                                        event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES ?
+                                            "'%.*s%s%.*s' attribute only applies to return values that are pointers or references" :
+                                        event->kind == CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE ? "GCC does not allow the '%.*s%s%.*s' attribute to be written on a type" :
+                                        event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ? "'%.*s%s%.*s' calling convention is not supported for this target" :
+                                        event->kind == CHECK_WARNING_EVENT_IBOUTLET ? "'%.*s%s%.*s' attribute can only be applied to instance variables or properties" :
+                                        event->kind == CHECK_WARNING_EVENT_SPAN_ONLY ? "'%.*s%s%.*s' attribute only applies to functions that return span-like structures" :
+                                        event->kind == CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS ? "attribute '%.*s%s%.*s' is already applied with different arguments" :
+                                        event->kind == CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE ?
+                                            "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'always_inline'" :
+                                        event->kind == CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN ?
+                                            "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'flatten'" :
+                                        event->kind == CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE ?
+                                            "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'noinline'" :
+                                        event->kind == CHECK_WARNING_EVENT_NO_CALLS ?
+                                            "'%.*s%s%.*s' attribute is ignored because there exists no call expression inside the statement" :
+                                        "'%.*s%s%.*s' attribute ignored",
+                                        (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_ATTRIBUTE_VARIABLES_FUNCTIONS:
+        {
+            // clang's handleInternalLinkageAttr's subjects (#147), the attribute named as the unknown one's warning names it.
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "'%.*s%s%.*s' attribute only applies to variables and functions", (int)scope.length, scope.pointer,
+                                        scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_ATTRIBUTE_DEFINITION:
+            // clang's diagnostic takes the attribute's name as a string: 'weak_import' however it is spelled.
+            result = "'weak_import' attribute cannot be specified on a definition";
+            break;
+        case CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL:
+            result = "'internal_linkage' attribute on a non-static local variable is ignored";
+            break;
+        case CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED:
+            result = "'nocf_check' attribute ignored; use -fcf-protection to enable the attribute";
+            break;
+        case CHECK_WARNING_EVENT_EXTERN_INITIALIZER:
+            result = "'extern' variable has an initializer";
+            break;
+        case CHECK_WARNING_EVENT_VECTOR_MODE:
+            result = "specifying vector types with the 'mode' attribute is deprecated; use the 'vector_size' attribute instead";
+            break;
+        case CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION:
+            result = check_warning_text(scratch, "GCC does not allow '%.*s' attribute in this position on a function definition", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE:
             result = "'__clang__' is a predefined macro name, not an attribute scope specifier; did you mean '_Clang' instead?";
             break;
@@ -513,6 +857,28 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
+        case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
+        case CHECK_WARNING_NOTE_DEPRECATED_HERE:
+        {
+            const String8 noted = check_driver_warning_name(pp, note->payload.name);
+            result = check_warning_text(scratch, "'%.*s' has been explicitly marked deprecated here", (int)noted.length, noted.pointer);
+            break;
+        }
+        case CHECK_WARNING_NOTE_SPAN_REASON:
+        {
+            static const char* const places[] = { "", "1st", "2nd" };
+            const uint32_t reason = note->payload.data & 0xffu;
+            const uint32_t number = note->payload.data >> 8;
+            result = reason == 1 ? "returned type is incomplete" : reason == 2 ? "returned type is not a struct type" :
+                     reason == 3 ? check_warning_text(scratch, "returned struct has %u fields, expected 2", number) :
+                     reason == 4 ? check_warning_text(scratch, "%s field is expected to be an integer", places[number < 3 ? number : 0]) :
+                     "returned struct fields are not a supported combination for a span-like type (expected pointer/integer or pointer/pointer)";
+            break;
+        }
+        case CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD:
+            result = check_warning_text(scratch, "%s of first field is %u bits", (note->payload.data & 0xffu) == BUSTER_CHECK_TRANSPARENT_SIZE ? "size" : "alignment",
+                                        note->payload.data >> 8);
+            break;
         default: break;
     }
     return result;
@@ -528,8 +894,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     {
         return valid;
     }
-    // Only these three facts render a type (#992); a pass of typeless messages, pragmas or notes needs no
-    // spelling rows at all.
+    // Only these facts render a type (#992, and #147's function-type attributes); a pass of typeless messages, pragmas or
+    // notes needs no spelling rows at all.
     bool renders = false;
     for (uint32_t i = 0; !renders && i < view->count; i += 1)
     {
@@ -538,7 +904,9 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                   (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                   (repair == NULL || check_repair_warning_token(repair, event->token)) &&
                   (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER ||
-                   event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER);
+                   event->kind == CHECK_WARNING_EVENT_VARIABLE_SIZED_MEMBER || event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE ||
+                   event->kind == CHECK_WARNING_EVENT_NONSTRING_TYPE || event->kind == CHECK_WARNING_EVENT_TRANSPARENT_UNION ||
+                   event->kind == CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT);
     }
     // One pass's name columns and anonymous-tag spellings (#992), built once below the events' marks when some
     // event renders a type: every event's mark then sits above them, so per-event release keeps them, and each

@@ -649,6 +649,239 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "int f(int x) {\n    [[invented]] a: x++;\n    [[invented]] a: return x;\n}\n",
         "int f(int x) {\n    a: x++;\n    a: return x;\n}\n",
         "int f(int x) {\n    {\n        __label__ a;\n    a: x++;\n    a: x--;\n    }\n    return x;\n}\n",
+        // Attributes on declarations of none of their subjects (check_input_attribute_subjects): clang's warning, which
+        // keeps nothing of them, on variables, functions, parameters, members, bit-fields, typedefs, tags, enumerators and
+        // labels, by GNU's spellings and C23's; and its errors, one a unit.
+        "int a __attribute__((__cold__));\n[[gnu::cold]] int b;\n[[__gnu__::__cold__]] int c;\nint d __attribute__((cold, hot));\n"
+        "void f(int p __attribute__((cold)));\nstruct S { int m __attribute__((cold)); int bf : 3 __attribute__((cold)); };\n"
+        "typedef int T __attribute__((cold));\n"
+        "void g(void) { int l __attribute__((cold)); static int s __attribute__((used)); int u __attribute__((used)); }\n"
+        "void (*fp)(const char *, ...) __attribute__((format(printf, 1, 2)));\nint q __attribute__((nothrow));\n"
+        "void (*r)(void) __attribute__((nothrow));\nstruct __attribute__((cold)) U { int x; };\nenum __attribute__((flag_enum)) E { E0 = 1 };\n"
+        "struct __attribute__((flag_enum)) V { int x; };\nint w __attribute__((cleanup(g)));\n"
+        "void h(void) { static int sv __attribute__((cleanup(g))); }\nint nn __attribute__((nonnull));\nvoid pn(int *p __attribute__((nonnull)));\n"
+        "int ar __attribute__((artificial));\ninline void ia(void) __attribute__((artificial));\nvoid ni(void) __attribute__((artificial));\n",
+        "void f(int a __attribute__((used)), int *b __attribute__((nonnull)), void (*c)(void) __attribute__((nothrow)), int d __attribute__((nothrow)));\n"
+        "typedef void (*FP)(const char *, ...) __attribute__((format(printf, 1, 2)));\n"
+        "struct W { void (*fn)(void) __attribute__((nothrow)); int z __attribute__((nothrow)); };\n"
+        "int __thread tl __attribute__((tls_model(\"local-exec\")));\nvoid lab(void) { l: __attribute__((cold)); }\n"
+        "void lab2(void) { [[gnu::cold]] l2: ; }\nenum F { F0 __attribute__((cold)), F1 };\nint g1 __attribute__((weak));\n"
+        "void g3(void) __attribute__((weak));\nint g4 __attribute__((no_instrument_function));\nint g5 __attribute__((unused));\n"
+        "void g6(void) { int l __attribute__((unused)); }\nstruct __attribute__((unused)) X { int a; };\nint g7 __attribute__((mode(SI)));\n"
+        "void g8(void) __attribute__((nodebug));\nvoid g9(int p __attribute__((nodebug)));\n",
+        "int e __attribute__((error(\"x\")));\n",
+        "int __attribute__((tls_model(\"initial-exec\"))) tm;\n",
+        "void f(void) { int l __attribute__((section(\".l\"))); }\n",
+        "void f(void) __attribute__((mode(SI)));\n",
+        "enum G { G0 __attribute__((mode(SI))) };\n",
+        // Function types' attributes on other types, at each declarator a specifier's reaches; the handlers' own subjects
+        // (sentinel's, transparent_union's) and nonstring's types, at the declaration's start.
+        "int a __attribute__((stdcall));\nint *b __attribute__((ms_abi));\nint c __attribute__((noreturn));\nint d __attribute__((regparm(2)));\n"
+        "typedef int T; T e __attribute__((sysv_abi));\nstruct S { int m __attribute__((preserve_most)); };\nvoid f(int p __attribute__((vectorcall)));\n"
+        "int __attribute__((cdecl)) i;\n[[gnu::stdcall]] int j;\n[[gnu::__stdcall__]] int j2;\nint __attribute__((stdcall)) e1, e2;\n"
+        "int __attribute__((cold)) a1, a2, f1(void);\n[[gnu::cold]] int c1, c2;\n",
+        "void (*sp)(int, ...) __attribute__((sentinel));\nstruct SS { void (*sf)(int, ...) __attribute__((sentinel)); };\n"
+        "typedef void (*ST)(int, ...) __attribute__((sentinel));\nvoid sv(int a, ...) __attribute__((sentinel));\n"
+        "void sq(void (*p)(int, ...) __attribute__((sentinel)));\nint g17 __attribute__((sentinel));\n"
+        "int g __attribute__((transparent_union));\ntypedef int TI __attribute__((transparent_union));\n[[gnu::transparent_union]] int tj;\n"
+        "__attribute__((transparent_union)) int t1, t2;\n",
+        "struct T2 { int m __attribute__((nonstring)); [[gnu::nonstring]] int n; __attribute__((nonstring)) int o; int b : 3 __attribute__((nonstring)); };\n"
+        "char g33[2] __attribute__((nonstring));\nstatic int g34 __attribute__((nonstring));\n"
+        "void f(int p __attribute__((nonstring)), char q[2] __attribute__((nonstring)), int r[2] __attribute__((nonstring)), [[gnu::nonstring]] int s);\n"
+        "const char *g35 __attribute__((nonstring));\nchar **g36 __attribute__((nonstring));\nsigned char g37[3][2] __attribute__((nonstring));\n"
+        "typedef char TC[4]; TC g38 __attribute__((nonstring));\ntypedef int TN; TN g39 __attribute__((nonstring));\n"
+        "int __attribute__((nonstring)) g40, g41;\n__extension__ int g42 __attribute__((nonstring));\n[[gnu::nonstring]] [[gnu::unused]] static int g43;\n"
+        "int __attribute__((__nonstring__)) g44;\n[[__gnu__::__nonstring__]] int g45;\n_Bool g46[2] __attribute__((nonstring));\n"
+        "void g(void) { register int l __attribute__((nonstring)); extern int x __attribute__((nonstring)); char c[2] __attribute__((nonstring)); }\n",
+        // transparent_union's own warnings: an empty union, a floating or vector first field, a field of another size or a
+        // greater alignment (a smaller one is fine, and so is a call through it), a flexible array member, an incomplete union.
+        "union __attribute__((transparent_union)) E { };\nunion __attribute__((transparent_union)) F { float x; int y; };\n"
+        "union __attribute__((transparent_union)) G { int x; long y; };\nunion I;\ntypedef union I TI __attribute__((transparent_union));\n"
+        "union J { char c[4]; int y; } __attribute__((transparent_union));\ntypedef union { int a; double d; } TK __attribute__((transparent_union));\n"
+        "typedef float FL;\nunion __attribute__((transparent_union)) L { FL x; int y; };\n"
+        "union __attribute__((transparent_union)) M { int __attribute__((vector_size(16))) v; int y; };\n"
+        "union __attribute__((transparent_union)) N { int x; char c[]; };\nunion P { int a; long b; };\n"
+        "typedef union P TP __attribute__((transparent_union));\nunion [[gnu::transparent_union]] Q { };\n"
+        "typedef union { int *a; char b[8]; } U __attribute__((transparent_union));\nvoid take(U u);\nvoid give(int *p) { take(p); }\n",
+        // GNU attributes GCC doesn't take after a function definition's declarator (-Wgcc-compat); nonnull's indices and
+        // subjects (its pointer warnings, a variadic function's, a parameter's), and an index of no parameter, an error.
+        "void f(void) __attribute__((cold)) {}\nvoid g(void) __attribute__((noinline, used)) {}\nint h(int x) __attribute__((const)) { return x; }\n"
+        "__attribute__((cold)) void i(void) {}\nvoid k(void) __attribute__((__noinline__)) { }\nvoid m(void) [[gnu::cold]] {}\n"
+        "void n(void) __attribute__((invented)) {}\nstatic void q(void) __attribute__((unused, always_inline)) {}\n",
+        "int a(int x) __attribute__((nonnull));\nint b(int *x, int y) __attribute__((nonnull(2)));\nint c(int *x, int y) __attribute__((nonnull(1)));\n"
+        "int e(void) __attribute__((nonnull));\nint f(int x, ...) __attribute__((nonnull));\nint g(int x, ...) __attribute__((nonnull(2)));\n"
+        "int h(int (*fp)(void)) __attribute__((nonnull));\nvoid i(int *p __attribute__((nonnull)), int q __attribute__((nonnull)));\n"
+        "void i2(int *p __attribute__((nonnull(1))));\nint j(int x) __attribute__((nonnull(1, 1)));\nstruct S { int a; };\n"
+        "int k(struct S s) __attribute__((nonnull(1)));\nint l(char x[]) __attribute__((nonnull(1)));\n",
+        "int f(char *) __attribute__((nonnull(2)));\n",
+        "int m(void *p) __attribute__((nonnull(0)));\n",
+        // C23 attributes in a type's place (check_input_standard_place): a gnu:: declaration attribute after a declarator
+        // chunk, ignored with clang's warning (a list after another where that one is), and a type attribute there, which GCC
+        // doesn't take; noderef in this syntax, and vector_size after the specifiers, ignored.
+        "int * [[gnu::unused]] p1;\nint a1[2] [[gnu::unused]];\nvoid m1(void) [[gnu::cold]];\nint (*fp1)(void) [[gnu::unused]];\n"
+        "void f3(int * [[gnu::unused]] a);\nint * [[gnu::aligned(8)]] p2;\nint * [[gnu::invented]] p3;\nint x4 [[clang::noderef]];\n"
+        "int * [[clang::noderef]] p5;\n[[clang::noderef]] int x5;\nvoid f5(void) [[gnu::cold]] [[gnu::unused]];\n"
+        "int * [[gnu::unused]] [[gnu::cold]] p9;\nvoid f6(void) { int * [[gnu::unused]] q = 0; (void)q; }\nvoid m3(int) [[gnu::nonnull]];\n"
+        "int [[gnu::vector_size(16)]] v1;\nint * [[gnu::regparm(2)]] p10;\nvoid m4(void) [[gnu::ms_abi]];\nint * [[clang::invented]] p11;\n",
+        "int [[gnu::cold]] x2;\n",
+        "int * [[deprecated]] p1;\n",
+        "void f1(void) [[deprecated]];\n",
+        "struct S1 { int a; } [[gnu::unused]] s1;\n",
+        "void f2(int [[gnu::unused]] a);\n",
+        "int [[gnu::nocf_check]] x5;\n",
+        "int * const [[gnu::unused]] p6 = 0;\n",
+        "int * restrict [[gnu::unused]] p8 = 0;\n",
+        "int x4 __attribute__((unused)) [[gnu::unused]];\n",
+        "void f7(void) __attribute__((cold)) [[gnu::cold]];\n",
+        // C23 lists between a declarator's name and its suffixes, and between suffixes, which C23's direct-declarator allows.
+        "int x1 [[gnu::unused]] [2];\nint x2[2] [[gnu::unused]] [3];\nvoid (*fp1 [[gnu::unused]])(void);\nvoid f1 [[gnu::cold]] (void) {}\n"
+        "void f2(int a [[gnu::unused]] [2]);\nvoid f3 [[gnu::cold]] (void), f4 [[gnu::cold]] (int);\n"
+        "void f6(void) { int y [[gnu::unused]] [2]; (void)y; }\nstruct S { int m [[gnu::unused]] [2]; };\nint x5 [[gnu::unused]] [[gnu::unused]] [2];\n"
+        "int (*fp2 [[gnu::unused]]) [2];\nint main(void) { f1(); return x1[0] + x2[1][2] + x5[1]; }\n",
+        // Calling conventions x86-64 hasn't: clang's warning where one meets a function (once for a specifier's), and none on
+        // another type; two of them, or one with cdecl, are no conflict.
+        "void __stdcall k1(void);\nvoid __fastcall k2(void), k3(void);\nvoid __attribute__((thiscall)) g1(void);\n"
+        "void __attribute__((__stdcall__)) g4(void);\nvoid (__stdcall *fp1)(void);\nvoid (* __attribute__((stdcall)) fp2)(void);\n"
+        "typedef void __attribute__((stdcall)) T1(void);\nvoid g5(void) __attribute__((stdcall, regparm(1)));\nvoid __attribute__((stdcall)) g9(void) {}\n"
+        "void m4(void) [[gnu::stdcall]];\nvoid (* [[gnu::stdcall]] fp3)(void);\nint * [[gnu::stdcall]] p1;\nvoid f2(void (__stdcall *cb)(void));\n"
+        "void f4(void) { void (__stdcall *q)(void) = 0; (void)q; }\nint __cdecl __vectorcall x9;\nvoid __stdcall __stdcall f7(void);\n"
+        "void __stdcall __cdecl f8(void);\n[[gnu::stdcall]] void m2(void);\nvoid __pascal k4(void);\nint __attribute__((stdcall)) x1;\n"
+        "struct S1 { void (__stdcall *m)(void); };\nvoid __attribute__((stdcall)) __attribute__((stdcall)) f9(void);\n",
+        // Conflicting conventions on a function, by clang's names, the one x86-64 hasn't as cdecl.
+        "void __cdecl __vectorcall f1(void);\n",
+        "void __attribute__((stdcall)) __attribute__((ms_abi)) f2(void);\n",
+        "void __attribute__((ms_abi)) __attribute__((stdcall)) f3(void);\n",
+        "void __stdcall __vectorcall f6(void);\n",
+        "void __attribute__((ms_abi, vectorcall)) f(void);\n",
+        "void __vectorcall f3(void) __attribute__((ms_abi));\n",
+        "void __attribute__((preserve_most)) __attribute__((preserve_all)) f4(void);\n",
+        "typedef void __attribute__((ms_abi)) T(void);\nT __attribute__((sysv_abi)) f6;\n",
+        "void (__vectorcall __cdecl *fp)(void);\n",
+        // A tag declaration's attributes (check_input_tag_attributes): those of earlier declarations reach the definition's
+        // layout; after a reference's name they are its declarators'; after a bare declaration's name ignored with clang's
+        // warning; after the definition warned of unless it has them; an enum reference's ignored; and C23 lists on a
+        // reference, an error.
+        "struct A; struct __attribute__((aligned(16))) A *pa; struct A { int a; };\n_Static_assert(__alignof__(struct A) == 16, \"A\");\n"
+        "struct __attribute__((packed)) B; struct B { char c; int i; };\n_Static_assert(sizeof(struct B) == 5, \"B\");\n"
+        "struct __attribute__((aligned(32))) C *pc; struct __attribute__((aligned(8))) C { int a; };\n_Static_assert(__alignof__(struct C) == 32, \"C\");\n"
+        "union __attribute__((aligned(16))) U; union U { int a; };\n_Static_assert(__alignof__(union U) == 16, \"U\");\n"
+        "enum __attribute__((packed)) E; enum E { E0 };\n_Static_assert(sizeof(enum E) == 1, \"E\");\n"
+        "struct __attribute__((aligned(16), packed)) G; struct G { char c; int i; };\n_Static_assert(sizeof(struct G) == 16, \"G\");\n"
+        "struct S { int a; };\nstruct S __attribute__((aligned(16))) v2;\n_Static_assert(__alignof__(v2) == 16, \"v2\");\n"
+        "struct S __attribute__((cold, aligned(32))) v6, v7[2];\n_Static_assert(__alignof__(v7) == 32, \"v7\");\n"
+        "struct __attribute__((aligned(16), packed)) S v1;\nstruct __attribute__((cold)) S v4;\nstruct __attribute__((unused)) S v10;\n"
+        "struct S __attribute__((__cold__, aligned(8)));\nstruct __attribute__((aligned(16))) S;\nvoid f(struct __attribute__((aligned(16))) S *p);\n"
+        "union __attribute__((transparent_union)) U2;\nunion __attribute__((transparent_union)) U3 *pu;\nenum E2 { A2 };\n"
+        "enum __attribute__((aligned(16))) E2 e2;\nenum __attribute__((cold)) E2 e3;\nenum __attribute__((aligned(16))) F2 : int;\n"
+        "struct T2; struct __attribute__((aligned(8))) T2; struct T2 { int a; }; struct __attribute__((aligned(16))) T2 t2;\n",
+        "struct S { int a; };\nstruct [[gnu::aligned(16)]] S v9;\n",
+        "struct S { int a; };\nstruct S [[gnu::cold]] v;\n",
+        // A GNU declaration attribute in a type name is ignored with clang's warning, mode's too (sizeof stays 4), once for
+        // a cast in a constant; a function type's on another type warns as a declaration's does.
+        "int s1 = sizeof(int __attribute__((aligned(16))));\nint s2 = sizeof(__attribute__((aligned(16))) int);\n"
+        "int s3 = sizeof(int __attribute__((cold, __aligned__(8))));\n_Static_assert(sizeof(int __attribute__((mode(DI)))) == 4, \"m\");\n"
+        "_Static_assert(sizeof((int __attribute__((mode(QI))))300) == 4, \"c\");\ntypedef typeof(int __attribute__((aligned(16)))) T1;\n"
+        "int g(void) { return (int)sizeof(char __attribute__((packed))) + _Generic(1, int __attribute__((cold)): 1, default: 0); }\n"
+        "int h(void) { return (int __attribute__((unused))){5} + (int)sizeof(int * __attribute__((aligned(16)))); }\n"
+        "int k = sizeof(int __attribute__((stdcall)));\nint m = sizeof(int __attribute__((__vector_size__(8))));\n",
+        // vector_size's checks in clang's order, each an error of its own.
+        "struct S { int a; };\nstruct S v1 __attribute__((vector_size(16)));\n",
+        "struct S { int a; };\ntypedef struct S TS;\nTS __attribute__((vector_size(16))) v2;\n",
+        "int * __attribute__((vector_size(16))) v;\n",
+        "typedef int *P;\nP __attribute__((vector_size(16))) v;\n",
+        "_Bool __attribute__((vector_size(16))) v;\n",
+        "_Complex float __attribute__((vector_size(16))) v;\n",
+        "enum E { A };\nenum E __attribute__((vector_size(16))) v;\n",
+        "union U { int a; };\nunion U __attribute__((vector_size(16))) v;\n",
+        "int __attribute__((vector_size(16), vector_size(32))) v;\n",
+        "_BitInt(7) __attribute__((vector_size(16))) v;\n",
+        "int __attribute__((vector_size(0))) v;\n",
+        "int __attribute__((vector_size(-4))) v;\n",
+        "int __attribute__((vector_size(1ULL << 40))) v;\n",
+        "int __attribute__((vector_size(3))) v;\n",
+        "int __attribute__((vector_size(16.0))) v;\n",
+        "int __attribute__((vector_size(\"x\"))) v;\n",
+        "struct S { int a; };\nstruct S __attribute__((vector_size(16.0))) v;\n",
+        "int * [[gnu::vector_size(16)]] v;\n",
+        "short __attribute__((vector_size(6))) a;\nint __attribute__((vector_size(12))) b;\n_BitInt(8) __attribute__((vector_size(16))) c;\n",
+        // _Alignof and alignof of an expression, a GNU extension (check_input_alignof_expression), once whichever evaluation
+        // reaches them; __alignof__ of one, and either of a type, without a word.
+        "int v;\nint a = __alignof__(v);\nint b = _Alignof(v);\nint c = alignof(v);\n_Static_assert(_Alignof(v) == 4, \"\");\n"
+        "int f(void) { int x; return _Alignof(x) + alignof(int) + _Alignof(v + 1); }\nint arr[_Alignof(v)];\nenum { E = alignof(v) };\n",
+        // A declaration attribute after its entity's definition that the definition lacks: clang's warning, and it's
+        // ignored, an alignment's too (check_input_attribute_after_kind); one the definition has, a tentative
+        // definition's, and C23's deprecated, without a word.
+        "int v = 1;\nextern int v __attribute__((aligned(16)));\n_Static_assert(__alignof__(v) == 4, \"v\");\nvoid f(void) {}\n"
+        "void f(void) __attribute__((cold));\nint w __attribute__((aligned(8))) = 1;\nextern int w __attribute__((aligned(16)));\nint u = 1;\n"
+        "extern int u [[maybe_unused]];\nextern int u __attribute__((unused));\nvoid a(void) __attribute__((cold));\nvoid a(void) {}\n"
+        "void a(void) __attribute__((cold));\nint t;\nextern int t __attribute__((aligned(16)));\nextern int u [[deprecated]];\n"
+        "extern int u [[gnu::deprecated]];\nstatic int s = 1;\nstatic int s __attribute__((section(\".x\")));\n"
+        "int g(int *p) { return *p; }\nint g(int *p) __attribute__((nonnull));\nvoid h(void) {}\nvoid h(void) __attribute__((weak, cold));\n"
+        "int y = 2;\nextern int y __attribute__((visibility(\"hidden\")));\n",
+        // Attributes the checker has no rule for, as clang takes them (check_input_attribute_generic): another language's
+        // ignored with its warning, one clang ignores everywhere without a word, one its generated handler applies kept for
+        // its subject's check, and those whose handlers' checks are made here (noescape's, optnone's over always_inline
+        // and minsize); their argument counts, and supported ones', are clang's errors, each in a unit of its own.
+        "struct __attribute__((trivial_abi)) S { int a; };\nvoid f(void) __attribute__((device));\nint x __attribute__((shared));\n"
+        "void g(void) __attribute__((called_once(1)));\nint z __attribute__((bounded));\nvoid h(void) __attribute__((nouwtable));\n"
+        "int w __attribute__((nouwtable));\nvoid k(void) __attribute__((disable_tail_calls, xray_never_instrument));\n"
+        "void n(void) __attribute__((minsize));\nvoid p(int *q __attribute__((noescape)), int r __attribute__((noescape)));\n"
+        "void a1(void) __attribute__((optnone));\nvoid a2(void) __attribute__((optnone, always_inline));\n"
+        "void a3(void) __attribute__((minsize, optnone));\nint c1 __attribute__((annotate(\"x\")));\nint c2 __attribute__((annotate(\"x\", 1, 2)));\n"
+        "void d1(void) { int v __attribute__((uninitialized)); (void)v; }\nint d2 __attribute__((uninitialized));\n"
+        "struct __attribute__((gcc_struct)) S1 { int a; };\nvoid e1(void) __attribute__((no_sanitize_memory));\n"
+        "void g1(void) __attribute__((analyzer_noreturn));\nvoid i1(void) __attribute__((optnone)) {}\nvoid j(void) [[clang::nouwtable]];\n",
+        "void m(void) __attribute__((nouwtable(1)));\n",
+        "int v __attribute__((minsize));\n",
+        "int c3 __attribute__((annotate(1)));\n",
+        "int c4 __attribute__((annotate));\n",
+        "int e2 __attribute__((no_sanitize_memory));\n",
+        "int j1 __attribute__((carries_dependency));\n",
+        "void a(void) __attribute__((cold(1)));\n",
+        "int b __attribute__((aligned(1, 2)));\n",
+        "int c __attribute__((section));\n",
+        "void d(const char *f, ...) __attribute__((format(printf)));\n",
+        "void e(void) __attribute__((noreturn(1)));\n",
+        "int g __attribute__((visibility));\n",
+        "void i(void) __attribute__((constructor(1, 2)));\n",
+        "int k __attribute__((deprecated(\"a\", \"b\", \"c\")));\n",
+        "void l(void) __attribute__((target));\n",
+        // Mutual exclusions (check_input_attribute_excluding), on one declaration, through a specifier's list, and across
+        // redeclarations, but not after a definition, where the later one is dropped first.
+        "void f(void) __attribute__((hot, cold));\n",
+        "void f(void) __attribute__((__hot__, __cold__));\n",
+        "[[gnu::hot]] void g(void) __attribute__((cold));\n",
+        "__attribute__((hot)) void m(void), n(void) __attribute__((cold));\n",
+        "void q(void) __attribute__((not_tail_called, always_inline));\n",
+        "void h(void) __attribute__((cold));\nvoid h(void);\nvoid h(void) __attribute__((hot));\n",
+        "static void s(void) __attribute__((hot));\nstatic void s(void) __attribute__((cold)) {}\n",
+        "void k(void) __attribute__((hot)) {}\nvoid k(void) __attribute__((cold));\nvoid c(void) __attribute__((cold)) __attribute__((cold));\n",
+        // Uses of what deprecated marks (check_input_deprecated_uses): functions, variables, typedefs, tags, enumerators (by
+        // their enum too), with a message or none, after the declaration that marks them; none in a deprecated function's
+        // body (deprecated by an earlier declaration too), in a deprecated declaration's specifiers, or in a bare tag
+        // declaration; and an unavailable one's error, with its note at the declaration.
+        "void f(void) __attribute__((deprecated));\nvoid g(void) __attribute__((deprecated(\"use h\")));\n[[deprecated]] int v;\n"
+        "[[deprecated(\"old\")]] int w;\ntypedef int T __attribute__((deprecated));\nstruct __attribute__((deprecated)) S { int a; };\n"
+        "enum E { A __attribute__((deprecated)), B };\nint main(void)\n{\n    f();\n    g();\n    T t = v + w + A;\n    struct S s;\n"
+        "    (void)t; (void)s;\n    void (*p)(void) = f;\n    (void)p;\n    return sizeof(v);\n}\nvoid d(void) __attribute__((deprecated));\n"
+        "void d(void) { f(); }\nvoid e(void);\nvoid e(void) __attribute__((deprecated));\nvoid e(void);\nT x __attribute__((deprecated));\n"
+        "struct S;\nstruct S *ps;\nenum __attribute__((deprecated)) F { F0 };\nenum F ef;\nint k(void) { e(); return F0; }\n",
+        "void u(void) __attribute__((unavailable(\"gone\")));\nint h(void) { return sizeof(u); }\n",
+        // __builtin___CFStringMakeConstantString's literal that isn't UTF-8 (#148, check_input_cfstring_literal), past its
+        // parentheses and casts; a valid one's, and NSString's, without a word.
+        "const void* f(void) { return __builtin___CFStringMakeConstantString(\"\\xff\"); }\n"
+        "const void* g(void) { return __builtin___CFStringMakeConstantString(((const char*)(\"\\xc0\\x80\"))); }\n"
+        "const void* h(void) { return __builtin___CFStringMakeConstantString(\"\\xc3\\xa9 \\xed\\x9f\\xbf a\\0b\"); }\n"
+        "const void* k(void) { return __builtin___NSStringMakeConstantString(\"\\xff\"); }\n"
+        "const void* m(void) { return __builtin___CFStringMakeConstantString(\"\\xed\\xa0\\x80\" \"\\xf4\\x90\\x80\\x80\"); }\n",
+        // A start its function refuses (#148, check_diagnostic_varargs), at the builtin's name: by its ABI, and without
+        // variadic parameters.
+        "void f(int n, ...) { char* a; __builtin_ms_va_start(a, n); }\n",
+        "void __attribute__((ms_abi)) f(int n, ...) { __builtin_va_list a; __builtin_va_start(a, n); }\n",
+        "void __attribute__((ms_abi)) f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); }\n",
+        "void __attribute__((ms_abi)) f(int n) { char* a; __builtin_ms_va_start(a, (n)); }\n",
+        "void f(int n) { __builtin_va_list a; __builtin_va_start(a, n); }\n",
+        "void u(void) __attribute__((unavailable));\nvoid z(void) { u(); }\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

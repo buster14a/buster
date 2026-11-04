@@ -21,7 +21,9 @@
 // time, from the save area into `object`, a frame object of the caller's with room for size rounded up to 8, whose
 // address it leaves; its overflow path leaves the address of its bytes in the overflow area, and an ignored one
 // object's address, the list untouched. Copy snapshots all three U64 words before storing exactly 24 bytes; end emits
-// no entries because its operand effects occurred before this call. No new Tier 0 opcode or nonbaseline generated
+// no entries because its operand effects occurred before this call. A Microsoft list (CBuiltinVaLowerCall.microsoft) is
+// a char *'s address instead: va_arg reads its 8-byte slots (cbuiltin_varargs_microsoft), copy stores one char * in
+// another, and end, Microsoft's or z/OS's, emits nothing either. No new Tier 0 opcode or nonbaseline generated
 // instruction is used. Test source/runtime frame integration independently of this typed consumer.
 #ifndef BUSTER_C_BUILTIN_VARARGS_LOWER_INCLUDED
 #define BUSTER_C_BUILTIN_VARARGS_LOWER_INCLUDED
@@ -43,6 +45,10 @@ struct CBuiltinVaLowerCall
     // va_arg of a struct or a union: its bytes (0 for a scalar), and the frame object its register path copies them to.
     uint32_t size;
     uint32_t object;
+    // A Microsoft list's va_arg or va_copy (#148): the list is its char *'s address. va_arg's value is in the list's
+    // 8-byte slot, or where the pointer in it points (indirect: a value of more than 8 bytes or of no power of 2's).
+    bool microsoft;
+    bool indirect;
 };
 
 static bool cbuiltin_varargs_pointer(const CBuiltinLowerBuffer* buffer, uint32_t local)
@@ -96,6 +102,17 @@ static bool cbuiltin_varargs_plan(const CBuiltinVaLowerCall* call)
     const bool x87 = call->result_class == BUSTER_TYPED_CLASS_F80 && stack && plan.stack_bytes == 16 && plan.overflow_alignment_log2 == 4 &&
                      plan.flags == 0 && plan.sources[1] == BUSTER_ABI_VA_NONE;
     const bool result = ((integer || floating) && slot && (registers || stack)) || x87;
+    return result;
+}
+
+// A Microsoft va_arg's (#148): a scalar of an integer, floating, half-precision or long double class, or an aggregate's
+// (or a 128-bit integer's or a vector's) address, the call's size nonzero, as the System V plans' are.
+static bool cbuiltin_varargs_microsoft_plan(const CBuiltinVaLowerCall* call)
+{
+    const uint32_t class = call->result_class;
+    const bool scalar = (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64) || class == BUSTER_TYPED_CLASS_F32 ||
+                        class == BUSTER_TYPED_CLASS_F64 || class == BUSTER_TYPED_CLASS_F80 || class == BUSTER_TYPED_CLASS_U16;
+    const bool result = call->size != 0 ? class == BUSTER_TYPED_CLASS_U64 : scalar;
     return result;
 }
 
@@ -324,6 +341,41 @@ static void cbuiltin_varargs_aggregate(CBuiltinLowerRecipe* recipe, const CBuilt
     cbuiltin_lower_local(recipe, address);
 }
 
+// A Microsoft va_arg (#148, clang's EmitMSVAArg): the list's char * is the value's slot and moves 8 bytes on. The value
+// is in the slot, or where the pointer there points (indirect), loaded as its class, or that place's address for an
+// aggregate's (the call's size nonzero).
+static void cbuiltin_varargs_microsoft(CBuiltinLowerRecipe* recipe, const CBuiltinVaLowerCall* call, uint32_t list)
+{
+    const uint32_t slot = cbuiltin_lower_temporary(recipe);
+    cbuiltin_varargs_load(recipe, list, 0, BUSTER_TYPED_CLASS_U64);
+    cbuiltin_lower_set(recipe, slot);
+    cbuiltin_varargs_address(recipe, list, 0);
+    cbuiltin_lower_local(recipe, slot);
+    cbuiltin_lower_constant(recipe, BUSTER_ABI_SLOT_BYTES);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    if (call->indirect)
+    {
+        cbuiltin_varargs_load(recipe, slot, 0, BUSTER_TYPED_CLASS_U64);
+    }
+    else
+    {
+        cbuiltin_lower_local(recipe, slot);
+    }
+    if (call->size == 0)
+    {
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, call->result_class, 0);
+    }
+}
+
+// __builtin_ms_va_copy (#148, as clang lowers it by hand): the source list's char * stored in the destination's.
+static void cbuiltin_varargs_microsoft_copy(CBuiltinLowerRecipe* recipe, const CBuiltinVaLowerCall* call, uint32_t list)
+{
+    cbuiltin_varargs_address(recipe, list, 0);
+    cbuiltin_varargs_load(recipe, call->source, 0, BUSTER_TYPED_CLASS_U64);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+}
+
 static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call, bool vector)
 {
     (void)vector;
@@ -332,8 +384,8 @@ static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, 
     CBuiltinLowerRecipe recipe = { 0 };
     const bool start = call != 0 && (call->id == CBUILTIN_VA_START || call->id == CBUILTIN_C23_VA_START);
     const bool argument = call != 0 && call->id == CBUILTIN_VA_ARG;
-    const bool copy = call != 0 && call->id == CBUILTIN_VA_COPY;
-    const bool end = call != 0 && call->id == CBUILTIN_VA_END;
+    const bool copy = call != 0 && (call->id == CBUILTIN_VA_COPY || call->id == CBUILTIN_MS_VA_COPY);
+    const bool end = call != 0 && (call->id == CBUILTIN_VA_END || call->id == CBUILTIN_MS_VA_END || call->id == CBUILTIN_ZOS_VA_END);
     if (buffer == 0 || call == 0 || buffer->count > buffer->capacity || buffer->local_count > buffer->local_capacity ||
         buffer->capacity > BUSTER_TIER0_MAX_ENTRIES || buffer->local_capacity > BUSTER_TIER0_MAX_LOCALS || buffer->kinds == 0 ||
         buffer->classes == 0 || buffer->values == 0 || buffer->local_classes == 0 || buffer->local_flags == 0)
@@ -355,7 +407,8 @@ static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, 
     {
         result.error = CBUILTIN_LOWER_ARGUMENT;
     }
-    else if (argument && (call->size != 0 ? !cbuiltin_varargs_aggregate_plan(buffer, call) : !cbuiltin_varargs_plan(call)))
+    else if (argument && (call->microsoft ? !cbuiltin_varargs_microsoft_plan(call) :
+                          call->size != 0 ? !cbuiltin_varargs_aggregate_plan(buffer, call) : !cbuiltin_varargs_plan(call)))
     {
         result.error = CBUILTIN_LOWER_UNSUPPORTED;
     }
@@ -371,9 +424,17 @@ static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, 
             {
                 cbuiltin_varargs_start(&recipe, call, list);
             }
+            else if (copy && call->microsoft)
+            {
+                cbuiltin_varargs_microsoft_copy(&recipe, call, list);
+            }
             else if (copy)
             {
                 cbuiltin_varargs_copy(&recipe, call, list);
+            }
+            else if (call->microsoft)
+            {
+                cbuiltin_varargs_microsoft(&recipe, call, list);
             }
             else if (call->size != 0)
             {

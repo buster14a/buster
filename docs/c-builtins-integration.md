@@ -159,10 +159,10 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
-but refused names would remain zero (none is now), and the vector builtins
-the checker checks but no lowering takes (`__builtin_elementwise_clmul` and the
-masked memory builtins) have `BUSTER_CBUILTIN_CAP_CHECKER` alone, so
-`__has_builtin` answers 0 for them. The matrix builtins are an error at every
+but refused names would remain zero (none is now), and so would builtins the
+checker checks but no lowering takes, with `BUSTER_CBUILTIN_CAP_CHECKER`
+alone (none is now: the masked memory builtins and
+`__builtin_elementwise_clmul` have their code, #148). The matrix builtins are an error at every
 call, as clang's are without `-fenable-matrix`, so they have the source
 capability and `__has_builtin` answers 1 for them, as clang's does. clang's sized legacy atomics
 (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog
@@ -213,6 +213,53 @@ local reserves 24 bytes, beyond the ordinary eight-byte scalar local slot.
 exact-revision target qualification and source/Tier 1 integration remain
 separate acceptance requirements. Host-created-list tests alone establish
 only the recipe expansion contract.
+
+### Microsoft and z/OS lists (#148)
+
+`__builtin_ms_va_start`, `__builtin_ms_va_end` and `__builtin_ms_va_copy`
+(0x459 to 0x45b) and `__builtin_zos_va_start`, `__builtin_zos_va_end` and
+`__builtin_zos_va_copy` (0x45c to 0x45e) take the varargs actions, as clang
+checks them on x86-64 Linux.
+
+- **Microsoft lists.** `__builtin_ms_va_list` is `char *` here. Each ms
+  builtin binds its list as clang's `char *&`: an lvalue of exactly `char *`,
+  never converted. Another type is refused, and so are qualifiers on the
+  pointer or its `char`, and an rvalue (`p + 0`).
+- **Microsoft `va_arg`.** `va_arg` of such an lvalue reads it as a Microsoft
+  list in any function, as clang's `BuildVAArgExpr` does
+  (`check_varargs_microsoft_list`). `char *const` or `const char *` is no list
+  of either kind.
+- **Starts.** clang's `checkVAStartABI` comes first.
+  `__builtin_ms_va_start` belongs to an `ms_abi` function alone ("used in
+  System V ABI function"). Every other start, z/OS's included, belongs to any
+  other function ("'va_start' used in Win64 ABI function"). Then the function
+  must be variadic, and the last-parameter check applies as for `va_start`.
+  The driver words the three errors as clang does, at the builtin's name
+  (`check_diagnostic_varargs`).
+- **z/OS lists.** z/OS's lists are `char **` parameters, converted as a
+  prototype's.
+- **Code.** A Microsoft list's operations take its `char *`'s address
+  (`CheckVarargsEffect.microsoft`).
+  - `va_arg` reads the 8-byte slot it points at and moves it 8 bytes on, as
+    clang's `EmitMSVAArg` does. A value of 1, 2, 4 or 8 bytes is in the slot.
+    Any other is where the slot's pointer points: a 3- or 16-byte struct, a
+    `long double`, a `_Complex double`, an `__int128`. An aggregate's value is
+    that place's address.
+  - `__builtin_ms_va_copy` stores one `char *` in the other.
+    `__builtin_ms_va_end` and `__builtin_zos_va_end` emit nothing, as clang's
+    `va_end` does on x86-64.
+  - `__builtin_ms_va_start` sits only in `ms_abi` definitions, which the
+    backend refuses.
+  - `-c` refuses `__builtin_zos_va_start` and `__builtin_zos_va_copy` by name.
+    clang's x86-64 code for them is LLVM's 24-byte `va_start` and `va_copy`
+    over the `char *` that z/OS's list is.
+- **Input counts.** The reader counts calls of these names among its varargs
+  spellings, to size its tables. A spelling the unit never interned takes no
+  comparison in that count.
+
+clang's `-Wvarargs` warnings, such as "second argument to 'va_start' is not
+the last non-variadic parameter", are checked here (`BUSTER_CHECK_VARARGS_WARN_*`)
+but not yet rendered, for any start.
 
 ## Hints, memory and frame checking
 
@@ -1579,6 +1626,336 @@ The last of them, catalog codes 0x3fd to 0x3ff and 0x440 to 0x44e
   authentication"), the latter's after their arity. `__has_builtin` answers 1
   for them, as clang's does, and `__has_constexpr_builtin` as clang's.
 
+`__builtin_preserve_access_index` and `__builtin_hlsl_resource_getpointer_typed`
+(0x452 and 0x453, #148) are checked as clang's Sema checks them in C, and `-c`
+refuses each by name, as clang's code generation does for x86:
+
+- `__builtin_preserve_access_index(x)`, BPF's relocation marker, is x's value,
+  converted, of its type: an rvalue and never a constant. Clang's code
+  generation refuses it without `-g`, and with `-g` its member accesses fail
+  to select for x86. With `-g`, clang compiles a plain value as itself, which
+  the refusal here doesn't follow.
+- `__builtin_hlsl_resource_getpointer_typed(...)` is `void(...)` in C. Its
+  arguments are a variadic call's, any but void ones ("argument type 'void' is
+  incomplete"), and its code is "cannot compile this builtin function yet".
+
+`__has_builtin` answers 1 for both, as clang's does.
+
+`__builtin_clear_padding(p)` (0x454, #148) zeroes the padding bits of the
+object p points to, as clang's `PaddingClearer` does.
+
+- **Sema.** p is a pointer as written (an array isn't one) to a complete object
+  type that isn't const. Volatile and `_Atomic` pointees are fine.
+- **Bits.** The bits no scalar, bit-field or vector of the object holds are
+  padding:
+  - a record's holes and tail, and an unnamed bit-field;
+  - a union's bits that none of its members holds;
+  - an x87 long double's last 48;
+  - a `_BitInt`'s bits past its width;
+  - an atomic type's bits past its value's;
+  - a vector's past its elements (a bool ext vector's past one bit each).
+
+  `check_lower_padding` walks the type with an explicit stack and sets each
+  held bit in a bitmap of the object's.
+- **Stores.** A byte with no bit held is a zero, in runs stored 8, 4, 2 and 1
+  bytes at a time. A byte with some is its load ANDed with their mask. An
+  array's elements, through arrays of arrays, are cleared in a loop by their
+  element's stores. A variable length array is left as it is, as clang's code
+  leaves it.
+- **Limits.** An element past 4 KiB, or one whose stores pass a builtin's
+  entries (about 40 runs or bytes), is refused by name.
+- **Difference.** Clang's walk doesn't look through a typedef of an array
+  type (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps such
+  an array's padding. The type table here has no typedef sugar, so the
+  padding is cleared.
+
+`__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
+clang's Sema builds it.
+
+- The reader drops the name and its parentheses (`check_input_declaration`'s
+  walk), so the call's first operand is its callee and the rest are its
+  arguments. A function, a pointer to one, a member of one, `*p` and `&g` are
+  all fine. The checks are the call's: a prototype's conversions, a variadic
+  function's promotions, and argument counts.
+- With no arguments, clang's error "too few arguments to function call,
+  expected at least 1, have 0" is at the name
+  (`CHECK_INPUT_INVOKE_ARGUMENTS`). The constant evaluator takes the name as
+  the call's syntax too (`check_constant_invoke`), so the call's type is
+  known in `_Generic` and `sizeof`.
+- Clang reports the call's other errors (a callee that isn't a function, a
+  call without a prototype's warning) at the name. Here they are at the
+  callee, in the checker's wording for calls.
+- It is never a constant, and its name alone is refused as other builtins'
+  are.
+- `__has_builtin` answers 1.
+
+### Checked, refused in code (#148)
+
+`__has_builtin` answers 1 for some builtins whose source checks are clang's
+but whose code `-c` refuses by name. Some are refused because clang can't
+compile them for x86-64 either: `__builtin_preserve_access_index` (BPF
+alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
+compile, and this compiler doesn't yet:
+
+- `__builtin_eh_return`, whose unwinding to a handler;
+- `__builtin___CFStringMakeConstantString` and
+  `__builtin___NSStringMakeConstantString`, whose `cfstring` object;
+- `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
+  writes over a `char *` that its 24-byte list overruns;
+- `__builtin_call_with_static_chain`, whose chain register (`r10`);
+- `__builtin_os_log_format` of data its items take out of order, or of
+  more than 8 bytes;
+- `__builtin_dump_struct`, whose generated calls.
+
+`__builtin_available` with an empty version (`0.0.0`) is refused too, as
+clang's code generation refuses it, and so is `__builtin_counted_by_ref` of a
+bit-field count, which crashes clang's.
+
+A unit that only checks them (`-fsyntax-only`) gets clang's answers. A unit
+that compiles one gets the refusal's message, at the call.
+
+`__builtin_eh_return(offset, handler)` (0x456, #148) is `void(size_t,
+void *)` and doesn't return, as clang's Sema takes it: each argument converts
+as a prototype's parameter. Clang's code generation unwinds the stack by the
+offset and jumps to the handler; this compiler's refuses it by name
+("unsupported: __builtin_eh_return, whose unwinding to a handler this
+compiler doesn't make").
+
+`__builtin___CFStringMakeConstantString(s)` and
+`__builtin___NSStringMakeConstantString(s)` (0x457 and 0x458, #148) are
+`const __NSConstantString *`, clang's predeclared record (`const int *isa;
+int flags; const char *str; long length;`, 32 bytes), which the reader makes
+the first time a call needs it, at its claim or where an operand's evaluation
+reaches the call first (`check_input_ns_constant_string`: a `typeof`'s, a file
+scope `sizeof`'s).
+
+- **Sema.** s converts to `const char *` as a prototype's parameter. CFString's
+  is, past its parentheses and casts, an ordinary string literal
+  (`CheckObjCString`): a pointer, a wide literal, `__func__` or a UTF-8 one
+  (`u8"x"`, or `"a" u8"b"`, `CheckStringLiteral.utf8`) is refused. NSString's
+  is any `const char *`: clang checks its literal in Objective-C alone.
+- **Warning.** A CFString literal that isn't UTF-8 as LLVM's strict conversion
+  reads it (an overlong form, a surrogate, past U+10FFFF, or cut short;
+  `pp_utf8_sequence`) is clang's `-WCFString-literal`, "input conversion
+  stopped due to an input byte that does not belong to the input codeset
+  UTF-8", at the literal (`check_input_cfstring_literal`).
+- **Code.** Clang makes a `cfstring` section object pointing at
+  `__CFConstantStringClassReference` and the literal; this compiler refuses
+  either call by name ("unsupported: a constant CFString or NSString, whose
+  object this compiler doesn't make").
+- **Difference.** Clang's evaluator takes either call as an address constant
+  (`IsOpaqueConstantCall`), so a static initializer of one (`static const void
+  *p = __builtin___CFStringMakeConstantString("x");`, cast to `long` or
+  `_Bool` too, or plus an offset) is accepted. This checker's isn't, and
+  refuses it as "initializer is not a constant expression": it has no object
+  to give the address of, as its code generation doesn't.
+
+A miscellaneous builtin's argument of the other signedness of a `char`
+pointer (`__builtin_strlen(u8"x")` in C23) gets the pointer-sign warning, as
+an ordinary call's.
+
+`__builtin_call_with_static_chain(call, chain)` (0x4b0, #148) is the call's
+value, as clang's `BuiltinCallWithStaticChain` checks it.
+
+- **The call.** The first argument is a call as written: not a name, and not
+  a call in parentheses (its node is then a grouping's). It may not call a
+  builtin. That means a catalog builtin, a header builtin's leaf, or the
+  unit's external declaration of a library builtin's name (`abs` or `strlen`
+  declared), found through the callee's parentheses, as `getBuiltinCallee`
+  finds it.
+- **The chain.** The second argument is a pointer, of any type.
+- **Code.** clang's code evaluates the callee, then the chain, then the
+  arguments, and passes the chain in `r10`. This compiler's calls have no
+  static chain register, so `-c` refuses the call by name. Adding one would
+  touch every consumer of a call's record: Tier 0, Tier 1, the interpreter
+  and the SSA lowering.
+- **Identities.** The miscellaneous builtins past 0x45f start at 0x4b0, past
+  the `<stdbit.h>` library builtins' identities (0x460 to 0x4a5). A static
+  assertion keeps them apart.
+
+`__builtin_os_log_format_buffer_size(format, data...)` and
+`__builtin_os_log_format(buffer, format, data...)` (0x4b1 and 0x4b2, #148) are
+clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
+`emitBuiltinOSLogFormat` make them.
+
+- **The format.** It must be an ordinary or UTF-8 string literal past its
+  parentheses and casts ("os_log() format argument is not a string
+  constant"). The reader reads it as clang's `ParsePrintfSpecifier` does,
+  with os_log's annotations (`c_check_os_log_input.c`).
+  - Annotations are `%{public}`, `%{private}`, `%{sensitive}` and
+    `%{mask.NAME}`, comma-separated. A privacy one counts where it is at
+    least as strict as those before it.
+  - Positions are `%N$`, and amounts are `*` and `*N$`.
+  - Length modifiers include C23's `H`, `D`, `DD`, `wN` and `wfN`.
+- **The layout.** The layout pass stops where clang's handler stops: at a
+  value without its data, or after a `%P` without its length. Each
+  specifier gives up to five items, in this order: its mask (8 bytes of its
+  name), its field width and precision when they are arguments, a string's
+  or pointer's count (from the precision's argument, or its constant as 4
+  bytes), and its value (none for `%m`). A data argument's size is its
+  promoted type's: arrays and functions as pointers, float and half as
+  double.
+- **The checks.** The checking pass goes on past a `%P` without its length,
+  as clang's `CheckFormatArguments` does. Each data argument is under 256
+  bytes, promoted ("argument N is too big"). For `__builtin_os_log_format`,
+  a mask of other than 1 to 8 bytes is refused, and so is a struct or
+  complex value that a specifier or an amount takes. Clang's `-Wformat`
+  warnings aren't given, as they aren't for printf here.
+- **The size.** `__builtin_os_log_format_buffer_size` is a `size_t` integer
+  constant expression whose data never runs: 2 header bytes, then 2 bytes
+  plus the data of each item. `__has_constexpr_builtin` answers 1 for it.
+- **The buffer.** `__builtin_os_log_format` writes what clang's helper
+  function writes, inline (`check_lower_os_log`), and its value is the
+  buffer.
+  - It writes the summary byte (0x1 for private items, 0x2 for items other
+    than scalars), the items' count, then each item's descriptor
+    (`kind << 4 | privacy`), its size and its data.
+  - clang evaluates the data in its items' order, once each. A format whose
+    items take the data other than once each in order (positions, a repeat,
+    an unused argument) is refused by name, and so is data of other than 1,
+    2, 4 or 8 bytes (a `long double`, an `__int128`).
+- **Limits.** At most 31 arguments are taken, and clang takes up to the
+  format's plus 255.
+
+`__builtin_dump_struct(pointer, printer, rest...)` (0x4b3, #148) is clang's
+record dump, as `BuiltinDumpStruct` checks it.
+
+- **Its arguments.** The pointer, lvalue-converted, points to a complete
+  struct or union. The printer is a function or a function pointer.
+- **The calls.** clang then calls the printer once per line, as
+  `printer(rest..., format, operands...)`: no operands for a brace's line,
+  and up to five for a field's. A prototyped printer must take every such
+  call. It is variadic, with no more parameters than the rest and the
+  format, and the rest and the format (a `char *`) convert to those
+  parameters. An unprototyped printer takes any calls.
+- **Code.** clang's code is those calls, with each field's value or address
+  and type names it prints. This compiler doesn't make them, so `-c` refuses
+  the call by name.
+
+`__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
+a keyword whose specs are no expressions: each a `*`, or a platform's name and
+its version (`macos 10.12`, `iOS 10_3`). It is a `_Bool` that is no constant
+expression. On an x86-64 Linux target, whose platform name is empty, the
+`*`'s, clang's code is the constant 1.
+
+- **The parser.** The scalar parser reads the specs in their own modes
+  (`PARSE_MODE_AVAILABILITY_SPEC`, `_VERSION`, `_NEXT`): a `*` or an
+  identifier, whatever the ordinary names mean (a typedef's name too), then
+  a number, then `,` or `)`. Its errors are clang's where the kinds don't fit:
+  "expected '('" just past the keyword, "expected a platform name here",
+  "expected a version of the form 'major[.minor[.subminor]]'", and the
+  balanced delimiters' "expected ')'". The vector path's checks never take the
+  keyword (`PARSE_CLASS_OPERAND_KEYWORD`), so its declarations fall back.
+- **The specs' checks.** `c_check_availability_input.c` makes the checks of
+  clang's parser past the kinds, at the keyword, in the walk's source order:
+  - `ParseVersionTuple`'s reading of the number's spelling: a numeric
+    constant (not `true` or `__func__`), its components separated by `.` or
+    `_`, their values wrapping as unsigned ones, a zero version's error at the
+    token after the number, and -Wavailability's warning where the
+    separators differ (`1.2_3`);
+  - the platform, canonicalized as `canonicalizePlatformName` does, one of
+    the 19 `getPrettyPlatformName` names, and none with `xros` in it;
+  - an anyAppleOS version of 26 at least;
+  - and then, where each spec is valid, the list's: a second `*`, a
+    platform's second version, and no `*`, just past the last version.
+
+  A version whose kept components are all 0 (`0.0.0`, `0.2147483648`) is no
+  spec of clang's, without a diagnostic: clang's expression is invalid, and
+  its code generation refuses it ("cannot compile this scalar expression
+  yet"), as `-c` does here by name.
+- **The value.** The call takes no operand (its specs' tokens are ignored).
+  The walk and the constant evaluator, in its raw and its bound modes, give it
+  the builtin's id at its `)`, so `sizeof`, `typeof`, `_Generic` and a VLA's
+  bound read its type, and an integer constant expression refuses it.
+- **-Wunsupported-availability-guard.** clang warns at a check in a function's
+  body that isn't an if's condition, as written through parentheses and `!`,
+  nor a case label's value, once it has read the body: the warning completes
+  after the body's `}`. A check whose specs aren't each valid is no
+  expression of clang's, which no warning visits. A file-scope check gets
+  none. The walk and the constant evaluator (a `typeof`'s operand, which the
+  walk doesn't visit) each ask, once.
+- **Differences.** clang reads the rest of a list after a spec's error, and
+  its errors before a missing `)` include the list's; this parser stops at
+  its first. `__builtin_available` in a constant context gets the checker's
+  messages of a call that is no constant, as `__builtin_cpu_supports` does:
+  "initializer is not a constant expression" where clang says "initializer
+  element is not a compile-time constant", and a static assertion's message
+  at the call's `)`.
+
+`__builtin_counted_by_ref(member)` (0x4b5, #148) is clang's address of a
+counted_by count, as `BuiltinCountedByRef` checks it and `GetCountedByFieldExprGEP`
+computes it.
+
+- **Sema.** Its argument, past parentheses, is a pointer or an array without side
+  effects and a member access (`.` or `->`), else clang's errors at it ("argument
+  must reference a member with the 'counted_by' attribute", "cannot have
+  side-effects"). A member of a `counted_by` count (not `sized_by`'s or an
+  `_or_null` one's) makes it a pointer to the count's member, of its declared type,
+  found by its name in the access's record (`check_graph_counted_member` in the
+  walk, `check_counted_lookup` in the constant evaluator, which keeps an access's
+  base type at its operator); any other such member a `void *`.
+- **Its value's uses.** clang's `CheckInvalidBuiltinCountedByRef` refuses it where it
+  would leak the count's address, by where the call stands as written, past
+  parentheses (`check_input_counted_ref_context`): an assignment's operand or a
+  declaration's initializer (not an initializer list's element), a call's argument,
+  a return's value, a subscript's base and a binary operator's operand, the comma
+  operator's too, each with clang's message at the call.
+- **Code.** The access's record's address (an `->`'s pointer, a `.`'s object's)
+  plus the count's offset; a null pointer for a `void *` one. Its argument doesn't
+  run otherwise. A bit-field count, which crashes clang's code generation, is
+  refused by name.
+
+`__builtin_dynamic_object_size` of clang's counted_by forms (#148,
+`emitCountedBySize` and `findStructFieldAccess`) counts at run time
+(`check_graph_counted_size`, `check_lower_counted_size`): past casts, `&`, `*`, a
+comma's right operand and one subscript, to a member access. A counted flexible array
+member (or its element's address) is the count times its element's bytes, less the
+index's bytes; a counted pointer read as a value the same, by its pointee's bytes (1
+for `void`); another member's address, through a pointer, the record's size less the
+member's offset (and its index's bytes) plus the flexible array member's bytes.
+The count converts to the size's width by its signedness, and a negative result, or
+a negative index, is 0. clang's evaluator leaves a counted flexible array member to
+the code, so no bound of the object folds it here either; mode 3, an argument with
+side effects and a bound the object gives (another member of a named object) keep the
+ordinary query's answer. `__builtin_object_size` ignores the count, as clang's does.
+
+`__builtin_infer_alloc_token(args...)` (0x45f, #148) is a `size_t` whose
+arguments never run. It is clang 23's allocation token: the reader works it
+out from the arguments' syntax, in the walk and in the constant evaluator
+alike (`c_check_alloc_token_input.c`).
+
+- **The type.** clang's `inferPossibleType` gives it. The first argument
+  that gives one decides.
+  - The argument's first `sizeof` (not `_Alignof`) in source order that
+    nothing but groupings and binary `+ - * / << >>` hold gives its
+    operand's type. That is the leftmost one clang's walk reaches.
+  - A variable's name alone gives its initializer's.
+  - An explicit cast stops the search, as clang's `IgnoreParenImpCasts`
+    keeps casts.
+- **The name.** The type's canonical name as clang prints it with
+  `SuppressTagKeyword`: `S`, `char *`, `int[4]`, `int (*)(int)`, `bool` in
+  C23. A typedef-named record prints the typedef's name. An unnamed record is
+  `(unnamed struct at FILE:LINE:COL)`, qualified by the records around it
+  (`O::(unnamed struct at …)`), as clang qualifies one but not a named one.
+  The type printer's `BUSTER_TYPE_PRINT_NO_TAG_KEYWORD` drops the keywords.
+- **The token.** LLVM's `getStableSipHash` of the name, SipHash-2-4 under
+  LLVM's fixed key, modulo half of the 64-bit token space. A type holding a
+  pointer takes the upper half, as `TypeHashPointerSplit`, the default mode,
+  gives it. Holding means a pointer member, array element, atomic value or
+  nested record, or a `uintptr_t` through typedefs. For `uintptr_t`, the type
+  table keeps no typedef sugar, so the reader looks at the `sizeof`'s operand
+  and at each record body's members.
+- **Constness.** With a type, the token is an integer constant expression.
+  Without one, or for an incomplete record without a pointer, there is no
+  constant, as clang's evaluator gives none, and the code's value is 0, the
+  AllocToken pass's fallback token.
+- **Arguments.** They may be anything but `void`. `__has_constexpr_builtin`
+  answers 1, as clang's does.
+- **Limits.** `-falloc-token-max` and `-falloc-token-mode` aren't options
+  here. An unnamed enumeration's name, and more than 31 arguments, are
+  refused. A body on a deferred lane that names an unnamed record is read
+  again in source order, as source-location builtins' bodies are.
+
 `__builtin_cpu_init`, `__builtin_cpu_is` and `__builtin_cpu_supports` (0x44f
 to 0x451) are libgcc's CPU model's, as clang's code reads it: `cpu_init()`
 calls `__cpu_indicator_init`, which is also the model's constructor;
@@ -1657,10 +2034,16 @@ features. Their prototypes are clang's metadata's:
   local in one and no value of its stacks either (its integer depths are the
   nine caller-saved registers'), and a realigned frame whose base is r15 (an
   over-aligned object beside `alloca` or a VLA) is refused. A value of an
-  enclosing expression pending across the call is reloaded from its call save
-  slot after the second return, which a later call with values pending at that
-  depth may have reused; C's contexts for setjmp (a condition, compared with a
-  constant) have none. Ordinary Tier 1 leaves such a function to Tier 0.
+  enclosing expression that a call holds (`100 + __builtin_setjmp(buf)`'s 100)
+  is saved in a region of the call's own in such a function
+  (`tier0_layout_frame`), so the second return finds it whatever calls ran
+  before the longjmp. Before #1242's review the regions were shared, so a later
+  call could overwrite the value. A value held in its depth's frame slot can't
+  be saved that way, since later expressions share the slot: a long double, an
+  `__int128`, a vector, a mask, or any value of a function with deep entries.
+  Such a call is refused by name (`tier0_returns_twice_saves`). C's contexts
+  for setjmp (a condition, compared with a constant) hold none. Ordinary Tier 1
+  leaves such a function to Tier 0.
   longjmp's second argument must be a constant 1, wherever the call is, with
   clang's two errors at the call (`check_input_longjmp_argument`).
 

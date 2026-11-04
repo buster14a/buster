@@ -99,6 +99,16 @@ the direct answers, the batch sort and the parser's replay on every token.
 - `stacks` and `batch` take their results and work arrays from scratch and pop
   them before returning. The parser modes borrow the parser through a local
   view whose scratch is the checker's, and pop everything they pushed.
+- The events are in source order. A use the reader reaches after later tokens'
+  events goes in at the log's last point (`check_input_use_point`): a
+  specifier's argument before a tag's definition, which the declaration reads
+  first (`_Alignas(K) struct S { int a; } x;`, an attribute's `aligned(K)` or
+  `cleanup(f)` there). Such a use names what the name named at its token only
+  when its binding is older than it; one the definition declared since (an
+  enumerator of the same name in an inner scope) is refused
+  (`check_input_use_shadowed`), where clang names the earlier one. Before
+  #147's fix the late use broke the order and the unit was refused as out of
+  memory.
 - Invalid events, a resolver's allocation failure or an invalid answer set
   `CheckInput.resource` and publish no use's declaration, type or report.
   Undeclared uses and declaration errors are ordinary reports, in token order.

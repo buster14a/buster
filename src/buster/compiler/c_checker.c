@@ -44,6 +44,24 @@ struct CheckBuiltinCall
     // Whether an explicit cast was stripped before that literal: clang's literal-only arguments (allow_runtime_check's,
     // allow_sanitize_check's, cpu_supports' and cpu_is') refuse one, as annotation's doesn't (#1126's review).
     bool nan_payload_cast;
+    // Whether that literal is a UTF-8 one (u8"..."), which the CFString builtins refuse, and its first token.
+    bool nan_payload_utf8;
+    uint32_t nan_payload_token;
+    // __builtin_infer_alloc_token's token, where its arguments give one (check_input_alloc_token_evidence, #148).
+    bool alloc_token_known;
+    uint64_t alloc_token;
+    // Whether __builtin_call_with_static_chain's first argument is a call as written, of no builtin (#148).
+    bool static_chain_call;
+    // The os_log builtins' format (check_input_os_log_evidence, #148): its layout's items, whether it is a literal, whether
+    // a mask's size is invalid, and the data arguments its specifiers take.
+    const CheckOSLogItem* os_log_items;
+    uint32_t os_log_count;
+    bool os_log_known;
+    bool os_log_invalid_mask;
+    uint64_t os_log_taken[4];
+    // Whether __builtin_available's specs have an empty version (`0.0.0`, #148), which clang refuses without a diagnostic:
+    // its code generation then refuses the call ("cannot compile this scalar expression yet").
+    bool availability_silent;
     // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
     // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
     uint32_t function_objects[4];
@@ -166,6 +184,8 @@ struct CheckGraphValidation
 
 struct CheckGraph
 {
+    // The unit's __NSConstantString record, which a CFString or NSString builtin's call makes the reader declare (#148), or 0.
+    TypeId ns_constant_string;
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
     // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf_of). Other nodes use types/member as
     // action data.
@@ -339,6 +359,8 @@ struct CheckVarargsEffect
     uint32_t evaluated_operands;
     uint32_t warnings;
     bool mutates_list;
+    // Whether its lists are Microsoft ones, whose addresses it takes (CheckVarargsResult.microsoft, #148).
+    bool microsoft;
 };
 
 typedef struct CheckBuiltinMiscEffect CheckBuiltinMiscEffect;
@@ -2120,12 +2142,250 @@ static uint32_t check_graph_atomic_alignment(const TypeTable* types, const Check
     return check_graph_atomic_address_alignment(types, graph, stream, node, witness, false, false);
 }
 
+// A member access's counted_by family count (#148), as clang's findCountedByField finds it: `node`'s member, past the
+// parentheses, which the graph doesn't keep, of a struct or union through a `.` or an `->`; the member's kind and the
+// count's member, looked up by its name in the access's record, its type and offset there, and the member's offset.
+typedef struct CheckCountedMember CheckCountedMember;
+struct CheckCountedMember
+{
+    uint32_t base;
+    bool arrow;
+    bool member;
+    uint8_t kind;
+    TypeId member_type;
+    TypeId count_type;
+    bool count_found;
+    bool count_bit_field;
+    // In bytes, from the access's record's start.
+    uint64_t member_offset;
+    uint64_t count_offset;
+};
+
+// A `.` (or an `->`, `arrow`) access of member `name` of a value of type `base_type`, as check_graph_counted_member reads
+// it; the constant evaluator's too (check_constant_call), which has no graph.
+static CheckCountedMember check_counted_lookup(const TypeTable* types, TypeId base_type, bool arrow, uint32_t name)
+{
+    CheckCountedMember result = { .base = BUSTER_CHECK_NONE };
+    {
+        const TypeId stripped = type_strip_aligned(types, base_type);
+        const TypeId record = arrow ? (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, stripped)) : 0) : stripped;
+        const uint8_t kind = type_kind(types, record);
+        uint64_t offset = 0;
+        uint32_t qualifiers = 0;
+        const uint32_t member = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? type_lookup_member(types, record, name, &offset, &qualifiers) : 0;
+        result.member = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN;
+        if (result.member)
+        {
+            result.arrow = arrow;
+            result.member_type = types->members.type[member];
+            result.member_offset = offset / 8;
+            result.kind = (uint8_t)((types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT);
+            uint64_t count_offset = 0;
+            const uint32_t count = result.kind != BUSTER_TYPE_COUNT_NONE ? type_lookup_member(types, record, types->members.count_name[member], &count_offset, &qualifiers) : 0;
+            result.count_found = count != 0 && count != BUSTER_TYPE_MEMBER_UNKNOWN;
+            result.count_type = result.count_found ? types->members.type[count] : 0;
+            result.count_bit_field = result.count_found && (types->members.flags[count] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+            result.count_offset = count_offset / 8;
+        }
+    }
+    return result;
+}
+
+static CheckCountedMember check_graph_counted_member(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    CheckCountedMember result = { .base = BUSTER_CHECK_NONE };
+    const uint8_t op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint32_t base = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    if (base < graph->count)
+    {
+        result = check_counted_lookup(types, check_stream_type(stream, base), op == CHECK_OP_ARROW, graph->members[node]);
+        result.base = result.member ? base : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// __builtin_dynamic_object_size's argument by clang's counted_by forms (#148, findStructFieldAccess and emitCountedBySize):
+// past casts, `&`, `*` and a comma's right operand, at most one subscript (its index and its base's type kept), to a
+// member access. A pointer member read as a value (no `&` before it) is CHECK_COUNTED_SIZE_POINTER, its own count's;
+// a flexible array member (or a trailing array) CHECK_COUNTED_SIZE_ARRAY; any other member, `&` before an array aside,
+// CHECK_COUNTED_SIZE_FIELD, its record's flexible array member's count's, as clang's FindFlexibleArrayMemberField finds
+// it (the first trailing array of the record's members, theirs too). `counted` is the counted member's (the pointer's
+// or the flexible array's), its count's offset from the access's record.
+#define CHECK_COUNTED_SIZE_NONE 0
+#define CHECK_COUNTED_SIZE_ARRAY 1
+#define CHECK_COUNTED_SIZE_FIELD 2
+#define CHECK_COUNTED_SIZE_POINTER 3
+
+typedef struct CheckCountedSize CheckCountedSize;
+struct CheckCountedSize
+{
+    uint8_t shape;
+    // The member found is itself of a counted_by family attribute, and no pointer read as a value: clang's evaluator then
+    // leaves the size to the code, whatever it knows of the object.
+    bool vetoed;
+    // The member access, its subscript's index (BUSTER_CHECK_NONE for none) and the subscript's base's type.
+    uint32_t member;
+    uint32_t index;
+    TypeId index_base_type;
+    CheckCountedMember counted;
+    // The counted member's element's bytes (a pointer's pointee's, 1 for void), and for CHECK_COUNTED_SIZE_FIELD the field's
+    // offset and its record's size, and its own element's bytes (an array field's, for its index).
+    uint64_t element_bytes;
+    uint64_t field_offset;
+    uint64_t record_bytes;
+    uint64_t field_element_bytes;
+};
+
+// Whether member `member` (TypeMembers' index) is its record's last, and so a trailing array's place.
+static bool check_counted_last_member(const TypeTable* types, uint32_t member)
+{
+    bool result = false;
+    for (uint32_t tag = 1; !result && tag < types->tags.count; tag += 1)
+    {
+        const uint32_t begin = types->tags.member_begin[tag];
+        result = types->tags.member_count[tag] != 0 && member == begin + types->tags.member_count[tag] - 1;
+    }
+    return result;
+}
+
+// The record's flexible array member as clang's FindFlexibleArrayMemberField finds it: its members in order, a record's
+// own members before the next (an explicit stack of them, no recursion), the first array that is its record's last
+// member. Its index, its type and its name, or 0.
+static uint32_t check_counted_flexible(const TypeTable* types, TypeId record)
+{
+    uint32_t stack[16];
+    uint32_t ends[16];
+    uint32_t depth = 0;
+    uint32_t result = 0;
+    const uint32_t tag = types->types.index[type_index(record)];
+    stack[0] = types->tags.member_begin[tag];
+    ends[0] = stack[0] + types->tags.member_count[tag];
+    depth = 1;
+    for (uint32_t steps = 0; result == 0 && depth != 0 && steps < 4096; steps += 1)
+    {
+        if (stack[depth - 1] >= ends[depth - 1])
+        {
+            depth -= 1;
+        }
+        else
+        {
+            const uint32_t member = stack[depth - 1]++;
+            const TypeId type = type_strip_aligned(types, types->members.type[member]);
+            const uint8_t kind = type_kind(types, type);
+            const bool array = kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_ARRAY;
+            if (array && check_counted_last_member(types, member))
+            {
+                result = member;
+            }
+            else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && depth < 16 && type_is_complete(types, type))
+            {
+                const uint32_t inner = types->types.index[type_index(type)];
+                stack[depth] = types->tags.member_begin[inner];
+                ends[depth] = stack[depth] + types->tags.member_count[inner];
+                depth += 1;
+            }
+        }
+    }
+    return result;
+}
+
+static CheckCountedSize check_graph_counted_size(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t argument)
+{
+    CheckCountedSize result = { .member = BUSTER_CHECK_NONE, .index = BUSTER_CHECK_NONE };
+    uint32_t node = argument;
+    bool address = false;
+    bool walking = true;
+    for (uint32_t depth = 0; walking && depth < 256 && node < graph->count; depth += 1)
+    {
+        const uint8_t op = graph->ops[node];
+        if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT)
+        {
+            node = graph->operand0[node];
+        }
+        else if (op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE)
+        {
+            address = op == CHECK_OP_ADDRESS;
+            node = graph->operand0[node];
+        }
+        else if (op == CHECK_OP_COMMA)
+        {
+            node = graph->operand1[node];
+        }
+        else if (op == CHECK_OP_SUBSCRIPT && result.index == BUSTER_CHECK_NONE)
+        {
+            address = false;
+            result.index = graph->operand1[node];
+            result.index_base_type = check_stream_type(stream, graph->operand0[node]);
+            node = graph->operand0[node];
+        }
+        else
+        {
+            result.member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ? node : BUSTER_CHECK_NONE;
+            walking = false;
+        }
+    }
+    const CheckCountedMember member = result.member != BUSTER_CHECK_NONE ? check_graph_counted_member(types, graph, stream, result.member) : (CheckCountedMember){ 0 };
+    const TypeId member_type = type_strip_aligned(types, member.member_type);
+    const uint8_t member_kind = type_kind(types, member_type);
+    const bool array = member_kind == BUSTER_TYPE_KIND_ARRAY || member_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+    const bool pointer = member_kind == BUSTER_TYPE_KIND_POINTER;
+    result.vetoed = member.member && member.kind != BUSTER_TYPE_COUNT_NONE && !(pointer && !address) && !(address && array);
+    if (member.member && !(address && array))
+    {
+        const TypeId base_type = type_strip_aligned(types, check_stream_type(stream, member.base));
+        const TypeId record = member.arrow ? type_strip_aligned(types, type_element(types, base_type)) : base_type;
+        uint64_t offset = 0;
+        uint32_t qualifiers = 0;
+        const uint32_t index = type_lookup_member(types, record, graph->members[result.member], &offset, &qualifiers);
+        const bool trailing = array && index != 0 && index != BUSTER_TYPE_MEMBER_UNKNOWN && check_counted_last_member(types, index);
+        if (pointer && !address)
+        {
+            result.shape = CHECK_COUNTED_SIZE_POINTER;
+            result.counted = member;
+            const TypeId pointee = type_strip_aligned(types, type_element(types, member_type));
+            const uint64_t bytes = type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID || type_kind(types, pointee) == BUSTER_TYPE_KIND_FUNCTION ? 0 :
+                                   type_size(types, pointee);
+            result.element_bytes = bytes != 0 ? bytes : 1;
+        }
+        else if (trailing)
+        {
+            result.shape = CHECK_COUNTED_SIZE_ARRAY;
+            result.counted = member;
+            result.element_bytes = type_size(types, type_strip_aligned(types, type_element(types, member_type)));
+        }
+        else if (type_is_complete(types, record))
+        {
+            // Another member: its record's flexible array member's count, the field's offset and the record's size.
+            const uint32_t flexible = check_counted_flexible(types, record);
+            const CheckCountedMember counted = flexible != 0 ? check_counted_lookup(types, record, false, types->members.name[flexible]) : (CheckCountedMember){ 0 };
+            result.shape = flexible != 0 ? CHECK_COUNTED_SIZE_FIELD : CHECK_COUNTED_SIZE_NONE;
+            result.counted = counted;
+            result.counted.base = member.base;
+            result.counted.arrow = member.arrow;
+            result.element_bytes = flexible != 0 ? type_size(types, type_strip_aligned(types, type_element(types, types->members.type[flexible]))) : 0;
+            result.field_offset = member.member_offset;
+            result.record_bytes = type_size(types, record);
+            result.field_element_bytes = array ? type_size(types, type_strip_aligned(types, type_element(types, member_type))) : 0;
+        }
+    }
+    // The member's count: of a counted_by family attribute, found, no bit-field's. Another member's size clang's evaluator
+    // folds where the access's object is named (`s.x`, `(&s)->x`); its code counts only through a pointer.
+    const bool counted = result.counted.member && result.counted.kind != BUSTER_TYPE_COUNT_NONE && result.counted.count_found && !result.counted.count_bit_field;
+    const uint8_t base_op = member.member && member.base < graph->count ? graph->ops[member.base] : CHECK_OP_COUNT;
+    const bool named = base_op == CHECK_OP_ADDRESS || (!member.arrow && base_op == CHECK_OP_VALUE);
+    result.shape = counted && !(result.shape == CHECK_COUNTED_SIZE_FIELD && named) ? result.shape : CHECK_COUNTED_SIZE_NONE;
+    return result;
+}
+
 static void check_graph_special_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
 {
     const uint32_t node = action->node;
     const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
     if (action->op == CHECK_OP_BUILTIN_MISC)
     {
+        const bool counted_ref = action->member == CBUILTIN_COUNTED_BY_REF && graph->argument_counts[node] == 1;
+        const CheckCountedMember counted = counted_ref ? check_graph_counted_member(types, graph, stream, graph->argument_nodes[graph->argument_offsets[node]]) :
+                                                         (CheckCountedMember){ .base = BUSTER_CHECK_NONE };
         const CheckBuiltinMiscAction input = {
             .id = (CBuiltinId)action->member,
             .arguments = action->arguments,
@@ -2139,16 +2399,31 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
             .string_known = witness != NULL && witness->nan_payload_known,
             .string_cast = witness != NULL && witness->nan_payload_cast,
+            .string_utf8 = witness != NULL && witness->nan_payload_utf8,
+            .alloc_token_known = witness != NULL && witness->alloc_token_known,
+            .alloc_token = witness != NULL ? witness->alloc_token : 0,
+            .static_chain_call = witness != NULL && witness->static_chain_call,
+            .os_log_items = witness != NULL ? witness->os_log_items : NULL,
+            .os_log_count = witness != NULL ? witness->os_log_count : 0,
+            .os_log_known = witness != NULL && witness->os_log_known,
+            .os_log_invalid_mask = witness != NULL && witness->os_log_invalid_mask,
+            .os_log_taken = { witness != NULL ? witness->os_log_taken[0] : 0, witness != NULL ? witness->os_log_taken[1] : 0,
+                              witness != NULL ? witness->os_log_taken[2] : 0, witness != NULL ? witness->os_log_taken[3] : 0 },
             .function_objects = witness != NULL ? witness->function_objects : NULL,
             .function_object_count = witness != NULL ? witness->function_object_count : 0,
             .string_bytes = witness != NULL ? witness->nan_payload : NULL,
             .string_length = witness != NULL ? witness->nan_payload_length : 0,
+            .ns_constant_string = graph->ns_constant_string,
+            .counted_member = !counted.member ? BUSTER_CHECK_COUNTED_NONE :
+                              counted.kind == BUSTER_TYPE_COUNTED_BY && counted.count_found ? BUSTER_CHECK_COUNTED_COUNTED : BUSTER_CHECK_COUNTED_MEMBER,
+            .counted_type = counted.count_type,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
         *result = checked.action;
         check_builtin_library_fold_memory(types, input.id, action, checked.argument_conversions, result);
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+        result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_POINTER_SIGN) != 0 ? CHECK_WARNING_POINTER_SIGN : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 4; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
@@ -2439,8 +2714,25 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             memcpy(input.object_size_source_constant, witness->object_size_source_constant, sizeof(input.object_size_source_constant));
             memcpy(input.object_sizes, witness->object_sizes, sizeof(input.object_sizes));
         }
+        // clang's evaluator leaves __builtin_dynamic_object_size of a counted flexible array member (or a pointer
+        // member's access through one) to its code (#148): no bound of the object folds it.
+        const CheckCountedSize counted = input.id == CBUILTIN_DYNAMIC_OBJECT_SIZE && action->argument_count == 2 ?
+                                         check_graph_counted_size(types, graph, stream, graph->argument_nodes[graph->argument_offsets[node]]) :
+                                         (CheckCountedSize){ .shape = CHECK_COUNTED_SIZE_NONE };
+        if (counted.vetoed)
+        {
+            memset(input.object_size_known, 0, sizeof(input.object_size_known));
+            memset(input.object_size_source_constant, 0, sizeof(input.object_size_source_constant));
+        }
         CheckBuiltinQueryResult checked;
         check_builtin_query(types, &input, &checked, 1);
+        // Its counted_by code reads the argument's base (check_lower_counted_size): a reference of its operand, which
+        // has no side effects there.
+        if (counted.shape != CHECK_COUNTED_SIZE_NONE && checked.mode != 3 && checked.action.diagnostic == CHECK_DIAG_NONE && !input.object_size_known[checked.mode] &&
+            (action->arguments[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+        {
+            checked.evaluated_operands |= 1;
+        }
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 2; i += 1)
@@ -2626,6 +2918,7 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
             .evaluated_operands = checked.evaluated_operands,
             .warnings = checked.warnings,
             .mutates_list = checked.mutates_list,
+            .microsoft = checked.microsoft,
         };
     }
     else if (__builtin_expect(check_graph_has_arguments(action.op) & (action.op != CHECK_OP_CALL), 0))

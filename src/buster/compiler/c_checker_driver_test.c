@@ -443,6 +443,108 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
 // bytes, whose naked function has a label another template takes the address of, and whose template calls libc's puts
 // by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
 // which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
+// A value held across a call in a function that calls __builtin_setjmp where a longjmp's resumption wouldn't find it (#1242's
+// review): a long double's, in its depth's slot, which later expressions share. Both paths refuse it by name, and compile
+// the same function with no value held across its setjmp.
+static void check_test_driver_setjmp_held(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char* const sources[2] = {
+        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
+        "long double run(long double x) { long double r = x + __builtin_setjmp(buf); if (r == x) jump(); return r; }\n",
+        "static void *buf[5];\n__attribute__((noinline)) static void jump(void) { __builtin_longjmp(buf, 1); }\n"
+        "long double run(long double x) { if (__builtin_setjmp(buf) == 0) { x = x * 2; jump(); } return x; }\n",
+    };
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/setjmp_held.c", directory);
+    snprintf(object, sizeof(object), "%s/setjmp_held.o", directory);
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            const bool refused = status == 1 && text != NULL &&
+                                 strstr(text, "unsupported: a long double, __int128, vector or mask value, or a deep expression's, held across a call in a function "
+                                              "that calls __builtin_setjmp") != NULL;
+            const bool compiled = status == 0;
+            check_test_expect(test, s == 0 ? refused : compiled,
+                              s == 0 ? (path == 0 ? "a long double held across __builtin_setjmp is refused by name" : "the same, scalar")
+                                     : (path == 0 ? "a long double not held across __builtin_setjmp compiles" : "the same, scalar"));
+            free(text);
+        }
+        check_test_expect(test, written, "setjmp's held-value sources written");
+    }
+    unlink(source);
+    unlink(object);
+}
+
+// Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
+// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; and eh_return's
+// unwinding and the constant strings' objects, which clang makes and this compiler doesn't; z/OS's va_start and
+// va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; and
+// os_log formats whose items take their data out of order, or data past 8 bytes; dump_struct's generated calls; and
+// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
+static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        const char* message;
+    } cases[] = {
+        { "struct S { int a; };\nint f(struct S* s) { return __builtin_preserve_access_index(s->a); }\n",
+          "unsupported: __builtin_preserve_access_index, which clang compiles for BPF alone (an error without -g)" },
+        { "void f(int x) { __builtin_hlsl_resource_getpointer_typed(x); }\n",
+          "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
+        { "struct S { char c[5000]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
+          "unsupported: __builtin_clear_padding of an element past 4 KiB or of more padding than a builtin's stores" },
+        { "void f(void* p) { __builtin_eh_return(8, p); }\n", "unsupported: __builtin_eh_return, whose unwinding to a handler this compiler doesn't make" },
+        { "const void* f(void) { return __builtin___CFStringMakeConstantString(\"x\"); }\n",
+          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
+        { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
+          "unsupported: a constant CFString or NSString, whose object this compiler doesn't make" },
+        { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
+          "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
+        { "void f(char** a, char** b) { __builtin_zos_va_copy(a, b); }\n",
+          "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
+        { "int g(int);\nint f(void* p) { return __builtin_call_with_static_chain(g(1), p); }\n",
+          "unsupported: __builtin_call_with_static_chain, whose chain this compiler's calls don't pass in r10" },
+        { "void* f(void* b) { return __builtin_os_log_format(b, \"%2$d %1$d\", 1, 2); }\n",
+          "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
+        { "void* f(void* b) { return __builtin_os_log_format(b, \"%Lf\", 1.0L); }\n",
+          "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
+        { "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s) { __builtin_dump_struct(s, printf); }\n",
+          "unsupported: __builtin_dump_struct, whose calls of its printing function this compiler doesn't make" },
+        { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
+          "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
+    };
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/codegen_refusal.c", directory);
+    snprintf(object, sizeof(object), "%s/codegen_refusal.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const bool written = parse_test_write(source, cases[c].source, strlen(cases[c].source));
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            char description[256];
+            snprintf(description, sizeof(description), "code generation refusal %u, %s: '%s'", c, path == 0 ? "vector" : "scalar", cases[c].message);
+            check_test_expect(test, status == 1 && text != NULL && strstr(text, cases[c].message) != NULL, description);
+            free(text);
+        }
+        check_test_expect(test, written, "a code generation refusal's source written");
+    }
+    unlink(source);
+    unlink(object);
+}
+
 static void check_test_driver_asm_symbols(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] =
@@ -5737,6 +5839,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
+#include "c_check_attribute_effects_driver_test.c"
+#include "c_check_attribute_arguments_driver_test.c"
 #include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_fence_driver_test.c"
@@ -6875,6 +6979,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_generic_builtins(&test, clang, executable, directory);
+            check_test_driver_availability(&test, clang, executable, directory);
+            check_test_driver_counted_by(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -6981,6 +7087,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_commons(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_attribute_effects(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_attribute_arguments(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -7176,6 +7290,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_symbols(&test, executable, directory);
+                check_test_driver_setjmp_held(&test, executable, directory);
+                check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

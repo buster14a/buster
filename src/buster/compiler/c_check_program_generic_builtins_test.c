@@ -197,6 +197,11 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void *b[5];\nvoid f(void)\n{\n__builtin_longjmp(b, 1);\n}\nint g(void)\n{\nreturn __builtin_setjmp(b);\n}\n"
           "_Static_assert(_Generic(__builtin_setjmp(b), int: 1, default: 0), \"\");\n" },
         { .name = "generic: longjmp of 2", .source = "void *b[5];\nvoid f(int n)\n{\n__builtin_longjmp(b, 2);\n}\n", .rejected = true },
+        // A builtin's name in parentheses is its call's callee, which clang's call looks through (#1242's review): in a
+        // constant expression and in code.
+        { .name = "generic: a builtin's name in parentheses", .source =
+          "_Static_assert((__builtin_popcount)(7) == 3, \"\");\n_Static_assert(((__builtin_clz))(1) == 31, \"\");\n"
+          "enum { E = (__builtin_ctz)(8) };\nint f(unsigned x)\n{\nreturn (__builtin_popcount)(x) + ((__builtin_ffs))((int)x) + E;\n}\n" },
         { .name = "generic: longjmp of a variable", .source = "void *b[5];\nvoid f(int n)\n{\n__builtin_longjmp(b, n);\n}\n", .rejected = true },
         { .name = "generic: longjmp of 0 where it can't run", .source = "void *b[5];\nvoid f(void)\n{\nif (0) __builtin_longjmp(b, 0);\n}\n",
           .rejected = true },
@@ -226,6 +231,208 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: fence in constant contexts", .source = "static const double c = 2.0;\nstatic double e = __arithmetic_fence(c);\n_Static_assert(__arithmetic_fence(1.0) == 1.0, \"\");\n" },
         { .name = "generic: fence of float vectors and complex values", .source = "typedef float V __attribute__((vector_size(16)));\nV f(V v, _Complex float z)\n{\nreturn __arithmetic_fence(v) + __real__ __arithmetic_fence(z);\n}\n" },
         { .name = "generic: xray of an integer for its string", .source = "void f(void)\n{\n__xray_customevent(1, 2);\n}\n", .rejected = true },
+        // BPF's preserve_access_index (#148): its operand's value of its type, which clang's Sema takes of any expression, an
+        // rvalue and never a constant; and HLSL's resource pointer, void(...) in C, of any arguments but void ones.
+        { .name = "generic: preserve_access_index", .source =
+          "struct S { int a[4]; short b; };\nvoid g(void);\nint* f(struct S* s, int x)\n{\n__builtin_preserve_access_index(g());\n"
+          "_Static_assert(_Generic(__builtin_preserve_access_index(s->b), short: 1, default: 0), \"\");\n"
+          "return __builtin_preserve_access_index(s->a) + *__builtin_preserve_access_index(&x);\n}\n" },
+        { .name = "generic: preserve_access_index of none", .source = "int f(void)\n{\nreturn __builtin_preserve_access_index();\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index of two", .source = "int f(int x)\n{\nreturn __builtin_preserve_access_index(x, x);\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index's address", .source = "int* f(int x)\n{\nreturn &__builtin_preserve_access_index(x);\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index assigned", .source = "void f(int x)\n{\n__builtin_preserve_access_index(x) = 3;\n}\n", .rejected = true },
+        { .name = "generic: preserve_access_index in a constant", .source = "enum { E = __builtin_preserve_access_index(3) };\n", .rejected = true },
+        { .name = "generic: hlsl resource pointer", .source =
+          "struct S { int a; };\nvoid f(struct S s, int x)\n{\n__builtin_hlsl_resource_getpointer_typed();\n"
+          "__builtin_hlsl_resource_getpointer_typed(s, 1.0f, \"x\", x++, f);\n(void)sizeof(__builtin_hlsl_resource_getpointer_typed(1));\n}\n" },
+        // clear_padding (#148): a pointer as written to a complete object type that isn't const, volatile and _Atomic ones
+        // and a pointer to a variable length array among them.
+        { .name = "generic: clear_padding", .source =
+          "struct S { char c; int i; };\nvoid f(int n, struct S* p, volatile struct S* v, _Atomic(struct S)* a, int (*q)[n], int (*r)[3])\n{\n"
+          "__builtin_clear_padding(p);\n__builtin_clear_padding(v);\n__builtin_clear_padding(a);\n__builtin_clear_padding(q);\n__builtin_clear_padding(r);\n}\n" },
+        { .name = "generic: clear_padding of void", .source = "void f(void* p)\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an incomplete struct", .source = "struct S;\nvoid f(struct S* p)\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an int", .source = "void f(int x)\n{\n__builtin_clear_padding(x);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of const", .source = "void f(const int* p)\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of a function pointer", .source = "void f(int (*p)(void))\n{\n__builtin_clear_padding(p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an array", .source = "int a[3];\nvoid f(void)\n{\n__builtin_clear_padding(a);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of an incomplete array", .source = "void f(int (*q)[])\n{\n__builtin_clear_padding(q);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding of two", .source = "void f(int* p)\n{\n__builtin_clear_padding(p, p);\n}\n", .rejected = true },
+        { .name = "generic: clear_padding's value", .source = "int f(int* p)\n{\nreturn __builtin_clear_padding(p);\n}\n", .rejected = true },
+        // eh_return (#148): void(size_t, void*), which doesn't return. CFString's argument is an ordinary literal past its
+        // parentheses and casts, NSString's any const char *, each a const __NSConstantString *, whose record is made
+        // where an operand's evaluation reaches it first.
+        { .name = "generic: eh_return and constant strings", .source =
+          "enum { E = sizeof(*__builtin___NSStringMakeConstantString(\"x\")) };\nconst __NSConstantString* f(const char* s, int x)\n{\n"
+          "if (x) __builtin_eh_return(x, &x);\n(void)__builtin___CFStringMakeConstantString(\"x\");\n"
+          "(void)__builtin___CFStringMakeConstantString(((const char*)(\"a\" \"b\")));\n(void)sizeof(__builtin___CFStringMakeConstantString(\"\"));\n"
+          "long n = __builtin___CFStringMakeConstantString(\"abc\")->length;\n__typeof__(__builtin___CFStringMakeConstantString(\"x\")) p = 0;\n"
+          "(void)n;\n(void)p;\nreturn __builtin___NSStringMakeConstantString(s);\n}\n" },
+        { .name = "generic: eh_return of one", .source = "void f(void)\n{\n__builtin_eh_return(1);\n}\n", .rejected = true },
+        { .name = "generic: eh_return of a pointer offset", .source = "void f(void)\n{\n__builtin_eh_return((void*)0, 0);\n}\n", .rejected = true },
+        { .name = "generic: eh_return's value", .source = "int f(void)\n{\nreturn __builtin_eh_return(1, 0);\n}\n", .rejected = true },
+        { .name = "generic: CFString of a pointer", .source = "const void* f(const char* s)\n{\nreturn __builtin___CFStringMakeConstantString(s);\n}\n", .rejected = true },
+        { .name = "generic: CFString of a wide literal", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString(L\"x\");\n}\n", .rejected = true },
+        { .name = "generic: CFString of a UTF-8 literal", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString(\"a\" u8\"x\");\n}\n", .rejected = true },
+        { .name = "generic: CFString of __func__", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString(__func__);\n}\n", .rejected = true },
+        { .name = "generic: CFString of none", .source = "const void* f(void)\n{\nreturn __builtin___CFStringMakeConstantString();\n}\n", .rejected = true },
+        { .name = "generic: CFString as an int", .source = "int f(void)\n{\nreturn __builtin___CFStringMakeConstantString(\"x\");\n}\n", .rejected = true },
+        { .name = "generic: NSString of an int", .source = "const void* f(int x)\n{\nreturn __builtin___NSStringMakeConstantString(x);\n}\n", .rejected = true },
+        // The Microsoft and z/OS lists (#148): each ms builtin's list an lvalue of exactly char * (clang's char *&), and
+        // va_arg's where it is one; ms_va_start in an ms_abi variadic function alone, every other start out of one;
+        // z/OS's lists char ** parameters.
+        { .name = "generic: Microsoft and z/OS lists", .source =
+          "int __attribute__((ms_abi)) f(int n, ...)\n{\n__builtin_ms_va_list a, b;\n__builtin_ms_va_start(a, n);\n__builtin_ms_va_copy(b, a);\n"
+          "int x = __builtin_va_arg(b, int);\n__builtin_ms_va_end(b);\n__builtin_ms_va_end(a);\n__builtin_va_list s;\n__builtin_va_copy(s, s);\nreturn x;\n}\n"
+          "int g(char* p, char** q, int n, ...)\n{\nchar* c[1];\n__builtin_ms_va_copy(c[0], *q);\n__builtin_ms_va_end(p);\nchar* z;\n"
+          "__builtin_zos_va_start(&z, n);\n__builtin_zos_va_copy(q, &z);\n__builtin_zos_va_end(q);\nreturn __builtin_va_arg(p, int) + __builtin_va_arg(*q, int);\n}\n" },
+        { .name = "generic: ms_va_start out of ms_abi", .source = "void f(int n, ...)\n{\nchar* a;\n__builtin_ms_va_start(a, n);\n}\n", .rejected = true },
+        { .name = "generic: va_start in ms_abi", .source = "void __attribute__((ms_abi)) f(int n, ...)\n{\n__builtin_va_list a;\n__builtin_va_start(a, n);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_start in ms_abi", .source = "void __attribute__((ms_abi)) f(int n, ...)\n{\nchar* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_start with fixed args", .source = "void __attribute__((ms_abi)) f(int n)\n{\nchar* a;\n__builtin_ms_va_start(a, n);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_end of a const list", .source = "void f(char* const a)\n{\n__builtin_ms_va_end(a);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_end of an unsigned char pointer", .source = "void f(unsigned char* a)\n{\n__builtin_ms_va_end(a);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_copy of a temporary", .source = "void f(char* a)\n{\n__builtin_ms_va_copy(a, a + 1);\n}\n", .rejected = true },
+        { .name = "generic: ms_va_copy of a const char pointer", .source = "void f(char* a, const char* b)\n{\n__builtin_ms_va_copy(a, b);\n}\n", .rejected = true },
+        { .name = "generic: va_arg of a const char pointer", .source = "int f(const char* a)\n{\nreturn __builtin_va_arg(a, int);\n}\n", .rejected = true },
+        { .name = "generic: va_arg of a char pointer temporary", .source = "int f(char* a)\n{\nreturn __builtin_va_arg(a + 0, int);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_start of a void list", .source = "void f(int n, ...)\n{\nvoid* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_start with fixed args", .source = "void f(int n)\n{\nchar* a;\n__builtin_zos_va_start(&a, n);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_copy of one", .source = "void f(char** a)\n{\n__builtin_zos_va_copy(a);\n}\n", .rejected = true },
+        { .name = "generic: zos_va_end's value", .source = "int f(char** a)\n{\nreturn __builtin_zos_va_end(a);\n}\n", .rejected = true },
+        // infer_alloc_token (#148): a size_t of arguments that never run, an integer constant expression of the type a
+        // sizeof among them gives (through groupings and + - * / << >>, or a variable's initializer), LLVM's SipHash of
+        // its name without tag keywords, past half the tokens for a type holding a pointer (uintptr_t's typedef chain
+        // too, a member's included); no constant where no type is inferred.
+        { .name = "generic: infer_alloc_token", .source =
+          "typedef unsigned long uintptr_t;\ntypedef uintptr_t handle;\nstruct S { int a; char* p; };\nstruct W { handle h; };\n"
+          "struct Q { int a[3]; long b; };\ntypedef struct { short s; } TS;\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(int)) == 2689373973731826898u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(struct S)) == 9965185003513084084u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(char*) * 4) == 11473864704255292954u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(3 + sizeof(TS)) == 2947234827507279461u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(struct W)) > 9223372036854775807u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(uintptr_t)) > 9223372036854775807u, \"\");\n"
+          "_Static_assert(__builtin_infer_alloc_token(sizeof(struct Q)) == 6602487442970685230u, \"\");\n"
+          "_Static_assert(sizeof(__builtin_infer_alloc_token(1)) == 8, \"\");\nenum { E = __builtin_infer_alloc_token(sizeof(int[4])) != 0 };\n"
+          "unsigned long f(int i)\n{\nunsigned long s = sizeof(struct Q) * 2;\nstatic unsigned long t = __builtin_infer_alloc_token(sizeof(_Bool));\n"
+          "return __builtin_infer_alloc_token(i++, sizeof(char)) + __builtin_infer_alloc_token(s) + __builtin_infer_alloc_token(i) + t;\n}\n" },
+        // call_with_static_chain (#148): a call as written of no builtin (a catalog one, a header's leaf or a library
+        // builtin's external declaration), the call's value, and a pointer chain.
+        { .name = "generic: call_with_static_chain", .source =
+          "struct S { int a[4]; };\nint f(int);\nstruct S h(void);\nstatic int abs(int x) { return x; }\nvoid v(void);\n"
+          "int g(void* p, char* q, int (*k)(int, ...))\n{\nstruct S s = __builtin_call_with_static_chain(h(), q);\n"
+          "__builtin_call_with_static_chain(v(), p);\n(void)sizeof(__builtin_call_with_static_chain(f(1), p));\n"
+          "return __builtin_call_with_static_chain(f(1), p) + __builtin_call_with_static_chain((*k)(1, 2.0), p++) + s.a[0] +\n"
+          "__builtin_call_with_static_chain(abs(2), p);\n}\n" },
+        { .name = "generic: call_with_static_chain of a name", .source = "int f(int);\nint g(void* p)\n{\nreturn __builtin_call_with_static_chain(f, p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a grouping", .source = "int f(int);\nint g(void* p)\n{\nreturn __builtin_call_with_static_chain((f(1)), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a builtin", .source = "int g(void* p)\n{\nreturn __builtin_call_with_static_chain(__builtin_abs(1), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a library builtin", .source = "unsigned long strlen(const char*);\nunsigned long g(void* p)\n{\nreturn __builtin_call_with_static_chain(strlen(\"x\"), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of an int chain", .source = "int f(int);\nint g(int p)\n{\nreturn __builtin_call_with_static_chain(f(1), p);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of a null constant", .source = "int f(int);\nint g(void)\n{\nreturn __builtin_call_with_static_chain(f(1), 0);\n}\n", .rejected = true },
+        { .name = "generic: call_with_static_chain of one", .source = "int f(int);\nint g(void)\n{\nreturn __builtin_call_with_static_chain(f(1));\n}\n", .rejected = true },
+        // The os_log builtins (#148): a buffer that converts to void *, a format that is an ordinary or UTF-8 literal past its
+        // parentheses and casts, data of less than 256 bytes each; the buffer's size a size_t integer constant expression of
+        // the layout, whatever its data's types; __builtin_os_log_format's format checks refusing a struct or a complex
+        // value a specifier takes and a mask of other than 1 to 8 bytes, one after a %P without its length too (the checks go
+        // on past it, as the layout doesn't).
+        { .name = "generic: os_log", .source =
+          "struct S { int a; };\n_Static_assert(__builtin_os_log_format_buffer_size(\"%d %s\", 1, \"x\") == 18, \"\");\n"
+          "enum { E = __builtin_os_log_format_buffer_size(\"%{mask.ab}d %m\", 1) };\n_Static_assert(E == 20, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%Lf %P\", 1.0L, 1) == 26, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%2$s %1$d\", 1, \"x\") == 18, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%.*s %{public, mask.abcdefghij}d\", 3, \"x\", 1, 2) == 34, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(u8\"%d\", (struct S){ 1 }) == 8, \"\");\n"
+          "void* f(void* b, char* c, int i, struct S s)\n{\nunsigned long n = __builtin_os_log_format_buffer_size(\"%d\", i++);\n"
+          "(void)__builtin_os_log_format(c, (\"%d\"), i);\n(void)__builtin_os_log_format(b, (const char*)\"%s %f\", \"x\", 1.5f);\n"
+          "(void)__builtin_os_log_format(b, \"%d\", 1, s);\n(void)__builtin_os_log_format(b, \"%P %{mask.ab}d\", n, 1);\n"
+          "return __builtin_os_log_format(b, \"%{private}s %%\", \"x\");\n}\n" },
+        { .name = "generic: os_log of an int buffer", .source = "void* f(int b)\n{\nreturn __builtin_os_log_format(b, \"%d\", 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a pointer format", .source = "void* f(void* b, const char* s)\n{\nreturn __builtin_os_log_format(b, s);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a wide format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size(L\"x\");\n}\n", .rejected = true },
+        { .name = "generic: os_log of a struct", .source = "struct S { int a; };\nvoid* f(void* b, struct S s)\n{\nreturn __builtin_os_log_format(b, \"%d\", s);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a complex width", .source = "void* f(void* b, _Complex double c)\n{\nreturn __builtin_os_log_format(b, \"%*d\", c, 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a long mask", .source = "void* f(void* b)\n{\nreturn __builtin_os_log_format(b, \"%{mask.abcdefghi}d\", 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a long mask after an unlengthened pointer", .source = "void* f(void* b)\n{\nreturn __builtin_os_log_format(b, \"%P %{mask.abcdefghi}d\", 4, 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of an empty mask", .source = "void* f(void* b)\n{\nreturn __builtin_os_log_format(b, \"%{mask.}d\", 1);\n}\n", .rejected = true },
+        { .name = "generic: os_log of a big argument", .source = "struct T { char c[300]; };\nunsigned long f(struct T t)\n{\nreturn __builtin_os_log_format_buffer_size(\"%d\", t);\n}\n", .rejected = true },
+        { .name = "generic: os_log of no buffer", .source = "void* f(void)\n{\nreturn __builtin_os_log_format(\"%d\");\n}\n", .rejected = true },
+        { .name = "generic: os_log of no format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size();\n}\n", .rejected = true },
+        // dump_struct (#148): a pointer to a complete struct or union and a function or a function pointer that takes clang's
+        // generated calls (variadic past the rest of the arguments and the format, or without a prototype).
+        { .name = "generic: dump_struct", .source =
+          "int printf(const char*, ...);\nint pf(void* ctx, const char* f, ...);\nint kr();\nstruct S { int a; unsigned b : 2; struct { char c; } in; int arr[2]; };\n"
+          "union U { int a; };\nvoid f(struct S* s, const union U* u, int (*p)(const char*, ...))\n{\n__builtin_dump_struct(s, printf);\n"
+          "__builtin_dump_struct(u, p);\n__builtin_dump_struct((s), (printf));\n__builtin_dump_struct(s, pf, (void*)0);\n__builtin_dump_struct(s, pf, s);\n"
+          "__builtin_dump_struct(s, kr, 1, 2.0);\n}\n" },
+        { .name = "generic: dump_struct of a struct", .source = "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S s)\n{\n__builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of an int pointer", .source = "int printf(const char*, ...);\nvoid f(int* p)\n{\n__builtin_dump_struct(p, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of an incomplete struct", .source = "int printf(const char*, ...);\nstruct I;\nvoid f(struct I* p)\n{\n__builtin_dump_struct(p, printf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of no callable", .source = "struct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, 1);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a fixed printer", .source = "int bad(const char*);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, bad);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a missing context", .source = "int pf(void* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of a wrong context", .source = "int pf(int* ctx, const char* f, ...);\nstruct S { int a; };\nvoid f(struct S* s, long* l)\n{\n__builtin_dump_struct(s, pf, l);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct of an int format", .source = "int pf(void* ctx, int f, ...);\nstruct S { int a; };\nvoid f(struct S* s)\n{\n__builtin_dump_struct(s, pf, s);\n}\n", .rejected = true },
+        { .name = "generic: dump_struct's value", .source = "int printf(const char*, ...);\nstruct S { int a; };\nint f(struct S* s)\n{\nreturn __builtin_dump_struct(s, printf);\n}\n", .rejected = true },
+        // clang's counted_by family (#148): on flexible array members and pointers, wherever written, its count a member
+        // declared before it (an enclosing record's through an anonymous one); __builtin_counted_by_ref a pointer to it,
+        // or a void * of a member of none, in sizeof, typeof and _Generic too, and its value stored through.
+        { .name = "generic: counted_by", .source =
+          "struct S { long n; int fam[] __attribute__((counted_by(n))); };\n"
+          "struct P { int k; char *p __attribute__((sized_by(k))); int * __attribute__((counted_by(k))) q; void *v __attribute__((counted_by_or_null(k))); };\n"
+          "struct N { int k; struct { int x; char fam[] __attribute__((counted_by(k))); }; };\n"
+          "struct Q { int n; int fam[]; };\n"
+          "_Static_assert(_Generic(__builtin_counted_by_ref(((struct S *)0)->fam), long *: 1, default: 0), \"\");\n"
+          "int f(struct S *s, struct P *p, struct N *m, struct Q *q)\n{\n"
+          "*__builtin_counted_by_ref(s->fam) = 3;\n*__builtin_counted_by_ref(p->q) = 4;\n*__builtin_counted_by_ref(m->fam) = 5;\n"
+          "typeof(__builtin_counted_by_ref(p->p)) v = (void *)__builtin_counted_by_ref(q->fam);\n(void)v;\n"
+          "return (int)sizeof(*__builtin_counted_by_ref((s)->fam)) + (int)__builtin_dynamic_object_size(s->fam, 0);\n}\n" },
+        { .name = "generic: counted_by of a later member", .source = "struct S { int fam[] __attribute__((counted_by(n))); int n; };\n", .rejected = true },
+        { .name = "generic: counted_by of a bool", .source = "struct S { _Bool n; int fam[] __attribute__((counted_by(n))); };\n", .rejected = true },
+        { .name = "generic: counted_by on an int", .source = "struct S { int n; int x __attribute__((counted_by(n))); };\n", .rejected = true },
+        { .name = "generic: counted_by in a union", .source = "union U { int n; int *p __attribute__((counted_by(n))); };\n", .rejected = true },
+        { .name = "generic: sized_by on an array", .source = "struct S { int n; char fam[] __attribute__((sized_by(n))); };\n", .rejected = true },
+        { .name = "generic: counted_by_ref returned", .source = "struct S { int n; int fam[] __attribute__((counted_by(n))); };\nint *f(struct S *s)\n{\nreturn __builtin_counted_by_ref(s->fam);\n}\n", .rejected = true },
+        { .name = "generic: counted_by_ref of no member", .source = "void f(int *p)\n{\n(void)__builtin_counted_by_ref(p);\n}\n", .rejected = true },
+        // __builtin_available (#148): a _Bool of no constant expression, its specs names and numbers of nothing of the
+        // unit's, a typedef's name among them; a spec's error and the list's, at file scope and in a function.
+        { .name = "generic: available", .source =
+          "typedef int macos;\nint s = sizeof(__builtin_available(*));\ntypeof(__builtin_available(ios 10, *)) t;\n"
+          "_Static_assert(_Generic(__builtin_available(*), _Bool: 1, default: 0), \"\");\nint f(int x)\n{\n"
+          "if (__builtin_available(macos 10.12, iOS 10_3, watchOS 3.1.2, *)) x += 1;\nif (!__builtin_available(*)) x += 2;\n"
+          "_Bool b = __builtin_available(android 21, *);\nint a[__builtin_available(*) + 1];\n"
+          "return x + b + (int)sizeof a + __builtin_available(anyAppleOS 26.1, *);\n}\n" },
+        { .name = "generic: available of no version", .source = "int f(void)\n{\nreturn __builtin_available(macos x, *);\n}\n", .rejected = true },
+        { .name = "generic: available of an unknown platform", .source = "int f(void)\n{\nreturn __builtin_available(linuxos 1, *);\n}\n", .rejected = true },
+        { .name = "generic: available of a zero version", .source = "int f(void)\n{\nreturn __builtin_available(macos 0.0, *);\n}\n", .rejected = true },
+        { .name = "generic: available without a star", .source = "int f(void)\n{\nreturn __builtin_available(macos 1);\n}\n", .rejected = true },
+        { .name = "generic: available of a repeated platform", .source = "int f(void)\n{\nreturn __builtin_available(macos 1, macosx 2, *);\n}\n", .rejected = true },
+        { .name = "generic: available of an old anyAppleOS", .source = "int f(void)\n{\nreturn __builtin_available(anyAppleOS 25, *);\n}\n", .rejected = true },
+        { .name = "generic: available as a constant", .source = "enum { E = __builtin_available(*) };\n", .rejected = true },
+        { .name = "generic: available's static", .source = "static int v = __builtin_available(*);\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of none", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token();\n}\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of void", .source = "unsigned long f(void)\n{\nreturn __builtin_infer_alloc_token((void)0);\n}\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of no type", .source = "_Static_assert(__builtin_infer_alloc_token(1) == 0, \"\");\n", .rejected = true },
+        { .name = "generic: infer_alloc_token of a cast", .source = "_Static_assert(__builtin_infer_alloc_token((unsigned long)sizeof(int)) != 1, \"\");\n", .rejected = true },
+        { .name = "generic: infer_alloc_token's static", .source = "void f(void)\n{\nstatic unsigned long t = __builtin_infer_alloc_token(3);\n}\n", .rejected = true },
+        // __builtin_invoke(f, a...) is the call f(a...) in C (#148): of a function, a pointer to one and a member of one,
+        // with a prototype's conversions and a variadic one's promotions; its errors are the call's.
+        { .name = "generic: invoke", .source =
+          "int g(int);\nint v(int, ...);\nint (*p)(int) = g;\nstruct S { int (*fn)(int); };\nlong f(struct S s)\n{\n"
+          "_Static_assert(_Generic(__builtin_invoke(g, 1), int: 1, default: 0), \"\");\n"
+          "return __builtin_invoke(g, 1.5) + __builtin_invoke(p, 2) + __builtin_invoke(*p, 3) + __builtin_invoke(s.fn, 4) + __builtin_invoke(&g, 5) + __builtin_invoke(v, 1, 2.0f, \"x\");\n}\n" },
+        { .name = "generic: invoke of none", .source = "int f(void)\n{\nreturn __builtin_invoke();\n}\n", .rejected = true },
+        { .name = "generic: invoke of too many", .source = "int g(int);\nint f(void)\n{\nreturn __builtin_invoke(g, 1, 2);\n}\n", .rejected = true },
+        { .name = "generic: invoke of too few", .source = "int g(int);\nint f(void)\n{\nreturn __builtin_invoke(g);\n}\n", .rejected = true },
+        { .name = "generic: invoke of an int", .source = "int f(int x)\n{\nreturn __builtin_invoke(x, 1);\n}\n", .rejected = true },
+        { .name = "generic: invoke's address", .source = "void* h = __builtin_invoke;\n", .rejected = true },
+        // Any builtin's name that no call takes is clang's "builtin functions must be directly called".
+        { .name = "generic: a builtin's address", .source = "int (*p)(unsigned) = &__builtin_popcount;\n", .rejected = true },
+        { .name = "generic: a builtin's value", .source = "void f(void)\n{\n(void)__builtin_trap;\n}\n", .rejected = true },
+        { .name = "generic: invoke in a constant", .source = "int g(int);\nenum { E = __builtin_invoke(g, 1) };\n", .rejected = true },
+        { .name = "generic: hlsl resource pointer of void", .source = "void g(void);\nvoid f(void)\n{\n__builtin_hlsl_resource_getpointer_typed(g());\n}\n", .rejected = true },
+        { .name = "generic: hlsl resource pointer's value", .source = "int* f(void)\n{\nreturn __builtin_hlsl_resource_getpointer_typed();\n}\n", .rejected = true },
         { .name = "generic: xray typed event of two", .source = "void f(void)\n{\n__xray_typedevent(1, \"x\");\n}\n", .rejected = true },
         { .name = "generic: warn_memset_zero_len of one", .source = "void f(void)\n{\n__warn_memset_zero_len(1);\n}\n", .rejected = true },
         { .name = "generic: relocate of const", .source = "void f(const int* a, const int* b)\n{\n__builtin_trivially_relocate(a, b, 1);\n}\n", .rejected = true },
@@ -378,6 +585,47 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "return (int)((pushed((const unsigned char*)saver)&callee)*4+(pushed((const unsigned char*)kept)&callee)*2+"
         "((pushed((const unsigned char*)plain)&callee)!=0))+plain(n)*7+kept(n);}",
         "generic-unwind-init-saves", clang);
+    // __builtin_counted_by_ref (#148): stores through the count's address, of an `->`'s and a `.`'s access, of a count in an
+    // anonymous struct's enclosing record, and a null void * of a flexible array member of no count; and
+    // __builtin_dynamic_object_size of clang's counted_by forms, at counts below zero and above: a flexible array member,
+    // its element's address (and through a char *), another member's (an array's element too), a counted pointer and a
+    // sized_by one, a count in the enclosing record, mode 3's 0, and __builtin_object_size, which ignores the count.
+    check_test_program_source(test,
+        "typedef unsigned long size_t;void* malloc(size_t);"
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+        "struct S{char tag;long n;int fam[] __attribute__((counted_by(n)));};"
+        "struct U{unsigned char n;short arr[3];char c;long fam[] __attribute__((counted_by(n)));};"
+        "struct P{int x;unsigned short m;double* p __attribute__((counted_by(m)));char* q __attribute__((sized_by(x)));};"
+        "struct N{int k;struct{int x;char fam[] __attribute__((counted_by(k)));};};"
+        "struct Q{int n;int fam[];};"
+        "__attribute__((noinline)) static unsigned long f0(struct S* s){return __builtin_dynamic_object_size(s->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f1(struct S* s,int i){return __builtin_dynamic_object_size(&s->fam[i],1);}"
+        "__attribute__((noinline)) static unsigned long f2(struct S* s){return __builtin_dynamic_object_size(&s->tag,0);}"
+        "__attribute__((noinline)) static unsigned long f3(struct U* u,int i){return __builtin_dynamic_object_size(&u->arr[i],2);}"
+        "__attribute__((noinline)) static unsigned long f4(struct P* p,int i){return __builtin_dynamic_object_size(&p->p[i],0)+1000*__builtin_dynamic_object_size(p->q,1);}"
+        "__attribute__((noinline)) static unsigned long f5(struct N* n){return __builtin_dynamic_object_size(n->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f6(struct S* s){return __builtin_dynamic_object_size(s->fam,3);}"
+        "__attribute__((noinline)) static unsigned long f7(struct Q* q){return __builtin_dynamic_object_size(q->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f8(struct S* s,int i){return __builtin_dynamic_object_size(&((char*)s->fam)[i],0);}"
+        "__attribute__((noinline)) static unsigned long f9(struct U* u){return __builtin_dynamic_object_size(u->fam,0);}"
+        "__attribute__((noinline)) static unsigned long f10(struct S* s){return __builtin_object_size(s->fam,0);}"
+        "int tested(int n){h=(unsigned)n;struct S* s=malloc(sizeof(struct S)+64);struct U* u=malloc(sizeof(struct U)+64);"
+        "struct P p={5,3,0,0};struct N* m=malloc(sizeof(struct N)+8);struct Q* q=malloc(sizeof(struct Q)+8);"
+        "for(long c=-2;c<=6+n;c+=4){*__builtin_counted_by_ref(s->fam)=c;u->n=(unsigned char)c;*__builtin_counted_by_ref(m->fam)=(int)c;"
+        "*__builtin_counted_by_ref(p.p)=(unsigned short)(c+3);"
+        "mix(f0(s));mix(f1(s,2));mix(f1(s,-1));mix(f1(s,9));mix(f2(s));mix(f3(u,1));mix(f4(&p,1));mix(f4(&p,5));mix(f5(m));mix(f6(s));"
+        "mix(f7(q));mix(f8(s,3));mix(f9(u));mix(f10(s));mix((unsigned long)s->n);mix(m->k);mix(p.m);}"
+        "mix((void*)__builtin_counted_by_ref(q->fam)==0);"
+        "return (int)(h^(h>>32));}",
+        "generic-counted-by", clang);
+    // __builtin_available (#148): 1 for every platform's spec on Linux, in conditions, negated, as a value, through its
+    // type's queries, which never run it, and in a loop's condition.
+    check_test_program_source(test,
+        "int tested(int n){int r=0;if(__builtin_available(macos 10.12,ios 10,*))r+=1;if(!__builtin_available(*))r+=2;"
+        "_Bool b=__builtin_available(android 21,*);r+=b*4;r+=(int)sizeof(__builtin_available(*))*8;"
+        "r+=_Generic(__builtin_available(*),_Bool:16,default:0);typeof(__builtin_available(*)) t=7;r+=t*32;"
+        "for(int i=0;i<n&&__builtin_available(*);i++)r+=64;return r+(n>3?__builtin_available(swift 5,*):0)*1024;}",
+        "generic-available", clang);
     // The alloca variants' bytes and alignments, in a loop whose allocations each stay apart; the checks' values; the
     // annotation's integer, once evaluated; and addressof's and function_start's addresses, of a local, a member, an
     // array, a function, and in static data.
@@ -456,6 +704,120 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "static int frames(void){void* f[5];int r=__builtin_setjmp(f);return r==0&&f[0]==__builtin_frame_address(0);}\n"
         "int tested(int n){h=(unsigned)n;depth=0;for(int i=0;i<4;i++)mix((unsigned)jumps(n+i));mix((unsigned)depth);mix((unsigned)frames());return (int)(h^(h>>32));}\n",
         "generic-setjmp-longjmp", clang);
+    // A value an expression holds across __builtin_setjmp's call, which a longjmp's resumption finds, though calls after it
+    // saved values of their own below their arguments (#1242's review): an int's, a double's beside an int's, and nested
+    // operands of a call, each resumed once; and a control that holds none.
+    check_test_program_source(test,
+        "static void* buf[5];static volatile int sink;static volatile double dsink;static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "__attribute__((noinline)) static int side(int x){return x+5;}__attribute__((noinline)) static double dside(double x){return x+0.5;}\n"
+        "__attribute__((noinline)) static void jump(void){__builtin_longjmp(buf,1);}\n"
+        "__attribute__((noinline)) static int run(int n){int result=n+100+__builtin_setjmp(buf);if(result==n+100){sink=12345+side(8);jump();}return result;}\n"
+        "__attribute__((noinline)) static double drun(int k){double result=(double)k*1.5+__builtin_setjmp(buf);if(result==k*1.5){dsink=7.25+dside(1.0)+side(1);jump();}return result;}\n"
+        "__attribute__((noinline)) static int nested(int a){int r=a+(a*3+(side(a)+__builtin_setjmp(buf)));if(r==a+a*3+side(a)){sink=1+(2+(3+side(4)));jump();}return r;}\n"
+        "__attribute__((noinline)) static int control(void){if(__builtin_setjmp(buf)==0){sink=99+side(1);jump();}return sink;}\n"
+        "int tested(int n){h=(unsigned)n;mix((unsigned)run(n));mix((unsigned)sink);mix((unsigned long long)(drun(n&7)*4));mix((unsigned long long)(dsink*4));\n"
+        "mix((unsigned)nested(n&15));mix((unsigned)control());return (int)(h^(h>>32));}\n",
+        "generic-setjmp-held-values", clang);
+    // Builtins called through their names in parentheses (#1242's review), whose arguments run once.
+    check_test_program_source(test,
+        "static int calls;static unsigned next(unsigned v){calls++;return v;}\n"
+        "int tested(int n){unsigned u=(unsigned)n|1u;return (int)((__builtin_popcount)(next(u))+((__builtin_clz))(u)*100+(__builtin_bswap32)(u)%1000*10000)+calls*7;}\n",
+        "generic-builtin-names-in-parentheses", clang);
+    // __builtin_clear_padding (#148): the bytes of objects filled with ones, then cleared, against clang's build: a struct's
+    // holes and tail, bit-fields' unused bits and an unnamed one, a union's bytes no member holds, an x87 long double's last
+    // six, a _BitInt's high bits, an atomic struct's, an ext vector's tail, an anonymous member's, arrays of structs in a
+    // loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "struct A{char c;int i;short s;};struct B{int x:3;int:4;unsigned y:9;char z;long double ld;};union U{char c;int i;struct{char a;short b;}s;};\n"
+        "struct K{char k[3];};struct C{struct A a[2];_Complex long double z;_Atomic(struct K) at;_BitInt(37) bi;};typedef int V __attribute__((ext_vector_type(3)));\n"
+        "struct D{V v;char tail;};struct E{char c;struct{char d;long e;};};struct F{char c;int a[2][2];struct{char p:1;unsigned long q:50;}bits[2];};\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define T(decl) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(&v);bytes((const void*)&v,sizeof v);}while(0)\n"
+        "static struct A big[300];\n"
+        "int tested(int n){h=(unsigned)n;T(struct A v);T(struct B v);T(union U v);T(struct C v);T(struct D v);T(struct E v);T(long double v);T(struct F v);\n"
+        "T(struct A v[3]);T(struct A v[2][3]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
+        "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
+        "generic-clear-padding", clang);
+    // va_arg of a Microsoft list (#148, clang's EmitMSVAArg) against clang's build: 8-byte slots built by hand, read as an
+    // int, a float and a double, structs of 3, 4, 8 and 16 bytes (the 3- and 16-byte ones through their slots' pointers),
+    // a long double, a _Complex double and an __int128 through theirs, then __builtin_ms_va_copy into a list through a
+    // pointer, __builtin_ms_va_end, and va_arg through that pointer and of the copy, whose place is the last value.
+    check_test_program_source(test,
+        "void *memcpy(void *, const void *, unsigned long); static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "struct S3 { char c[3]; }; struct S4 { short a, b; }; struct S8 { int a, b; }; struct S16 { long a, b; };\n"
+        "static unsigned long long slots[16]; static struct S3 s3 = { { 1, 2, 3 } }; static struct S16 s16 = { 11, 12 };\n"
+        "static long double ld = 2.5L; static _Complex double cd = 1.0 + 2.0i; static __int128 wide = ((__int128)7 << 64) | 9;\n"
+        "static double take(char** list) { return __builtin_va_arg(*list, double); }\n"
+        "static void copy_end(__builtin_ms_va_list* to, __builtin_ms_va_list from) { __builtin_ms_va_copy(*to, from); __builtin_ms_va_end(from); }\n"
+        "int tested(int n) { h = (unsigned)n; struct S4 s4 = { 5, 6 }; struct S8 s8 = { 7, 8 }; float f = 1.5f; double d = 3.25;\n"
+        "unsigned long long k = 0; slots[k++] = (unsigned)n; memcpy(&slots[k++], &f, sizeof f); memcpy(&slots[k++], &d, sizeof d);\n"
+        "slots[k++] = (unsigned long long)&s3; memcpy(&slots[k++], &s4, sizeof s4); memcpy(&slots[k++], &s8, sizeof s8);\n"
+        "slots[k++] = (unsigned long long)&s16; slots[k++] = (unsigned long long)&ld; slots[k++] = (unsigned long long)&cd;\n"
+        "slots[k++] = (unsigned long long)&wide; slots[k++] = (unsigned long long)(long long)-3; memcpy(&slots[k++], &d, sizeof d);\n"
+        "slots[k++] = 0x1234; char* ap = (char*)slots; __builtin_ms_va_list copy; mix((unsigned)__builtin_va_arg(ap, int));\n"
+        "mix((unsigned long long)(__builtin_va_arg(ap, float) * 4)); mix((unsigned long long)(__builtin_va_arg(ap, double) * 4));\n"
+        "struct S3 r3 = __builtin_va_arg(ap, struct S3); mix(r3.c[0] + r3.c[1] * 10 + r3.c[2] * 100); struct S4 r4 = __builtin_va_arg(ap, struct S4);\n"
+        "mix(r4.a * 10 + r4.b); struct S8 r8 = __builtin_va_arg(ap, struct S8); mix(r8.a * 10 + r8.b);\n"
+        "struct S16 r16 = __builtin_va_arg(ap, struct S16); mix(r16.a * 100 + r16.b);\n"
+        "mix((unsigned long long)(__builtin_va_arg(ap, long double) * 8)); _Complex double rc = __builtin_va_arg(ap, _Complex double);\n"
+        "mix((unsigned long long)(__real__ rc * 10 + __imag__ rc)); __int128 rw = __builtin_va_arg(ap, __int128);\n"
+        "mix((unsigned long long)(rw >> 64) * 100 + (unsigned long long)rw); mix((unsigned long long)__builtin_va_arg(ap, long long));\n"
+        "copy_end(&copy, ap); mix((unsigned long long)(take(&copy) * 4)); mix((unsigned)__builtin_va_arg(copy, short));\n"
+        "mix((unsigned long long)(copy - (char*)slots)); return (int)(h ^ (h >> 32)); }\n",
+        "generic-microsoft-va-arg", clang);
+    // __builtin_infer_alloc_token (#148) against clang's build: the tokens of scalars, pointers, arrays, function pointers,
+    // records with and without pointers (through members, nested records and uintptr_t's typedefs), typedef-named and
+    // nested records, an atomic and a qualified type, by sizeof's type or its expression's, through arithmetic and a
+    // variable's initializer, and the fallback 0 of no type; arguments never run. (An unnamed record's name holds its file's
+    // path, which differs between this build's source and clang's.)
+    check_test_program_source(test,
+        "typedef unsigned long uintptr_t; typedef uintptr_t handle; static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "struct I; struct P { struct I* p; }; struct Q { int a[3]; long b; }; typedef struct { char c; } T; enum E { E0 }; union U { int a; float b; };\n"
+        "struct R { struct R* next; }; struct W { handle u; }; struct O { struct N { int x; } n; struct { char c; } a; }; struct V { struct Q q[2]; struct W w; };\n"
+        "int tested(int n) { int i = n; unsigned long s = sizeof(struct Q) * 2; h = (unsigned)n; mix(__builtin_infer_alloc_token(i++));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(struct I*))); mix(__builtin_infer_alloc_token(sizeof(struct P))); mix(__builtin_infer_alloc_token(s));\n"
+        "mix(__builtin_infer_alloc_token(3 + sizeof(T))); mix(__builtin_infer_alloc_token(sizeof(enum E))); mix(__builtin_infer_alloc_token(sizeof(union U)));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(struct R))); mix(__builtin_infer_alloc_token(sizeof(uintptr_t))); mix(__builtin_infer_alloc_token(sizeof(struct W)));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(int[4]))); mix(__builtin_infer_alloc_token(sizeof(int (*)(int)))); mix(__builtin_infer_alloc_token(sizeof(const char*)));\n"
+        "mix(__builtin_infer_alloc_token(sizeof i)); mix(__builtin_infer_alloc_token(4, sizeof(double))); mix(__builtin_infer_alloc_token(sizeof(_Atomic(int))));\n"
+        "mix(__builtin_infer_alloc_token(sizeof(volatile int))); mix(__builtin_infer_alloc_token(sizeof(struct N)));\n"
+        "mix(__builtin_infer_alloc_token(n * sizeof(struct V) << 1)); mix(__builtin_infer_alloc_token((sizeof(struct V) / 2) - 1)); mix((unsigned)i);\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-infer-alloc-token", clang);
+    // __builtin_os_log_format's buffers against clang's build (#148, the bytes of clang's helper's stores): privacy
+    // annotations (sensitive over a later public), scalars of each promoted size, %m and %%, a string's count from its
+    // precision's argument and from a constant, %.8P, masks, a field width and a precision of arguments, a double, a
+    // pointer, and an array (its address, compared in place, since the two builds place it apart); and buffer sizes of
+    // positions, of a %P without its length and of missing data.
+    check_test_program_source(test,
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "static unsigned char buffer[512]; static char arr[4] = { 1, 2, 3, 4 };\n"
+        "static void bytes(unsigned long n) { for (unsigned long i = 0; i < n; i++) mix(buffer[i]); } int tested(int n) { h = (unsigned)n;\n"
+        "const char* s = (const char*)(unsigned long)(0x1000 + n);\n"
+        "char c = (char)(n + 3); short w = (short)(n * 7); long long q = -n; float f = 1.5f * n; double d = 0.25 * n;\n"
+        "void* r = __builtin_os_log_format(buffer, \"%d %s %{public}s\", n, s, s);\n"
+        "mix(r == (void*)buffer); bytes(__builtin_os_log_format_buffer_size(\"%d %s %{public}s\", n, s, s));\n"
+        "__builtin_os_log_format(buffer, \"%{private}c %hd %lld %f %{sensitive, public}lu\", c, w, q, f, (unsigned long)n);\n"
+        "bytes(__builtin_os_log_format_buffer_size(\"%{private}c %hd %lld %f %{sensitive, public}lu\", c, w, q, f, (unsigned long)n));\n"
+        "__builtin_os_log_format(buffer, \"%m %% %.*s %.8P %{mask.abc}d %*.*d\", 3, s, s, n, 4, 2, n);\n"
+        "bytes(__builtin_os_log_format_buffer_size(\"%m %% %.*s %.8P %{mask.abc}d %*.*d\", 3, s, s, n, 4, 2, n));\n"
+        "__builtin_os_log_format(buffer, \"%{public,mask.xy}.16s %e %p %s\", s, d, (void*)s, arr);\n"
+        "unsigned long size = __builtin_os_log_format_buffer_size(\"%{public,mask.xy}.16s %e %p %s\", s, d, (void*)s, arr);\n"
+        "unsigned long v = 0; for (int i = 0; i < 8; i++) v |= (unsigned long)buffer[size - 8 + i] << (8 * i);\n"
+        "mix(v == (unsigned long)arr); bytes(size - 8);\n"
+        "mix(__builtin_os_log_format_buffer_size(\"plain\") + __builtin_os_log_format_buffer_size(\"%2$d %1$s\", s, n) * 100 +\n"
+        "__builtin_os_log_format_buffer_size(\"%P %d\", n, n) * 10000 + __builtin_os_log_format_buffer_size(\"%d %d\", n) * 1000000);\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-os-log", clang);
+    // __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
+    // evaluated once, as the call's.
+    check_test_program_source(test,
+        "static int calls;static int next(int v){calls++;return v;}static int twice(int x){return 2*x;}static int sum(int n,...){return n;}\n"
+        "struct S{int (*fn)(int);};\n"
+        "int tested(int n){int (*p)(int)=twice;struct S s={twice};return __builtin_invoke(twice,next(n))+__builtin_invoke(p,3)*10+__builtin_invoke(*p,1)*100+\n"
+        "__builtin_invoke(s.fn,next(2))*1000+__builtin_invoke(sum,7,1.5,\"x\")*10000+calls;}\n",
+        "generic-invoke", clang);
     // clang's type traits of C (#148), their values in code: of complete, incomplete and variably modified types.
     check_test_program_source(test,
         "struct T{int x;};\n"
