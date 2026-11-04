@@ -266,9 +266,13 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     depth += 1;
                     break;
                 case BUSTER_TYPED_X86:
+                    // A row of no result (#141, a machine row's, a masked store's) leaves nothing, as a void call.
                     depth -= input->operations[value].operand_count;
-                    stack[depth] = class;
-                    depth += 1;
+                    if (class != BUSTER_TYPED_CLASS_VOID)
+                    {
+                        stack[depth] = class;
+                        depth += 1;
+                    }
                     break;
                 case BUSTER_TYPED_LOAD:
                     if (!ir_typed_access_valid(kind, class, value))
@@ -678,6 +682,49 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
 {
     return ir_typed_emit(sink, IR_INTRINSIC, type, operands[operation->intrinsic_operands[0]], operands[operation->intrinsic_operands[1]], operation->intrinsic - 1u, 0);
+}
+
+// Any other X86 row (#141, ir_simd_typed_machine_row) as a row call of the operands on the stack, in their order: the row
+// itself, the IR's machine row (IrFunction.rows), whose call's types are its classes' (ir_row_type).
+static __attribute__((always_inline)) inline uint32_t ir_typed_machine_row(IrTypedSink* sink, const Tier0Operation* row, IrType type, const uint32_t* operands)
+{
+    const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
+    const uint32_t first = (uint32_t)sink->sizes.extra_count;
+    const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
+    const uint32_t index = (uint32_t)sink->sizes.row_count;
+    const uint32_t count = row->operand_count;
+    if (sink->output != 0)
+    {
+        // The row's used fields alone, its unused records and operands zero: equal rows are equal bytes.
+        IrFunction* output = sink->output;
+        Tier0Operation* copy = &output->rows[index];
+        memset(copy, 0, sizeof(*copy));
+        memcpy(copy->records, row->records, (uint64_t)row->record_count * sizeof(X86Instruction));
+        memcpy(copy->operand_classes, row->operand_classes, count);
+        memcpy(copy->operand_bytes, row->operand_bytes, count);
+        copy->record_count = row->record_count;
+        copy->operand_count = row->operand_count;
+        copy->result_class = row->result_class;
+        copy->result_bytes = row->result_bytes;
+        output->calls[descriptor] = (IrCall){
+            .argument_first = first,
+            .argument_count = count,
+            .type_first = type_first,
+            .parameter_count = count,
+            .result_type = (uint8_t)type,
+            .row = index + 1,
+        };
+        for (uint32_t j = 0; j < count; j += 1)
+        {
+            output->extra[first + j] = operands[j];
+            output->call_types[type_first + j] = (uint8_t)ir_row_type(row->operand_classes[j], row->operand_bytes[j]);
+        }
+    }
+    sink->sizes.call_count += 1;
+    sink->sizes.extra_count += count;
+    sink->sizes.call_type_count += count;
+    sink->sizes.row_count += 1;
+    return ir_typed_emit(sink, IR_CALL, type, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
 // A mask's bits as an integer of at least 32 bits, which Tier 1's arithmetic takes (an m8's or m16's zero-extended past

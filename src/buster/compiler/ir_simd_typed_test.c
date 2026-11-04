@@ -13,7 +13,18 @@
 // result untouched; a step's kind the one its form names, its count the shift's (a flags test's its condition: setb's
 // 1, sete's 0). Then each row changed one way at a time: a decoration, a displacement, memory, a destination by number
 // (k3, not a role), another width's form, a narrower kmov, an operand of another width or class, a test's other condition
-// (setne) or result move, a record read before it is written and one too many: each UNSUPPORTED.
+// (setne) or result move, a record read before it is written and one too many: none the front end's operation
+// (ir_simd_typed_test_undecoded).
+static void ir_simd_typed_test_masks(IrTestTally* tally);
+
+// Whether a changed row isn't decoded as the front end's operation: the IR's own operations refuse it, so that it is at
+// most the IR's machine row (#141, the row itself, ir_simd_typed_machine_row), or refused, by its classes or the target.
+static bool ir_simd_typed_test_undecoded(IrSimdTypedStatus status, const IrSimdTypedOperation* decoded)
+{
+    const bool machine = status == IR_SIMD_TYPED_OK && decoded->machine && decoded->mask_bytes == 0 && decoded->intrinsic == 0 && decoded->operation == IR_SIMD_OPERATION_COUNT;
+    return status == IR_SIMD_TYPED_UNSUPPORTED || status == IR_SIMD_TYPED_TARGET || machine;
+}
+
 static void ir_simd_typed_test_masks(IrTestTally* tally)
 {
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
@@ -179,7 +190,11 @@ static void ir_simd_typed_test_masks(IrTestTally* tally)
                 memset(&mutated, 0x3c, sizeof(mutated));
                 const IrSimdTypedStatus refused = applies ? ir_simd_typed_row(&changed, avx512, &mutated) : IR_SIMD_TYPED_UNSUPPORTED;
                 snprintf(description, sizeof(description), "%s: its row changed one way (%u) isn't the front end's operation", rule->name, m);
-                ir_test_expect(tally, refused == IR_SIMD_TYPED_UNSUPPORTED, description);
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &mutated), description);
+                // The mask decoder itself refuses it (or the target does, for a form of a width it lacks).
+                const IrSimdTypedStatus own = applies ? ir_simd_typed_mask_row(&changed, avx512, &mutated) : IR_SIMD_TYPED_UNSUPPORTED;
+                const IrSimdTypedStatus own_test = applies ? ir_simd_typed_mask_test(&changed, avx512, &mutated) : IR_SIMD_TYPED_UNSUPPORTED;
+                ir_test_expect(tally, (test ? own_test : own) != IR_SIMD_TYPED_OK, description);
             }
         }
     }
@@ -204,7 +219,8 @@ struct IrSimdTypedTestIntrinsic
 // x86_target_requirement's for its form (x86_target_rows.c's), and refuses as TARGET without it, the result untouched.
 // Then each row changed one way at a time: a decoration, a displacement, an immediate, memory, a destination by number
 // (not a role), the other width's form, a result of a signed class or the other width's, an operand of the other
-// width's class, both registers one operand, a second record, and a third operand: each UNSUPPORTED.
+// width's class, both registers one operand, a second record, and a third operand: each refused by the intrinsics'
+// decoder, so at most the IR's machine row (ir_simd_typed_test_undecoded).
 static void ir_simd_typed_test_intrinsics(IrTestTally* tally)
 {
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
@@ -294,21 +310,101 @@ static void ir_simd_typed_test_intrinsics(IrTestTally* tally)
             memset(&mutated, 0x3c, sizeof(mutated));
             const IrSimdTypedStatus result = ir_simd_typed_row(&changed, UINT64_MAX, &mutated);
             snprintf(description, sizeof(description), "%s: its row changed one way (%u) isn't the front end's operation", rule->name, m);
-            ir_test_expect(tally, result == IR_SIMD_TYPED_UNSUPPORTED, description);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(result, &mutated) && ir_simd_typed_intrinsic(&changed, UINT64_MAX, &mutated) != IR_SIMD_TYPED_OK, description);
         }
         Tier0Operation third = row;
         third.operand_count = 3;
         third.operand_classes[2] = row.operand_classes[0];
         IrSimdTypedOperation mutated;
         snprintf(description, sizeof(description), "%s: a row of a third operand isn't the front end's operation", rule->name);
-        ir_test_expect(tally, ir_simd_typed_row(&third, UINT64_MAX, &mutated) == IR_SIMD_TYPED_UNSUPPORTED, description);
+        const IrSimdTypedStatus third_status = ir_simd_typed_row(&third, UINT64_MAX, &mutated);
+        ir_test_expect(tally, ir_simd_typed_test_undecoded(third_status, &mutated) && ir_simd_typed_intrinsic(&third, UINT64_MAX, &mutated) != IR_SIMD_TYPED_OK, description);
     }
     ir_test_expect(tally, rows == BUSTER_ARRAY_LENGTH(expected_intrinsics), "every BMI builtin's rule decodes");
     printf("  IR SIMD rows: %u of the front end's scalar BMI rows decode to intrinsics\n", rows);
 }
 
+// The machine rows (#141, ir_simd_typed_machine_row): rows the IR's own operations don't take decode as the row itself,
+// with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and of
+// their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a quadword
+// one), and nothing else: a byte addition's of two vectors, a masked store's of an address, a vector and a mask of no
+// result, and a shift's of a count from a general register. Without each feature, TARGET with the result untouched. A
+// row of a class no row call takes (a vector of 8 bytes, a long double, a 128-bit integer) is UNSUPPORTED.
+static void ir_simd_typed_test_machine(IrTestTally* tally)
+{
+    const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
+    Tier0Operation rows[3];
+    memset(rows, 0, sizeof(rows));
+    rows[0].records[0] = (X86Instruction){ .form = X86_FORM_VPADDB_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    rows[0].record_count = 1;
+    rows[0].operand_count = 2;
+    rows[0].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[0].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[0].operand_bytes[0] = 64;
+    rows[0].operand_bytes[1] = 64;
+    rows[0].result_class = BUSTER_TYPED_CLASS_VECTOR;
+    rows[0].result_bytes = 64;
+    rows[1].records[0] = (X86Instruction){ .form = X86_FORM_VMOVDQU8_XM128_X, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE, .decorations = BUSTER_TIER0_DECORATION_MASK(2) };
+    rows[1].record_count = 1;
+    rows[1].operand_count = 3;
+    rows[1].operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+    rows[1].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[1].operand_classes[2] = BUSTER_TYPED_CLASS_MASK;
+    rows[1].operand_bytes[1] = 16;
+    rows[1].operand_bytes[2] = 2;
+    rows[1].result_class = BUSTER_TYPED_CLASS_VOID;
+    rows[2].records[0] = (X86Instruction){ .form = X86_FORM_VMOVD_X_RM32_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    rows[2].records[1] = (X86Instruction){ .form = X86_FORM_VPSRLQ_Y_Y_XM128_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    rows[2].record_count = 2;
+    rows[2].operand_count = 2;
+    rows[2].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[2].operand_classes[1] = BUSTER_TYPED_CLASS_I32;
+    rows[2].operand_bytes[0] = 32;
+    rows[2].result_class = BUSTER_TYPED_CLASS_VECTOR;
+    rows[2].result_bytes = 32;
+    // Each row's features, written out: the forms' and the moves'.
+    const uint64_t expected[3] = {
+        BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW),
+        BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW),
+        BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL),
+    };
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    char description[192];
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0x5a, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&rows[r], avx512, &decoded);
+        snprintf(description, sizeof(description), "machine row %u decodes as the row itself, its classes and its features", r);
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.machine && decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.mask_bytes == 0 && decoded.intrinsic == 0 &&
+                              decoded.required_features == expected[r] && decoded.operand_count == rows[r].operand_count &&
+                              memcmp(decoded.operand_classes, rows[r].operand_classes, rows[r].operand_count) == 0 && memcmp(decoded.operand_bytes, rows[r].operand_bytes, rows[r].operand_count) == 0,
+                       description);
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedOperation before = without;
+            const bool needed = (expected[r] & features[f]) != 0;
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&rows[r], avx512 & ~features[f], &without);
+            snprintf(description, sizeof(description), "machine row %u without feature %u is refused exactly where it needs it, the result untouched", r, f);
+            ir_test_expect(tally, needed ? refused == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0 : refused == IR_SIMD_TYPED_OK, description);
+        }
+    }
+    Tier0Operation narrow = rows[0];
+    narrow.operand_bytes[1] = 8;
+    IrSimdTypedOperation decoded;
+    ir_test_expect(tally, ir_simd_typed_row(&narrow, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of an 8-byte vector is no row call's");
+    Tier0Operation wide = rows[2];
+    wide.operand_classes[1] = BUSTER_TYPED_CLASS_I128;
+    ir_test_expect(tally, ir_simd_typed_row(&wide, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a 128-bit integer is no row call's");
+    wide.operand_classes[1] = BUSTER_TYPED_CLASS_F80;
+    ir_test_expect(tally, ir_simd_typed_row(&wide, avx512, &decoded) == IR_SIMD_TYPED_UNSUPPORTED, "a row of a long double is no row call's");
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
+    ir_simd_typed_test_machine(tally);
     TypeTestTable table = { 0 };
     const bool ready = type_test_table_open(&table, 256);
     ir_test_expect(tally, ready, "typed SIMD operation fixtures initialize a real C type table");

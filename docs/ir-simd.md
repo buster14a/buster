@@ -139,14 +139,17 @@ masks through 64 bits, unused high mask bits, undefined selection alternatives,
 step/value budgets. The original straight-line executor remains an independent
 consumer; the shared interpreter is not routed through it.
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c`
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c`
 drives real C through the checker, typed producer, both adapters and both text
 parsers. This explicit mode also requires a function with vectors to promote by
 both SSA promoters (#141), counting them, as a function whose only SIMD values
 are masks must (#179): `mask-builtins.c`'s four functions of the `_k*` builtins
 at every width, one of them a loop. `bmi-builtins.c`'s four functions lower the
 scalar BMI builtins of both widths, one of them in a loop, and an elementwise
-deposit of a vector to the IR's `intrinsic` (#141). `test-ir-simd` runs a function of each
+deposit of a vector to the IR's `intrinsic` (#141). `vector-rows.c`'s seven functions lower
+vector operators on bytes, words and quadwords and vector builtins to row calls (#141's
+machine rows): a compare into a mask, a masked store of no result, a shift by a count
+from a general register, a permute and a loop whose row results are phis. `test-ir-simd` runs a function of each
 vector width through a vector slot, an addition, compares and a selection,
 lowered, promoted and optimized by both paths, on the shared interpreter. Without `--simd`, source-corpus acceptance continues to
 require promotion. Source preparation retains each function's selected
@@ -218,6 +221,27 @@ mask, index or control. Tier 1 selects each as its one VEX instruction
 (`TIER1_RULE_INTRINSIC`), whose three registers are its own; its emission's
 target allow-list refuses one for a target without the feature.
 
+## Machine rows (#141)
+
+Any other `X86` row, one the decoders above don't take, is the IR's machine row
+(`ir_simd_typed_machine_row`, [the IR guide](ir.md)'s "Machine rows"): a row call
+runs it, its arguments the row's operands. Its operands and result must be of the
+classes a row call takes (`ir_row_type`: integers of 1 to 8 bytes, floats and
+doubles, vectors of 16, 32 or 64 bytes whatever their elements, masks, and `void`
+for its result), refused as `IR_SIMD_TYPED_UNSUPPORTED` otherwise (a vector of 4
+or 8 bytes, a long double, a 128-bit integer), and the target must have its
+features, refused as `IR_SIMD_TYPED_TARGET` otherwise: the union of its forms'
+(`x86_target_requirement`'s, less `BUSTER_X86_TARGET_KNOWN`, which classified rows
+carry) and of its vectors' and masks' moves, Tier 1's (AVX512F, VL below 64 bytes,
+DQ for a byte mask, BW for a doubleword or a quadword one). A row the decoders
+take but the target refuses stays refused. So the decoders' refusals above are
+now each a machine row, or a refusal by class or target: `test-ir-simd`'s
+mutations of the `_k*` and BMI rows check that none decodes as the front end's
+operation, and that the decoder of its family refuses it. `test-ir-simd` also
+decodes a byte addition's, a masked store's of no result and a shift's of a count
+from a general register as machine rows, with their classes and exactly their
+features, each refused without each feature it needs.
+
 The consumers take a function without vectors (`ir_function_has_vectors`, 64
 instructions at a time on the vector path, with a scalar twin): a vector type
 anywhere, a vector constant or a `vconst`, `vcmp` or `vselect`, in its
@@ -252,7 +276,9 @@ The tests:
   generator) through both lowering paths into the same IR, the IR's interpreter
   on the lowered, both promoted and the optimized functions against the
   generator's model, then both of Tier 1's paths natively; programs with rows the
-  decoder refuses must be refused by both paths at the row. Then every `_k*`
+  decoders refuse (an integer in a row, opmask registers by number) have them as
+  machine rows (#141), which the interpreter refuses at every stage and Tier 1's
+  native runs alone check against the model. Then every `_k*`
   rule's row as the program's only row, compiled by both of Tier 0's paths and
   run natively against a C model of each instruction written from Intel's
   manual, so that the processor checks the model, then through the same

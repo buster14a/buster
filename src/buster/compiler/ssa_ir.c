@@ -83,6 +83,7 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
         ssa_ir_owned(arena, f->extra, f->extra_count, 4) ||
         ssa_ir_owned(arena, f->constants, f->constant_count, sizeof(IrConstant)) ||
         ssa_ir_owned(arena, f->vector_constants, f->vector_constant_count, sizeof(IrSimdValue)) ||
+        ssa_ir_owned(arena, f->rows, f->row_count, sizeof(Tier0Operation)) ||
         ssa_ir_owned(arena, f->slots, f->slot_count, sizeof(IrSlot)) ||
         ssa_ir_owned(arena, f->addresses, f->address_count, sizeof(IrAddress)) ||
         ssa_ir_owned(arena, f->calls, f->call_count, sizeof(IrCall)) ||
@@ -302,6 +303,7 @@ static IrError ssa_ir_layout(SsaIrWork* work)
         work->sizes = (IrSizes){
             .constant_count = f->constant_count,
             .vector_constant_count = f->vector_constant_count,
+            .row_count = f->row_count,
             .address_count = f->address_count,
             .call_type_count = f->call_type_count,
             .parameter_count = f->parameter_count,
@@ -422,6 +424,11 @@ static void ssa_ir_copy_metadata(const SsaIrWork* work, IrFunction* f)
     if (input->vector_constant_count != 0)
     {
         memcpy(f->vector_constants, input->vector_constants, (uint64_t)input->vector_constant_count * sizeof(IrSimdValue));
+    }
+    // The machine rows (#141), which its row calls index as before.
+    if (input->row_count != 0)
+    {
+        memcpy(f->rows, input->rows, (uint64_t)input->row_count * sizeof(Tier0Operation));
     }
     if (input->address_count != 0)
     {

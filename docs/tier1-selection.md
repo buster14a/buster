@@ -859,6 +859,56 @@ interpreter on both paths, with and without rematerialization: every operation
 and all ten predicates at each width; constants of every kind; a loop whose vector
 phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
 and reloaded; and vectors of each width live across two calls of the helper.
+
+## Machine rows (#141)
+
+A row call ([the IR guide](ir.md)'s "Machine rows") is `TIER1_RULE_ROW`, its
+`immediate` the row's index and its operands the call's arguments, the node's
+effective uses, each in a register (the CFG problem's uses of it are required,
+as any operand's): a row call isn't a call of a function's
+(`tier1_select_function_call`), so nothing is saved around it, no argument moves,
+and it makes no frame a caller's. The selector takes a row Tier 0 places
+(`tier0_operation_valid`, which needs x86_semantics.c's tables) whose records
+name vector registers in EVEX forms alone, so that its vector roles can be zmm16
+and on, which no value takes, its floating roles past them below 32
+(`tier1_select_row_supported`). Its narrow integer result isn't canonical
+(`tier1_select_canonical`): its field's bits past the class are the row's. Only
+the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row as Tier 0
+does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
+
+| Role | Register |
+| --- | --- |
+| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
+| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, moved into the destination last |
+| `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
+| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no operand is; else a free register, moved into the destination last |
+| `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
+
+The free registers are the caller-saved general registers (rax, rcx, rdx, rsi,
+rdi, r8, r9, r10 and the scratch r11) and k1 to k7 that hold no value live past
+the node, no operand and not the destination. The opmask registers a row names by
+number (its own scratch: a row with a mask operand or result names none) are
+renamed to free ones too (`tier1_select_row_rename`), but a pair's (VP2INTERSECT's
+k and k + 1), which must be free where it is. Short of them, the row is refused as unsupported
+(`TIER1_EMIT_UNSUPPORTED`), and its function is Tier 0's: the CFG consumer keeps a
+node's own error rather than the block's owed call saves' (`TIER1_EMIT_INVALID`,
+which a refusal mid-block left owed). A move into place never
+overwrites another's source: its destination is free or a vector role's. Each row
+node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
+certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
+it doesn't decode the rows' records.
+
+`test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
+vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
+every function Tier 1's, by both paths and with and without rematerialization,
+and runs it with clang -O2's other unit, against clang -O0's build of both: compares
+into masks of every width, masked and zero-masked operations and blends,
+permutes and shuffles, shifts by immediates, by counts in general registers and by
+vectors, masked loads and stores, a store of no result and a compress, inserts,
+extracts and widening conversions of every width, broadcasts, reductions and
+extractions into general registers, and a loop whose row results cross its back
+edge.
+
 ## Tests and benchmark
 
 `test-tier1-select` checks both original-IR covers, real records and native

@@ -41,6 +41,9 @@ struct String8
 #include "buster/compiler/dataflow.c"
 #include "buster/compiler/c_types.c"
 #include "buster/compiler/calling_convention.c"
+// Tier 0's machine rows are the IR's row calls' (#141, IrFunction.rows), which Tier 1 places as Tier 0 does.
+#include "buster/compiler/branch_sizing.c"
+#include "buster/compiler/tier0.c"
 #include "buster/compiler/ir.c"
 #include "buster/compiler/tier1_select.c"
 #include "buster/compiler/tier1_allocate.c"
@@ -53,7 +56,6 @@ struct String8
 #include "buster/compiler/tier1_frame.c"
 #include "buster/compiler/tier1_frame_emit.c"
 #include "buster/compiler/tier1_emit.c"
-#include "buster/compiler/branch_sizing.c"
 #pragma clang diagnostic pop
 
 #define BUSTER_TIER1_SELECT_BENCH_PASSES 7

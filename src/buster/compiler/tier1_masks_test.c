@@ -72,10 +72,10 @@ struct Tier1MasksTest
     // General values recomputed (#178) in the runs with rematerialization, beside the masks, which never are.
     uint64_t recomputed;
     uint32_t refused;
-    // Tier 0's mask programs through the IR (tier1_masks_test_typed): those lowered and run through every stage, those
-    // whose rows the lowering refuses, and their native runs by Tier 1.
+    // Tier 0's mask programs through the IR (tier1_masks_test_typed): those lowered and run through every stage, those of
+    // them with a machine row (#141), which the interpreter refuses, and their native runs by Tier 1.
     uint32_t typed_programs;
-    uint32_t typed_refused;
+    uint32_t typed_machine;
     uint64_t typed_runs;
     // The front end's opmask rows (tier1_masks_test_builtins): those through every stage, and Tier 0's native runs of them.
     uint32_t builtin_attempts;
@@ -1586,17 +1586,19 @@ static void tier1_masks_test_typed_native(Tier1MasksTest* test, const char* name
 // the same functions; the all-in-memory IR run by the IR's interpreter on each input; promoted by both SSA paths and run
 // again; optimized (ir_optimize's SCCP, dead code and CFG cleanup) and run again; then planned and emitted by both of
 // Tier 1's paths (with rematerialization, as --tier1 compiles), its allocation checked by tier1_cfg_verify, and run
-// natively. A program that isn't `decodable` must instead be refused by both paths' lowering at an X86 row, as
-// unsupported. Each stage's output in an arena of its own (`arenas`: the promotions', the optimizer's and Tier 1's),
-// which owns none of its input (ssa_ir_promote's and the others' rule), as the C driver's --tier1 gives each a step's.
-// Returns whether it went through every stage, *refused whether it was refused so.
+// natively. A program that isn't `decodable` has a row the IR's decoders don't take, which both paths lower as a machine
+// row (#141, a row call): the interpreter refuses it at every stage, having no model of x86 records, and Tier 1's native
+// runs alone check it against the model, the row's records placed by tier1_emit_cfg_row. Each stage's output in an arena
+// of its own (`arenas`: the promotions', the optimizer's and Tier 1's), which owns none of its input (ssa_ir_promote's and
+// the others' rule), as the C driver's --tier1 gives each a step's. Returns whether it went through every stage, *machine
+// whether its program had a machine row.
 static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* name, const Tier0Function* functions, bool decodable, const uint64_t* inputs, const uint8_t* expected, Arena* arenas,
-                                            bool* refused)
+                                            bool* machine)
 {
     uint8_t* outputs = malloc(BUSTER_TIER1_MASKS_TEST_OUT);
     bool ok = tier1_masks_test_expect(test, outputs != 0, "the typed pipeline's outputs");
     static const IrType results[2] = { IR_VOID, IR_I64 };
-    *refused = false;
+    *machine = false;
     // Lowered by both paths: the vector path's functions in lowered[0], the scalar twin's in lowered[1].
     IrFunction lowered[2][2];
     IrCheck checks[2][2];
@@ -1610,10 +1612,8 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
     }
     if (ok && !decodable)
     {
-        *refused = checks[0][0].error == IR_ERROR_UNSUPPORTED && checks[1][0].error == IR_ERROR_UNSUPPORTED && checks[0][0].detail == IR_SIMD_TYPED_UNSUPPORTED &&
-                   checks[0][0].instruction == checks[1][0].instruction && checks[0][0].instruction < functions[0].count && functions[0].kinds[checks[0][0].instruction] == BUSTER_TYPED_X86;
-        tier1_masks_test_expect(test, *refused, "a row the IR's decoder doesn't take refuses the typed program's lowering, at the row, by both paths");
-        ok = false;
+        *machine = checks[0][0].error == IR_OK && checks[1][0].error == IR_OK && lowered[0][0].row_count != 0 && lowered[1][0].row_count == lowered[0][0].row_count;
+        tier1_masks_test_expect(test, *machine, "a row the IR's decoders don't take is the typed program's machine row, by both paths");
     }
     for (uint32_t f = 0; ok && f < 2; f += 1)
     {
@@ -1650,12 +1650,14 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
     }
     for (uint32_t stage = 0; ok && stage < 4; stage += 1)
     {
-        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        // A machine row's program: the interpreter refuses it, on the first input.
+        for (uint32_t input = 0; ok && input < (*machine ? 1 : BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS); input += 1)
         {
             memset(outputs, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
             const bool ran = tier1_masks_test_typed_interpret(test, stages[stage], inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8), outputs);
-            ok = tier1_masks_test_expect(test, ran && memcmp(outputs, expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT, BUSTER_TIER1_MASKS_TEST_OUT) == 0,
-                                         "the IR's interpreter gives the model's outputs at every stage");
+            ok = *machine ? tier1_masks_test_expect(test, !ran, "the IR's interpreter refuses a machine row at every stage") :
+                            tier1_masks_test_expect(test, ran && memcmp(outputs, expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT, BUSTER_TIER1_MASKS_TEST_OUT) == 0,
+                                                    "the IR's interpreter gives the model's outputs at every stage");
             if (!ok)
             {
                 printf("test-tier1-masks: %s, stage %u, input %u: %s\n", name, stage, input, ran ? "the outputs differ" : "the interpreter refused");
@@ -1703,9 +1705,9 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
 }
 
 // Tier 0's mask programs (tier0_mask_test.c's generator) through the IR (tier1_masks_test_typed_pipeline), against the
-// generator's own model of the stream (tier0_test_mask_model). A program with a row the IR's decoder doesn't take (FROM's
-// and TO's, an integer in a row; NUMBERED's, opmask registers by number) is refused by both paths' lowering, as
-// unsupported.
+// generator's own model of the stream (tier0_test_mask_model). A program with a row the IR's decoders don't take (FROM's
+// and TO's, an integer in a row; NUMBERED's, opmask registers by number) has it as a machine row (#141), which Tier 1's
+// native runs alone check.
 static void tier1_masks_test_typed(Tier1MasksTest* test)
 {
     Tier0TestMaskProgram* program = malloc(sizeof(*program));
@@ -1745,10 +1747,10 @@ static void tier1_masks_test_typed(Tier1MasksTest* test)
             memset(&reach, 0, sizeof(reach));
             ok = tier1_masks_test_expect(test, tier0_test_mask_model(program, in, wanted, &reach), "the model runs the typed program");
         }
-        bool refused = false;
-        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, decodable, inputs, expected, arenas, &refused);
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, decodable, inputs, expected, arenas, &machine);
         test->typed_programs += ok;
-        test->typed_refused += refused;
+        test->typed_machine += machine;
         tier1_masks_test_expect(test, test->scratch.length == 0, "the typed pipeline returns the scratch arena");
         arena_pop_to(&test->output, output_mark);
         arena_pop_to(&arenas[0], 0);
@@ -2013,18 +2015,17 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.native_runs == expected_runs, "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
             tier1_masks_test_expect(&test, test.recomputed != 0, "with rematerialization, general values beside the masks are recomputed");
             tier1_masks_test_expect(&test, test.refused == 8, "every refusal on both paths");
-            // Tier 0's programs through the IR: most taken whole, some refused for their rows, and natively by both paths.
-            tier1_masks_test_expect(&test, test.typed_programs + test.typed_refused == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_programs >= BUSTER_TIER1_MASKS_TEST_PROGRAMS / 2 &&
-                                               test.typed_refused != 0,
-                                    "Tier 0's mask programs go through the IR and Tier 1, but those whose rows the decoder refuses");
+            // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
+            tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
+                                    "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The front end's rows: every rule of the five families, the shifts at every count.
             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
         }
-        printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u refused for their rows\n", test.typed_programs, test.typed_runs,
-               test.typed_refused);
+        printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
+               test.typed_programs, test.typed_runs, test.typed_machine);
         printf("test-tier1-masks: the front end's opmask rows: %u through Tier 0 natively (%u runs), the IR's interpreter, SSA, the optimizer and Tier 1\n", test.builtin_rows, test.builtin_native);
         printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls, %" PRIu64 " through frame objects, %" PRIu64 " general values recomputed beside them; %u refusals (seed=%" PRIu64 ")\n",
                test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.frame_accesses,

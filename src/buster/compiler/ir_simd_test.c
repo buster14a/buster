@@ -40,9 +40,103 @@ static void ir_test_simd_bitcasts(IrTestTally* test, Arena* output, Arena* scrat
     }
 }
 
+// A row call (#141, IrCall.row): a masked byte addition's row of two vectors and a mask, its result a vector, and a masked
+// store's of an address, a vector and a mask, of no result, each a call of no symbol whose types are its row's classes'
+// (ir_row_type). Both verify, both scans find SIMD values, and the interpreter refuses them. Then each changed one way,
+// each refused: a symbol, a row past the column, an argument or the result of another type, an argument too few, a
+// variadic call, an indirect one, and a row's operand of a class no row call takes (a vector of 8 bytes).
+static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    IrFunction function = { 0 };
+    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .extra_count = 6, .call_count = 2, .call_type_count = 6, .parameter_count = 4, .row_count = 2 };
+    const bool ready = ir_create(output, &sizes, &function) == IR_OK;
+    ir_test_expect(test, ready, "a row call fixture allocates its rows");
+    if (ready)
+    {
+        function.result_type = IR_V16I32;
+        function.block_offsets[1] = 7;
+        const uint8_t parameters[4] = { IR_V16I32, IR_V16I32, IR_M64, IR_I64 };
+        memcpy(function.parameter_types, parameters, sizeof(parameters));
+        Tier0Operation* add = &function.rows[0];
+        add->records[0] = (X86Instruction){ .form = X86_FORM_VPADDB_Z_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1),
+                                            .mode = BUSTER_X86_REGISTER_DIRECT, .decorations = BUSTER_TIER0_DECORATION_MASK(2) };
+        add->record_count = 1;
+        add->operand_count = 3;
+        add->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+        add->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+        add->operand_classes[2] = BUSTER_TYPED_CLASS_MASK;
+        add->operand_bytes[0] = 64;
+        add->operand_bytes[1] = 64;
+        add->operand_bytes[2] = 8;
+        add->result_class = BUSTER_TYPED_CLASS_VECTOR;
+        add->result_bytes = 64;
+        Tier0Operation* store = &function.rows[1];
+        store->records[0] = (X86Instruction){ .form = X86_FORM_VMOVDQU8_ZM512_Z, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE,
+                                              .decorations = BUSTER_TIER0_DECORATION_MASK(2) };
+        store->record_count = 1;
+        store->operand_count = 3;
+        store->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+        store->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+        store->operand_classes[2] = BUSTER_TYPED_CLASS_MASK;
+        store->operand_bytes[1] = 64;
+        store->operand_bytes[2] = 8;
+        store->result_class = BUSTER_TYPED_CLASS_VOID;
+        const uint32_t extra[6] = { 0, 1, 2, 3, 4, 2 };
+        memcpy(function.extra, extra, sizeof(extra));
+        const uint8_t types[6] = { IR_V16I32, IR_V16I32, IR_M64, IR_I64, IR_V16I32, IR_M64 };
+        memcpy(function.call_types, types, sizeof(types));
+        function.calls[0] = (IrCall){ .argument_first = 0, .argument_count = 3, .type_first = 0, .parameter_count = 3, .result_type = IR_V16I32, .row = 1 };
+        function.calls[1] = (IrCall){ .argument_first = 3, .argument_count = 3, .type_first = 3, .parameter_count = 3, .result_type = IR_VOID, .row = 2 };
+        for (uint32_t p = 0; p < 4; p += 1)
+        {
+            ir_test_instruction(&function, p, IR_PARAM, (IrType)parameters[p], p, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        ir_test_instruction(&function, 4, IR_CALL, IR_V16I32, 0, 0, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 5, IR_CALL, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 6, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_pair(test, &function, scratch, NULL, true, "row calls of a vector result and of none verify");
+        ir_test_expect(test, ir_function_has_simd_path(&function, true) && ir_function_has_simd_path(&function, false) && ir_function_has_vectors_path(&function, true) &&
+                       ir_function_has_vectors_path(&function, false), "a function with machine rows has SIMD values on both scans' paths");
+        ir_test_expect(test, !ir_interpreter_simd_supported(&function), "the interpreter refuses a machine row, which it has no model of");
+        ir_test_printer(test, &function, output, scratch);
+        function.a[4] = 1;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call names no symbol");
+        function.a[4] = 0;
+        function.calls[0].row = 3;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call's row is in the rows' column");
+        function.calls[0].row = 1;
+        function.call_types[2] = IR_M32;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call's argument is of its operand's class's type");
+        function.call_types[2] = IR_M64;
+        function.type[4] = IR_V8I32;
+        function.calls[0].result_type = IR_V8I32;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call's result is of its row's result's type");
+        function.type[4] = IR_V16I32;
+        function.calls[0].result_type = IR_V16I32;
+        function.calls[0].argument_count = 2;
+        function.calls[0].parameter_count = 2;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call has an argument per operand of its row");
+        function.calls[0].argument_count = 3;
+        function.calls[0].parameter_count = 3;
+        function.calls[0].variadic = true;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call isn't variadic");
+        function.calls[0].variadic = false;
+        function.op[4] = IR_CALL_INDIRECT;
+        ir_test_pair(test, &function, scratch, NULL, false, "a row call is a direct call's");
+        function.op[4] = IR_CALL;
+        add->operand_bytes[0] = 8;
+        ir_test_pair(test, &function, scratch, NULL, false, "a vector of 8 bytes is no row call's operand");
+        add->operand_bytes[0] = 64;
+        ir_test_pair(test, &function, scratch, NULL, true, "the row calls verify again once restored");
+    }
+    arena_pop_to(output, mark);
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
     ir_test_simd_bitcasts(test, output, scratch);
+    ir_test_simd_rows(test, output, scratch);
     const uint64_t mark = output->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {
