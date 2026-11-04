@@ -6005,14 +6005,22 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             // A use in the specifiers of a declaration itself marked, which clang's delayed diagnostics read in that
             // declaration's context: one before its first declarator, which an attribute marks by its own token. Its worst
             // mark is a context as check_input_availability_contexts' are: a deprecated one drops a deprecated use, an
-            // unavailable one an unavailable use too. Looked for only at a marked use, which are few.
+            // unavailable one an unavailable use too. Only from the specifiers: a `,` or `=` outside the groups opened
+            // after the use (an attribute list's, a declarator's) ends an initializer or an earlier declarator, whose
+            // uses a later declarator's mark doesn't reach. Looked for only at a marked use, which are few.
             uint32_t declarator = marked && !inside ? t + 1 : count;
-            while (declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
+            int32_t depth = 0;
+            bool specifiers = true;
+            while (specifiers && declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
                    parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
             {
-                declarator += 1;
+                const uint8_t scanned = parser->tokens.kinds[declarator];
+                depth += scanned == PARSE_KIND_L_PAREN || scanned == PARSE_KIND_L_SQUARE;
+                depth -= scanned == PARSE_KIND_R_PAREN || scanned == PARSE_KIND_R_SQUARE || scanned == PARSE_KIND_R_BRACE;
+                specifiers = depth > 0 || (scanned != PARSE_KIND_COMMA && scanned != PARSE_KIND_EQUAL);
+                declarator += specifiers;
             }
-            const uint32_t declarator_key = declarator < count && reader->declaration_kinds[declarator] != 0 ? check_input_deprecated_key(reader, declarator) : count;
+            const uint32_t declarator_key = specifiers && declarator < count && reader->declaration_kinds[declarator] != 0 ? check_input_deprecated_key(reader, declarator) : count;
             const CheckInputAttribute* enclosing = declarator_key < count ? check_input_availability_mark(reader, marks, chain, declarator_key, declarator, UINT32_MAX) : NULL;
             const uint8_t specified = enclosing == NULL ? 0 : enclosing->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? BUSTER_CHECK_CONTEXT_UNAVAILABLE : BUSTER_CHECK_CONTEXT_DEPRECATED;
             const CheckInputAttribute* candidate = marked ? check_input_availability_mark(reader, marks, chain, key, limit, by_tag ? t : UINT32_MAX) : NULL;

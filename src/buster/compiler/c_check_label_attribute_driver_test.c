@@ -938,6 +938,17 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "typedef int V __attribute__((deprecated(\"old\")));\n__attribute__((unavailable)) V z;\nT w __attribute__((deprecated));\n"
         "struct __attribute__((deprecated(\"old\"))) S { int a; };\n__attribute__((deprecated)) struct S s;\n"
         "struct __attribute__((unavailable(\"gone\"))) R { int a; };\n__attribute__((unavailable)) struct R r;\n",
+        // Not a later declarator's: a use in an initializer (bare, in parentheses or braces) or an earlier declarator's
+        // bound keeps its diagnostic; the declarator's own mark drops its initializer's, and `typeof`'s operand and an
+        // attribute list's comma are in the specifiers.
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\nint a = E, b __attribute__((unavailable));\n",
+        "enum { D __attribute__((deprecated(\"old\"))) = 1 };\nint a = D, b __attribute__((deprecated));\n"
+        "int c = (D), d __attribute__((deprecated));\nint k[D], m __attribute__((deprecated));\nint n = { D }, o __attribute__((deprecated));\n",
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\nint k[E], m __attribute__((unavailable));\n",
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1, D __attribute__((deprecated(\"old\"))) = 2 };\n"
+        "int c __attribute__((unavailable)) = E, d;\nint e __attribute__((deprecated)) = D, f;\n__attribute__((deprecated)) int g = D, h;\n"
+        "typeof(E) n __attribute__((unavailable));\n__attribute__((deprecated)) typeof(D) p;\n"
+        "typedef int T __attribute__((unavailable(\"gone\")));\nT __attribute__((aligned(8), unavailable)) r;\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

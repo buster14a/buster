@@ -5598,7 +5598,10 @@ arguments against the function. The checker now gives these as clang does.
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable
-  declaration's drop both. There is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
+  declaration's drop both. That is the specifiers' alone (`typeof`'s operand
+  and an attribute list included): an initializer's or an earlier
+  declarator's use keeps its own context, not a later declarator's mark. There
+  is none in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
   the declaration its uses count by (its object's first, its tag's first),
