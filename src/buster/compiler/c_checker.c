@@ -553,6 +553,11 @@ struct CheckStream
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
     CheckReport* reports;
+    // Whether the columns whose empty value is zero are zero wherever no write has reached them, and each write is its
+    // node's first: check_graph_run's main loop, in an output arena whose bytes past its length are as the kernel mapped
+    // them (CheckOptions.fresh_output). Its writes then leave a zero unwritten, so that the diagnostics, their operands,
+    // the warnings and their ignored kinds, which few nodes have, take no memory where no node has one (#1050).
+    bool zero_columns;
     // Valid overflow stores in increasing graph-node order. This is a semantic descriptor stream: consumers
     // execute only effects belonging to reached expression nodes, never stores in an unselected branch.
     CheckStoreEffect* effects;
@@ -604,6 +609,10 @@ struct CheckOptions
     // Each transition hit's action run as well, its result stored and compared with the transition's
     // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
     bool verify_transitions;
+    // The caller knows that no copy of `output` pushed past its length, so that arena_untouched tells whether its bytes
+    // past it are as the kernel mapped them, zero (#628's fresh_output): the C driver's output arena, whose first user the
+    // run is. The run then clears no column and writes no zero in its main loop (CheckStream.zero_columns).
+    bool fresh_output;
 };
 
 _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, category) == 4 && __builtin_offsetof(CheckValue, flags) == 8 && __builtin_offsetof(CheckValue, constant_kind) == 12 &&
@@ -763,7 +772,10 @@ static inline __attribute__((always_inline)) void check_stream_set_value_flags(C
             stream->payloads[row - 1] = *value;
             stream->payloads[row - 1].flags = flags;
         }
-        stream->payload_rows[node] = row;
+        if (row != 0 || !stream->zero_columns)
+        {
+            stream->payload_rows[node] = row;
+        }
     }
 }
 
@@ -1673,9 +1685,21 @@ static inline __attribute__((always_inline)) void check_graph_store(CheckStream*
         conversions->operands[i] = check_conversion_fields(&result->conversions[i]);
     }
     conversions->store = check_conversion_fields(&result->store_conversion);
-    stream->diagnostics[node] = result->diagnostic;
-    stream->diagnostic_operands[node] = result->diagnostic_operand;
-    stream->warnings[node] = result->warnings;
+    // Few nodes have a diagnostic or a warning: in a fresh output (CheckStream.zero_columns), the run writes only those
+    // that do. A member's offset is written whatever it is, since the member accesses, a node in 13 of sqlite3.c's, touch
+    // every line of its column anyway.
+    if (result->diagnostic != CHECK_DIAG_NONE || !stream->zero_columns)
+    {
+        stream->diagnostics[node] = result->diagnostic;
+    }
+    if (result->diagnostic_operand != 0 || !stream->zero_columns)
+    {
+        stream->diagnostic_operands[node] = result->diagnostic_operand;
+    }
+    if (result->warnings != 0 || !stream->zero_columns)
+    {
+        stream->warnings[node] = result->warnings;
+    }
     stream->member_offsets[node] = result->member_offset;
 }
 
@@ -1702,10 +1726,23 @@ static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTab
     const CheckValue* leaf = check_graph_leaf_of(graph, node);
     const bool valid = type_is_valid(types, leaf->type);
     check_stream_set_value(stream, node, valid ? leaf : &(const CheckValue){ 0 });
-    stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
-    stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
-    stream->warnings[node] = 0;
-    stream->member_offsets[node] = 0;
+    // In a fresh output (CheckStream.zero_columns) the record's other fields, the warnings, the member's offset and a
+    // valid leaf's diagnostic are zero already.
+    if (stream->zero_columns)
+    {
+        stream->conversions[node].operands[0].type = leaf->type;
+        if (!valid)
+        {
+            stream->diagnostics[node] = CHECK_DIAG_INVALID_TYPE;
+        }
+    }
+    else
+    {
+        stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
+        stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
+        stream->warnings[node] = 0;
+        stream->member_offsets[node] = 0;
+    }
     stream->statistics.vector_nodes += 1;
 }
 
@@ -3044,13 +3081,16 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
 // This proof changes no graph column and is retained with the output rather than in the scheduler's scratch.
 // Only a context and the nodes it reaches mark anything: the vector path passes over each 64 nodes that hold neither a
 // context nor a mark from a later node, as one test of their two columns, since in postorder only a later node marks one
-// (#1050). The scalar path takes every node.
-static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks, bool scalar)
+// (#1050). The scalar path takes every node. `zero` says `marks` is zero already (a fresh output, CheckOptions.fresh_output).
+static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks, bool zero, bool scalar)
 {
     (void)scalar;
 
     const uint8_t required = BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE;
-    memset(marks, 0, graph->count);
+    if (!zero)
+    {
+        memset(marks, 0, graph->count);
+    }
     for (uint32_t node = graph->count; node > 0;)
     {
         bool skipped = false;
@@ -3069,7 +3109,10 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
         else
         {
             node -= 1;
-            marks[node] |= graph->contexts != NULL && (graph->contexts[node] & required) != 0;
+            if (graph->contexts != NULL && (graph->contexts[node] & required) != 0)
+            {
+                marks[node] = 1;
+            }
             if (marks[node] != 0)
             {
                 const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
@@ -3149,13 +3192,16 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     const uint32_t* maximum_builtins = validation.builtins;
     CheckValue* arguments = result && maximum_arguments != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, maximum_arguments) : 0;
     bool constant_contexts = false;
+    bool zero_output = false;
     for (uint32_t node = 0; result && graph->const_values != NULL && graph->contexts != NULL && !constant_contexts && node < count; node += 1)
     {
         constant_contexts = (graph->contexts[node] & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
     }
     if (result && count != 0)
     {
-        // Room for a payload row per node, of which the run writes the first few: only those take memory.
+        // Room for a payload row per node, of which the run writes the first few: only those take memory. In a fresh output,
+        // every column pushed here is zero until written (CheckOptions.fresh_output), and none is cleared.
+        zero_output = options->fresh_output && arena_untouched(output);
         stream->value_types = BUSTER_ARENA_PUSH_ARRAY(output, TypeId, count);
         stream->value_flags = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->value_objects = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
@@ -3163,7 +3209,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->value_constants = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count);
         stream->payload_rows = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->payloads = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
-        if (stream->payload_rows != NULL)
+        if (stream->payload_rows != NULL && !zero_output)
         {
             memset(stream->payload_rows, 0, (uint64_t)count * sizeof(uint32_t));
         }
@@ -3215,14 +3261,17 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         if (count != 0)
         {
-            memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
-            memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
+            if (!zero_output)
+            {
+                memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
+                memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
+            }
             if (constant_contexts)
             {
-                check_graph_constant_contexts(graph, stream->constant_evaluated, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_constant_contexts(graph, stream->constant_evaluated, zero_output, BUSTER_SCALAR_PATH(options->scalar));
             }
         }
-        if (stream->argument_conversions != 0)
+        if (stream->argument_conversions != 0 && !zero_output)
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
@@ -3241,6 +3290,9 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             result = false;
             stream->status = CHECK_STATUS_INVALID_GRAPH;
         }
+        // The main loop writes each node once, first: in a fresh output it writes no zero (CheckStream.zero_columns), which the
+        // passes after it, which may write a node again, do.
+        stream->zero_columns = zero_output;
         uint32_t node = transitions ? count : 0;
         while (node < count)
         {
@@ -3271,6 +3323,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 }
             }
         }
+        stream->zero_columns = false;
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
             const uint32_t exhausted = check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));

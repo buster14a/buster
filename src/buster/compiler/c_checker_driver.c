@@ -3133,6 +3133,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     .verify = verify,
                     .transitions = command->check_transitions,
                     .verify_transitions = verify,
+                    // The run is the output arena's first user in the unit, through no copy of it: past its length it is
+                    // as the kernel mapped it unless an earlier unit's pushes reached there (arena_untouched).
+                    .fresh_output = true,
                 };
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);

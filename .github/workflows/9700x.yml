@@ -1653,7 +1653,7 @@ jobs:
           fi
           git worktree add --detach "$ab/base" "$AB_BASE_SHA"
           trap 'git worktree remove --force "$ab/base"' EXIT
-          shifts=(0 1376 2752 4128)
+          shifts=(0 1088 2112 3136)
           (cd "$ab/base" && taskset -c 0-7 ./build.sh shifts --config Release "$ab/main" main_unit_checker.c "${shifts[@]}")
           taskset -c 0-7 ./build.sh shifts --config Release "$ab/head" main_unit_checker.c "${shifts[@]}"
           "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
