@@ -46,6 +46,9 @@ asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
 the complete suite before any benchmarks. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
 external cross-checks. There is no vector emulation or randomized runner pool.
+Hosted runners are virtual machines, so the compiler runs there with
+transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
+9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
 `BUSTER_SANITIZER=address|undefined|thread|memory`, for both host architectures.

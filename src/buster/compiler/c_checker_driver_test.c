@@ -3264,7 +3264,7 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tstage-system-validation\tdocs-compile-time-clock-accounting-control\n",
                                            "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t",
-                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
+                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t", "\ntime-process\thuge-pages\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
     double walk = -1;
@@ -3663,6 +3663,50 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                       "--time-stages -fsyntax-only reports the stages it ran, on one lane");
     free(text);
     text = NULL;
+    // BUSTER_HUGE_PAGES (#1109, arena_page_policy), each case with this process's own setting, which the child inherits,
+    // as the system's or off: "0" turns transparent huge pages off for the process; "1" leaves them as the system has
+    // them, even where the process that started it had them off; without it, they are off on a virtual machine (CPUID's
+    // hypervisor bit), which the child must decide itself, and elsewhere as the process that started it had them.
+    const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
+    char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
+    const int pages_own = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
+    uint32_t eax = 0;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
+    const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
+    // Each case: the variable's value (null for none), this process's setting, and whether the child's are off.
+    const struct
+    {
+        const char* setting;
+        int inherited;
+        bool off;
+    } pages_cases[] = {
+        { "0", 0, true },
+        { "1", 1, false },
+        { NULL, 0, virtual_machine },
+        { NULL, 1, true },
+    };
+    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && pages_own >= 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pages_cases); c += 1)
+    {
+        paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 &&
+                (pages_cases[c].setting != NULL ? setenv("BUSTER_HUGE_PAGES", pages_cases[c].setting, 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
+        const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
+        const char* expected = pages_cases[c].off ? "\ntime-process\thuge-pages\toff\n" : "\ntime-process\thuge-pages\tsystem\n";
+        paged = pages_status == 0 && text != NULL && strstr(text, expected) != NULL;
+        free(text);
+        text = NULL;
+    }
+    paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
+    paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
+    free(pages_copy);
+    printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
+                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES");
+    check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
+                                                     "on this virtual machine they are off without it" :
+                                                     "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
+                                                     "on this machine, not virtual, they are as the process's parent had them without it");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
