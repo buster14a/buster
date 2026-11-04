@@ -1773,8 +1773,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             }
             else if (body.common_count != 0)
             {
-                // A global's .comm is an SHN_COMMON symbol of the assembler's object alone (#1115); the program's Link
-                // would only declare it.
+                // A global's .comm is #147's COMMON symbol of its own atom (#1115), which this merge of a template's
+                // Link into the program's isn't yet checked to take against clang's.
                 reason = "inline assembly's common symbols (.comm)";
             }
             else if (entry_code && body.ret_first)

@@ -208,8 +208,11 @@ typedef uint32_t FixupId;
 //     data16 mov rax, fs:0 (or with four prefixes), the call's fixup with them.
 //   - DTPOFF32: 32 bits of S's offset in its module's TLS block, after a TLSLD (lea rax, [rax + x@dtpoff]):
 //     R_X86_64_DTPOFF32; that offset + A, which in an executable is TPOFF32's, from the end of the block.
-// Only imported objects have the last three (libgcc.a's decimal floating point and split-stack members, and GCC 16's
-// libgcc_eh.a's heap trampolines): the code generator makes local-exec and initial-exec accesses.
+//   - TPOFF64, DTPOFF64: TPOFF32's and DTPOFF32's values in 8 bytes, a 64-bit immediate (movabs rax, x@tpoff) or data
+//     (DWARF's location of a TLS variable, `.quad x@dtpoff`): R_X86_64_TPOFF64, R_X86_64_DTPOFF64 (#1115).
+// Only imported objects and the assembler have the last five (libgcc.a's decimal floating point and split-stack members,
+// GCC 16's libgcc_eh.a's heap trampolines, and compilers' -S output): the code generator makes local-exec and
+// initial-exec accesses.
 #define BUSTER_LINK_FIXUP_NONE 0
 #define BUSTER_LINK_FIXUP_CALL 1
 #define BUSTER_LINK_FIXUP_CALL_GOT 2
@@ -227,7 +230,9 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_FIXUP_TLSGD 14
 #define BUSTER_LINK_FIXUP_TLSLD 15
 #define BUSTER_LINK_FIXUP_DTPOFF32 16
-#define BUSTER_LINK_FIXUP_KINDS 17
+#define BUSTER_LINK_FIXUP_TPOFF64 17
+#define BUSTER_LINK_FIXUP_DTPOFF64 18
+#define BUSTER_LINK_FIXUP_KINDS 19
 // A fixup's kind is its BUSTER_LINK_FIXUP_KIND bits, and BUSTER_LINK_FIXUP_WIDE says its addend is in the side table.
 #define BUSTER_LINK_FIXUP_KIND 0x7f
 #define BUSTER_LINK_FIXUP_WIDE 0x80
@@ -364,6 +369,18 @@ static const LinkFixupKind link_fixup_kinds[BUSTER_LINK_FIXUP_KINDS] = {
         .width = 4,
         .pc_relative = false,
         .fields = BUSTER_LINK_FIELDS_ABSOLUTE32,
+    },
+    [BUSTER_LINK_FIXUP_TPOFF64] = {
+        .name = "tpoff64",
+        .width = 8,
+        .pc_relative = false,
+        .fields = BUSTER_LINK_FIELDS_ABSOLUTE64,
+    },
+    [BUSTER_LINK_FIXUP_DTPOFF64] = {
+        .name = "dtpoff64",
+        .width = 8,
+        .pc_relative = false,
+        .fields = BUSTER_LINK_FIELDS_ABSOLUTE64,
     },
 };
 
@@ -1158,9 +1175,10 @@ static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86F
     {
         result = result && (form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_ADD_R64_RM64);
     }
-    else if (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32)
+    else if (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 ||
+             kind == BUSTER_LINK_FIXUP_DTPOFF64)
     {
-        // Only imported objects have them (see the kinds above).
+        // Only imported objects and the assembler have them (see the kinds above).
         result = false;
     }
     return result;
@@ -1289,7 +1307,7 @@ static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, Symbo
     const uint8_t source = link->symbols.source[target];
     const AtomId target_atom = link->symbols.atom[target];
     const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
-                          kind == BUSTER_LINK_FIXUP_DTPOFF32;
+                          kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 || kind == BUSTER_LINK_FIXUP_DTPOFF64;
     const bool size_kind = kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
     const bool tls_target = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     const bool local = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
