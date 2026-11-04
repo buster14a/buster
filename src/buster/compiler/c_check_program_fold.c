@@ -283,7 +283,7 @@ static bool check_control_fold_const_local(const CheckControlWriter* writer, con
     const TypeId type = token < input->token_count ? input->declared_types[token] : 0;
     uint32_t width = 0;
     bool sign = false;
-    bool known = token > low && token < high && token < graph->tokens[node] && !input->static_objects[token] &&
+    bool known = token > low && token < high && token < graph->tokens[node] && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) &&
                  (type_qualifiers(type) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_TYPE_CONST &&
                  check_action_integer_type(program->types, type, &width, &sign) && program->initializers != NULL;
     const uint32_t index = known ? check_initializers_plan_index(program->initializers, token) : 0;
