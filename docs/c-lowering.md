@@ -1032,6 +1032,15 @@ the expansion's value at the two cases that take its address, so that clang
 could keep it in registers elsewhere, took 0.8 M of 207.4 M instructions on
 the baseline host (callgrind), and wasn't measured further.
 
+A `VALUE` task's read of a local or a global by its columns alone, in a copy
+of the loop 223 bytes longer (`check_lower_value_read`: no payload row, a
+plain class, none of the facts whose rules go elsewhere, no automatic
+compound literal), didn't pay either, interleaved this time
+([run at `02e4a889`](https://github.com/buster14a/buster/actions/runs/41784993695/job/126427989003)):
+`lower.statements` 6.848 ms against the base's 6.787, as #1205's leaf path's
+two separate runs found. A `VALUE` node costs about the same through the
+expansion, whose instructions aren't what it waits on.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

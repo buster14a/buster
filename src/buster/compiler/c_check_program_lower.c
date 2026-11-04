@@ -816,9 +816,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 4096: the statements' plain loop is
-    // its copy with the VALUE reads' path (check_lower_drain_reads).
-    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -10455,40 +10452,7 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // subtrees it splices. Constants in each but the sources' `bit_ints`, so that the plain loop does none of it: the tests
 // for a _BitInt took 3.9 million of sqlite3.c's instructions there (#137), and the templates' test would run on every
 // expression of every compile, which takes none of them.
-// #1048's experiment, temporary (#1235, bit 4096): a VALUE task's read of a local or a global in a value context, by its
-// columns alone, with the expansion's tests before its own (check_lower_expand: a compound literal's, an atomic lvalue's,
-// a folded constant's): true where it took the node, having written its entry; false, having written nothing, for any
-// other, which the expansion takes.
-static inline __attribute__((always_inline)) bool check_lower_value_read(CheckLowerWriter* writer, uint32_t node)
-{
-    const CheckProgram* program = writer->program;
-    const CheckStream* stream = program->stream;
-    bool taken = node < stream->count && stream->dense_values == NULL && stream->payload_rows[node] == 0 && writer->type_templates != NULL;
-    const TypeId type = taken ? stream->value_types[node] : 0;
-    const uint32_t info = taken ? check_lower_type_info(writer, type) : 0;
-    const uint8_t facts = (uint8_t)(info >> 8);
-    const uint8_t class = (uint8_t)info;
-    const uint32_t object = taken ? stream->value_objects[node] : 0;
-    const bool lvalue = taken && (CheckCategory)stream->value_categories[node] == CHECK_LVALUE;
-    const bool known = object != 0 && object < program->object_count;
-    // An lvalue of a type without the aggregate's, the address's, the atomic's or a _BitInt's facts, of a class that isn't a
-    // memory class's (a global of one is read through its address), of an object that isn't an automatic compound literal;
-    // an lvalue is no folded constant's (whose test reads its rvalue category).
-    taken = taken && lvalue && known && type != BUSTER_TYPE_VOID && class < BUSTER_TYPED_CLASSES && class != BUSTER_TYPED_CLASS_VOID && !check_lower_memory_class(class) &&
-            (facts & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-            !(check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC));
-    const uint32_t local = taken ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
-    const SymbolId symbol = taken ? program->object_symbols[object] : 0;
-    taken = taken && (local != BUSTER_CHECK_NONE || symbol != 0);
-    if (taken)
-    {
-        writer->token = program->input->graph.tokens[node];
-        check_lower_emit(writer, local != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL, class, local != BUSTER_CHECK_NONE ? local : symbol);
-    }
-    return taken;
-}
-
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates, bool reads)
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -10521,8 +10485,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 // expansion): on the 9700X, sqlite3.c's lowering took 0.20 ms less without it (#1048, docs/c-lowering.md's
                 // "The leaf path and the runtimes' names"). The wrappers' and truth tests' path pays, and stays.
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool read = reads && value_node && (flags & 7) == 0 && check_lower_value_read(writer, node);
-                const bool plain = read || (!value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0));
+                const bool plain = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
                 const bool batched = !value_node && !plain && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
                                      writer->type_templates != NULL && (flags & 5) == 0 && check_lower_batch_expression(writer, node);
                 if (!batched)
@@ -10630,20 +10593,14 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, false, false);
-}
-
-// #1048's experiment (bit 4096): the plain loop with the VALUE reads' path (check_lower_value_read).
-static __attribute__((noinline)) void check_lower_drain_reads(CheckLowerWriter* writer)
-{
-    check_lower_drain_body(writer, false, false, false, true);
+    check_lower_drain_body(writer, false, false, false);
 }
 
 // The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
 // (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, true, false, false);
+    check_lower_drain_body(writer, false, true, false);
 }
 
 // The tasks' loop for a body whose node templates are ready (CheckLowerWriter.template_ready, #1048): a copy of its own
@@ -10651,7 +10608,7 @@ static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWrite
 // nor a _BitInt type (CheckLowerShared.templates_allowed).
 static __attribute__((noinline)) void check_lower_drain_templates(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, true, false);
+    check_lower_drain_body(writer, false, false, true);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
@@ -10661,7 +10618,7 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     {
         writer->owners->draining = true;
     }
-    check_lower_drain_body(writer, true, writer->bit_ints, false, false);
+    check_lower_drain_body(writer, true, writer->bit_ints, false);
     if (writer->owners != NULL)
     {
         writer->owners->draining = false;
@@ -12669,8 +12626,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -13092,10 +13047,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             else if (writer->template_ready)
             {
                 check_lower_drain_templates(writer);
-            }
-            else if ((writer->experiment & 4096) != 0 && !BUSTER_SCALAR_PATH(writer->scalar))
-            {
-                check_lower_drain_reads(writer);
             }
             else
             {
