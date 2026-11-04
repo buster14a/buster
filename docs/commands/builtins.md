@@ -73,7 +73,8 @@ requirements. [Command index](README.md).
   list `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`),
   a difference no named release explains still failing. A fixture reruns the
   comparisons under a fake clang 23.1.5, so CI's reference release exercises the
-  skip path too. The floating
+  skip path too; the fake's script quotes the clang it forwards to, which it
+  reaches through a path with a space and the shell's metacharacters. The floating
   classifications past the first ones (`isnormal` to `isfpclass`, `signbitf`,
   `signbitl` and `canonicalize`: `c_check_builtin_float.c`,
   `c_builtin_float_lower.c`) test their `FPClassTest` masks by a table, an x87

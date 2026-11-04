@@ -45,7 +45,9 @@ requirements. [Command index](README.md).
   differently (the named list `cbuiltin_library_table_differences`: 23.1.5's
   `strlcat` and `strlcpy`), still comparing every other name and every
   version-independent check, and reruns them under a fake clang 23.1.5 so the
-  skip path is exercised under the reference too. `test-checker-corpus`
+  skip path is exercised under the reference too; the fake reaches `--clang`'s
+  executable through a path with a space, quotes and `$;*`
+  (`clang_release_wrapper`), so an awkward `--clang` path stays one word. `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and

@@ -685,17 +685,16 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
 // The non-reference release path under a fake clang (#1131): a wrapper script reports 23.1.5 and answers its
 // library-builtin questions as that release's table does (no strlcat or strlcpy, which its -fno-builtin-NAME options
 // give), so the implicit comparisons under it must pass while leaving out only those names — every other name's
-// diagnostics still compare. CI's clang is the reference, whose own run skips nothing and can't reach this path.
+// diagnostics still compare. It reaches the configured clang through a path with a space and the shell's
+// metacharacters (clang_release_wrapper), as a --clang path may have. CI's clang is the reference, whose own run skips
+// nothing and can't reach this path.
 static void check_test_library_release(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char wrapper[512];
-    snprintf(wrapper, sizeof(wrapper), "%s/clang-23.1.5", directory);
-    char script[768];
-    const int length = snprintf(script, sizeof(script),
-                                "#!/bin/sh\nfor argument in \"$@\"; do if [ \"$argument\" = \"--version\" ]; then printf 'clang version 23.1.5\\n'; exit 0; fi; done\n"
-                                "exec %s -fno-builtin-strlcat -fno-builtin-strlcpy \"$@\"\n",
-                                clang);
-    const bool written = length > 0 && (size_t)length < sizeof(script) && parse_test_write(wrapper, script, (uint64_t)length) && chmod(wrapper, 0755) == 0;
+    char trampoline[1024];
+    char folder[768];
+    const bool written = clang_release_wrapper(directory, clang, "23.1.5", "-fno-builtin-strlcat -fno-builtin-strlcpy", wrapper, sizeof(wrapper), trampoline,
+                                               sizeof(trampoline), folder, sizeof(folder));
     check_test_expect(test, written, "library release: the fake clang is written");
     char version[64] = "";
     // The wrapper isn't the reference: the check must say so with both releases, which enables the release's known
@@ -714,6 +713,8 @@ static void check_test_library_release(CheckTest* test, const char* clang, const
     check_driver_clang_reference = reference;
     memcpy(check_driver_clang_version, saved_version, sizeof(check_driver_clang_version));
     unlink(wrapper);
+    unlink(trampoline);
+    rmdir(folder);
 }
 
 static void check_test_driver_library(CheckTest* test, const char* clang, const char* executable, const char* directory)

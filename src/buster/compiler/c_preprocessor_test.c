@@ -186,6 +186,57 @@ static bool clang_reference_report(const char* clang_path, char* version, size_t
     return result;
 }
 
+// A shell script at `path` that runs `clang` with `options` (NULL for none) and its own arguments, and that answers
+// --version as `release` (NULL to forward it too). `clang` goes in single quotes, each of its own quotes as '\'', so a
+// path with spaces or the shell's metacharacters reaches exec as one word. False where it isn't written.
+static bool clang_wrapper_write(const char* path, const char* clang, const char* release, const char* options)
+{
+    char script[8192];
+    int length = snprintf(script, sizeof(script), "#!/bin/sh\n");
+    if (release != NULL && length > 0 && (size_t)length < sizeof(script))
+    {
+        length += snprintf(script + length, sizeof(script) - (size_t)length,
+                           "for argument in \"$@\"; do if [ \"$argument\" = \"--version\" ]; then printf 'clang version %s\\n'; exit 0; fi; done\n", release);
+    }
+    if (length > 0 && (size_t)length < sizeof(script))
+    {
+        length += snprintf(script + length, sizeof(script) - (size_t)length, "exec '");
+    }
+    const char* c = clang;
+    for (; length > 0 && (size_t)length + 8 < sizeof(script) && *c != 0; c += 1)
+    {
+        length += *c == '\'' ? snprintf(script + length, sizeof(script) - (size_t)length, "'\\''") : snprintf(script + length, sizeof(script) - (size_t)length, "%c", *c);
+    }
+    // The whole path, or no script.
+    length = *c == 0 ? length : -1;
+    if (length > 0 && (size_t)length < sizeof(script))
+    {
+        length += snprintf(script + length, sizeof(script) - (size_t)length, "' %s \"$@\"\n", options != NULL ? options : "");
+    }
+    bool result = length > 0 && (size_t)length < sizeof(script);
+    FILE* file = result ? fopen(path, "wb") : NULL;
+    result = file != NULL && fwrite(script, 1, (size_t)length, file) == (size_t)length;
+    result = file != NULL && fclose(file) == 0 && result && chmod(path, 0755) == 0;
+    return result;
+}
+
+// The fake release's wrapper for the non-reference fixtures (#1131), `wrapper` in `directory`: it reports `release`
+// and passes `options`, and reaches `clang` through a forwarding script in a directory whose name has a space, quotes
+// and the shell's $, ; and *, so that the reference CI's runs check that an awkward configured clang path still reaches
+// exec as one word. `trampoline` and `folder` are the files to remove; false where they aren't written.
+static bool clang_release_wrapper(const char* directory, const char* clang, const char* release, const char* options, char* wrapper, size_t wrapper_capacity,
+                                  char* trampoline, size_t trampoline_capacity, char* folder, size_t folder_capacity)
+{
+    const int folder_length = snprintf(folder, folder_capacity, "%s/fake clang 'q' $x;*", directory);
+    const int trampoline_length = snprintf(trampoline, trampoline_capacity, "%s/clang", folder);
+    const int wrapper_length = snprintf(wrapper, wrapper_capacity, "%s/clang-%s", directory, release);
+    bool result = folder_length > 0 && (size_t)folder_length < folder_capacity && trampoline_length > 0 && (size_t)trampoline_length < trampoline_capacity &&
+                  wrapper_length > 0 && (size_t)wrapper_length < wrapper_capacity;
+    result = result && (mkdir(folder, 0700) == 0 || errno == EEXIST) && clang_wrapper_write(trampoline, clang, NULL, NULL) &&
+             clang_wrapper_write(wrapper, trampoline, release, options);
+    return result;
+}
+
 // The version comparison's fixture: fake `clang --version` lines, so that no second compiler is needed, and the
 // mismatch message naming both releases.
 static bool pp_test_clang_reference(void)

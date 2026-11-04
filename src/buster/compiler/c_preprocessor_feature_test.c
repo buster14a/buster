@@ -363,15 +363,16 @@ static bool pp_test_builtin_targets(const char* directory)
 
 // The non-reference release path under a fake clang (#1131): a wrapper script reports 23.1.5 and answers strlcat's
 // and strlcpy's __has_builtin as that release's table does (none, which -fno-builtin-NAME gives), so the whole
-// builtin-targets run under it must pass while skipping only those two names — every other answer still compares.
+// builtin-targets run under it must pass while skipping only those two names — every other answer still compares. It
+// reaches the configured clang through a path with a space and the shell's metacharacters (clang_release_wrapper).
 // CI's clang is the reference, whose own run skips nothing and can't reach this path.
 static bool pp_test_builtin_release(const char* directory)
 {
     char wrapper[4200];
-    snprintf(wrapper, sizeof(wrapper), "%s/clang-23.1.5", directory);
-    static const char script[] = "#!/bin/sh\nfor argument in \"$@\"; do if [ \"$argument\" = \"--version\" ]; then printf 'clang version 23.1.5\\n'; exit 0; fi; done\n"
-                                 "exec clang -fno-builtin-strlcat -fno-builtin-strlcpy \"$@\"\n";
-    bool result = pp_test_write_file(wrapper, script) && chmod(wrapper, 0755) == 0;
+    char trampoline[4200];
+    char folder[4200];
+    bool result = clang_release_wrapper(directory, pp_test_clang_path, "23.1.5", "-fno-builtin-strlcat -fno-builtin-strlcpy", wrapper, sizeof(wrapper), trampoline,
+                                        sizeof(trampoline), folder, sizeof(folder));
     char version[64] = "";
     const char* const saved_path = pp_test_clang_path;
     char saved_version[sizeof(pp_test_clang_version)];
@@ -385,6 +386,8 @@ static bool pp_test_builtin_release(const char* directory)
     pp_test_clang_path = saved_path;
     memcpy(pp_test_clang_version, saved_version, sizeof(pp_test_clang_version));
     unlink(wrapper);
+    unlink(trampoline);
+    rmdir(folder);
     printf("builtin targets under a fake clang 23.1.5: %s\n", result ? "pass" : "FAIL");
     return result;
 }

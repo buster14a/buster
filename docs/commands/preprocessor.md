@@ -255,7 +255,9 @@ features:
   `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`) are
   skipped, so every version-independent answer and every difference no named
   release explains is still checked, and a fixture reruns the check under a
-  fake clang 23.1.5 so the skip path is exercised under the reference too;
+  fake clang 23.1.5 so the skip path is exercised under the reference too,
+  reaching the real clang through a path with a space, quotes and `$;*`
+  (`clang_release_wrapper`);
 - buster's own headers (`src/buster/include`) against clang's, for each header,
   8 modes, hosted and freestanding (176 sets): with each set, clang's run must
   define the same macros (but the guards and helpers each names its own way),
