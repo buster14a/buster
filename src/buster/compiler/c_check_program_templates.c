@@ -367,7 +367,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
         const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
         if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
         {
-            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
+            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
             const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] :
                                     a < stream->count && graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
             const uint32_t local = target != 0 && target < program->object_count ? check_lower_local_of(writer, target) : BUSTER_CHECK_NONE;
@@ -544,7 +544,7 @@ static void check_lower_template_own(const CheckLowerWriter* writer, uint32_t no
     }
     else if (kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL || kind == CHECK_LOWER_TEMPLATE_STORE_GLOBAL)
     {
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
         const uint32_t a = graph->operand0[node];
         const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : check_stream_object(stream, a);
         check_lower_template_put(entries, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
@@ -969,7 +969,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
         if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
         {
-            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
+            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
             const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] :
                                     a < stream->count && graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
             const bool named = target != 0 && target < program->object_count;
