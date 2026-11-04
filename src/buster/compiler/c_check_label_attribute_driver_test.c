@@ -882,6 +882,23 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void __attribute__((ms_abi)) f(int n) { char* a; __builtin_ms_va_start(a, (n)); }\n",
         "void f(int n) { __builtin_va_list a; __builtin_va_start(a, n); }\n",
         "void u(void) __attribute__((unavailable));\nvoid z(void) { u(); }\n",
+        // Members' uses (check_input_member_uses): `.` and `->`, through an anonymous member and a union, of any operand
+        // (a dereference, an address, a compound literal, a call), in sizeof; none in a deprecated or unavailable
+        // function's body, nor in a deprecated declaration's initializer; an unavailable one's error, in a deprecated
+        // function too, with its note at the member's name.
+        "struct S { int x __attribute__((deprecated(\"msg\"))); int y; struct { int z __attribute__((deprecated)); }; };\n"
+        "union U { int a [[deprecated]]; };\nstruct S g(void);\n"
+        "int f(struct S *p, struct S s, union U v) { return p->x + s.x + s.z + v.a + s.y + (*p).x + (&s)->x + ((struct S){.y = 0}).y + g().x; }\n"
+        "int h(struct S *p) { int a = sizeof(p->z); return a; }\n"
+        "__attribute__((deprecated)) int m(struct S *p) { return p->x; }\n"
+        "__attribute__((unavailable)) int n(struct S *p) { return p->x; }\n"
+        "struct S t;\n__attribute__((deprecated)) int q = sizeof(t.x);\nint r __attribute__((deprecated)) = sizeof(t.z);\n"
+        "int w(void) { __attribute__((deprecated)) int l = t.x; return 0; }\n",
+        "struct S { int u __attribute__((unavailable(\"gone\"))); int w; };\nint k(struct S *p) { return p->u; }\n",
+        "struct S { int u __attribute__((unavailable)); };\n__attribute__((deprecated)) int k(struct S *p) { return sizeof(p->u); }\n",
+        "struct S { int u __attribute__((unavailable)); };\n__attribute__((unavailable)) int k(struct S *p) { return p->u; }\n",
+        "struct S { int x __attribute__((deprecated)), y __attribute__((deprecated(\"y\"))); } s;\n"
+        "struct T { struct S in; } t;\nint k(void) { return s.x + t.in.y + __builtin_offsetof(struct S, x); }\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

@@ -3761,7 +3761,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 {
                     // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
                     CheckMusttails musttails = { 0 };
-                    const bool expression_valid = input_valid && stream.report_count == 0;
+                    // The reader's reports after checking are unavailable members' uses (check_input_member_uses, #147).
+                    const bool expression_valid = input_valid && stream.report_count == 0 && input.report_count == 0;
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
                     CheckDriverDiagnostic fallback[4] = { 0 };
                     CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);

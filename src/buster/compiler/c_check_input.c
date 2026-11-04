@@ -479,6 +479,23 @@ struct CheckInputPackedMember
     bool implicit_conversions;
     bool suppressed;
 };
+// A struct's or union's member that a deprecated or unavailable attribute marks (#147): its index in the type table's
+// members, its declaration's name, the attribute's first token (the deprecated note's place) and its message's string
+// (BUSTER_CHECK_WARNING_NO_SOURCE for none). Its uses are check_input_member_uses'.
+typedef struct CheckInputMarkedMember CheckInputMarkedMember;
+struct CheckInputMarkedMember
+{
+    uint32_t member;
+    uint32_t name;
+    uint32_t attribute;
+    uint32_t message;
+    bool unavailable;
+};
+// A token's availability context (CheckInput.availability_contexts, #147): in a deprecated or an unavailable function's
+// body or declaration's initializer, where clang's ShouldDiagnoseAvailabilityInContext drops a use's diagnostic (a
+// deprecated context a deprecated use's, an unavailable one either's).
+#define BUSTER_CHECK_CONTEXT_DEPRECATED 0x01
+#define BUSTER_CHECK_CONTEXT_UNAVAILABLE 0x02
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
 typedef struct CheckInputSections CheckInputSections;
@@ -658,6 +675,14 @@ struct CheckInput
     // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
+    // The members deprecated or unavailable attributes mark, in ascending order of their indexes (each record's as it is
+    // completed), for their uses' diagnostics after checking (check_input_member_uses, #147), and each token's
+    // availability context (BUSTER_CHECK_CONTEXT_*), made in a unit where such an attribute was read
+    // (check_input_deprecated_uses), or null.
+    CheckInputMarkedMember* marked_members;
+    uint32_t marked_member_count;
+    uint32_t marked_member_capacity;
+    uint8_t* availability_contexts;
     CheckWarningEvents warning_events;
     // Directive-only warnings survive parser recovery independently of expression facts.
     CheckWarningEvents pragma_warnings;
@@ -5169,7 +5194,42 @@ struct CheckTagMember
     // The record that declares it, and its declaration's first token (#148's counted_by checks).
     TypeId record;
     uint32_t begin;
+    // The deprecated or unavailable attribute that marks it (#147): its first token and its message's string
+    // (CheckInputMarkedMember's), or mark 0 for none, CHECK_ATTRIBUTE_DEPRECATED + 1 or CHECK_ATTRIBUTE_UNAVAILABLE + 1.
+    uint8_t mark;
+    uint32_t mark_attribute;
+    uint32_t mark_message;
 };
+
+// A marked member's record (#147): CheckInput.marked_members grows by doubling, in the output arena, and stays ascending,
+// as the type table gives a completed record's members indexes past every earlier one.
+static void check_input_mark_member(CheckInputReader* reader, uint32_t index, const CheckTagMember* member)
+{
+    CheckInput* input = reader->output;
+    if (input->marked_member_count == input->marked_member_capacity && !input->resource)
+    {
+        const uint32_t capacity = input->marked_member_capacity != 0 ? input->marked_member_capacity * 2 : 16;
+        CheckInputMarkedMember* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputMarkedMember, capacity);
+        input->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            memcpy(grown, input->marked_members, (uint64_t)input->marked_member_count * sizeof(*grown));
+            input->marked_members = grown;
+            input->marked_member_capacity = capacity;
+        }
+    }
+    if (input->marked_member_count < input->marked_member_capacity)
+    {
+        input->marked_members[input->marked_member_count++] = (CheckInputMarkedMember)
+        {
+            .member = index,
+            .name = member->token,
+            .attribute = member->mark_attribute,
+            .message = member->mark_message,
+            .unavailable = member->mark == CHECK_ATTRIBUTE_UNAVAILABLE + 1,
+        };
+    }
+}
 
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
@@ -5343,6 +5403,17 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     .alignment_log2 = frame->attributes != 0 ? frame->attributes->alignment_log2 : 0,
                 };
                 valid = valid && type_complete_record(reader->types, frame->type, packed, frame->count, attributes);
+                // The marked members, by the indexes the completion gave the record's members in order (#147).
+                const uint32_t record_tag = valid ? reader->types->types.index[type_index(frame->type)] : 0;
+                uint32_t position = valid ? reader->types->tags.member_begin[record_tag] : 0;
+                for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
+                {
+                    if (members[member].mark != 0)
+                    {
+                        check_input_mark_member(reader, position, members + member);
+                    }
+                    position += 1;
+                }
                 bool variable_sized = false;
                 for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
                 {
@@ -5597,6 +5668,10 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         }
                         if (valid)
                         {
+                            // A deprecated or unavailable attribute's mark, for its uses (#147, check_input_member_uses).
+                            const CheckInputAttribute* mark = name != BUSTER_CHECK_NONE ? check_input_deprecated_record(attributes) : NULL;
+                            const bool message = mark != NULL && mark->argument_first < mark->argument_end &&
+                                                 parser->tokens.kinds[mark->argument_first] == PARSE_KIND_STRING;
                             members[member_count] = (CheckTagMember)
                             {
                                 .member = member,
@@ -5605,6 +5680,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                                 .previous = reader->member_seen[identifier],
                                 .record = frame->type,
                                 .begin = counted_begin,
+                                .mark = mark != NULL ? (uint8_t)(mark->kind + 1) : 0,
+                                .mark_attribute = mark != NULL ? mark->first : 0,
+                                .mark_message = message ? mark->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE,
                             };
                             if (identifier != 0)
                             {

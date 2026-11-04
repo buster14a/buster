@@ -5446,13 +5446,31 @@ arguments against the function. The checker now gives these as clang does.
   attribute. An `unavailable` one's use is clang's error "'X' is
   unavailable", with its note at the declaration. An enumerator of a
   deprecated enum is deprecated by its enum, which the note names. As clang's
-  context rules have it, there is none in the body of a function itself
-  deprecated (by any declaration before its body), in the specifiers of a
-  declaration whose declarator is deprecated, or in a bare declaration of a
-  tag. The pass runs after the bindings, only in a unit where some
+  context rules have it, a deprecated context drops a deprecated use's
+  warning and an unavailable one an unavailable use's error too: the body of
+  a function itself marked (by any declaration before its body) and a marked
+  declaration's declarator and initializer (`check_input_availability_contexts`).
+  There is none either in the specifiers of a declaration whose declarator is
+  deprecated, or in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
   the declaration its uses count by (its object's first, its tag's first).
+- **Deprecated and unavailable members** (`check_input_member_uses`). A
+  struct's or union's member that such an attribute marks is recorded when
+  its record is completed, by its index in the type table's members
+  (`CheckInput.marked_members`, ascending). After checking, in a unit with
+  one, each `.` or `->` whose member the operand's checked record finds by
+  its name (through anonymous members, as the checker found it) gets
+  clang's warning at the member's name, or the unavailable error with its
+  note at the member's declaration: of any operand (a dereference, an
+  address, a call, a compound literal) and in `sizeof`'s. The error is a
+  reader report made after checking, which the driver and the corpus
+  comparison count. clang's context rules come from a byte per token
+  (`CheckInput.availability_contexts`, `check_input_availability_contexts`):
+  a deprecated or unavailable function's body, and a deprecated or
+  unavailable declaration's declarator and initializer; a deprecated context
+  drops a deprecated member's use, and an unavailable one either's.
+  `offsetof`'s member designator is no use, as in clang.
 - **Attributes without a rule** (`check_input_attribute_generic`). An
   attribute clang knows that the checker has no rule for is taken by its facts:
   - one clang ignores everywhere (`bounded`) is ignored without a word;
@@ -5876,11 +5894,13 @@ arguments against the function. The checker now gives these as clang does.
   - When a GNU attribute of a declaration and a calling convention keyword
     on another type share the specifiers, the two warnings come in the
     attributes' order. Clang gives the type's first.
-  - A field's use (`m.x`) of a deprecated field gets no warning: its
-    declaration is found by the expression's type, which the uses' pass
-    doesn't have. Nor does an overloadable function's call that resolves to a
-    deprecated overload, which clang warns of (it doesn't at an address taken
-    through the overload set, and neither does the checker).
+  - A deprecated or unavailable member's use gets no diagnostic where it
+    isn't a checked `.` or `->`: a designator (`.x = 1`), an initializer
+    that a member takes by its position (clang's warning is at it), and an
+    access the reader's evaluator reads alone (`typeof`'s operand, an array
+    bound at file scope). Nor does an overloadable function's call that
+    resolves to a deprecated overload, which clang warns of (it doesn't at an
+    address taken through the overload set, and neither does the checker).
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations.
   - An argument count of a supported attribute is checked as its arguments are
