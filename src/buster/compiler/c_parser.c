@@ -3471,7 +3471,11 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
         // type name, an error after which clang takes it for the type. A parameter in C23, which has no implicit int, is
         // always the latter.
         const bool parameter = frame->role == PARSE_ROLE_OPEN_FUNCTION;
-        if ((parameter && parser->language.standard >= 2023) || !parse_scalar_valid_after_name(parser, i + 1))
+        // C23's auto already supplies the inferred type: its name may be followed by GNU attributes, including
+        // the attributes before a direct initializer (#1252), rather than being mistaken for an unknown type.
+        const bool inferred_attribute = parser->language.standard >= 2023 && (frame->flags & BUSTER_PARSE_FRAME_AUTO) != 0 &&
+                                        parser->kinds[i + 1] == PARSE_KIND_ATTRIBUTE;
+        if ((parameter && parser->language.standard >= 2023) || (!inferred_attribute && !parse_scalar_valid_after_name(parser, i + 1)))
         {
             parse_scalar_note(parser, i, PARSE_MESSAGE_UNKNOWN_TYPE_NAME, i, true);
             step->role = PARSE_ROLE_SPECIFIER;
