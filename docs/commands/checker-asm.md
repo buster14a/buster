@@ -10,8 +10,11 @@ requirements. [Command index](README.md).
   (#147). It places each operand by its constraint and substitutes the template
   as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
   assembles it, by the checker's path, into records, branch columns,
-  references and labels. The statement's code calls the result, a per-unit
-  helper; a template of no instructions, a barrier's, is no code at all, but
+  references and labels. A statement of register, memory and constant operands
+  whose records name no register but its operands' is placed in its caller, a
+  Tier 0 `X86` row by role (#1059, `check_asm_row`); any other statement's code
+  calls the result, a per-unit helper; a template of no instructions, a
+  barrier's, is no code at all, but
   one with x87 operands, whose helper passes them through the x87's stack as
   clang's code does. A template that takes a directive besides the syntax
   switches is instead one source assembled whole by `asm_assemble` (the
@@ -42,7 +45,9 @@ requirements. [Command index](README.md).
   the full `test-checker` command continues to include them.
   `test-checker-driver` links and runs naked functions' labels and a template's
   call of `puts` by the direct path, and compares a template's `-c` symbols
-  with clang's. `test-assembler` checks
+  with clang's; it reads a placed statement's instructions from its function's
+  records (under `--tier1`, whose lowering keeps the helpers, Tier 1's calls of
+  them), and backtraces through a function of placed statements. `test-assembler` checks
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
   admits for templates with GNU as. [The inline assembly
   guide](../../docs/c-inline-assembly.md) has the placement, the substitution, the

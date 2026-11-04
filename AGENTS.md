@@ -407,15 +407,15 @@ preprocessor's predefines give as clang's do for the same options
 ## Command and module index
 
 Source entry points below are relative to `src/buster/compiler/`, except
-`tools/` paths; each guide has the full commands, owning files, flags and
-acceptance boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
+`tools/` paths; each guide has the commands, files, flags and acceptance
+boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 
 - `test-assembler, benchmark-assembler` — `assembler.c` — [guide](docs/commands/assembler.md).
 - `test-bind, benchmark-bind` — `bind.c` — [guide](docs/commands/bind.md).
 - `test-bindings, test-parser-bindings` — `c_bindings.c` — [guide](docs/commands/bindings.md).
 - `test-branch-sizing, benchmark-branch-sizing` — `branch_sizing.c` — [guide](docs/commands/branch-sizing.md).
 - `./build.sh, bake-tables, test-baked-tables` — `baked.c` — [guide](docs/commands/build.md).
-- `test-builtins, test-check-builtins, test-builtin-lowering` — `c_builtin.c` — [guide](docs/commands/builtins.md).
+- `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` — `c_builtin.c` — [guide](docs/commands/builtins.md).
 - `check-call-graph, test-call-graph` — `call_graph.c` — [guide](docs/commands/call-graph.md).
 - `test-calling-convention, benchmark-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
 - `check, test-checker, test-checker-driver` — `c_checker.c` — [guide](docs/commands/checker.md).

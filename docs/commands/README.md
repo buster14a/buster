@@ -21,7 +21,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-bindings, test-parser-bindings` | `c_bindings.c` | [bindings](bindings.md) |
 | `test-branch-sizing, benchmark-branch-sizing` | `branch_sizing.c` | [branch-sizing](branch-sizing.md) |
 | `./build.sh, bake-tables, test-baked-tables` | `baked.c` | [build](build.md) |
-| `test-builtins, test-check-builtins, test-builtin-lowering` | `c_builtin.c` | [builtins](builtins.md) |
+| `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` | `c_builtin.c`, `helpers_measure.c` | [builtins](builtins.md) |
 | `check-call-graph, test-call-graph` | `call_graph.c` | [call-graph](call-graph.md) |
 | `test-calling-convention, benchmark-calling-convention` | `calling_convention.c` | [calling-convention](calling-convention.md) |
 | `check, test-checker, test-checker-driver` | `c_checker.c` | [checker](checker.md) |

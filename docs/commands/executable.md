@@ -381,7 +381,8 @@ The checks:
   thread too; GCC 14's heap trampolines, whose member's accesses are
   local-dynamic, where `cc` is GCC 14 or later (it says so otherwise); and
   assembly with each general- and local-dynamic sequence through the PLT and
-  the GOT (status 31), with a local IFUNC called, pointed to and compared, and
+  the GOT, and the 64-bit TLS offsets (`movabs $x@tpoff`, `.quad x@dtpoff`;
+  status 40), with a local IFUNC called, pointed to and compared, and
   a global one called through the GOT (status 53), with an IFUNC called
   directly, called through its GOT slot and loaded through it, whose stub only
   calls reach, so that the loads read the stub's slot (status 63), with a weak
