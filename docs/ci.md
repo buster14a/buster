@@ -528,13 +528,15 @@ The source call-graph capture omits bootstrap sanitizer/coverage instrumentation
 whose runtime calls and generated globals are outside the source graph; its
 analyzer still runs inside the instrumented compiler.
 The other resource-exhaustion fixtures retain their cases and output/fallback comparisons.
-ASan, MSan and TSan builds inject compiler-owned arena-reservation and lane-start
-failures in place of process-wide address-space/process limits, which can prevent
-the detector from allocating shadow/fake-stack memory or starting its own threads.
-Ordinary builds and standalone UBSan retain the actual OS-limit tests. No detector
-is disabled for these cases; the injection controls are absent from normal builds.
-The injected limits are process-wide, since lanes reserve their arenas and start
-on their own threads.
+ASan, UBSan, MSan and TSan builds inject compiler-owned arena-reservation and
+lane-start failures in place of process-wide address-space/process limits. ASan,
+MSan and TSan need room for shadow/fake-stack memory and runtime threads; even
+standalone UBSan needs address space to report allocation failures. In particular,
+`RLIMIT_AS=0` caused the UBSan runtime to overflow its stack and fail to mmap its
+diagnostic buffer instead of reporting the compiler's intended reservation failure.
+Ordinary builds retain the actual OS-limit tests. No detector is disabled for these
+cases; injection controls are absent from normal builds. The injected limits are
+process-wide, since lanes reserve arenas and start on their own threads.
 A few fixtures run generated programs with FS pointing at the program's own TLS
 block. The detectors reach their per-thread state through FS, so the code that runs
 in that window (the link tests' libc stand-ins and C-runtime startup, and Tier 0's
@@ -545,9 +547,10 @@ Under ASan, MSan and TSan, the units driver's walk that fails each reservation i
 turn is not run: each detector maps shadow of its own, whose high-water mark the
 parent's `VmPeak` keeps above its `VmSize`, so a probe inherits a peak that hides
 the growth a limit would fail at, and a limit below the shadow stops the detector
-at its start. The parser driver's reservation check still runs in those builds,
-with their injected arena limit in place of `RLIMIT_AS`; UBSan and ordinary
-builds, whose peak is the run's own, still run the units walk with the OS limit.
+at its start. UBSan also skips that OS-limit walk, since its diagnostic runtime
+cannot safely run under an artificially exhausted address space. The parser
+driver's reservation check still runs under all sanitizers using injected arena
+limits; ordinary builds retain the OS-limit walk.
 TSan also kills a child that starts a thread after a fork from a process of
 several threads, so under it `test-lanes`' child forked from a session's lane 0
 (#905) runs a group of one.
