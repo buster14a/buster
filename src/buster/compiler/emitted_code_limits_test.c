@@ -257,4 +257,3 @@ static void emitted_test_large_driver(EmittedTest* test)
         arena_pop_to(&test->arena, mark);
     }
 }
-
