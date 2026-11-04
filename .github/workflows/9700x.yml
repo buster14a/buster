@@ -1666,9 +1666,26 @@ jobs:
               done
           done
           taskset -c 2 ./build/compiler time-runs --runs 5 --copies 2 "${builds[@]}" --list "${options[@]}" -o "$ab/runs.o"
-          for build in main head; do
-              echo "== $build: --time-stages' stages, medians of 11"
-              taskset -c 2 "$ab/$build/compiler-0" measure-compile --runs 11 -- "${options[@]}"
+          # Each placement's stages, the base's and this tree's in turn: placement 0's in full, and every placement's
+          # graph run, lowering and program check, the stages' span and the default runs' wall time and peak.
+          for shift in "${shifts[@]}"; do
+              for build in main head; do
+                  taskset -c 2 "$ab/$build/compiler-$shift" measure-compile --runs 11 -- "${options[@]}" > "$ab/$build-$shift-stages.txt"
+                  if [ "$shift" = 0 ]; then
+                      echo "== $build: --time-stages' stages, medians of 11"
+                      cat "$ab/$build-$shift-stages.txt"
+                  fi
+              done
+          done
+          echo "== each placement's stages, medians of 11 (ms; the default runs' wall ms and wait4 peak KiB)"
+          for shift in "${shifts[@]}"; do
+              for build in main head; do
+                  awk -v name="$build-$shift" '
+                      $1 ~ /^(check-expressions|lower|check-program|span)$/ { line = line " " $1 " " $2 }
+                      $1 == "default:" { wall = $5; peak = $17 }
+                      END { printf "%-10s%s wall %s peak %s\n", name, line, wall, peak }
+                  ' "$ab/$build-$shift-stages.txt"
+              done
           done
           for build in main head; do
               echo "== $build: counters"
@@ -1680,12 +1697,15 @@ jobs:
               taskset -c 2 perf record -q -F 20000 -o "$ab/$build.data" -- \
                   bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile "$ab/$build/compiler-0" "${options[@]}" -o "$ab/profiled.o"
               perf report -i "$ab/$build.data" --stdio --no-children --sort symbol --percent-limit 0.15 > "$ab/$build-symbols.txt"
-              grep -E ' (check|type)_' "$ab/$build-symbols.txt" | head -40
+              awk '/ (check|type)_/ && shown++ < 40' "$ab/$build-symbols.txt"
           done
-          # This tree's hottest instructions in the graph run and its regions, each at least 0.3% of the function's samples.
-          for function in check_graph_run check_graph_region_postorder; do
-              echo "== head: $function's hottest instructions"
-              perf annotate -i "$ab/head.data" --stdio --no-source -s "$function" 2> /dev/null | awk '$1 + 0 >= 0.3' | head -60
+          # This tree's sampled instructions in the graph run, its regions and the operands' conversion, each at least
+          # 0.05% of its function's samples, by address, with the functions' addresses: an unchanged build of the same tree
+          # maps them to their source lines. awk reads all of perf's output, which no closed pipe may stop under pipefail.
+          nm "$ab/head/compiler-0" | awk '$3 ~ /^(check_graph_run|check_graph_region_postorder|check_action_operand_value)$/'
+          for function in check_graph_run check_graph_region_postorder check_action_operand_value; do
+              echo "== head: $function's sampled instructions"
+              perf annotate -i "$ab/head.data" --stdio --no-source -s "$function" 2> /dev/null | awk '$1 + 0 >= 0.05 { print $1, $3 }'
           done
 
       - name: Benchmark the C driver's source rows
