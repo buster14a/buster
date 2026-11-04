@@ -12359,7 +12359,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         const CheckStream* stream = program->stream;
         const bool informed = (bits & 48) != 0 && shared->type_templates != NULL && stream != NULL && stream->dense_values == NULL && stream->value_types != NULL &&
                               stream->payload_rows != NULL && nodes != 0;
+#if BUSTER_HOST_VECTOR
         shared->node_infos = informed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, (uint64_t)nodes + 16) : NULL;
+#else
+        (void)unrowed;
+        (void)informed;
+        shared->node_infos = NULL;
+#endif
+#if BUSTER_HOST_VECTOR
         for (uint32_t first = 0; shared->node_infos != NULL && first < nodes; first += 16)
         {
             const uint32_t count = nodes - first < 16 ? nodes - first : 16;
@@ -12375,6 +12382,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             const __m512i infos = _mm512_mask_i32gather_epi32(fallback, typed, indices, shared->type_templates, 4);
             _mm256_mask_storeu_epi16(shared->node_infos + first, active, _mm512_cvtepi32_epi16(infos));
         }
+#endif
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
