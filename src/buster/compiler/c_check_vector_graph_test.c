@@ -40,9 +40,9 @@ static __attribute__((noinline)) void check_test_vector_graph(CheckTest* test, T
                                    check_stream_type(&scalar, second) == pair && (check_stream_flags(&scalar, second) & BUSTER_CHECK_VECTOR_DUPLICATE) != 0,
                               "member lane order and duplicate classification preserve exact vector result types");
             const uint64_t mark = output.length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
-                const CheckOptions options = { .batch_size = batch };
+                const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
                 CheckStream actual;
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &actual) &&
                                        check_test_stream_equal(&scalar, &actual, 0),

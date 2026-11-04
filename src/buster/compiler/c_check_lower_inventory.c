@@ -223,8 +223,8 @@ static void lower_inventory_key(uint8_t* key, const CheckProgram* program, const
     key[6] = (uint8_t)(((value.flags & BUSTER_CHECK_BIT_FIELD) != 0 ? 1u : 0u) | ((value.flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 ? 2u : 0u) |
                        (value.overload_head != 0 ? 4u : 0u));
     key[7] = (uint8_t)(!addressed || !known ? 0u :
-                       (program->object_symbols[object] != 0 ? 1u : 2u) | (program->input->compound_objects[object - 1] ? 4u : 0u) |
-                           (program->input->static_objects[object - 1] ? 8u : 0u) | (constant && value.offset != 0 ? 16u : 0u));
+                       (program->object_symbols[object] != 0 ? 1u : 2u) | (check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) ? 4u : 0u) |
+                           (check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC) ? 8u : 0u) | (constant && value.offset != 0 ? 16u : 0u));
     key[8] = (uint8_t)((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && stream->member_offsets[node] / 8 != 0 ? 1u : 0u);
     const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
     for (uint32_t i = 0; op != CHECK_OP_VALUE && i < 2; i += 1)
@@ -237,7 +237,7 @@ static void lower_inventory_key(uint8_t* key, const CheckProgram* program, const
     const bool store = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
     const uint32_t destination = store && operands[0] < stream->count && graph->ops[operands[0]] == CHECK_OP_VALUE ? check_stream_object(stream, operands[0]) : 0;
     key[17] = (uint8_t)(!store ? 0u : destination == 0 || destination >= program->object_count ? 0xffu :
-                                       (program->object_symbols[destination] != 0 ? 1u : 2u) | (program->input->static_objects[destination - 1] ? 8u : 0u));
+                                       (program->object_symbols[destination] != 0 ? 1u : 2u) | (check_input_bit(program->input->declaration_bits, destination - 1, BUSTER_CHECK_BITS_STATIC) ? 8u : 0u));
 }
 
 // Whether a body that tracks its stack (CheckLowerWriter.track) is classified by its nodes as any other is
@@ -658,7 +658,7 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
         .predefines = &source->pp.options.predefines,
     };
     prepared = prepared && check_program(&source->program, &source->parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
-    prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, &path->output_arena, &path->scratch);
+    prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, false, &path->output_arena, &path->scratch);
     source->prepared = prepared && (tier0_initialized || (x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize()));
     return valid;
 }

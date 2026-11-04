@@ -193,7 +193,8 @@ static bool asm_test_oracle(AsmTest* test, const char* source, const char* direc
         const int length = oracle_source != 0 ? snprintf(oracle_source, capacity, "%s\n.section .note.GNU-stack,\"\",@progbits\n", source) : -1;
         unlink(theirs_path);
         passed = length > 0 && object_write_file(assembly, (const uint8_t*)oracle_source, length) == OBJECT_ERROR_NONE && oracle_epoch_file(assembly);
-        char* arguments[] = {"as", "--64", "-o", theirs_path, assembly, 0};
+        // Uncompressed debug sections, which some binutils builds compress by default (#1115's line tables).
+        char* arguments[] = {"as", "--64", "--nocompress-debug-sections", "-o", theirs_path, assembly, 0};
         passed = passed && asm_test_tool(arguments, theirs_path, output, errors) == 0;
     }
     if (passed)
@@ -661,6 +662,7 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                     const uint32_t role = roles[i];
                     const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG || role == X86_MATCH_IS4 ? form->reg
                                               : role == X86_MATCH_XMM0                         ? BUSTER_X86_OPERAND_V
+                                              : role == X86_MATCH_ST0                          ? BUSTER_X86_OPERAND_ST
                                                                                                : form->vvvv;
                     const uint64_t bits = asm_test_random(random);
                     operand->width = form->operand_bytes;
@@ -699,10 +701,15 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                             operand->class = role == X86_MATCH_CL ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 1 ? BUSTER_X86_CLASS_GPR8 : form->operand_bytes == 2 ? BUSTER_X86_CLASS_GPR16 : form->operand_bytes == 4 ? BUSTER_X86_CLASS_GPR32 : BUSTER_X86_CLASS_GPR64;
                             operand->reg = role == X86_MATCH_CL ? 1 : 0;
                         }
-                        // XMM0 written out, and every fourth variant another XMM register, which no form takes there.
+                        // XMM0 written out, and every fourth variant another XMM register, which no form takes there; and
+                        // the x87's st(0) beside an st(i) (#147), every fourth variant another st(i).
                         if (role == X86_MATCH_XMM0)
                         {
                             operand->reg = variant % 4 == 1 ? bits & 31 : 0;
+                        }
+                        if (role == X86_MATCH_ST0 || (role == X86_MATCH_RM && operand->class == BUSTER_X86_CLASS_ST))
+                        {
+                            operand->reg = role == X86_MATCH_ST0 && variant % 4 != 1 ? 0 : bits & 7;
                         }
                         if (role == X86_MATCH_ACC && variant % 2 == 0)
                         {
@@ -1292,6 +1299,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 
 #include "assembler_compat_test.c"
 #include "assembler_corpus_test.c"
+#include "assembler_programs_test.c"
 #include "assembler_round_trip_test.c"
 
 static int run_assembler_tests(int count, char** arguments)
@@ -1569,6 +1577,7 @@ static int run_assembler_tests(int count, char** arguments)
             asm_test_reader(&test, directory);
             asm_test_preprocessed(&test, directory);
             asm_test_compatibility(&test, directory, cross_check);
+            asm_test_issue_fixtures(&test, directory, cross_check);
             if (cross_check)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
@@ -1637,6 +1646,25 @@ static int run_assembler_tests(int count, char** arguments)
                                        "psrlq xmm0,1\nvfmadd132sd xmm0,xmm2,xmm1\nfnstsw ax\nfistp qword ptr [rax]\nfild word ptr [rax]\nfisttp dword ptr [rax]\nfsqrt\n"
                                        "rep; bsr rax,rcx\nrep bsf ecx,dword ptr [rdi]\nlzcnt rcx,rax\n",
                                 directory, X86_ARCH_V3);
+                // The x87's stack registers (#147): st and st(i) in both syntaxes, every form of st(i) and GNU as's
+                // operands left out (fxch, fcom and fucom alone; fadd st(i); faddp alone and of st(i); fcomi st(i); AT&T's bare
+                // arithmetic mnemonics, its popping forms'),
+                // and AT&T's subtraction and division with st(i) the destination, which GNU as assembles as Intel's
+                // reversed forms, popping or not, st(0) among them.
+                asm_test_oracle(&test, ".text\nx87: fxch\nfxch %st(2)\nfadd %st(1),%st\nfadd %st,%st(1)\nfadd %st(3)\nfaddp\nfaddp %st,%st(2)\nfaddp %st(2)\n"
+                                       "fsub %st(1),%st\nfsub %st,%st(1)\nfsubr %st(1),%st\nfsubr %st,%st(1)\nfsubp %st,%st(1)\nfsubrp %st,%st(1)\nfsubp\n"
+                                       "fsubrp\nfdiv %st(2),%st\nfdiv %st,%st(1)\nfdivr %st,%st(3)\nfdivp %st,%st(1)\nfdivrp %st,%st(1)\nfdivp\nfdivrp %st(4)\n"
+                                       "fmul %st(1),%st\nfmul %st,%st(7)\nfmulp\nfmulp %st,%st(5)\nfld %st(1)\nfld %st\nfld %st(0)\nfst %st(2)\nfstp %st(1)\n"
+                                       "fstp %st(0)\nfcom %st(1)\nfcom\nfcomp\nfcomp %st(3)\nfucom %st(2)\nfucom\nfucomp\nfucompp\nfcompp\nfcomi %st(1),%st\n"
+                                       "fcomip %st(1),%st\nfucomi %st(1),%st\nfucomip %st(1),%st\nfcomi %st(2)\nfucomip %st(6)\nffree %st(3)\n"
+                                       "fcmovb %st(1),%st\nfcmove %st(2),%st\nfcmovbe %st(3),%st\nfcmovu %st(4),%st\nfcmovnb %st(5),%st\nfcmovne %st(6),%st\n"
+                                       "fcmovnbe %st(7),%st\nfcmovnu %st(1),%st\nfsub %st,%st\nfsubp %st,%st\nfdivr %st(0),%st(0)\nfadd %st,%st\n"
+                                       "fadd\nfmul\nfsub\nfsubr\nfdiv\nfdivr\n"
+                                       ".intel_syntax noprefix\nfxch\nfxch st(3)\nfadd st,st(1)\nfadd st(1),st\nfadd st(2)\nfsub st(1),st\nfsub st,st(1)\n"
+                                       "fsubp st(1),st\nfsubrp st(2),st\nfsubp\nfdivp st(1),st\nfdiv st(3),st\nfdivr st(1),st\nfld st(1)\nfstp st(1)\nfst st(0)\n"
+                                       "fcomi st,st(1)\nfucomip st,st(2)\nfcmovb st,st(1)\nfcom st(2)\nfcom\nffree st(7)\nfsub st,st\nfsubp st,st\n"
+                                       "fld tbyte ptr [rax]\nfstp tbyte ptr [rsp+16]\nfld qword ptr [rax]\nfstp dword ptr [rdi]\n",
+                                directory, 0);
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);
@@ -1655,6 +1683,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_preprocessing(&test, directory);
                 asm_test_preprocessed_spacing(&test, directory);
                 asm_test_compiler_corpus(&test, directory, keep);
+                asm_test_program_corpus(&test, directory, keep);
             }
             const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)

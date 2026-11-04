@@ -70,6 +70,7 @@ static void check_test_program_task_stack(CheckTest* test)
                         .label_count = 1,
                         .token = 123,
                         .scalar = path == 0,
+                        .fragments = true,
                         .type_classes = type_classes,
                         .type_facts = type_facts,
                         .type_templates = type_templates,
@@ -80,7 +81,7 @@ static void check_test_program_task_stack(CheckTest* test)
                 }
                 check_test_expect(test, status[0].status == status[1].status && status[0].token == status[1].token &&
                                   writers[0].count == writers[1].count && writers[0].depth == writers[1].depth && labels[0][0] == labels[1][0] &&
-                                  writers[0].token == writers[1].token && writers[0].expression_nodes == writers[1].expression_nodes &&
+                                  check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[1]) && writers[0].expression_nodes == writers[1].expression_nodes &&
                                   memcmp(kinds[0], kinds[1], sizeof(kinds[0])) == 0 && memcmp(classes[0], classes[1], sizeof(classes[0])) == 0 &&
                                   memcmp(values[0], values[1], sizeof(values[0])) == 0,
                                   "guarded instruction batches preserve columns, untouched tails, labels and the first capacity/class failure");
@@ -216,8 +217,7 @@ static void check_test_program_batch(CheckTest* test)
     for (uint32_t count = 1; ready && count <= BUSTER_CHECK_BATCH_TEST_NODES; count += 1)
     {
         CheckInput input = {
-            .compound_objects = object_flags,
-            .static_objects = object_flags,
+            .declaration_bits = object_flags,
         };
         CheckGraph* graph = &input.graph;
         graph->count = count;
@@ -321,6 +321,7 @@ static void check_test_program_batch(CheckTest* test)
                         .local_flags = local_flags[path],
                         .capacity = limit == 0 ? BUSTER_CHECK_BATCH_TEST_ENTRIES : limit == 1 ? count : 1,
                         .scalar = path == 0,
+                        .fragments = true,
                         .type_classes = type_classes,
                         .type_facts = type_facts,
                         .type_templates = path == 2 ? NULL : type_templates,
@@ -347,7 +348,7 @@ static void check_test_program_batch(CheckTest* test)
                     check_lower_drain(writers + path);
                 }
                 const bool same = writers[0].count == writers[1].count && status[0].status == status[1].status && status[0].token == status[1].token &&
-                                  writers[0].token == writers[1].token && memcmp(kinds[0], kinds[1], writers[0].count) == 0 &&
+                                  check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[1]) && memcmp(kinds[0], kinds[1], writers[0].count) == 0 &&
                                   memcmp(classes[0], classes[1], writers[0].count) == 0 &&
                                   memcmp(values[0], values[1], (uint64_t)writers[0].count * sizeof(uint64_t)) == 0 && local_flags[0][0] == local_flags[1][0];
                 char description[200];
@@ -355,7 +356,7 @@ static void check_test_program_batch(CheckTest* test)
                          mode, writers[0].capacity);
                 check_test_expect(test, same, description);
                 const bool fallback = writers[0].count == writers[2].count && status[0].status == status[2].status && status[0].token == status[2].token &&
-                                      writers[0].token == writers[2].token && memcmp(kinds[0], kinds[2], writers[0].count) == 0 &&
+                                      check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[2]) && memcmp(kinds[0], kinds[2], writers[0].count) == 0 &&
                                       memcmp(classes[0], classes[2], writers[0].count) == 0 &&
                                       memcmp(values[0], values[2], (uint64_t)writers[0].count * sizeof(uint64_t)) == 0 && local_flags[0][0] == local_flags[2][0] && writers[2].classified_nodes == 0;
                 check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact entries and failures");
@@ -405,8 +406,7 @@ static void check_test_program_batch(CheckTest* test)
             20,
         };
         Arena sparse = arena_reserve(UINT64_C(1) << 16);
-        uint8_t flags[2] = { 0 };
-        uint8_t static_flags[2] = { 0 };
+        uint8_t declaration_bits[2] = { 0 };
         SymbolId object_symbols[3] = { 0 };
         CheckValue source_values[2] = {
             {
@@ -430,8 +430,7 @@ static void check_test_program_batch(CheckTest* test)
                 .count = 2,
             },
             .token_count = 2,
-            .compound_objects = flags,
-            .static_objects = static_flags,
+            .declaration_bits = declaration_bits,
             .declaration_bodies = check_sparse_from_values(&sparse, bodies, 2),
         };
         CheckStream stream = {
@@ -474,7 +473,7 @@ static void check_test_program_batch(CheckTest* test)
         const bool lowered = check_lower_value(&writer, 0, false, false);
         check_test_expect(test, lowered && writer.count == 1 && kinds[0] == BUSTER_TYPED_LOCAL && classes[0] == BUSTER_TYPED_CLASS_I32 && values[0] == 0,
                           "a window across bodies never reads another lane's mutable local map");
-        flags[0] = 1;
+        declaration_bits[0] = BUSTER_CHECK_BITS_COMPOUND;
         source_values[0].category = CHECK_RVALUE;
         source_values[0].constant_kind = CHECK_CONSTANT_INTEGER;
         source_values[0].integer = 7;

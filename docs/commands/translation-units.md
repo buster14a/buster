@@ -24,17 +24,35 @@ unit has run. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
 release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED`, and
 the mappings and their writable prefixes kept for the next reservations they
-hold, #1128); and the arenas of a
+hold, #1128; the preprocessor's tables and token columns and the parser's
+columns are arenas of tables, each group one mapping, `arena_reserve_tables`);
+and the arenas of a
 unit of less than 1 MB of source start with 16 MB of base pages
 (`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
-write would show. Each lane releases what its units shared, into its pool and
-then the pool itself, on the lane as soon as it takes no more units, before it
-helps the others' functions (#777); without a link, in a command whose process
-exits after the lanes (main's, which releases no memory), the lane that stops
-taking units last leaves its memory to the exit. The
+write would show. The lanes' units are held to the memory (#1109,
+`CheckUnitsMemory`): once preprocessed, a unit takes an estimate of its peak
+(`check_units_estimate`: 600 bytes a token and 48 MB) from seven eighths of
+what the process may take when the run starts (`MemAvailable`, or the free
+pages without it, and each cgroup v2 `memory.max` up its cgroup less what it
+uses, nothing where that can't be read, `check_units_memory_read`; not cgroup
+v1's) before it parses
+(`check_units_admit`); a unit that doesn't fit beside what the other lanes hold
+waits until a lane gives its memory back (at its unit's end while one waits,
+and once it has no unit left, before it helps on the board), and a unit alone
+always runs.
+`--units-memory=BYTES`, a test option, sets that budget and reports how many
+units waited, the most lanes that held memory at once and how many lanes kept
+their pages for the exit. Each lane releases
+what its units shared, into its pool and then the pool itself, on the lane as
+soon as it takes no more units, before it helps the others' functions (#777);
+without a link, in a command whose process exits after the lanes (main's,
+which releases no memory), the lane that stops taking units last leaves its
+memory to the exit and returns its share of the budget alone. The run counts
+the lanes still taking units itself, with or without the board, so that this
+holds when the board's allocation fails too. The
 command's session's lanes (#905) run the units, the merge, `link_check` and the
 executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
 that lane 0 announces and every lane runs, with a worker-budget lease of its
@@ -58,7 +76,19 @@ generated programs of 2 to 7 units and one of synth's shape (12 units of 30
 functions), each of whose executables, by `--lanes` 1, 2, 3 and 8, by default
 and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 `clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
-objects defines, and each of whose units' `-c` objects is the unit's alone;
+objects defines, and each of whose units' `-c` objects is the unit's alone
+(by `--lanes` 1, 2, 3 and 8, by default, by 8 poisoned, and by 8 with
+`--units-memory=1`, whose report must say that at most one lane held memory at
+once and one kept its pages); the units' memory (#1109: the budget read from
+files of the test's own, without `MemAvailable` the free pages, a page at least
+and bounded, and a limit whose use can't be read leaving nothing; two equal
+units by two lanes with a byte of memory, one of which must wait unless the
+process may run on one CPU, where the command runs one lane; and
+a 16 MiB unit of comments beside a tiny one, by two lanes with a byte, with
+one unit's memory and with a byte without the board
+(`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that stands for its allocation
+failing), which deadlocked before the lanes gave memory back before helping,
+and where only the last lane may keep its pages);
 diagnostics, each unit's alone in the command line's order; refusals, one
 of them over a poisoned stack; the merge on lanes against its twin, by
 `--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
@@ -66,9 +96,14 @@ first in the units' order is the one reported, and a wide addend beside a unit
 without symbols, into the same bytes); a few large units (#777: a unit of 800
 functions beside a small one, whose lanes without units take its functions'
 parts, `--shared-parts`' report, into objects their own alone and executables
-one lane's); every reservation of two units' `-c` failed in turn, each run
+one lane's, and whose `-c` leaves one lane's memory to the exit, with the board
+and without it, `BUSTER_TEST_NO_UNITS_BOARD`); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
-jobserver's tokens held while the link writes; and lanes that don't start;
+jobserver's tokens held while the link writes; lanes that don't start; and
+`benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it
+can't take (no lanes, a ninth lane count, runs past 1,000 or 64 bits, a count
+with more than its digits), of forwarded options that set the lanes, and of a
+command that fails every run;
 with `-g`, the executables by `--lanes` 1 and 8, poisoned and by each path the
 same bytes, and each unit's `-c -g` object its own alone. With `--corpus DIR`
 it compiles DIR's `.c` files at once with `-c`, plainly and poisoned, against
@@ -81,3 +116,20 @@ mixed-tier and actual command-team receipts, is
 `tests/driver/multicore.c` runs it in the shared correctness suite. What
 #149's remaining whole-process performance acceptance still needs is there
 too.
+
+`./build/compiler benchmark-check-units [--executable PATH] [--units N]
+[--functions N] [--lanes N,N...] [--runs N] [-- OPTION...]` (#1128) times one
+command of synth's shape (64 units of 200 functions by default) by `-c`, with
+the options after `--` (absolute paths: the processes run in the program's
+directory), by each lane count (1, 2, 4 and 8 by default), as processes in
+`time-runs`' rotated order, 5 runs of each after a warm-up, every one of which
+must compile the units (`time-runs` alone passes a status that stays the same).
+Counts are whole decimals from 1: at most 4,096 units, 100,000 functions, eight
+lane counts of at most 4,096 lanes, and 1,000 runs. The options after `--` may
+not set the lanes (`--lanes` or `--worker-budget`, either spelling): the driver
+would take theirs over each command's count.
+Then it prints each count's wall time and system time against the first
+count's: lanes that serialize on the kernel, as #1128's did on the address
+space's lock, raise the system time where a busy machine's wall time may hide
+it. The 9700X job runs it by 1, 2, 4 and 8 lanes with the frozen corpus's
+headers and predefines, where `tools/ci/changes.c`'s `check-units` says.

@@ -15,7 +15,10 @@ requirements. [Command index](README.md).
   `--cross-check` also links its `-c` object with `cc`, and compares the
   functions and objects it defines with `clang -O0 -c`'s (#129,
   `c_lowering_symbols.c`). `--self-test` checks the harness with a stand-in
-  compiler.
+  compiler, in six scenarios that run at once, each in a process of its own
+  (each changes the directory and environment, and its results' shared mapping
+  is its own): each waits out one-second timeouts, so in turn they took about 7 s
+  and at once take about 2.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both, and the subset again with `--tier1`, which compiles them by the

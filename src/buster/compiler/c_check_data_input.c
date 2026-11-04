@@ -89,7 +89,7 @@ static uint32_t check_data_declared_index(const CheckDataPrepared* prepared, uin
 static uint8_t check_data_declared_alignment(const CheckInput* input, const TypeTable* types, uint32_t object, TypeId type, uint8_t attribute)
 {
     uint8_t result = attribute != 0 ? (uint8_t)(attribute - 1) : 0;
-    if (attribute == 0 && !input->compound_objects[object - 1] && type_large_array(types, type))
+    if (attribute == 0 && !check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && type_large_array(types, type))
     {
         result = 4;
     }
@@ -131,11 +131,11 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     uint32_t varying = 0;
     for (uint32_t first = 0; valid && first < count; first += 64)
     {
-        const uint64_t lanes = scalar ? check_input_scan_all(first, count) : check_input_scan_nonzero(input->static_objects, first, count);
+        const uint64_t lanes = scalar ? check_input_scan_all(first, count) : check_input_scan_bit(input->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; valid && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            if (input->declarations[token] == token && input->static_objects[token])
+            if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
             {
                 const uint32_t object = input->objects[token];
                 valid = object != 0 && object <= count;
@@ -184,15 +184,15 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         }
         const uint32_t at = objects - 1;
         result->declared_latest[at] = token;
-        const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+        const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, token) : 0;
         if (attributes != 0 && attributes->alignment_log2 > alignments[at])
         {
             alignments[at] = attributes->alignment_log2;
         }
-        if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+        if (input->declaration_kinds[token] == C_BINDING_OBJECT && (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
         {
             const uint32_t previous = definition[at];
-            if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
+            if (previous == BUSTER_CHECK_NONE || !check_input_bit(input->declaration_bits, previous, BUSTER_CHECK_BITS_DEFINED))
             {
                 definition[at] = token;
             }
@@ -244,7 +244,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);
-            if (plan == 0 && input->tentative[selected] && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            if (plan == 0 && check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_TENTATIVE) && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
             {
                 // Tentative arrays acquire one element at translation-unit end; earlier uses retain their
                 // historical incomplete TypeIds and cannot gain a retroactive sizeof result.
@@ -437,7 +437,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
         if (needed[object])
         {
             const uint32_t token = check_data_latest(&prepared, object);
-            valid = definitions[object] != 0 || (token != BUSTER_CHECK_NONE && input->linkage[token] == 2);
+            valid = definitions[object] != 0 || (token != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, token) == 2);
             if (valid)
             {
                 symbol_count += 1;
@@ -468,7 +468,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
     {
         const uint32_t token = (uint32_t)prepared.declaration_keys[d];
         const uint32_t object = (uint32_t)(prepared.declaration_keys[d] >> 32);
-        const CheckInputAttributes* attributes = input->attributes[token];
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
         if (needed[object] && input->declaration_kinds[token] == C_BINDING_FUNCTION && attributes != NULL)
         {
             for (uint32_t i = 0; valid && i < attributes->count; i += 1)
@@ -543,7 +543,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
         {
             const uint32_t token = check_data_latest(&prepared, object);
             const bool literal = token == BUSTER_CHECK_NONE;
-            const bool compound = !literal && input->compound_objects != 0 && input->compound_objects[token];
+            const bool compound = !literal && input->declaration_bits != 0 && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND);
             const uint32_t name = !literal ? parser->tokens.names[token] : 0;
             uint8_t generated_name[48];
             const int generated_length = compound ? snprintf((char*)generated_name, sizeof(generated_name), ".Lcompound.%u", object) : 0;
@@ -552,8 +552,8 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
                                      renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
                                      !literal ? link_add_name(&result->link, intern_bytes(identifiers, name), intern_length(identifiers, name)) : 0;
             const uint8_t kind = !literal && input->declaration_kinds[token] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
-                                 !literal && input->thread_local[token] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
-            const uint8_t binding = !literal && input->linkage[token] == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL;
+                                 !literal && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+            const uint8_t binding = !literal && check_input_linkage(input->declaration_bits, token) == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL;
             result->object_symbols[object] = literal || link_name != 0 ? link_add_symbol(&result->link, link_name, 0, 0, 0, kind | binding, BUSTER_LINK_SOURCE_NONE) : 0;
             valid = result->object_symbols[object] != 0;
             if (!valid)

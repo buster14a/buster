@@ -175,28 +175,28 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             }
             for (uint32_t token = 0; emitted && token < input.token_count; token += 1)
             {
-                const CheckInputAttributes* attributes = input.attributes[token];
+                const CheckInputAttributes* attributes = check_input_attributes_at(&input, token);
                 const uint32_t object = input.objects[token];
                 const SymbolId symbol = object < program->object_count ? program->object_symbols[object] : 0;
                 for (uint32_t a = 0; symbol != 0 && attributes != 0 && a < attributes->count; a += 1)
                 {
                     const CheckInputAttribute* attribute = attributes->records + a;
-                    if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && !input.registers[token])
+                    if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && !check_input_bit(input.declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
                     {
                         const NameId renamed = code.link.symbols.name[symbol];
                         check_test_expect(test, code.link.names.length[renamed] == attribute->text.length &&
                                                memcmp(code.link.names.bytes[renamed], attribute->text.pointer, attribute->text.length) == 0,
                                           "decoded asm label survives canonical redeclarations into the actual object symbol");
                     }
-                    else if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && !input.registers[token])
+                    else if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && !check_input_bit(input.declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
                     {
                         bool explicit_name = false;
                         for (uint32_t other = 0; other < input.token_count; other += 1)
                         {
-                            const CheckInputAttributes* retained = input.attributes[other];
+                            const CheckInputAttributes* retained = check_input_attributes_at(&input, other);
                             for (uint32_t j = 0; input.objects[other] == object && retained != 0 && j < retained->count; j += 1)
                             {
-                                explicit_name |= retained->records[j].kind == CHECK_ATTRIBUTE_ASM_LABEL && !retained->records[j].ignored && !input.registers[other];
+                                explicit_name |= retained->records[j].kind == CHECK_ATTRIBUTE_ASM_LABEL && !retained->records[j].ignored && !check_input_bit(input.declaration_bits, other, BUSTER_CHECK_BITS_REGISTER);
                             }
                         }
                         if (!explicit_name)
@@ -545,7 +545,7 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "hidden-symbol-visibility-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
-        "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "explicit-common-publishes-a-common-symbol", 1, 1, CHECK_PROGRAM_OK, 0, 0, 0, false);
     // A section attribute's definition emits as any other's: check_program_sections gives its atom its section (#619).
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",

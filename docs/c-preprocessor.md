@@ -1258,7 +1258,9 @@ sequences need a separate compact conversion representation.
 ### Built-in macros and the predefines
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
-`__FILE_NAME__`, `__FLT_EVAL_METHOD__` (0 on x86-64, as clang gives it), and
+`__FILE_NAME__` (the presumed name's last component, as clang's
+`llvm::sys::path::filename` takes it: `pp_path_file_name`), `__FLT_EVAL_METHOD__`
+(0 on x86-64, as clang gives it), and
 `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
 `SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
 `__has_attribute`, `__has_builtin`, `__has_constexpr_builtin`, `__has_feature`,
@@ -1328,7 +1330,15 @@ decisions in #154 and on #117's configuration):
   `-fno-builtin-NAME`, `-ffreestanding` and `-fhosted` among them): its
   `__has_builtin` for every builtin buster implements, and 0 for the others,
   and its `__has_constexpr_builtin` wherever buster's answers 1; and the gates'
-  facts with clang's table.
+  facts with clang's table. The plain library names are pinned to Clang
+  23.1.4, CI's reference release, whose GNU library builtins include `strlcat`
+  and `strlcpy` (23.1.5's table drops them): the oracle compares
+  `clang --version` with it, prints `expected clang 23.1.4, found …` when the
+  release differs, and skips only the plain names the found release is known to
+  classify differently (`cbuiltin_library_table_differences`: 23.1.5's
+  `strlcat` and `strlcpy`), a difference no named release explains still
+  failing. A fixture reruns the check under a fake clang 23.1.5, so CI's
+  reference release exercises the skip path too.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.
@@ -1421,9 +1431,9 @@ query:
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
 default, clang's include search, and clang's predefined macros for the same
-options plus `__BUSTER__` defined to 1. One capability macro differs: the
-default omits `__GCC_ASM_FLAG_OUTPUTS__` until inline assembly flag-output
-constraints are implemented (#798). `pp_predefines` writes the rest in three parts:
+options plus `__BUSTER__` defined to 1, `__GCC_ASM_FLAG_OUTPUTS__` among
+them, since the C driver lowers inline assembly's flag outputs (#147).
+`pp_predefines` writes them in three parts:
 
 - the fixed part, `pp_predefines_base`: clang 23.1.3's for
   `x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
@@ -1442,9 +1452,7 @@ constraints are implemented (#798). `pp_predefines` writes the rest in three par
 file runs use it, so that they start from clang's macros alone and compare only
 preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
 `__clang_version__` differ from the generator's.
-The file may define `__GCC_ASM_FLAG_OUTPUTS__`; `-D` and `-U` also retain their
-usual order after the chosen predefines. `--clang-features` selects feature
-query answers and does not enable the omitted macro.
+`-D` and `-U` keep their usual order after the chosen predefines.
 
 `__FLT_EVAL_METHOD__` is a builtin, as in clang: 0, or 1 and 2 with
 `-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).

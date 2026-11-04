@@ -8,7 +8,7 @@
 //   - a volatile object is read as often as the source reads it: twice for g + g, once for a value used twice;
 //   - a volatile increment reads it once and writes it once (one record or two);
 //   - a load through a pointer stays on its side of a store through the same pointer;
-//   - an atomic increment writes its object only with a locked form, in a call's helper;
+//   - an atomic increment writes its object only with a locked form, its own lock xadd (#1059: no helper's call);
 // and natively against clang, locals whose homes are folded, read and written through pointers to them between their
 // uses. Include after c_check_program_copy_test.c.
 
@@ -120,9 +120,9 @@ static void check_test_program_folds(CheckTest* test, const char* clang)
                 expected = strcmp(folds.accesses, "rwr") == 0;
                 break;
             default:
-                // The builtin calls its helper (c_check_program_helpers.c), whose lock xadd is the write; the caller
-                // itself writes nothing unlocked.
-                expected = folds.call && folds.unlocked_writes == 0;
+                // The builtin is the typed stream's ATOMIC_RMW (#1059), its lock xadd the one access, which reads and
+                // writes its object; no call, and no unlocked write.
+                expected = !folds.call && folds.unlocked_writes == 0 && strcmp(folds.accesses, "m") == 0;
                 break;
             }
             snprintf(description, sizeof(description), "folds (%s path): %s accesses memory as \"%s\"%s", path == 0 ? "scalar" : "vector", names[f], folds.accesses,

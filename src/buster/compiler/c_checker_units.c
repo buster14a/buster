@@ -31,6 +31,12 @@
 // --shared-parts' pause after each part that a unit's emission takes itself on the board (#777), in microseconds: long
 // enough that the lanes without units, woken from their futex in 10 to 14 µs, take some of its parts.
 #define BUSTER_CHECK_UNITS_SHARED_PAUSE 1000
+// A unit's estimated peak (#1109, check_units_estimate): bytes per preprocessed token, and bytes for any unit; and the
+// part of what the process may take that the units' estimates may hold at once, in eighths, the rest left for what they
+// don't count (the links the lanes keep, the lanes that take only functions' parts, the link).
+#define BUSTER_CHECK_UNITS_TOKEN_BYTES 600
+#define BUSTER_CHECK_UNITS_UNIT_BYTES (48ull << 20)
+#define BUSTER_CHECK_UNITS_MEMORY_EIGHTHS 7
 
 // A unit's link kept for the units' link (check_units_keep): a copy of its records, with room for no more, and which of
 // its undefined global symbols a system header declared, for the link's error about them (check_driver_executable's,
@@ -65,9 +71,32 @@ struct CheckUnitsUnit
     DependencyOutput dependency;
 };
 
+// The memory the units' lanes may hold at once (#1109), against which each unit, once preprocessed, takes an estimate of
+// its peak (check_units_admit): `limit`, what the process may still take when the run starts
+// (check_units_memory_available), or --units-memory's; `held`, what the lanes hold, each lane its largest unit's since it
+// last gave memory back, whose pages its three arenas keep for its next units. A unit that doesn't fit beside what the
+// other lanes hold waits on `released`, which every lane that gives memory back advances (lane_advance), until it fits
+// or no other lane holds any: a unit alone always runs. `waiting` counts the lanes waiting now, which makes a lane that
+// ends a unit give its memory back rather than keep it for its next; and for --units-memory's report, `waits` the units
+// that waited, and `holders` the lanes that hold memory now, which a lane adds itself to after it takes the memory and
+// takes itself out of before it gives it back, so that it never counts more than hold it, and `most` the most it counted.
+// Which lane may keep its pages for the process's exit, and so returns its share alone, the run's count decides
+// (CheckUnitsRun's `taking`).
+typedef struct CheckUnitsMemory CheckUnitsMemory;
+struct CheckUnitsMemory
+{
+    uint64_t limit;
+    uint64_t held;
+    uint32_t released;
+    uint32_t waiting;
+    uint32_t waits;
+    uint32_t holders;
+    uint32_t most;
+};
+
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
-// preprocessor, parser, memory and function lanes, the memory of the links it keeps, and the pool of the arenas its
-// units release (arena_pool).
+// preprocessor, parser, memory and function lanes, the memory of the links it keeps, the pool of the arenas its units
+// release (arena_pool), and the part of the run's memory it holds (CheckUnitsMemory).
 typedef struct CheckUnitsLane CheckUnitsLane;
 struct CheckUnitsLane
 {
@@ -84,6 +113,8 @@ struct CheckUnitsLane
     Arena kept_bytes;
     CheckProgramLanes functions;
     ArenaPool pool;
+    CheckUnitsMemory* memory;
+    uint64_t held;
 };
 
 // What every lane of the units' run reads, and each unit's result, which the lane that takes it fills.
@@ -99,10 +130,18 @@ struct CheckUnitsRun
     // The lanes' board (#777), on which a unit's emission shares its functions' parts with the lanes that have no unit
     // left to take; null on one lane.
     CheckEmitBoard* board;
+    // The memory the lanes' units take turns with (#1109).
+    CheckUnitsMemory* memory;
     // Whether every lane releases its memory, as in a command that releases its memory (check_driver_units' `release`) and
     // before a link, whose peak then stays the units'; otherwise the process's exit, which follows the lanes, frees the
     // memory of the lane that stops taking units last.
     bool release;
+    // The lanes that still take units, which the run counts itself, with or without a board (whose own count gates the
+    // help): the board's allocation may fail on several lanes, and only the lane that stops last may leave its memory to
+    // the exit (check_units_lane), and so may still take the units' memory (#1109). `kept` counts the lanes that did,
+    // for --shared-parts' and --units-memory's reports.
+    uint32_t taking;
+    uint32_t kept;
 };
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
@@ -155,6 +194,18 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             memcpy(bytes, link->atoms.bytes[a], size);
         }
         copy->atoms.bytes[a] = bytes;
+        const String8 section = link->atoms.section[a];
+        char* name = section.length != 0 ? arena_push(kept->arena, section.length, 1) : NULL;
+        result = result && (section.length == 0 || name != NULL);
+        if (name != NULL)
+        {
+            memcpy(name, section.pointer, section.length);
+            copy->atoms.section[a] = (String8){ .pointer = name, .length = section.length };
+        }
+        else
+        {
+            copy->atoms.section[a] = (String8){ 0 };
+        }
     }
     if (result)
     {
@@ -364,6 +415,33 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     return valid;
 }
 
+// Whether a unit's definition `symbol` of `link` takes a name's place from the earlier one, `earlier` of `earlier_link`,
+// and whether the two are a duplicate (#147): a strong definition takes a weak one's or a common one's place, a common
+// one (BUSTER_LINK_SYMBOL_COMMON) a weak one's and a smaller common one's, as a linker keeps the largest of a name's
+// commons, and only two strong definitions are a duplicate. The kept common takes the largest alignment of the name's
+// commons, whichever gives it, as GNU ld and lld take both maxima (check_units_common_alignment).
+static bool check_units_merge_replaces(const Link* earlier_link, SymbolId earlier, const Link* link, SymbolId symbol, bool* duplicate)
+{
+    const uint8_t was = earlier_link->symbols.flags[earlier];
+    const uint8_t is = link->symbols.flags[symbol];
+    const bool was_weak = (was & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool is_weak = (is & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool was_common = (was & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+    const bool is_common = (is & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+    const bool was_strong = !was_weak && !was_common;
+    const bool is_strong = !is_weak && !is_common;
+    const bool larger = link->symbols.size[symbol] > earlier_link->symbols.size[earlier];
+    *duplicate = was_strong && is_strong;
+    return is_strong ? !was_strong : is_common && (was_weak || (was_common && larger));
+}
+
+// The alignment (log2) a unit's symbol gives its name's common: its atom's for a common definition, else 0.
+static uint8_t check_units_common_alignment(const Link* unit, SymbolId symbol)
+{
+    const bool common = (unit->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON && unit->symbols.atom[symbol] != 0;
+    return common ? unit->atoms.alignment_log2[unit->symbols.atom[symbol]] : 0;
+}
+
 // The units' kept links joined into `link`, in the units' order, as check_program_emit builds one unit's (#152): every
 // symbol first, a global name's once and each unit's locals its own, the units' definitions marked as the program's;
 // then the C runtime, which binding (`binding`, bind_begin) joins between the program's symbols and its atoms, its units
@@ -403,6 +481,8 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     SymbolId* defining_symbol = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, symbols + 1) : NULL;
     uint8_t* visibility = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1) : NULL;
     uint8_t* strong = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1) : NULL;
+    // The largest alignment of each name's common definitions, which the kept common takes.
+    uint8_t* common_alignment = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1) : NULL;
     // The global names' table, open addressing on their hashes: twice the slots of the symbols, at least, each the link's
     // symbol of its name or 0.
     uint64_t slots = 16;
@@ -412,7 +492,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     }
     SymbolId* table = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, slots) : NULL;
     valid = valid && maps != NULL && first_unit != NULL && first_symbol != NULL && defining_unit != NULL && defining_symbol != NULL && visibility != NULL &&
-            strong != NULL && table != NULL;
+            strong != NULL && common_alignment != NULL && table != NULL;
     for (uint32_t u = 0; valid && u < count; u += 1)
     {
         maps[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, units[u].kept.link.symbols.count);
@@ -458,6 +538,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 defining_symbol[merged] = 0;
                 visibility[merged] = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
                 strong[merged] = 0;
+                common_alignment[merged] = 0;
                 if (global)
                 {
                     table[slot] = merged;
@@ -468,18 +549,19 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 visibility[merged] = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
             }
             strong[merged] |= binding_flags != BUSTER_LINK_SYMBOL_WEAK;
+            const uint8_t aligned = check_units_common_alignment(unit, s);
+            common_alignment[merged] = aligned > common_alignment[merged] ? aligned : common_alignment[merged];
             if (defined)
             {
-                const bool weak = binding_flags == BUSTER_LINK_SYMBOL_WEAK;
                 const bool earlier = defining_unit[merged] != count;
-                const bool earlier_weak = earlier && (units[defining_unit[merged]].kept.link.symbols.flags[defining_symbol[merged]] & BUSTER_LINK_SYMBOL_BINDING) ==
-                                                         BUSTER_LINK_SYMBOL_WEAK;
-                if (!earlier || (earlier_weak && !weak))
+                bool twice = false;
+                const bool replaces = earlier && check_units_merge_replaces(&units[defining_unit[merged]].kept.link, defining_symbol[merged], unit, s, &twice);
+                if (!earlier || replaces)
                 {
                     defining_unit[merged] = u;
                     defining_symbol[merged] = s;
                 }
-                else if (!earlier_weak && !weak)
+                else if (twice)
                 {
                     duplicate_unit = u;
                     duplicate = merged;
@@ -608,7 +690,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         for (AtomId a = 1; valid && a < unit->atoms.count; a += 1)
         {
             placed[a] = link_add_atom(link, unit->atoms.class[a], unit->atoms.alignment_log2[a], unit->atoms.size[a], unit->atoms.bytes[a], u);
-            valid = placed[a] != 0;
+            valid = placed[a] != 0 && link_set_atom_section(link, placed[a], unit->atoms.section[a]);
             const FixupId begin = unit->atoms.fixup_begin[a];
             for (uint32_t i = 0; valid && i < unit->atoms.fixup_count[a]; i += 1)
             {
@@ -627,6 +709,10 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
             if (unit->symbols.atom[s] != 0 && defining_unit[merged] == u && defining_symbol[merged] == s)
             {
                 valid = link_define_symbol(link, merged, placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
+                // A kept common takes its name's commons' largest alignment.
+                const AtomId atom = placed[unit->symbols.atom[s]];
+                const bool common = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+                link->atoms.alignment_log2[atom] = common && common_alignment[merged] > link->atoms.alignment_log2[atom] ? common_alignment[merged] : link->atoms.alignment_log2[atom];
             }
         }
         for (uint32_t f = 0; described != NULL && valid && f < units[u].kept.debug.function_count; f += 1)
@@ -688,9 +774,9 @@ struct CheckUnitsMergeRecord
     SymbolId symbol;
 };
 
-// A global name's resolution, at its first record: its definition's record (the first strong one's, else the first weak
-// one's) or UINT32_MAX, its first duplicate definition's (a strong one after a strong one) or UINT32_MAX, the most
-// constraining visibility its symbols give it, and whether any of them binds it otherwise than weakly.
+// A global name's resolution, at its first record: its definition's record (check_units_merge_replaces') or UINT32_MAX,
+// its first duplicate definition's (a strong one after a strong one) or UINT32_MAX, the most constraining visibility its
+// symbols give it, whether any of them binds it otherwise than weakly, and its commons' largest alignment.
 typedef struct CheckUnitsMergeName CheckUnitsMergeName;
 struct CheckUnitsMergeName
 {
@@ -698,6 +784,7 @@ struct CheckUnitsMergeName
     uint32_t duplicate;
     uint8_t visibility;
     uint8_t strong;
+    uint8_t common_alignment;
 };
 
 // The partitions of the exchange per lane: enough that a lane's partitions balance, few enough that each one's table is
@@ -736,14 +823,15 @@ struct CheckUnitsMerge
     // Per unit: its symbols that take ids of their own, then the first of them (exclusive prefix sums, from 1).
     uint64_t* unit_ids;
     // Per record: the id of its name in the link, at a first record. Per id: the symbol that gives it its name and flags
-    // (the definition's, else the first reference's), whether it is defined, its visibility and whether it binds
-    // otherwise than weakly.
+    // (the definition's, else the first reference's), whether it is defined, its visibility, whether it binds otherwise
+    // than weakly and its commons' largest alignment, which a kept common takes.
     SymbolId* record_ids;
     uint32_t* source_unit;
     SymbolId* source_symbol;
     uint8_t* defined;
     uint8_t* visibility;
     uint8_t* strong;
+    uint8_t* common_alignment;
     SymbolId next;
     // -g's functions' symbols in the link, per unit (check_units_merge's `described`), and how many are replaced.
     SymbolId** described;
@@ -837,17 +925,19 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
         }
         const bool weak = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         resolution->strong |= !weak;
+        const uint8_t aligned = check_units_common_alignment(unit, record.symbol);
+        resolution->common_alignment = aligned > resolution->common_alignment ? aligned : resolution->common_alignment;
         if (check_units_merge_defines(unit, record.symbol))
         {
             const bool earlier = resolution->defining != UINT32_MAX;
             const CheckUnitsMergeRecord definer = earlier ? merge->records[resolution->defining] : (CheckUnitsMergeRecord){ 0 };
-            const bool earlier_weak = earlier && (merge->units[definer.unit].kept.link.symbols.flags[definer.symbol] & BUSTER_LINK_SYMBOL_BINDING) ==
-                                                     BUSTER_LINK_SYMBOL_WEAK;
-            if (!earlier || (earlier_weak && !weak))
+            bool twice = false;
+            const bool replaces = earlier && check_units_merge_replaces(&merge->units[definer.unit].kept.link, definer.symbol, unit, record.symbol, &twice);
+            if (!earlier || replaces)
             {
                 resolution->defining = (uint32_t)r;
             }
-            else if (!earlier_weak && !weak && resolution->duplicate == UINT32_MAX)
+            else if (twice && resolution->duplicate == UINT32_MAX)
             {
                 resolution->duplicate = (uint32_t)r;
                 const uint64_t key = (uint64_t)record.unit << 32 | record.symbol;
@@ -1015,6 +1105,7 @@ static void check_units_merge_lane(void* argument)
                     SymbolId source_symbol = s;
                     uint8_t visibility = unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_VISIBILITY;
                     uint8_t strong = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_WEAK;
+                    uint8_t common_alignment = check_units_common_alignment(unit, s);
                     bool defined = check_units_merge_defines(unit, s);
                     if (entry != UINT32_MAX)
                     {
@@ -1024,6 +1115,7 @@ static void check_units_merge_lane(void* argument)
                         source_symbol = defined ? merge->records[resolution->defining].symbol : source_symbol;
                         visibility = resolution->visibility;
                         strong = resolution->strong;
+                        common_alignment = resolution->common_alignment;
                         merge->record_ids[entry] = id;
                     }
                     merge->source_unit[id] = source_unit;
@@ -1031,6 +1123,7 @@ static void check_units_merge_lane(void* argument)
                     merge->defined[id] = defined;
                     merge->visibility[id] = visibility;
                     merge->strong[id] = strong;
+                    merge->common_alignment[id] = common_alignment;
                     id += 1;
                 }
             }
@@ -1263,6 +1356,7 @@ static void check_units_merge_lane(void* argument)
                 link->atoms.alignment_log2[placed] = unit->atoms.alignment_log2[a];
                 link->atoms.unit[placed] = (uint32_t)u;
                 link->atoms.size[placed] = unit->atoms.size[a];
+                link->atoms.section[placed] = unit->atoms.section[a];
                 link->atoms.bytes[placed] = unit->atoms.bytes[a];
                 link->atoms.fixup_begin[placed] = fixup_count != 0 ? fixup : 0;
                 link->atoms.fixup_count[placed] = fixup_count;
@@ -1297,9 +1391,14 @@ static void check_units_merge_lane(void* argument)
                 const SymbolId merged = map[s];
                 if (unit->symbols.atom[s] != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged])
                 {
-                    link->symbols.atom[merged] = atom_base + unit->symbols.atom[s] - 1;
+                    const AtomId atom = atom_base + unit->symbols.atom[s] - 1;
+                    const bool common = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+                    link->symbols.atom[merged] = atom;
                     link->symbols.value[merged] = unit->symbols.value[s];
                     link->symbols.size[merged] = unit->symbols.size[s];
+                    // A kept common takes its name's commons' largest alignment, as the twin's does; its atom is this unit's.
+                    link->atoms.alignment_log2[atom] = common && merge->common_alignment[merged] > link->atoms.alignment_log2[atom] ? merge->common_alignment[merged] :
+                                                                                                                                   link->atoms.alignment_log2[atom];
                 }
             }
             for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < units[u].kept.debug.function_count; f += 1)
@@ -1384,6 +1483,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     merge.defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
     merge.visibility = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
     merge.strong = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
+    merge.common_alignment = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
     merge.described = debug != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId*, count) : NULL;
     merge.atom_base = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count);
     merge.fixup_base = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count);
@@ -1392,7 +1492,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     bool reserved = merge.symbol_costs != NULL && merge.record_costs != NULL && merge.counts != NULL && merge.partition_begin != NULL && merge.records != NULL &&
                     merge.firsts != NULL && merge.names != NULL && merge.record_ids != NULL && merge.entries != NULL && merge.maps != NULL && merge.unit_ids != NULL &&
                     merge.source_unit != NULL && merge.source_symbol != NULL && merge.defined != NULL && merge.visibility != NULL && merge.strong != NULL &&
-                    (debug == NULL || merge.described != NULL) && merge.atom_base != NULL && merge.fixup_base != NULL && merge.wide_base != NULL &&
+                    merge.common_alignment != NULL && (debug == NULL || merge.described != NULL) && merge.atom_base != NULL && merge.fixup_base != NULL && merge.wide_base != NULL &&
                     merge.priority_base != NULL;
     uint64_t symbol_cost = 0;
     uint64_t record_cost = 0;
@@ -1436,6 +1536,190 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     return result;
 }
 
+// Up to `size` - 1 bytes of the file at `path` into `buffer`, NUL-terminated: their count, 0 if it can't be read.
+static uint64_t check_units_read_text(const char* path, char* buffer, uint64_t size)
+{
+    uint64_t length = 0;
+    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t got = file >= 0 ? 1 : 0;
+    while (got > 0 && length + 1 < size)
+    {
+        got = read(file, buffer + length, size - 1 - length);
+        length += got > 0 ? (uint64_t)got : 0;
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    buffer[length] = 0;
+    return length;
+}
+
+// The number after `key` at the start of one of `text`'s lines (blanks skipped), times `unit`; `missing` if no line
+// starts with `key` and a number.
+static uint64_t check_units_text_value(const char* text, const char* key, uint64_t unit, uint64_t missing)
+{
+    const uint64_t key_length = strlen(key);
+    uint64_t result = missing;
+    bool found = false;
+    const char* line = text;
+    while (!found && line != NULL && *line != 0)
+    {
+        if (strncmp(line, key, key_length) == 0)
+        {
+            char* end = NULL;
+            const unsigned long long value = strtoull(line + key_length, &end, 10);
+            found = end != line + key_length;
+            result = found ? (value <= UINT64_MAX / unit ? (uint64_t)value * unit : UINT64_MAX) : result;
+        }
+        const char* next = strchr(line, '\n');
+        line = next != NULL ? next + 1 : NULL;
+    }
+    return result;
+}
+
+// What the process may still take of the machine's memory (#1109), read from `meminfo`, `cgroup` and the cgroup v2
+// hierarchy at `root` (/proc/meminfo, /proc/self/cgroup and /sys/fs/cgroup, which test-check-units replaces with files of
+// its own): the least of MemAvailable (or, without it, the free pages, _SC_AVPHYS_PAGES, which leave out what the kernel
+// could take back) and, for each cgroup from the process's own (`cgroup`'s "0::" line) up to the hierarchy's root, its
+// memory.max less its memory.current, the files' pages on its lists (memory.stat's active_file and inactive_file)
+// counted as free, since the kernel takes them back before it kills. A limit whose memory.current can't be read, or
+// doesn't hold a number, leaves nothing: what the cgroup uses is unknown, and the lanes then take turns. A cgroup v1
+// limit isn't read: under one, the machine's memory is the bound.
+static uint64_t check_units_memory_read(const char* meminfo, const char* cgroup, const char* root)
+{
+    char text[8192];
+    uint64_t result = check_units_read_text(meminfo, text, sizeof(text)) != 0 ? check_units_text_value(text, "MemAvailable:", 1024, UINT64_MAX) : UINT64_MAX;
+    if (result == UINT64_MAX)
+    {
+        const long free_pages = sysconf(_SC_AVPHYS_PAGES);
+        const long page_bytes = sysconf(_SC_PAGESIZE);
+        result = free_pages > 0 && page_bytes > 0 ? (uint64_t)free_pages * (uint64_t)page_bytes : 0;
+    }
+    char directory[PATH_MAX];
+    const uint64_t prefix = strlen(root);
+    const uint64_t length = check_units_read_text(cgroup, text, sizeof(text));
+    const char* line = length != 0 && strncmp(text, "0::/", 4) == 0 ? text : length != 0 ? strstr(text, "\n0::/") : NULL;
+    const char* path = line != NULL ? line + (line == text ? 3 : 4) : NULL;
+    const uint64_t path_length = path != NULL ? strcspn(path, "\n") : 0;
+    uint64_t end = path != NULL && prefix + path_length < sizeof(directory) ? prefix + path_length : 0;
+    if (end != 0)
+    {
+        memcpy(directory, root, prefix);
+        memcpy(directory + prefix, path, path_length);
+        // The hierarchy's root itself, "0::/", is root alone.
+        end = directory[end - 1] == '/' ? end - 1 : end;
+    }
+    while (end >= prefix)
+    {
+        char file[PATH_MAX + 32];
+        snprintf(file, sizeof(file), "%.*s/memory.max", (int)end, directory);
+        const uint64_t limit = check_units_read_text(file, text, sizeof(text)) != 0 ? check_units_text_value(text, "", 1, UINT64_MAX) : UINT64_MAX;
+        if (limit != UINT64_MAX)
+        {
+            snprintf(file, sizeof(file), "%.*s/memory.current", (int)end, directory);
+            const uint64_t current = check_units_read_text(file, text, sizeof(text)) != 0 ? check_units_text_value(text, "", 1, UINT64_MAX) : UINT64_MAX;
+            snprintf(file, sizeof(file), "%.*s/memory.stat", (int)end, directory);
+            const bool stat = check_units_read_text(file, text, sizeof(text)) != 0;
+            const uint64_t files = stat ? check_units_text_value(text, "active_file ", 1, 0) + check_units_text_value(text, "inactive_file ", 1, 0) : 0;
+            const uint64_t used = current == UINT64_MAX ? limit : current > files ? current - files : 0;
+            const uint64_t headroom = limit > used ? limit - used : 0;
+            result = headroom < result ? headroom : result;
+        }
+        // Up a level: to the last '/' past root, or past root's own level, out of the loop.
+        uint64_t parent = end;
+        while (parent > prefix && directory[parent - 1] != '/')
+        {
+            parent -= 1;
+        }
+        end = end > prefix ? parent - 1 : 0;
+    }
+    return result;
+}
+
+// What the process may still take of the machine's memory when the units' run starts (check_units_memory_read).
+static uint64_t check_units_memory_available(void)
+{
+    return check_units_memory_read("/proc/meminfo", "/proc/self/cgroup", "/sys/fs/cgroup");
+}
+
+// The peak a unit of `tokens` preprocessed tokens adds to the process's resident memory, by estimate (#1109): what its
+// parse, checking and emission take per token, and what any unit takes, measured on units from a few tokens to
+// main.c's (docs/translation-units.md, "Memory").
+static uint64_t check_units_estimate(uint32_t tokens)
+{
+    return (uint64_t)tokens * BUSTER_CHECK_UNITS_TOKEN_BYTES + BUSTER_CHECK_UNITS_UNIT_BYTES;
+}
+
+// Takes `need` bytes of the run's memory for a lane that holds `held` of it, in place of those: true if they fit beside
+// what the other lanes hold, or no other lane holds any.
+static bool check_units_memory_take(CheckUnitsMemory* memory, uint64_t held, uint64_t need)
+{
+    uint64_t total = __atomic_load_n(&memory->held, __ATOMIC_ACQUIRE);
+    bool fits = total - held + need <= memory->limit || total == held;
+    while (fits && !__atomic_compare_exchange_n(&memory->held, &total, total - held + need, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        fits = total - held + need <= memory->limit || total == held;
+    }
+    if (fits && held == 0)
+    {
+        const uint32_t holders = __atomic_add_fetch(&memory->holders, 1, __ATOMIC_ACQ_REL);
+        uint32_t most = __atomic_load_n(&memory->most, __ATOMIC_RELAXED);
+        while (holders > most && !__atomic_compare_exchange_n(&memory->most, &most, holders, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        {
+        }
+    }
+    return fits;
+}
+
+// `lane`'s part of the run's memory, returned (#1109), which wakes the lanes waiting for it; its pages stay.
+static void check_units_memory_return(CheckUnitsLane* lane)
+{
+    if (lane->held != 0)
+    {
+        __atomic_sub_fetch(&lane->memory->holders, 1, __ATOMIC_ACQ_REL);
+        __atomic_sub_fetch(&lane->memory->held, lane->held, __ATOMIC_RELEASE);
+        lane->held = 0;
+        lane_advance(&lane->memory->released);
+    }
+}
+
+// What `lane` held of the run's memory, given back (#1109): its three arenas' pages from the first huge page boundary past
+// their lengths (arena_discard; none after its release), and its part of the run's memory (check_units_memory_return).
+static void check_units_memory_give(CheckUnitsLane* lane)
+{
+    if (lane->held != 0)
+    {
+        arena_discard(&lane->arena);
+        arena_discard(&lane->scratch);
+        arena_discard(&lane->output);
+        check_units_memory_return(lane);
+    }
+}
+
+// A unit of `tokens` preprocessed tokens on `lane`, before its parse (#1109, check_driver_unit): it takes its estimated
+// peak from the run's memory, in place of what the lane holds, where that is less. If that doesn't fit beside what the
+// other lanes hold, the lane gives back what it holds and waits until it fits or no other lane holds any.
+static void check_units_admit(CheckUnitsLane* lane, uint32_t tokens)
+{
+    CheckUnitsMemory* memory = lane->memory;
+    const uint64_t need = check_units_estimate(tokens);
+    if (memory != NULL && need > lane->held && !check_units_memory_take(memory, lane->held, need))
+    {
+        check_units_memory_give(lane);
+        __atomic_add_fetch(&memory->waiting, 1, __ATOMIC_ACQ_REL);
+        __atomic_add_fetch(&memory->waits, 1, __ATOMIC_RELAXED);
+        // The word is read before each try, so that a lane that gives memory back after a failed try wakes this one.
+        uint32_t released = __atomic_load_n(&memory->released, __ATOMIC_ACQUIRE) & ~1u;
+        while (!check_units_memory_take(memory, 0, need))
+        {
+            released = lane_sleep(&memory->released, released);
+        }
+        __atomic_sub_fetch(&memory->waiting, 1, __ATOMIC_ACQ_REL);
+    }
+    lane->held = memory != NULL && need > lane->held ? need : lane->held;
+}
+
 // The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
 // memory of the links it keeps (once: the links it kept stay there), the first time the lane takes a unit. False, with
 // the lane failed, if it can't be reserved: what was stays the lane's, for its release.
@@ -1461,6 +1745,7 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
 // where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
 // A lane whose setup failed releases what it reserved before the failure, which its table and cache keep as their
 // initializers left them (a lane that took no unit, or released them already, has them zero, which their releases take).
+// Then it gives back what it held of the run's memory (check_units_memory_give).
 static void check_units_lane_release(CheckUnitsLane* lane)
 {
     file_cache_release(&lane->cache);
@@ -1469,6 +1754,7 @@ static void check_units_lane_release(CheckUnitsLane* lane)
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
+    check_units_memory_give(lane);
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
@@ -1506,7 +1792,11 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .tier1_gvn = command->tier1_gvn,
             .tier1_no_lifetimes = command->tier1_no_lifetimes,
             .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+            .helper_reporting = command->helper_report != NULL,
+            .units_lane = lane,
+            .helper_forms = command->helper_forms,
         };
+        lane->memory = run->memory;
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
@@ -1536,6 +1826,10 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&command->tier1_report->operations[k], lane->functions.tier1_report.operations[k], __ATOMIC_RELAXED);
             __atomic_fetch_add(&command->tier1_report->emission[k], lane->functions.tier1_report.emission[k], __ATOMIC_RELAXED);
         }
+        for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+        {
+            __atomic_fetch_add(&command->tier1_report->calls[k], lane->functions.tier1_report.calls[k], __ATOMIC_RELAXED);
+        }
         if (command->tier1 && command->tier1_report != NULL)
         {
             CheckTier1Report* report = command->tier1_report;
@@ -1561,6 +1855,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->open_frames, unit_report->open_frames, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->return_tails, unit_report->return_tails, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->code_certified, unit_report->code_certified, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
@@ -1574,6 +1870,11 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             {
                 arena_pop_to(arenas[a], 0);
             }
+        }
+        // A lane that waits for memory (#1109) takes what this one gave back, rather than wait for its later units too.
+        if (lane->memory != NULL && __atomic_load_n(&lane->memory->waiting, __ATOMIC_ACQUIRE) != 0)
+        {
+            check_units_memory_give(lane);
         }
     }
     if (errors != NULL && fclose(errors) != 0)
@@ -1592,9 +1893,12 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 // to overlap its release with: in a command without a link that doesn't release its memory (main's, whose process exits
 // after the lanes: run_check_command_mode), the process's exit frees that lane's with the rest of the address space.
 // Before a link it releases it, as every lane does, so that the link's peak stays the units'.
+// A lane holds the units' memory (#1109) only while it takes units, and waits for nothing but its own units' work
+// while it does, so that a unit waiting for memory always has a lane to give it back: the release gives it back
+// before the help, and the last lane, which keeps its memory for the exit, returns its share alone.
 static void check_units_lane(void* argument)
 {
-    const CheckUnitsRun* run = argument;
+    CheckUnitsRun* run = argument;
     const uint32_t index = lane_index();
     CheckUnitsLane* lane = run->lanes + index;
     arena_pool = &lane->pool;
@@ -1604,16 +1908,31 @@ static void check_units_lane(void* argument)
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
-    // The lanes that still take units after this one, which help the units' emissions (#777) from now on.
-    const uint32_t taking = run->board != NULL ? __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE) : 0;
+    // The lanes that still take units after this one: the board's, which help the units' emissions (#777) from now on,
+    // and the run's, which counts them without a board too. Every lane counts itself out of the board's first, so the
+    // one that leaves the run's at 0 finds no unit's emission left to help, and no lane takes the units' memory after it.
+    if (run->board != NULL)
+    {
+        __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE);
+    }
+    const uint32_t taking = __atomic_sub_fetch(&run->taking, 1, __ATOMIC_RELEASE);
     if (run->release || taking != 0)
     {
+        // Its release gives back its part of the units' memory (#1109), its pages freed, before it helps: the help
+        // waits for the lanes still taking units, one of which may wait for that memory.
         check_units_lane_release(lane);
         arena_pool_release(&lane->pool);
     }
+    else
+    {
+        // The lane that stops taking units last keeps its memory for the exit, and no lane takes the units' memory
+        // after it: it returns its share alone, without freeing pages.
+        check_units_memory_return(lane);
+        __atomic_add_fetch(&run->kept, 1, __ATOMIC_RELAXED);
+    }
     arena_pool = 0;
     // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
-    // a unit is, until no lane takes units.
+    // a unit is, until no lane takes units. The parts it takes run on their sharing lane's arenas, not its own.
     if (run->board != NULL)
     {
         const Lane group = lane_alone();
@@ -1812,14 +2131,21 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             memset(states, 0, (uint64_t)active * sizeof(*states));
             // The lanes' board (#777): every lane takes units at first. Without its memory, each unit's functions compile
-            // on its lane alone.
-            CheckEmitBoard* board = active > 1 ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
+            // on its lane alone; BUSTER_TEST_NO_UNITS_BOARD, a test hook (test-check-units), stands for its allocation
+            // failing.
+            const bool boarded = active > 1 && getenv("BUSTER_TEST_NO_UNITS_BOARD") == NULL;
+            CheckEmitBoard* board = boarded ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
             if (board != NULL)
             {
                 memset(board, 0, sizeof(*board));
                 board->lanes = active;
                 board->taking = active;
             }
+            // The memory the units take turns with (#1109): part of what the process may take, or --units-memory's.
+            const uint64_t available = command->units_memory != 0 ? 0 : check_units_memory_available();
+            CheckUnitsMemory memory = {
+                .limit = command->units_memory != 0 ? command->units_memory : available / 8 * BUSTER_CHECK_UNITS_MEMORY_EIGHTHS,
+            };
             CheckUnitsRun run = {
                 .command = command,
                 .units = units,
@@ -1827,7 +2153,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .order = order,
                 .lanes = states,
                 .board = board,
+                .memory = &memory,
                 .release = release || command->link,
+                .taking = active,
             };
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
@@ -1874,6 +2202,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             if (command->shared_parts)
             {
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
+                fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
+            }
+            if (command->units_memory != 0)
+            {
+                fprintf(stderr, "units memory: %u units waited, at most %u lane%s held memory at once, %u lane%s kept pages for the exit\n", memory.waits,
+                        memory.most, memory.most != 1 ? "s" : "", run.kept, run.kept != 1 ? "s" : "");
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release), but the last one's in a
             // command without a link that doesn't release its memory: the kept links are all the link reads.

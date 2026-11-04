@@ -345,6 +345,7 @@ static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     }
     if (error == TIER1_EMIT_OK)
     {
+        tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted), "every value a call stores is loaded back (#1116)");
         tier1_emit_test_expect(test, (fixture == 1 || keep_pointer) == emitted.frame.frame_pointer, "a realigned frame or a kept frame pointer gives the incoming area its base");
         tier1_emit_test_expect(test, fixture != 3 || emitted.frame.saved_registers != 0, "the parameters live across fixture 3's call are in callee-saved registers, which its prologue pushes");
         void* executable = MAP_FAILED;

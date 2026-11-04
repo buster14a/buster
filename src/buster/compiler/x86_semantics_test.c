@@ -694,6 +694,13 @@ static const X86SemanticsFixture x86_semantics_fixtures[] = {
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION | BUSTER_X86_EFFECT_KEEP_UPPER, 8, 8)
     BUSTER_X86_FIXTURE(CVTTSD2SI_R32_XM64, FLOAT_TO_INT, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0,
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 4, 4)
+    // #1193's legacy forms: the conversions by MXCSR's rounding and the sign masks, into a general register alone.
+    BUSTER_X86_FIXTURE(CVTSS2SI_R64_XM32, FLOAT_TO_INT, BUSTER_X86_W, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0,
+                       BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 8, 8)
+    BUSTER_X86_FIXTURE(CVTSD2SI_R32_XM64, FLOAT_TO_INT, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0,
+                       BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 4, 4)
+    BUSTER_X86_FIXTURE(PMOVMSKB_R32_X, VECTOR_TO_MASK, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0, 0, 4, 4)
+    BUSTER_X86_FIXTURE(MOVMSKPD_R32_X, VECTOR_TO_MASK, BUSTER_X86_W | BUSTER_X86_REST(ZERO), BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0, 0, 4, 4)
     BUSTER_X86_FIXTURE(UCOMISD_X_XM64, FCOMPARE, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 8, 0)
     BUSTER_X86_FIXTURE(COMISS_X_XM32, FCOMPARE_SIGNALING, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
@@ -1398,18 +1405,27 @@ static uint32_t x86_semantics_register_number(uint8_t value)
     return (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3u) : (value & 15u);
 }
 
-// A VSIB operand's data element and index: a gather's or scatter's last letter and the one before it (vpgatherdq:
-// dword indices, qword elements).
-static uint32_t x86_semantics_vsib_element(uint32_t form)
+// A VSIB operand's data element and index, in bytes, from the letters after a gather's or scatter's name: its index's,
+// then its element's (vpgatherdq: dword indices, qword elements), or for floating point `p` and the element's
+// (vgatherqps: qword indices, single elements; vscatterdpd: dword indices, doubles, #1115).
+static const char* x86_semantics_vsib_letters(uint32_t form)
 {
     const char* mnemonic = x86_form_descriptions[form].mnemonic;
-    return mnemonic[strlen(mnemonic) - 1] == 'q' ? 8 : 4;
+    const char* gather = strstr(mnemonic, "gather");
+    const char* scatter = strstr(mnemonic, "scatter");
+    return gather != 0 ? gather + 6 : scatter != 0 ? scatter + 7 : mnemonic + strlen(mnemonic);
+}
+
+static uint32_t x86_semantics_vsib_element(uint32_t form)
+{
+    const char* letters = x86_semantics_vsib_letters(form);
+    const char element = letters[0] != 0 && letters[1] == 'p' ? letters[2] : letters[0] != 0 ? letters[1] : 0;
+    return element == 'q' || (element == 'd' && letters[1] == 'p') ? 8 : 4;
 }
 
 static uint32_t x86_semantics_vsib_index(uint32_t form)
 {
-    const char* mnemonic = x86_form_descriptions[form].mnemonic;
-    return mnemonic[strlen(mnemonic) - 2] == 'q' ? 8 : 4;
+    return x86_semantics_vsib_letters(form)[0] == 'q' ? 8 : 4;
 }
 
 // A random record of the form: random registers (vvvv's too), the memory operand RIP-relative into the data page when

@@ -242,7 +242,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     {
         // An overload's placeholder, a _BitInt's and a complex value's are the tasks'.
     }
-    else if (op == CHECK_OP_VALUE && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1])
+    else if (op == CHECK_OP_VALUE && known && check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC))
     {
         // A compound literal's first read initializes it.
     }
@@ -367,7 +367,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
         const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
         if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
         {
-            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
             const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] :
                                     a < stream->count && graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
             const uint32_t local = target != 0 && target < program->object_count ? check_lower_local_of(writer, target) : BUSTER_CHECK_NONE;
@@ -544,7 +544,7 @@ static void check_lower_template_own(const CheckLowerWriter* writer, uint32_t no
     }
     else if (kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL || kind == CHECK_LOWER_TEMPLATE_STORE_GLOBAL)
     {
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const uint32_t a = graph->operand0[node];
         const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : check_stream_object(stream, a);
         check_lower_template_put(entries, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
@@ -855,7 +855,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     const bool ordinary = (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) == 0 &&
                           (address || category != CHECK_LVALUE || (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0);
     const bool reads = !address && !address_value;
-    const bool compound = op == CHECK_OP_VALUE && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
+    const bool compound = op == CHECK_OP_VALUE && known && check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
     // The payload row's parts the rules read: an overload (which no template takes), a fault, an integer and an offset.
     const CheckValue* payload = row != 0 && row <= stream->payload_count ? stream->payloads + row - 1 : NULL;
     const bool payloaded = row == 0 || payload != NULL;
@@ -969,7 +969,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
         if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
         {
-            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+            const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
             const uint32_t target = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] :
                                     a < stream->count && graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
             const bool named = target != 0 && target < program->object_count;

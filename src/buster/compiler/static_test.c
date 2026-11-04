@@ -175,7 +175,13 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
 {
     bool same = true;
     *file = (String8){ 0 };
-    const uint8_t* saved = executable_test_save(link, arena);
+    // The section runs are laid out before the bytes are saved, so that the save and the writes' restores find the same
+    // atoms in the same places (#1122).
+    ExecutableShared grouped_shared = { 0 };
+    ExecutableResult grouped_result = { 0 };
+    const bool grouped = executable_bound_sections(link, true, arena, &grouped_shared, &grouped_result) && grouped_result.error == EXECUTABLE_ERROR_NONE;
+    static_test_expect(tally, grouped, "room for the sections' runs", 0);
+    const uint8_t* saved = grouped ? executable_test_save(link, arena) : 0;
     static_test_expect(tally, saved != 0, "room for the atoms' bytes", 0);
     for (uint32_t w = 0; saved != 0 && w < BUSTER_STATIC_TEST_WRITES; w += 1)
     {
@@ -491,6 +497,12 @@ static bool static_test_symbol_value(const Link* link, const ExecutableTestImage
     else if (source == BUSTER_LINK_SOURCE_LINKER)
     {
         result = static_test_linker_value(link, image, symbol, value);
+        // A __start_ or __stop_ of a section: the writer resolved it at the section's bounds.
+        if (!result)
+        {
+            *value = base + link->symbols.reference[symbol];
+            result = true;
+        }
     }
     else if (source == BUSTER_LINK_SOURCE_ABSOLUTE)
     {
@@ -596,6 +608,12 @@ static bool static_test_expected(const Link* link, const ExecutableTestImage* im
                 break;
             case BUSTER_LINK_FIXUP_SIZE64:
                 value = link->symbols.size[target] + addend;
+                range = 2;
+                break;
+            case BUSTER_LINK_FIXUP_TPOFF64:
+            case BUSTER_LINK_FIXUP_DTPOFF64:
+                // The 64-bit offsets (#1115), TPOFF32's and DTPOFF32's values in 8 bytes.
+                value = symbol + addend;
                 range = 2;
                 break;
             default:
@@ -1164,7 +1182,9 @@ struct StaticTestSource
 //   - nested: a nested function called through a pointer, which GCC 14's heap trampolines make (libgcc_eh.a's
 //     heap-trampoline.o, whose thread-local state its local-dynamic accesses reach);
 //   - tls: each general- and local-dynamic sequence, through the PLT and through the GOT, two local-dynamic offsets from
-//     one module's block among them: the sum, 31, is its status;
+//     one module's block among them, a 64-bit offset from the thread pointer (movabs $value@tpoff, TPOFF64) and two
+//     64-bit offsets in the module's block as data (.quad x@dtpoff, DTPOFF64, as DWARF writes them), whose difference
+//     is 4: the sum, 40, is its status;
 //   - ifunc: a local IFUNC called directly, called through a pointer in .data and its address compared with the
 //     pointer's (a stub's address everywhere), and a global one called through its GOT slot: 21 + 21 + 10 + 1 = 53.
 //     As a static PIE too, as lld's link runs; GNU ld's gives the pointer in .data the IFUNC's implementation, from an
@@ -1260,10 +1280,21 @@ static const StaticTestSource static_test_sources[] = {
                   "    leaq value@tlsld(%rip), %rdi\n"
                   "    call *__tls_get_addr@GOTPCREL(%rip)\n"
                   "    addl value@dtpoff(%rax), %ebx\n"
+                  "    movabsq $value@tpoff, %rcx\n"
+                  "    movq %fs:0, %rdx\n"
+                  "    addl (%rdx,%rcx), %ebx\n"
+                  "    movq tls_offsets+8(%rip), %rcx\n"
+                  "    subq tls_offsets(%rip), %rcx\n"
+                  "    addl %ecx, %ebx\n"
                   "    movl %ebx, %eax\n"
                   "    popq %rbx\n"
                   "    ret\n"
                   "    .size main, .-main\n"
+                  "    .data\n"
+                  "    .align 8\n"
+                  "tls_offsets:\n"
+                  "    .quad shared_value@dtpoff\n"
+                  "    .quad value@dtpoff\n"
                   "    .section .note.GNU-stack,\"\",@progbits\n",
         .assembly = true,
     },
@@ -1369,6 +1400,27 @@ static const StaticTestSource static_test_sources[] = {
         .assembly = true,
         .lld_wrong = true,
         .pie_refused = true,
+    },
+    {
+        .name = "section-bounds",
+        .source = "#include <stdio.h>\n"
+                  "struct entry { long value; const char* name; };\n"
+                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e0 = { 11, \"a\" };\n"
+                  "__attribute__((aligned(16))) long between = 99;\n"
+                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e1 = { 22, \"b\" };\n"
+                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e2 = { 33, \"c\" };\n"
+                  "__attribute__((section(\"bst_one\"))) int one = 5;\n"
+                  "extern struct entry __start_bst_sec[], __stop_bst_sec[];\n"
+                  "extern int __start_bst_one[], __stop_bst_one[];\n"
+                  "extern int __start_bst_missing[] __attribute__((weak));\n"
+                  "int main(void)\n"
+                  "{\n"
+                  "    long total = 0;\n"
+                  "    for (struct entry* e = __start_bst_sec; e < __stop_bst_sec; e += 1) total += e->value;\n"
+                  "    const long count = __stop_bst_sec - __start_bst_sec;\n"
+                  "    printf(\"%ld %ld %d %d %ld %d\\n\", total, count, one, (int)(__stop_bst_one - __start_bst_one), between, __start_bst_missing == 0);\n"
+                  "    return total == 66 && count == 3 && one == 5 && __stop_bst_one - __start_bst_one == 1 && between == 99 && __start_bst_missing == 0 ? 0 : 1;\n"
+                  "}\n",
     },
     {
         .name = "absolute",
@@ -2051,7 +2103,7 @@ static void static_test_starved(StaticTestTally* tally, BindTestLink* test, cons
 }
 
 // Each refusal of the runtime's kind refused by every lane count and by the exact twins with 1 and 8 lanes, naming its
-// symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 31.
+// symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 40.
 static bool static_test_refused(const ExecutableTestDirectory* directory, const Runtime* runtime)
 {
     const bool pie = static_test_pie(runtime);
@@ -2098,7 +2150,7 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
     static_test_expect(&tally, bound, "the tls program bound", 0);
     if (bound)
     {
-        static_test_starved(&tally, &test, runtime, path, 31, scratch.arena);
+        static_test_starved(&tally, &test, runtime, path, 40, scratch.arena);
     }
     if (imported)
     {

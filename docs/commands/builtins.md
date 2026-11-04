@@ -50,9 +50,19 @@ requirements. [Command index](README.md).
   checks against every helper the emitters make; a fence of a constant order is
   the typed stream's `FENCE` (`check_program_direct_fence`), Tier 0's `mfence`
   or nothing, the IR's `fence`, with no helper; `--helper-report` prints each
-  family's direct and helper uses, and `test-checker-driver` runs a
+  family's direct forms and helper calls in the lowered code, and `test-checker-driver` runs a
   store-buffering litmus by both tiers (the guide's "Helper contracts and
-  direct forms"). The x86
+  direct forms"). `--helper-forms=LIST` (the families of a direct form by
+  `--helper-report`'s names, `fence`, `atomic-access`, `atomic-rmw` and `asm`,
+  or `all`) gives each of their operations its helper's call, the paired
+  measurements' other arm; `measure-helpers [--sqlite DIR --speedtest DIR]
+  [--runs N] [--compiles N] [--warmups N] [--directory DIR] [--keep]
+  [--uncounted]` (`helpers_measure.c`) builds the primitives' kernels and
+  speedtest1 by Tier 0 and `--tier1`, each with and without
+  `--helper-forms=all`, checks their outputs alike, and times their compiles and
+  runs as whole processes in rotating rounds beside each object's helper calls,
+  executable bytes and Tier 1's spill and call stores and loads; the 9700X job
+  runs it under the `helpers` gate (the guide's "Paired measurements"). The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
   `xsetbv`, `monitorx`, `mwaitx`, `tzcnt`, `lzcnt_u16`, the fences, `clflush`,
   `ldmxcsr`, `stmxcsr`, Key Locker's, `umwait`, `tpause` and `xbegin`) are
@@ -64,7 +74,17 @@ requirements. [Command index](README.md).
   `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
   `-ffreestanding` say, declared implicitly with their prototypes as clang
   declares them; `test-checker --program-library` and `test-checker-driver`
-  check them against clang (the guide's "Library builtins"). The floating
+  check them against clang (the guide's "Library builtins"). The plain table is
+  pinned to Clang 23.1.4, CI's reference release: its GNU library builtins
+  include `strlcat` and `strlcpy`, which 23.1.5's table drops. The preprocessor
+  and checker oracles compare `clang --version` with it, report
+  `expected clang 23.1.4, found …` when another release is found, and skip only
+  the plain names the found release is known to classify differently (the named
+  list `cbuiltin_library_table_differences`: 23.1.5's `strlcat` and `strlcpy`),
+  a difference no named release explains still failing. A fixture reruns the
+  comparisons under a fake clang 23.1.5, so CI's reference release exercises the
+  skip path too; the fake's script quotes the clang it forwards to, which it
+  reaches through a path with a space and the shell's metacharacters. The floating
   classifications past the first ones (`isnormal` to `isfpclass`, `signbitf`,
   `signbitl` and `canonicalize`: `c_check_builtin_float.c`,
   `c_builtin_float_lower.c`) test their `FPClassTest` masks by a table, an x87

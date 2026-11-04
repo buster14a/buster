@@ -14,7 +14,7 @@
 //     objects, which interpreter.c doesn't model, the typed interpreter's (#176);
 //   - fixtures: a zero-masked vector move whose decoration is a mask role, and a vaddps rounding down beside one (the
 //     decoration a 16- or 32-bit mode record would read as FS's override), each under no live mask and under seven (a row
-//     past the registers, which borrows them), against C; and the mask stack's bound (BUSTER_TIER0_MAX_DEPTH): 239 masks
+//     past the registers, which borrows them), against C; and the mask stack's bound (BUSTER_TIER0_MAX_MASK_DEPTH): 239 masks
 //     live at once compiled alike and run against C and the interpreter, 240, 256 and 257 refused alike, and rows that
 //     take a block of 64 entries more masks lower than an int8 holds;
 //   - the rules: each break of the class's refused by tier0_validate, and its valid neighbours taken, the 16- and 32-bit
@@ -1202,14 +1202,14 @@ static void tier0_test_mask_rounding(Tier0TestTally* tally, uint32_t live, bool 
     free(program);
 }
 
-// The mask stack's bound, BUSTER_TIER0_MAX_DEPTH as the other stacks': `masks` constants converted to masks of 8 bytes,
+// The mask stack's bound, BUSTER_TIER0_MAX_MASK_DEPTH as the other stacks': `masks` constants converted to masks of 8 bytes,
 // all live at once, then XORed into one, converted back and stored into the outputs' slot 0. Both paths compile it into
 // the same code while the stack stays below the bound (239 masks: the first XOR finds 239), which runs natively and in
 // the typed interpreter to C's XOR; and both refuse it, TIER0_ERROR_DEPTH, from 240 masks on, past which the depth
 // column's bytes would wrap (256 and 257 among them: a depth of 256 would read as 0, the first mask's place).
 static void tier0_test_mask_bound(Tier0TestTally* tally, bool host, Arena* arena)
 {
-    static const uint32_t stacks[] = { 8, BUSTER_TIER0_MAX_DEPTH - 1, BUSTER_TIER0_MAX_DEPTH, 256, 257 };
+    static const uint32_t stacks[] = { 8, BUSTER_TIER0_MAX_MASK_DEPTH - 1, BUSTER_TIER0_MAX_MASK_DEPTH, 256, 257 };
     Tier0TestMaskProgram* program = malloc(sizeof(*program));
     uint8_t* image = malloc(BUSTER_TIER0_TEST_MASK_CODE);
     for (uint32_t s = 0; program != 0 && image != 0 && s < BUSTER_ARRAY_LENGTH(stacks); s += 1)
@@ -1241,7 +1241,7 @@ static void tier0_test_mask_bound(Tier0TestTally* tally, bool host, Arena* arena
         const Tier0Check check = tier0_validate(&functions[0]);
         const bool valid = tier0_test_expect(tally, !program->overflow && check.error == TIER0_OK, "masks", "%s: refused (rule \"%s\" at %u)", name,
                                              check.rule != 0 ? check.rule : "", check.node);
-        if (valid && masks < BUSTER_TIER0_MAX_DEPTH)
+        if (valid && masks < BUSTER_TIER0_MAX_MASK_DEPTH)
         {
             const uint32_t length = tier0_test_mask_build(tally, name, functions, 1, arena, image);
             Tier0TestMaskShared shared;
@@ -1302,11 +1302,11 @@ static void tier0_test_mask_sums(Tier0TestTally* tally, bool host, Arena* arena)
         program->overflow = false;
         program->objects = false;
         // The model: the stack of the masks' values, from the bottom.
-        uint64_t stack[BUSTER_TIER0_MAX_DEPTH];
+        uint64_t stack[BUSTER_TIER0_MAX_MASK_DEPTH];
         uint32_t top = 0;
         uint64_t state = 0x7e57u;
         tier0_test_mask_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_TEST_MASK_OUT);
-        for (uint32_t m = 0; m < BUSTER_TIER0_MAX_DEPTH - 1; m += 1)
+        for (uint32_t m = 0; m < BUSTER_TIER0_MAX_MASK_DEPTH - 1; m += 1)
         {
             stack[top] = tier0_test_mask_random(&state);
             tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, stack[top]);

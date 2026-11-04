@@ -111,10 +111,10 @@ static void check_test_integer_policy_graph(CheckTest* test, TypeTable* table)
                                                      scalar.reports[0].fault == CHECK_FAULT_SIGNED_OVERFLOW && scalar.warnings[sum] == 0,
                                   "graph retains exact operation warning provenance without widening a strict ICE root");
                 const uint64_t mark = output.length;
-                for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+                for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
                 {
                     CheckStream vector;
-                    const CheckOptions vector_options = { .batch_size = batch };
+                    const CheckOptions vector_options = { .batch_size = batch, .regions = batch != 0 };
                     check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &vector_options, &vector) &&
                                            check_test_stream_equal(&scalar, &vector, 0),
                                       "GNU extension graph warnings, witnesses and strict reports agree at every scheduler partition");
@@ -238,10 +238,10 @@ static void check_test_integer_warning_contexts(CheckTest* test, TypeTable* tabl
                 if (checked)
                 {
                     const uint64_t mark = output.length;
-                    for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+                    for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
                     {
                         CheckStream vector;
-                        const CheckOptions options = { .batch_size = batch };
+                        const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
                         check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &vector) &&
                                                check_test_stream_equal(&scalar, &vector, graph.argument_count),
                                           "warning contexts retain exact metadata in every scalar/vector partition");

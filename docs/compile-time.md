@@ -604,6 +604,17 @@ which agree within 40 KB; the reader's end is the high-water mark when
   above it. Here the twin's reads of the four columns are 2,600 faults on the
   zero page, which the vector path doesn't make.
 
+A column that `check_program` pushes before the discard keeps the scratch's
+earlier pages under it, whatever it writes. #1154's dropped ranges, room of
+8 bytes a token for a prefix of a few kilobytes, kept 5.7 MB of them on
+`sqlite3.c`, and the lowering and the emission's setup set the peak past the
+checker's again, 4 MB higher on main `703ae9f5` than on `b70deb47`. They are
+pushed past the discard now (#628): on the 9700X, main `9a74fc37`'s peak is
+295,084 KiB and the change's 291,288, with every object the same bytes and the
+times flat ([the
+record](https://github.com/buster14a/buster-performance/tree/cfb3faec63e81977de79432fe72727f524b5f17d/docs/measurements/dropped-ranges-628-2026-11-03),
+with the bisect).
+
 **On the 9700X.** The `changes` job now selects the compile-time attribution
 when the checker's reader, graph, parser, program or arena sources change, so
 this PR's job ran the step's own `measure-compile --runs 11` on the frozen
@@ -636,7 +647,11 @@ reader's columns, to 77 MB of `sqlite3.c`'s scratch):
   which the identifiers' carry little but a type and an object: columns and
   payload rows, as the stream's values have, would take about 8 MB less.
 - **The byte columns.** Twelve zero-default output columns of a byte a token,
-  8.3 MB, written at declarations, most of whose bits would fit one byte.
+  8.3 MB, written at declarations, most of whose bits would fit one byte. Seven
+  of them are one now ("The declaration bits", below).
+- **The `attributes` column.** A pointer a token, 5.7 MB, for 2,457 tokens'
+  attributes, and four passes read it whole. It is a wide sparse column now
+  ("The attributes column", below).
 
 ### The sparse output columns (#628)
 
@@ -736,6 +751,96 @@ has the raw outputs, the receipts and the scripts):
   89.3 M, peak 323,608 → 296,856 KiB, objects the same bytes. User
   instructions are 0.75 M more than `67f7bf51`'s: the directories' acquire loads
   and the exhaustion test.
+
+### The attributes column (#1167)
+
+On main `b70deb47`, `CheckInput.attributes` held a pointer a token: 5.7 MB on
+`sqlite3.c`, for the 2,457 tokens that have attributes, whose entries lie on 219
+of its 1,399 base pages and so, in the output arena's huge pages, on all of
+them. Four passes read it whole, 8 pointers at a time: the asm labels' list of
+attributed tokens (`check_input_asm_attributed_tokens`, 0.81% of `-c`'s
+cycles), the late attributes' masks, the driver's attribute warnings and the
+emission's attributed declarations.
+
+It is a wide column of the sparse pool now (`CheckSparseWide`):
+- **The layout.** A directory entry for each 16 tokens names two consecutive
+  blocks of the pool, which hold the 16 tokens' values of 8 bytes, and the zero
+  entry blocks 0 and 1, both NONEs, which a pool with a wide column keeps. The
+  column holds each pointer complemented, so that a null pointer is its NONE:
+  a token without attributes takes no block, and a fresh arena's directory
+  needs no fill. Reads and writes go through `check_input_attributes_at` and
+  `check_input_set_attributes_at`.
+- **Lanes.** The deferred reader's lanes take its blocks by the pool's claims,
+  as the other columns' are taken (`check_sparse_take`, of two blocks here).
+- **The scans.** Each of the four skips 256 tokens without attributes with a
+  load of their 16 directory entries (`check_sparse_wide_next`) and tests a
+  group's values 8 at a time (`check_sparse_wide_group`); the scalar path, their
+  twin, visits every group and reads each token's value.
+
+`test-checker`'s scans test checks wide columns against columns of a 64-bit
+value a token at every count to 200, beside a column of the same pool: every
+token's value, every group's bits and the next group from every start, and the
+entries' lists, by both paths, with the directory ending at a `PROT_NONE` page.
+Its lanes test writes a wide column of the shared pool at once too.
+
+On the 9700X, main `b70deb47` against the change on it (`ebd8cf4e`), measured as
+the sparse output columns were above, with every object the same bytes by both
+paths, on 8 lanes and with `-g` ([the
+record](https://github.com/buster14a/buster-performance/tree/41457e6769eff22baa23243b55a0787f707f3d74/docs/measurements/attributes-column-1167-2026-11-03)):
+
+| measure | main | wide `attributes` |
+| --- | ---: | ---: |
+| task clock | 114.26 ms | 113.30 ms |
+| user cycles | 546.0 M | 541.3 M |
+| user instructions | 1,276.4 M | 1,275.8 M |
+| kernel cycles | 87.3 M | 87.2 M |
+| peak RSS (`wait4`) | 291,208 KiB | 287,104 KiB |
+| `check-input` | 45.73 ms | 44.96 ms |
+
+- **The time.** Every round of the 8 has the change 0.6 to 1.4 ms faster. The
+  4.7 M fewer user cycles are about the asm labels' 0.81%, but this is one
+  placement each.
+- **The peak** is 4.1 MB lower. It isn't the reader's end any more: a map of
+  each push's resident pages on the laptop puts `VmRSS` at 290.9 MB there and at
+  260.5 MB once the reader's arena of rare columns is released, and
+  `check-expressions` and `check-declarations` take it to the peak, 297.6 MB.
+  What the reader keeps to the peak lowers it; the rare columns, which their
+  few writes spread over about 30 MB of huge pages, cost that much clearing
+  instead (in base pages, the reader's reads of them take 6,800 more faults).
+
+### The declaration bits (#1167)
+
+Seven of the reader's byte columns held a flag or two at its declarations:
+`defined`, `tentative`, `static_objects`, `registers`, `thread_local`,
+`compound_objects` and `linkage`. At the peak, each took its 700 KiB of huge
+pages on `sqlite3.c`, the empty ones too, since the written ones share their
+pages. They are one byte a token now, `CheckInput.declaration_bits`: a bit each
+(`BUSTER_CHECK_BITS_DEFINED` and the others) and the linkage, 0 to 2, in the top
+two. `check_input_bit`, `check_input_set_bit`, `check_input_linkage` and
+`check_input_set_linkage` read and write them, and the scans test a bit of 64
+tokens' bytes at once (`check_input_scan_bit`, `check_input_scan_linkage`), as
+they tested the columns' bytes. The expressions' walk gathers a declaration's
+byte once for its three flags. `declaration_kinds`, `function_flags`,
+`explicit_abis` and the constant warnings' two columns stay columns of their own.
+
+On the 9700X, main `703ae9f5` against the branch merged with it (`49f066ba`),
+both changes, measured as the attributes' change was, with every object the same
+bytes ([the
+record](https://github.com/buster14a/buster-performance/tree/3dd0b4bfce2982eae0fb2ccb42be8a537d89c951/docs/measurements/attributes-column-1167-2026-11-03),
+`round5/`):
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 111.59 ms | 109.25 ms |
+| user cycles | 530.4 M | 520.7 M |
+| user instructions | 1,204.8 M | 1,204.1 M |
+| kernel cycles | 88.0 M | 85.5 M |
+| peak RSS (`wait4`) | 295,172 KiB | 287,028 KiB |
+| `check-input` | 44.37 ms | 43.15 ms |
+
+Every round of the 8 has the branch 1.8 to 2.8 ms faster. The peak is 8.1 MB
+lower, of the 12 MB that #1167 bounded for the two changes. Main's own peak had
+risen 4 MB since `b70deb47`, by its changes between.
 
 ## The checker's graph and program passes (#530)
 
@@ -984,9 +1089,9 @@ every token) and visits only them:
   static declarations, per static object, rather than from every declaring
   token into two object-sized columns.
 - **The emission's setup.** `check_program_object_access` finds the defining
-  tokens in the `defined` and `tentative` bytes, rather than reading four
-  columns at every declaring token; the attributes' passes visit only the
-  declaring tokens that have attributes.
+  tokens in the `defined` and `tentative` bytes (bits of one byte since #1167),
+  rather than reading four columns at every declaring token; the attributes'
+  passes visit only the declaring tokens that have attributes.
 
 **What is left.**
 - **The initializers' walks.** Most of `check-declarations` is now
@@ -1048,7 +1153,8 @@ Every change keeps both paths' objects and diagnostics byte for byte.
     identifier's declaration is one of a labelled object's: a bitset over the tokens
     (`check_input_asm_labelled_tokens`), which a gather of 16 tokens' words reads (`check_input_asm_labelled_uses`).
   - **Twins.** Each kernel's scalar path tests every token.
-  - The emission's own sweep of `attributes` and the column itself (#628) are unchanged.
+  - The emission's own sweep of `attributes` and the column itself (#628) are unchanged. Both are sparse since #1167
+    ("The attributes column", below).
 
 `test-checker` checks the selections' kernel against a reading of random forests of up to 1,100 tokens, and the asm
 labels' three kernels against a reading of random columns. Every column ends at a `PROT_NONE` page, and both paths
@@ -1304,9 +1410,48 @@ report, on standard error after the command, a row per stage.
   `check_input_expressions`, which the reader keeps (`CheckInput.expression_ticks`,
   #1038; two TSC reads a unit, with the option or without) and the driver adds
   up. It overlaps the stage, so it is no row of the stages' sum. The report's
-  reader (`check_clock_read`) requires it once, within its stage.
+  reader (`check_clock_read`) requires it once, within its stage. Its parts
+  follow, each a `time-check expressions.PART MILLISECONDS PERCENT` line
+  (`CheckInput.expression_part_ticks`, disjoint and within the walk):
+  - `classes`, the classes' pass;
+  - `prepare`, the coded walk's chunks' compaction and identifiers' leaves;
+  - `actions`, the classes' own actions in the coded walk;
+  - `visits`, the walk's own visits (`check_input_expression_visit`): in a
+    coded unit those of the tokens the classes' actions leave, in a unit the
+    coded walk leaves to the visit throughout all of its chunks' actions, and
+    on the scalar path all of the walk past its classes.
+
+  `prepare` and `actions` are the coded walk's: on the scalar path (`--scalar`)
+  both are `0.000`, which is no measurement, and in a unit the coded walk leaves
+  to the visit `actions` is, while `prepare` is its chunks' compaction. Then
+  comes
+  `time-check expressions.usage SYSTEM_MS MINOR_FAULTS`: the process's
+  `getrusage(RUSAGE_SELF)` counters across the walk, low-confidence as the
+  stages' are. They count every thread's, which in a one-lane compile (as the
+  9700X step's) are the reader's own; in a command with several units on
+  lanes, other threads' too. The faults are mostly the first touches of the
+  graph's node columns, which `check_graph_initialize` leaves unwritten and the
+  walk writes a node at a time; the reader's per-token columns and the output
+  columns `check_input_output_none` clears are written before the walk, so its
+  faults don't count them. Where a unit's read failed, the line is
+  `-1.000 -1`, latched across the units as the stages' columns are, so a
+  substituted zero cannot read as a measurement. `check_clock_read_walk` reads
+  these lines, each once, the parts nonnegative and adding up to no more than
+  the walk, and the usage numeric or wholly unavailable. `measure-compile`
+  prints their medians under `check-input.expressions`
+  (`check_clock_print_walk`), `-1` where a run's usage was unavailable.
+- **The walk's clock is always on.** The walk's row and parts are read with or
+  without the option: two TSC reads a unit for the walk, two for the classes'
+  pass, three a chunk of 1,024 positions, two a visit in a coded unit, and two
+  `getrusage` calls a unit. On sqlite 3.53.2's amalgamation with the 9700X
+  step's `-D` options (710,061 tokens: 694 chunks and 7,800 visits) that is
+  some 18,000 TSC reads and two system calls, well under a millisecond against
+  a walk of about 30 ms on a 4-CPU VM; the frozen corpus's `sqlite3.c` has
+  6,639 visits, about 15,000 reads. Reading them
+  only under the option would take a flag through the reader for less than the
+  run-to-run noise.
 - **Off by default.** Without the option the driver reads no clock, and each lap
-  is a test of a null pointer. With it, the report and the objects are checked
+  is a test of a null pointer; the reader's walk keeps its own counts, above. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
 
 **The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]
@@ -1320,7 +1465,8 @@ without the option, with it, and the reference compiler.
 - **Coverage.** After the runs, with the medians, it prints the first
   `--time-stages` report's `lowering-nodes` line (every run's is the same), as
   `lowering coverage:`: the evaluated nodes and the shares #624's fragments
-  and #1048's node templates took, on the host's path.
+  and #1048's node templates took, on the host's path (no compile takes
+  either since #1048, so both are 0).
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
   ranked by elapsed time. The preprocessor's phases and the expressions' walk
@@ -1555,7 +1701,7 @@ linked by wild 0.10.0, with tcc 0.9.27 (Ubuntu's):
 
 ### Baked tables (#590)
 
-build.sh has each executable it links write itself with the backend's tables
+The build's post-link step has each executable it links write itself with the backend's tables
 built (`bake-tables`, `src/buster/compiler/baked.c`): x86_encode's templates
 and their marked copies, the x86 semantics' tables, Tier 1's selection state
 tables (#141, `tier1_select_burs.c`, shared by main.c's units as the encoder's
@@ -1588,7 +1734,7 @@ the page cache, shared with every other process.
   than the file's.
 - **Where it isn't.** PIEs (the sanitizers' builds, whose tables would hold
   their load address if any had a pointer), executables linked without
-  build.sh and builds with `BUSTER_BAKE=0` build the tables when they run, as
+  the build's post-link step and builds with `BUSTER_BAKE=0` build the tables when they run, as
   before. So do the benchmarks' units.
 
 Objects are the same bytes, baked or built: `hello.c` and c-testsuite's 220

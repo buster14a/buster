@@ -7,13 +7,17 @@
 // (ir_optimize_verified.c, #1055), and emitted (tier1_emit.c, whose CFG consumer allocates a general CFG's values
 // over it, tier1_cfg.c), each step with --scalar by its scalar twin. The emission's check_program_emit_tier1 calls
 // it for each body and gives Tier 0 only explicit unsupported bodies, so that a program of both tiers' functions is
-// one System V program. Tier 1's code publishes its frame as Tier 0's does (check_tier1_frame, #177), so that the
-// emission writes its unwind tables as it writes Tier 0's. What Tier 1's code leaves out (-g's rows) the driver
-// refuses with the option. Include after tier1_emit.c and c_check_program_emit.c.
+// one System V program. Tier 1's code is the emission's tier-neutral result (EmittedCode, #1056) with its frame
+// emitter's own frame events (check_tier1_frame), which the emission resolves into its unwind table as it does Tier
+// 0's; and with -g, its source events at the function's granularity (the body's start and the epilogue:
+// docs/tier1.md's "Debug information"). Include after tier1_emit.c and c_check_program_emit.c.
 
 #include "ir_optimize_verified.c"
+#include "ir_wide.c"
 
-_Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT, "Tier 1 reads Tier 0's access column");
+_Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
+                   BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
+               "Tier 1 reads Tier 0's access column");
 
 // The emitter's nested cause domains, indexed by Tier1EmitCause. The public emitter error wraps these; the outcome
 // keeps the nested cause and error too, and the full table is regression-tested below (test-check-lanes).
@@ -83,8 +87,10 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
             category = error == TIER1_FRAME_CAPACITY || error == TIER1_FRAME_OVERFLOW ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         case CHECK_TIER1_CAUSE_CERTIFICATE:
-            // A refused certificate is an allocation the allocator got wrong (#939): internal, never Tier 0's to hide.
-            category = error == TIER1_CERT_CAPACITY ? CHECK_TIER1_RESOURCE_FAILURE : category;
+            // A refused certificate is an allocation the allocator got wrong, or code the emitter got wrong (its
+            // Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE, #939): internal, never Tier 0's to hide. Either
+            // checker's capacity is a resource failure.
+            category = error == TIER1_CERT_CAPACITY || error == (BUSTER_TIER1_EMIT_CODE_CERTIFICATE | TIER1_CERT_EMITTED_CAPACITY) ? CHECK_TIER1_RESOURCE_FAILURE : category;
             break;
         default:
             break;
@@ -114,6 +120,42 @@ static CheckTier1Outcome check_tier1_step(CheckTier1Stage stage, CheckTier1Cause
     return error == 0 ? success : check_tier1_failure(stage, cause, error, instruction, detail);
 }
 
+// The kinds of the call at `node` (CheckTier1CallKind's bits), for a selection refusal there (#1116): each shape of it
+// that the selector's call boundary doesn't take, by the selector's own predicates (tier1_select_call_supported's), so
+// that the report follows the boundary as it grows; and whether it is indirect or variadic, which the boundary takes.
+// An ABI record the boundary refuses, the call's or an argument's, is `abi-record`, and so are aggregates' parts in
+// registers past the staging slots (#141); an argument without one is named by its type. Every argument is looked at,
+// those past the boundary's limit too (the verifier bounds them all), so that a call past the limit still names its
+// other kinds.
+static uint32_t check_tier1_call_kinds(const IrFunction* ir, uint32_t node)
+{
+    const bool call = node < ir->instruction_count && (ir->op[node] == IR_CALL || ir->op[node] == IR_CALL_INDIRECT) && ir->b[node] < ir->call_count;
+    uint32_t kinds = 0;
+    if (call)
+    {
+        const IrCall* descriptor = &ir->calls[ir->b[node]];
+        const uint32_t result = ir->type[node];
+        kinds |= (ir->op[node] == IR_CALL_INDIRECT ? 1u : 0) << CHECK_TIER1_CALL_INDIRECT;
+        kinds |= (descriptor->variadic ? 1u : 0) << CHECK_TIER1_CALL_VARIADIC;
+        kinds |= (tier1_select_call_abi(ir, node, descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
+        kinds |= (descriptor->argument_count > BUSTER_TIER1_SELECT_MAX_ARGUMENTS ? 1u : 0) << CHECK_TIER1_CALL_STACK_ARGUMENTS;
+        kinds |= (tier1_select_call_arity(descriptor) ? 0 : 1u) << CHECK_TIER1_CALL_ARGUMENT_COUNT;
+        uint32_t staged = 0;
+        for (uint32_t argument = 0; argument < descriptor->argument_count; argument += 1)
+        {
+            const uint32_t type = tier1_select_argument_type(ir, descriptor, argument);
+            const IrPassed* record = tier1_select_argument_record(ir, descriptor, argument);
+            const bool taken = record != 0 ? tier1_select_record_supported(record, type) : tier1_select_call_argument(type);
+            const uint32_t shape = record != 0 ? CHECK_TIER1_CALL_ABI_RECORD : type == IR_I1 || type == IR_I8 || type == IR_I16 ? CHECK_TIER1_CALL_NARROW_ARGUMENT : CHECK_TIER1_CALL_OTHER_ARGUMENT;
+            kinds |= (taken ? 0 : 1u) << shape;
+            staged += taken ? tier1_select_argument_slots(record) : 0;
+        }
+        kinds |= (staged <= BUSTER_TIER1_SELECT_STAGING_SLOTS ? 0 : 1u) << CHECK_TIER1_CALL_ABI_RECORD;
+        kinds |= (tier1_select_call_result(result) ? 0 : 1u) << CHECK_TIER1_CALL_OTHER_RESULT;
+    }
+    return kinds;
+}
+
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome)
 {
     // This is only the legacy bounded histogram. The outcome itself never truncates an error or a location.
@@ -134,7 +176,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. The solver's arena (#866, step 6) is reserved only when `gvn` asks for it, so
+// for a target other than the last one's. The solver's arena (#866, step 7) is reserved only when `gvn` asks for it, so
 // that --tier1 alone maps no address space it never uses. Returns false if one can't be reserved.
 static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, bool gvn)
 {
@@ -177,58 +219,58 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
     return valid;
 }
 
-// Tier 1's frame as Tier 0 publishes its own (Tier0Code.frame_*, which unwind_tier0_frame_tails reads, #177): the
-// callee-saved registers it pushes, by their bits in Tier 0's order (unwind_tier0_saved_registers), its subtraction,
-// its frame pointer, its realignment and its base. Its early returns' rets are the code's tails, each right after its
-// epilogue; and where the code's last record isn't its last return's ret (a loop's latch, a call that doesn't return,
-// a trap), the frame is open and every return is a tail. A frameless function publishes no tails, its rules the CIE's
-// throughout; it is open where its code doesn't end in a ret, which spares the reader's rule that a closed frameless
-// function ends in a ret or a ud2, and its FDE is the closed one either way. A probe's loop
-// (BUSTER_TIER1_FRAME_PROBE_STACK, which the driver doesn't ask for) moves rsp a page at a time, which the protocol
-// doesn't describe; and every exit must be a ret, the last record exactly when the frame is closed. Returns false for
-// a frame it cannot publish. This is an internal publication failure, never an unsupported-input fallback.
-static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* tails, Tier0Code* code)
+// Tier 1's code's frame as the emission takes it (#1056): its frame emitter's own events (tier1_frame_emit, at the
+// records it wrote: the prologue's, then each return's epilogue's, bracketed by the body's rules remembered and restored
+// after its ret), checked against the exits it records: each a ret in the code, each bracket's restoring right after
+// one, in order. A frame whose last record is its last return's ret is closed: the emission drops that epilogue's
+// bracket (unwind_rows_canonical), so that its CFI is the fixed frame's where the frame is one. Also -g's source events
+// (EmittedCode's): the body's start, generated code at the declaration's line, and the closing brace's row from the
+// last epilogue's first record where the frame is closed. Tier 1's IR keeps no source positions yet: its rows are the
+// function's alone. Returns false for a frame whose events aren't its exits': an internal publication failure, never an
+// unsupported-input fallback.
+static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, uint32_t* epilogue)
 {
-    const Tier1Frame* frame = &emitted->frame;
     const X86Instruction* records = emitted->code.records;
-    bool describable = true;
-    for (uint32_t i = 0; i < frame->prologue_count; i += 1)
+    bool valid = emitted->frame_event_count == 0 || emitted->frame_events != 0;
+    for (uint32_t k = 0; valid && k < emitted->exit_count; k += 1)
     {
-        describable &= frame->prologue[i].kind != TIER1_FRAME_PROBE_ALLOCATE && frame->prologue[i].kind != TIER1_FRAME_PROBE_ALIGN;
+        valid = emitted->exits[k] < count && records[emitted->exits[k]].form == X86_FORM_RET && (k == 0 || emitted->exits[k] > emitted->exits[k - 1]);
     }
-    uint32_t saved = 0;
-    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); r += 1)
+    // Each bracket closes right after an exit's ret, in the exits' order: the epilogue its remembering opens.
+    uint32_t exit = 0;
+    uint32_t opened = UINT32_MAX;
+    *epilogue = emitted->exit_count != 0 ? emitted->exits[emitted->exit_count - 1] : count;
+    for (uint32_t i = 0; valid && i < emitted->frame_event_count; i += 1)
     {
-        saved |= ((frame->saved_registers >> unwind_tier0_saved_registers[r]) & 1u) << r;
+        const EmissionFrameEvent event = emitted->frame_events[i];
+        if (event.kind == EMISSION_FRAME_REMEMBER_STATE)
+        {
+            valid = opened == UINT32_MAX;
+            opened = event.at.boundary;
+        }
+        else if (event.kind == EMISSION_FRAME_RESTORE_STATE)
+        {
+            while (exit < emitted->exit_count && emitted->exits[exit] + 1 < event.at.boundary)
+            {
+                exit += 1;
+            }
+            valid = opened != UINT32_MAX && exit < emitted->exit_count && emitted->exits[exit] + 1 == event.at.boundary;
+            *epilogue = valid && exit + 1 == emitted->exit_count ? opened : *epilogue;
+            opened = UINT32_MAX;
+        }
     }
-    describable &= (frame->saved_registers & ~BUSTER_ABI_CALLEE_SAVED) == 0;
-    const bool frameless = saved == 0 && !frame->frame_pointer && frame->stack_adjust_bytes == 0;
+    valid = valid && opened == UINT32_MAX;
+    // Open: the code doesn't end in its last return's ret, so no epilogue row.
     const bool closed = count != 0 && emitted->exit_count != 0 && emitted->exits[emitted->exit_count - 1] == count - 1;
-    for (uint32_t k = 0; k < emitted->exit_count; k += 1)
-    {
-        describable &= emitted->exits[k] < count && records[emitted->exits[k]].form == X86_FORM_RET;
-    }
-    describable &= closed || count == 0 || records[count - 1].form != X86_FORM_RET;
-    const uint32_t tail_count = frameless ? 0 : closed ? emitted->exit_count - 1 : emitted->exit_count;
-    for (uint32_t k = 0; k < tail_count; k += 1)
-    {
-        tails[k] = emitted->exits[k];
-    }
-    code->frame_saved = saved;
-    code->frame_size = frame->stack_adjust_bytes;
-    code->frame_pointer = frame->frame_pointer;
-    code->frame_alignment_log2 = frame->realigned ? (uint8_t)__builtin_ctz(frame->alignment) : 0;
-    code->frame_base = frame->realigned && frame->base_register == BUSTER_TIER1_FRAME_REALIGN_BASE;
-    code->frame_open = !closed;
-    code->tail_records = tail_count != 0 ? tails : 0;
-    code->tail_count = tail_count;
-    return describable;
+    *epilogue = closed ? *epilogue : count;
+    return valid;
 }
 
 static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           bool rematerialize, bool gvn, bool certify, Arena* output, Tier0Code* code, CheckTier1Counts* counts, const CheckTier1Fault* fault)
+                                             bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
+                                             CheckTier1Counts* counts, const CheckTier1Fault* fault)
 {
-    *code = (Tier0Code){ 0 };
+    *code = (EmittedCode){ 0 };
     *counts = (CheckTier1Counts){ 0 };
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
                                                 check_tier1_lane_prepare(lane, target, gvn) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
@@ -255,7 +297,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         IrGvnOptions options = ir_gvn_options();
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[6], scratch, options, &gvn_result);
+        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
         outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
@@ -271,6 +313,16 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The 128-bit integers' halves (#141, ir_wide.c), which the optimizer then takes: a function without any is the
+    // promoted one itself, borrowed.
+    IrWideResult wide = { 0 };
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+    }
     IrOptimizeResult optimized = { 0 };
     IrVerifiedRevision revision = { 0 };
     IrVerifiedAnalysis analysis = { 0 };
@@ -278,10 +330,10 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_verified(&promoted, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
+        const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
-        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
     // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
@@ -296,9 +348,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED)
     {
         // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered,
-        // GVN's rewritten function (steps[6], when enabled) and promoted IR may borrow from each other, but none is a
-        // dependency of the optimized function. Reuse lowered and promoted arenas for the plan and emitted records;
-        // retain optimized IR and analyses through emission.
+        // GVN's rewritten function (steps[7], when enabled), promoted IR and its 128-bit integers' halves (steps[6]) may
+        // borrow from each other, but none is a dependency of the optimized function. Reuse lowered and promoted arenas
+        // for the plan and emitted records; retain optimized IR and analyses through emission.
         arena_pop_to(&lane->steps[0], 0);
         arena_pop_to(&lane->steps[1], 0);
     }
@@ -317,6 +369,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
         outcome.operation = refused;
+        outcome.call_kinds = selected == TIER1_SELECT_ERROR_UNSUPPORTED ? check_tier1_call_kinds(ir, node) : 0;
         stage = outcome.stage;
     }
     Tier1EmitResult emitted = { 0 };
@@ -365,8 +418,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
     // Each label's first record, where the emission defines its symbol (#789).
     uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
-    uint32_t* tails = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.exit_count + 1) : 0;
-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || tails == 0))
+    // Its frame's events (#1056), and with -g its source events: the body's start and the epilogue's (EmittedCode's).
+    EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
+    uint32_t* source_records = stage == CHECK_TIER1_COMPILED && sources ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2) : 0;
+    uint32_t* source_origins = stage == CHECK_TIER1_COMPILED && sources ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 1) : 0;
+    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0 ||
+                                          (sources && (source_records == 0 || source_origins == 0))))
     {
         arena_pop_to(output, mark);
         outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
@@ -404,8 +461,22 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .spill_slots = emitted.allocation.spill_count,
             .frame_bytes = emitted.frame.maximum_stack_bytes,
             .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
+            .code_certified = emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK,
+            .code_uncertified = emitted.code_checked && emitted.code_reason != TIER1_CERT_EMITTED_OK,
         };
-        *code = (Tier0Code){
+        if (emitted.frame_event_count != 0)
+        {
+            memcpy(frames, emitted.frame_events, (uint64_t)emitted.frame_event_count * sizeof(EmissionFrameEvent));
+        }
+        uint32_t epilogue = selected->count;
+        const bool published = check_tier1_frame(&emitted, selected->count, &epilogue);
+        if (sources)
+        {
+            source_records[0] = emitted.body_record;
+            source_records[1] = epilogue;
+            source_origins[0] = BUSTER_EMISSION_NO_ORIGIN;
+        }
+        *code = (EmittedCode){
             .records = records,
             .count = selected->count,
             .branches = branches,
@@ -415,17 +486,25 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .reference_count = emitted.reference_count,
             .label_records = labels,
             .label_count = emitted.label_count,
-            .error = TIER0_OK,
+            .source_records = source_records,
+            .source_origins = source_origins,
+            .source_count = sources ? 1 : 0,
+            .frames = emitted.frame_event_count != 0 ? frames : 0,
+            .frame_count = emitted.frame_event_count,
+            .frame_status = EMITTED_FRAME_DESCRIBED,
         };
-        const bool published = check_tier1_frame(&emitted, selected->count, tails, code);
-        counts->open_frames = code->frame_open && (code->frame_saved != 0 || code->frame_pointer || code->frame_size != 0);
-        counts->return_tails = code->tail_count;
+        // Its unwind table's shape (#177): open where its code doesn't end in its last return's ret, and the returns
+        // whose epilogues' rules are brackets of their own (all of an open frame's, all but the last of a closed one's).
+        const bool closed = selected->count != 0 && emitted.exit_count != 0 && emitted.exits[emitted.exit_count - 1] == selected->count - 1;
+        const bool framed = emitted.frame_event_count != 0;
+        counts->open_frames = framed && !closed;
+        counts->return_tails = !framed ? 0 : closed ? emitted.exit_count - 1 : emitted.exit_count;
         outcome = check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
                                    published ? 0 : BUSTER_CHECK_TIER1_FRAME_PUBLICATION, BUSTER_IR_NONE, 0, fault);
         if (outcome.category != CHECK_TIER1_SUCCESS)
         {
             arena_pop_to(output, mark);
-            *code = (Tier0Code){ 0 };
+            *code = (EmittedCode){ 0 };
             *counts = (CheckTier1Counts){ 0 };
             stage = outcome.stage;
         }
@@ -434,7 +513,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (!success)
     {
         arena_pop_to(output, mark);
-        *code = (Tier0Code){ 0 };
+        *code = (EmittedCode){ 0 };
         *counts = (CheckTier1Counts){ 0 };
     }
     // Only the copies in output may escape this invocation, on success as on a refusal. Invalidate before retiring
@@ -459,11 +538,19 @@ static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_
 {
     const char* operation = outcome.stage == CHECK_TIER1_SELECTION && outcome.operation < IR_OP_COUNT ? ir_op_names[outcome.operation] :
                             outcome.stage == CHECK_TIER1_SELECTION && outcome.operation == IR_OP_COUNT ? "function" : "none";
+    // A refused call's kinds, comma-separated, past the fields every refusal has (#1116).
+    char kinds[256] = { 0 };
+    uint32_t used = 0;
+    for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+    {
+        const int written = ((outcome.call_kinds >> k) & 1) != 0 ? snprintf(kinds + used, sizeof(kinds) - used, "%s%s", used == 0 ? "\tcall=" : ",", check_tier1_call_kind_names[k]) : 0;
+        used += written > 0 && used + (uint32_t)written < sizeof(kinds) ? (uint32_t)written : 0;
+    }
     fprintf(stream, "tier1-refused\t%.*s\t%s\tcategory=%s\tcause=%s\terror=%" PRIu32 "\tinstruction=%" PRIu32 "\tdetail=%" PRIu32
-                    "\toperation=%s\temission_error=%" PRIu32 "\tdominance_checked=%" PRIu32 "\tfallback=%s\n",
+                    "\toperation=%s\temission_error=%" PRIu32 "\tdominance_checked=%" PRIu32 "\tfallback=%s%s\n",
             (int)length, (const char*)name, check_tier1_stage_names[outcome.stage], check_tier1_category_names[outcome.category],
             check_tier1_cause_names[outcome.cause], outcome.error, outcome.instruction, outcome.detail, operation, outcome.emission_error,
-            (uint32_t)outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden");
+            (uint32_t)outcome.dominance_checked, outcome.fallback == CHECK_TIER1_FALLBACK_TIER0 ? "tier0" : "forbidden", kinds);
 }
 
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report)
@@ -493,6 +580,13 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             fprintf(stream, "\tselection.error%" PRIu32 "=%" PRIu32, k - IR_OP_COUNT, report->operations[k]);
         }
     }
+    for (uint32_t k = 0; k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+    {
+        if (report->calls[k] != 0)
+        {
+            fprintf(stream, "\tselection.call.%s=%" PRIu32, check_tier1_call_kind_names[k], report->calls[k]);
+        }
+    }
     for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_OPERATIONS; k += 1)
     {
         if (report->emission[k] != 0)
@@ -502,7 +596,8 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     }
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
-                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\n",
+                    "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
-            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones);
+            report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
+            report->code_certified, report->code_uncertified);
 }

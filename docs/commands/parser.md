@@ -27,7 +27,7 @@ requirements. [Command index](README.md).
 ## Parser tests
 
 `./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
-[--streams N] [--reports N] [--keep] [options] [file or directory...]`
+[--streams N] [--reports N] [--keep] [--files-only] [options] [file or directory...]`
 (about 7 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
 clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
 the vector path with its fallback and the scalar parser alone, which must read
@@ -49,7 +49,7 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults. On:
 
-- snippets: 202 of valid and invalid code, each with the first error clang gives
+- snippets: 404 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
   same message; `--clang` checks each expectation against clang too, which
   must be a parse issue but for the snippets marked as the errors clang's
@@ -59,12 +59,14 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   takes; and the oracle itself: clang given an option it doesn't know must
   count as no answer, and an error in a header a file includes must reject the
   file;
-- fixtures: five trees checked by hand, parent by parent, among them #127's
+- fixtures: six trees checked by hand, parent by parent, among them #127's
   comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
   is a cast where `T` names a type and a product where it doesn't), a
-  declarator's spine (`(*a[3])(double)`: array, pointer, function) and computed
+  declarator's spine (`(*a[3])(double)`: array, pointer, function), computed
   gotos (`goto *p ? p : p`: the `*` the goto's child and the whole expression
-  its own), which the vector path must build without its fallback;
+  its own), which the vector path must build without its fallback, and GNU's
+  array designators without their `=` (`{ [1] -f(1) }`: the `]` and the value
+  siblings, the value's tree its own), through the fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
   `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
@@ -99,12 +101,18 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
 - files: every `.c` file under each path, preprocessed with -E's options, must
   parse; with `--clang`, the parser must accept exactly what `clang
   -fsyntax-only` with the same options accepts (our side reads clang's
-  predefines for target options from `--predefines`);
+  predefines for target options from `--predefines`). A run with files also
+  runs the checks that take no input (the snippets, the oracle, the fixtures,
+  the workspace, K6's tables and the handoff's streams), but with
+  `--files-only`: they read only `--seed` and the language (`-std` and the
+  keywords' and digraphs' `-f` options), so the correctness list's runs of
+  files, beside its run without, leave them to that one;
 - mutations (`--mutations N`, with files): N copies of the files' -E text with
   a token deleted, duplicated or swapped with the next. With `--clang`, a copy
   clang accepts must parse, and one whose first error is a parse issue must fail
-  with its first error on the same line; without, both paths must agree as on
-  any file.
+  with the same first error, at its line and column with its message (#1127;
+  `--reports N` prints that many of the mismatches); without, both paths must
+  agree as on any file.
 
 `--explain` tallies instead why the checks sent valid code to the scalar parser,
 by signature, with an example of each, and `--print-tree FILE [FIRST LAST]`

@@ -563,6 +563,14 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             "FOLD(bits);volatile float a=1.0f,b=(float)(n|1)*1e-8f;for(unsigned mode=0;mode<4;mode++){_mm_setcsr((csr&~0x6000u)|mode<<13);"
             "float s=a+b;FOLD(s);}_mm_setcsr(csr);return (int)h;}");
     check_test_program_includes = false;
+    // <xmmintrin.h>'s _mm_prefetch without its header (#148), a builtin clang needn't see declared, and under a declaration
+    // of it with external linkage, which stays the builtin: each hint of 0 to 7, the address's effect evaluated once, and
+    // a hint past the range where the call can't run, which clang's deferred check doesn't refuse.
+    check_test_program_x86_source(test, clang, target, run_native, "x86-rest-mm-prefetch",
+            "void _mm_prefetch(const char*,int);static int calls;static const char* next(const char* p){calls++;return p;}\n"
+            "int tested(int n){static char line[64];line[n&63]=(char)n;_mm_prefetch(next(line),0);_mm_prefetch(next(line+1),1);"
+            "_mm_prefetch(next(line+2),2);_mm_prefetch(next(line+3),3);_mm_prefetch(next(line+4),4);_mm_prefetch(next(line+5),5);"
+            "_mm_prefetch((const char*)next(line+6),6);_mm_prefetch(next(line+7),4+3);if(0)_mm_prefetch(line,9);return line[n&63]+calls*1000;}");
 }
 
 // The rest's programs at znver5's target, where the host runs what its features allow (check_test_program_x86's rule).

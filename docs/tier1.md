@@ -56,15 +56,16 @@ real C's `vcmp` masks ([the allocation guide](tier1-allocation.md)'s "The
 opmask class"). The selector takes masks' operations, and the CFG consumer
 spills and reloads a mask at its width, moves it along CFG edges with `kmov` and
 saves it around calls ([the selection guide](tier1-selection.md)'s "AVX-512's
-masks"): `test-tier1-masks` runs hand-written IR of masks natively against the
+masks"): `test-tier1-masks` runs hand-written IR of masks, and of vectors (#141),
+natively against the
 shared IR's interpreter. Neither consumer may reinterpret a mask as an ordinary
 GPR value or infer target permission from the compiler host. SSA promotion and
 SCCP/DCE/CFG take a function whose only SIMD values are masks, as the typed
 stream's mask class and the `_k*` builtins' rows lower (#179, [the IR SIMD
-guide](ir-simd.md)'s "Masks from the typed stream"), and refuse one with vectors;
-GVN, LICM, SROA and the inliner still refuse every SIMD function, and selection
-refuses vectors; this handoff does not claim native Tier 1 vector
-execution, full vector ABI support or a throughput gain.
+guide](ir-simd.md)'s "Masks from the typed stream"), and one with vectors
+(#141), folding no vector; GVN, LICM, SROA and the inliner still refuse every
+SIMD function. Selection takes vectors (#141, the selection guide's
+"Vectors"), and claims no throughput gain for them.
 
 ## Required evidence
 
@@ -108,12 +109,12 @@ nonetheless produce different code between `-O0` and `-O2`.
 Use `buster --tier1 -O2 -c file.c` explicitly to request Tier 1; `--tier1`
 wins even with `-O0`, and a function unsupported by Tier 1 takes its
 documented Tier 0 fallback unless `--tier1-strict` forbids that fallback.
-`--tier1` currently rejects `-g` because its source-row debug information is
-not implemented. The driver deliberately does not map standard `-O` flags
-to Tier 1 until #138's correctness and compile-/run-time gates and #1116's
-code-quality gates qualify it for ordinary Release builds. The driver
-regression in `test-checker-driver` pins this selection policy; changing the
-mapping requires updating that test and re-evaluating these gates.
+`--tier1 -g` gives a Tier 1 function its declaration's and closing brace's rows
+only ("Debug information" below, #1056). The driver deliberately does not map
+standard `-O` flags to Tier 1 until #138's correctness and compile-/run-time
+gates and #1116's code-quality gates qualify it for ordinary Release builds.
+The driver regression in `test-checker-driver` pins this selection policy;
+changing the mapping requires updating that test and re-evaluating these gates.
 
 ## The C driver's `--tier1`
 
@@ -193,21 +194,42 @@ has the commands, the host and the raw logs; [the value-numbering
 guide](ir-value-numbering.md) has the rest of the figures.
 
 Tier 1's functions have unwind tables as Tier 0's do, by default and under the
-same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables"):
-their frames are Tier 0's frame protocol (callee-saved registers pushed, one
-subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
-realignment after the subtraction), which Tier 1's code publishes to the
-emission (`check_tier1_frame`), its early returns' epilogues as teardowns the
-tables remember and restore around, and a function whose code doesn't end in its
-last epilogue (a loop's latch last) as an open frame ([the frame
-guide](tier1-frame.md)'s "Unwind tables", #177). The driver refuses what Tier
-1's code can't carry yet: `-g`'s rows. Several source files compile as without
-the option, each unit's report added to the command's.
+same options ([the unwind guide](unwind.md)'s "The C driver's unwind tables").
+Tier 1's code is the emission's tier-neutral result (`EmittedCode`, #1056: [the
+emission metadata guide](emission-metadata.md)), with its frame emitter's own
+frame events (`tier1_frame_emit`: each push, pointing, allocation, release and
+pop at the record that makes it, its early returns' epilogues bracketed by the
+body's rules remembered and restored, a function whose code doesn't end in its
+last epilogue an open frame), which the emission resolves after branch sizing
+into the fixed-frame CFI where the frame is one and a row program otherwise ([the
+frame guide](tier1-frame.md)'s "Unwind tables", #177). Several source files
+compile as without the option, each unit's report added to the command's.
+
+### Debug information
+
+`--tier1 -g` compiles (#1056's bounded subset). Tier 1's IR keeps no source
+positions, so a Tier 1 function's DWARF has its name and range and rows at its
+granularity alone: every instruction from its entry to its last epilogue at its
+declaration's line (its body's start the function's breakpoint row) and the
+closing brace's line from its last epilogue where its frame is closed. There are
+no statement lines inside a Tier 1 function and no variable locations: a debugger
+steps over its body as one line, and a backtrace places each Tier 1 frame at its
+function's declaration. Tier 0's functions in the same program keep their
+statement rows, and the unwind tables are complete either way.
+`test-check-debug --cross-check` checks the subset with `llvm-dwarfdump --verify`
+and gdb, as an executable (by each path, on lanes and with its identifiers' ids
+in another order, into the same bytes) and as a `-c -g` object linked by `cc`
+([the debug guide](debug.md)); statement rows need source positions
+carried through the IR, lowering to selection, which remains.
 
 Beyond the straight-line subset, the CFG consumer takes frame objects'
 addresses (each object a frame slot live throughout, its `lea` re-based on the
 frame's layout), symbols' addresses (`lea` from `rip`, or a load of the GOT slot
-where the emission's access column says so; thread-locals are Tier 0's),
+where the emission's access column says so; a thread-local's, as Tier 0's,
+the thread pointer `fs:[0]` plus its offset: a TPOFF32 immediate for the
+image's own, or the offset from its GOT slot for one that may be outside it,
+which `test-checker-driver`'s thread-locals' fixture runs on five threads
+against clang -O0's build),
 parameters anywhere in the entry block and narrow ones (zero-extended into
 their canonical storage at the entry), variadic calls of integer arguments (`al`
 zero), calls through a pointer (the callee moved into `r10` with the
@@ -252,20 +274,132 @@ phis, parameters, arguments and results ([the selection guide](tier1-selection.m
 "Floating values" and [the allocation guide](tier1-allocation.md)'s "The vector
 class's floating values"). So do by-value aggregates' ABI records (#789): a call
 passes each aggregate's bytes where its record says, in registers or in its
-stack slots, and stores an aggregate result into its object; a function stores
+stack slots, and stores an aggregate result into its object. Where a call's
+stack slots need rsp aligned past 16 bytes (a 32- or 64-byte vector's, an
+over-aligned aggregate's), the frame realigns itself to the most any call needs,
+and a dynamic frame rounds its allocations and calls' areas to it (#1204's
+review); a function stores
 each aggregate parameter's registers into a frame object at its entry, and
 returns an aggregate's parts or copies it through the hidden pointer (the
 selection guide's "By-value aggregates"). So does the dynamic stack (#141):
 variable-length arrays' and `alloca`'s allocations, and the stack's position
 saved and restored around their scopes, in a frame with a frame pointer whose
 places are rbp's (or a realigned frame's r15's), each call's outgoing area taken
-from rsp around it (the selection guide's "The dynamic stack"). Still refused:
-long double and the 128-bit integers (`sqlite3.c`'s `sqlite3Multiply128` and
-`sqlite3Multiply160`), vectors, and the convention's rarer aggregate shapes (a
-part in a stack slot, a high or low eightbyte alone, a vector's or the x87's
-register). The IR's switches and selects of floating values are refused too,
-but the C driver's lowering makes neither: a `switch` comes as compares or a
-jump table, which Tier 1 takes, and `?:` as branches.
+from rsp around it (the selection guide's "The dynamic stack"). So do the
+128-bit integers (#141), as pairs of 64-bit halves ("The 128-bit integers",
+below), and long double (#141), in frame objects of their own, computed on the
+x87 stack (the selection guide's "Long double"), with aggregates returned in
+the x87's registers, and the convention's rarer aggregate shapes (#141): a
+part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
+register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
+selection guide's "Vectors"), within a function and passed or returned by value,
+which the lowering makes aggregates in a vector register whole. Still refused: a
+vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
+are assembly Tier 0 copies as written, an address whose offset alone is past 32
+bits, and a call whose aggregates' parts in registers other than 64-byte
+vectors take more than the red zone's 14 staging slots (four 32-byte vectors,
+for one). The IR's switches and selects of floating
+values are refused too, but the C driver's lowering makes neither: a `switch`
+comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
+Functions with what the IR doesn't represent stop before Tier 1, at the
+lowering to the IR: vectors of elements other than 32-bit integers (floats,
+doubles, 8-, 16- and 64-bit integers, which `__m512i`'s intrinsics are), any
+vector at a target without AVX-512 (#775), and x86 builtins' rows of vectors,
+which #732's subset left to the typed stream's adapter. Adding them is the IR's:
+its type column has 18 of the 32 types its masks allow. The scalar ones, BMI2's
+`pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
+[the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
+instruction of selection's `TIER1_RULE_INTRINSIC`.
+
+### The 128-bit integers
+
+`ir_wide.c` (#141) splits a function's `I128` values into pairs of `I64`
+halves, low and high, between SSA promotion and the optimizer (the driver's
+`wide` stage), so that the optimizer's SCCP, dead code and CFG cleanup,
+selection, both allocations and their certificates see 64-bit values alone.
+Each `I128` instruction becomes its halves' instructions in its place, so that
+blocks keep their numbers and a block's phis stay first:
+
+- a constant, an undef, a copy, a select, `and`, `or`, `xor` and `not`: each
+  half's own;
+- an addition: the low halves' sum, and the high halves' plus its carry, the low
+  sum's unsigned compare below an operand; a subtraction likewise with its
+  borrow; a negation: each half negated, the high one less 1 where the low one
+  isn't zero;
+- a product, modulo 2^128 whatever the signedness: the low halves' product and
+  its high half, the IR's `intrinsic` `mulhu` (the high 64 bits of an `I64`s' unsigned
+  product, [the IR guide](ir.md)'s), plus each cross product of a low half by a
+  high one not known to be zero. A product of two zero extensions, C's
+  `(unsigned __int128)a * b`, is `imul` and `mul` alone: selection's
+  `TIER1_RULE_MULTIPLY_HIGH`, one operand in `rax`, `mul` of the other, its
+  `rdx` the result, which both consumers save other values around as they do
+  a division by a constant's reciprocal;
+- a shift by a constant (through the count's extensions, truncations and
+  copies, as the typed stream gives `r >> 64`): shifts of the halves and an
+  `or`, a half alone past 64 bits, or at 64 the other half itself, for no
+  instruction; by a variable count, both halves shifted by its low 6 bits, the
+  bits crossing between them shifted by 1 and then by the complement (so that
+  no count reaches 64), and selects on its bit 6;
+- a comparison: equality from the halves' `xor`s, `or`ed; an order from the high
+  halves' (strict, of the predicate's signedness) where they differ, else the
+  low halves' (unsigned);
+- an extension: the value as the low half (a 64-bit one itself) and zero or its
+  sign as the high half; a truncation, the low half (to 64 bits the half
+  itself); a pointer's conversions, through the low half;
+- a load and a store: two 8-byte accesses, the high half's address 8 bytes on;
+  a phi: one of each half with the same predecessors.
+
+Division and remainder, and conversions to and from floating values, reach the
+IR as libgcc's calls (the checker's lowering), whose 128-bit arguments and
+results are by-value aggregates; an `I128` in a signature, or an operation the
+split doesn't take, refuses the body as unsupported, and Tier 0 compiles it.
+Every function `--tier1` compiles is scanned for an `I128` instruction, 64 type
+bytes a compare on the vector path and one at a time on its scalar twin, and a
+function without one is the promoted function itself. The rewrite is scalar:
+two passes of one body, counting then writing, on the functions with 128-bit
+values alone (two of `sqlite3.c`'s 2,668, none of Lua's), whose cost is below
+measurement on the compile (the record below). Each phi's and call's remapped
+list is appended to the `extra` table, so phis that share a predecessor list,
+as the verifier lets them, can take the output past what a `u32` counts where
+the source isn't: the counting pass counts in 64 bits and refuses such an
+output as a limit before it allocates. With the split, `--tier1
+--tier1-strict` compiles every function of `sqlite3.c` and speedtest1's, whose
+`--verify` hash is unchanged.
+
+The halves showed a constraint of the straight-line consumer: its allocation
+keeps each interval in the registers it allows and moves no value between
+registers, so a parameter bound to its incoming register, once evicted, can
+only reload there, which fails where another operand of the same node holds
+that register. Such a function now goes through the CFG consumer, whose
+allocation moves values (`tier1_emit_function`), rather than stopping the
+build.
+
+A 128-bit local is still a frame object (the checker gives `__int128`'s locals
+Tier 0's memory, initialized through its address), so promotion leaves its
+loads and stores, which the split makes 8-byte accesses: `sqlite3Multiply128`'s
+`r` goes through its frame slot. Promoting such a local is a front-end change
+(the checker's initialization and the IR lowering's slot types) not made here.
+
+`test-tier1-wide` runs hand-written 128-bit IR (every operation the split takes,
+`sqlite3Multiply128`'s product, a shift by an extended constant, phis around a
+loop, unaligned, volatile and indexed accesses), 120 random straight-line
+programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
+`?:`'s blocks, conversions both ways) through the split by both paths, which
+must make the same function, both verifiers, the optimizer and both of Tier 1's
+paths with their certificates, natively, against the IR's interpreter on the
+unsplit function and the programs' stack machine; the split's refusals and its
+scan's twins; overlapping `extra` slices, and `I128` phis that share one
+predecessor list past the `u32` limit; and 300 of Tier 0's random long double programs (calls of C
+functions of long doubles, every conversion, NaNs, frame objects, `?:`'s blocks)
+through the optimizer and both of Tier 1's paths natively against their stack
+machine (#141). `test-checker-driver`'s wide values' fixture
+(`c_check_tier1_driver_test.c`) passes long doubles, aggregates returned in the
+x87's registers (a struct of a long double, a `_Complex long double`) and the
+memory class's, to and from clang -O2's code and through a variadic
+definition, beside 128-bit integers within its bodies, every function Tier 1's
+by both paths, against clang -O0's build; and its rarer shapes' fixture passes
+aggregates with a high or a low eightbyte alone, in a register and in a stack
+slot, `SPLIT` ones and ignored ones, so.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1` #142's campaigns.
@@ -282,8 +416,8 @@ of C's truth values, addresses and divisions by powers of two (#141's items in
 compiles take 26% fewer as its code than as Tier 0's (41% fewer than before the
 walks). What still costs: a narrow value's zero extension is a `movzx`, though
 its register is zero-extended already; `&&`, `||` and `?:` results whose depth
-slot carries values of several types stay in memory (single-type ones promote
-since #983); a frame
+slot carried values of several types stayed in memory (single-type ones promoted
+since #983, and each depth and type has a slot of its own since #1189); a frame
 object's address is a `lea` rather than part of its users' memory operands; the
 pipeline has no loop-invariant motion; and `sqlite3VdbeExec`, the hottest
 function, was Tier 0's then (its switch). 80 of #142's programs, 40 per generator, gave
@@ -293,6 +427,69 @@ time is unchanged, and `--tier1 -c` of `sqlite3.c` takes 371 ms (387 ms before
 the walks, which leave 40% fewer records to emit); the checker's unit, which
 compiles Tier 1's modules for the driver, takes 40.0 s to build against 36.6 to
 36.9 s without them.
+
+## Where the gap to clang -O2 is (#1189)
+
+#1189's breakdown ([its comment](https://github.com/buster14a/buster/issues/1189#issuecomment-6601742145);
+[the record](https://github.com/buster14a/buster-performance/tree/6495a438f6a3d3b0c8605e24d16f5da996910dad/docs/measurements/tier1-gap-1189-2026-11-03)
+has the tool, the experiment patches and the counts)
+counts every user-space instruction of speedtest1 and of Lua 5.4.8's five
+scripts. It uses callgrind with `--dump-instr=yes`, which is exact per
+instruction and agrees with the 9700X's `perf stat` on c-testsuite 00040 to the
+instruction. An experiment build, not on main, tags each Tier 1 record with its
+origin: spill, edge spill, call save, edge move, call sequence, frame,
+recomputed value, CFG branch or node. Its executables are main's byte for byte.
+
+At main `96b6cbcd`, the program's own code runs:
+
+| | `--tier1` | clang -O2 | Gap |
+| --- | ---: | ---: | ---: |
+| speedtest1 | 3,744 M | 1,888 M | 1,856 M |
+| Lua 5.4.8, five scripts | 7,228 M | 3,768 M | 3,460 M |
+
+The gap by cause, as shares of each program's gap:
+
+| Cause | speedtest1 | Lua | Issue |
+| --- | ---: | ---: | --- |
+| stack loads and stores | 23.4% | 27.4% | #1216 (edge spills and reloads), #1116 (call saves) |
+| register moves | 18.8% | 12.9% | #1216 (edge moves), #1116 (call sequences' 32-bit self-moves) |
+| address arithmetic | 14.8% | 18.2% | #1217 |
+| compares and branches | 14.8% | 17.8% | #1218 |
+| other loads and stores | 11.2% | 7.8% | #139 (memory value numbering), #1218 (load folding) |
+| zero and sign extensions | 9.0% | 12.5% | #1219 |
+| calls, returns and frames | 7.4% | 1.5% | #139 (inlining), #177 (frames) |
+
+The interpreters' loops hold most of it: `sqlite3VdbeExec` 21% of speedtest1's
+gap, and `luaV_execute` 64% of Lua's.
+
+None of the existing passes that `--tier1` doesn't run measures as a gain:
+- GVN: the measurement above (`--tier1-gvn`).
+- LICM: [the loop-motion guide](ir-loop-motion.md)'s "In `--tier1`".
+- SROA: [the scalar-replacement guide](ir-scalar-replacement.md)'s "In `--tier1`".
+- The inliner: [the inlining guide](ir-inlining.md)'s "Reach in `--tier1`".
+
+What did pay is a slot per depth and type for the typed stream's values that
+cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
+instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
+-O0 on both programs: 3,870 M against 3,908 M, and 7,610 M against 8,253 M.
+
+On the 9700X, `measure-tier1-programs` ([the command guide](commands/tier1.md))
+ran in #1230's Benchpress job at `eeeafb6d`, with clang 23.1.4
+([the record's `9700x/`](https://github.com/buster14a/buster-performance/tree/6495a438f6a3d3b0c8605e24d16f5da996910dad/docs/measurements/tier1-gap-1189-2026-11-03),
+every run of 11 rounds). The medians, Lua's being the sum of its five scripts':
+
+| Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| speedtest1, ms | 258.2 | 207.0 | 271.0 | 129.3 | 269.7 | 1.60 |
+| speedtest1, user cycles, M | 1,336 | 1,051 | 1,397 | 626 | 1,398 | 1.68 |
+| Lua's scripts, ms | 335.2 | 260.8 | 358.7 | 167.4 | 393.6 | 1.56 |
+| Lua's scripts, user cycles, M | 1,839 | 1,424 | 1,957 | 910 | 2,157 | 1.57 |
+
+The `cc3387f` record had `--tier1` at 1.70× -O2's time on speedtest1 and 1.71×
+on Lua, before #1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1 and
+before the depth slots above. The 9700X job runs the measurement on its daily
+and dispatched runs, and on pull requests that change Tier 1's input or
+pipeline.
 
 ## Current integration boundary
 

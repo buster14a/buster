@@ -108,7 +108,7 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     const bool plain = (wrapper || truth) && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE;
     if (plain)
     {
-        writer->token = graph->tokens[node];
+        writer->token = node | BUSTER_CHECK_LOWER_TOKEN_NODE;
         if (wrapper)
         {
             check_lower_operand(writer, node, 0, op == CHECK_OP_SELECT && address, op == CHECK_OP_SELECT ? 0 : check_stream_type(stream, node));
@@ -139,7 +139,7 @@ static inline __attribute__((always_inline)) bool check_lower_value_payload(cons
     bool valid = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
                  (metadata & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC | BUSTER_CHECK_LOWER_TYPE_BIT_INT) << 8)) == 0 &&
                  value->overload_head == 0;
-    valid = valid && (initialized || op != CHECK_OP_VALUE || !known || !program->input->compound_objects[object - 1] || program->input->static_objects[object - 1]);
+    valid = valid && (initialized || op != CHECK_OP_VALUE || !known || !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) || check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC));
     *kind = 0;
     *bits = 0;
     if (valid && check_lower_batch_proof(value, op))
@@ -210,7 +210,7 @@ static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWr
     {
         const uint32_t object = value->object;
         const bool known = object != 0 && object < program->object_count;
-        const bool compound = op == CHECK_OP_VALUE && !initialized && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
+        const bool compound = op == CHECK_OP_VALUE && !initialized && known && check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
         if (op == CHECK_OP_VALUE && address && value->category == CHECK_LVALUE && value->type != BUSTER_TYPE_VOID && value->overload_head == 0 && known && !compound)
         {
             writer->token = program->input->graph.tokens[node];

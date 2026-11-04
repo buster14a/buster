@@ -39,6 +39,12 @@ struct CheckDriverPart
 
 static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
 
+// Whether the clang this run compares with is the pinned reference release (BUSTER_CLANG_REFERENCE_VERSION), from
+// run_checker_driver_tests, and the release it named: the library builtin comparisons that depend on its table then
+// skip only the names that release is known to classify differently, and report them as a version difference.
+static bool check_driver_clang_reference = true;
+static char check_driver_clang_version[64] = "";
+
 // Whether this part runs the next unit, which it deals.
 static bool check_test_driver_takes(void)
 {
@@ -1529,6 +1535,314 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
     unlink(direct_path);
 }
 
+// #1122: __start_SEC and __stop_SEC over the sections of C identifiers, which GNU ld and lld define: a registry of
+// three entries with an alignment, a section of one, and a weak reference to a missing one, by -c's object that cc
+// links, by the direct path and by --tier1, each printing clang's build's output.
+static void check_test_driver_section_bounds(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "struct entry { long value; const char* name; };\n"
+                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e0 = { 11, \"a\" };\n"
+                                  "__attribute__((aligned(16))) long between = 99;\n"
+                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e1 = { 22, \"b\" };\n"
+                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e2 = { 33, \"c\" };\n"
+                                  "__attribute__((section(\"bst_one\"))) int one = 5;\n"
+                                  "extern struct entry __start_bst_sec[], __stop_bst_sec[];\n"
+                                  "extern int __start_bst_one[], __stop_bst_one[];\n"
+                                  "extern int __start_bst_missing[] __attribute__((weak));\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    long total = 0;\n"
+                                  "    for (struct entry* e = __start_bst_sec; e < __stop_bst_sec; e += 1) total += e->value;\n"
+                                  "    printf(\"%ld %ld %d %d %ld %d\\n\", total, (long)(__stop_bst_sec - __start_bst_sec), one, (int)(__stop_bst_one - __start_bst_one),\n"
+                                  "           between, __start_bst_missing == 0);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the section bounds fixture is written");
+    char reference[256];
+    snprintf(reference, sizeof(reference), "%s/section-bounds-clang", directory);
+    char expected[64] = { 0 };
+    char* text = NULL;
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool oracle = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, oracle, "clang's build of the section bounds fixture runs");
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the object, linked by cc, prints clang's build's output");
+    static const char* const option_names[] = { "the direct path", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0, option_names[path]);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+    unlink(reference);
+}
+
+// #1122's own program, one atom in the section, whose count is 1: by clang, by -c's object that cc links, by the direct
+// path and by --tier1 with and without its scalar twin, each printing "5 1"; and a strong reference to a section that
+// doesn't exist, which stays undefined, as GNU ld and lld leave it.
+static void check_test_driver_section_bounds_exact(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "__attribute__((section(\"mysec\"))) int in_sec = 5;\n"
+                                  "extern int __start_mysec[], __stop_mysec[];\n"
+                                  "int main(void) { printf(\"%d %d\\n\", in_sec, (int)(__stop_mysec - __start_mysec)); return 0; }\n";
+    static const char missing_program[] = "extern int __start_bst_absent[];\n"
+                                          "int main(void) { return __start_bst_absent != 0; }\n";
+    static const char expected[] = "5 1\n";
+    char source[256];
+    char missing_source[256];
+    char object[256];
+    char reference[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds-exact.c", directory);
+    snprintf(missing_source, sizeof(missing_source), "%s/section-bounds-missing.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds-exact.o", directory);
+    snprintf(reference, sizeof(reference), "%s/section-bounds-exact-clang", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-exact-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-exact-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "#1122's fixture is written");
+    char* text = NULL;
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    char captured[64] = { 0 };
+    const bool oracle = referenced && check_test_driver_capture(reference, captured, sizeof(captured)) && strcmp(captured, expected) == 0;
+    check_test_expect(test, oracle, "clang's build prints 5 1");
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the object, linked by cc, prints 5 1");
+    static const char* const option_names[] = { "the direct path prints 5 1", "--tier1 prints 5 1", "--tier1 --scalar prints 5 1" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          option_names[path]);
+        unlink(direct_path[path]);
+    }
+    const bool missing_written = parse_test_write(missing_source, missing_program, sizeof(missing_program) - 1);
+    check_test_expect(test, missing_written, "the missing section's fixture is written");
+    char* missing_arguments[] = { (char*)executable, "-o", direct_path[0], missing_source, NULL };
+    const int missing_status = missing_written ? check_test_driver_spawn(missing_arguments, &text) : -1;
+    const bool undefined = missing_status != 0 && text != NULL && strstr(text, "undefined reference to '__start_bst_absent'") != NULL;
+    check_test_expect(test, undefined, "a strong reference to a missing section stays undefined");
+    free(text);
+    unlink(direct_path[0]);
+    unlink(source);
+    unlink(missing_source);
+    unlink(object);
+    unlink(reference);
+    unlink(linked_path);
+}
+
+// #1122's bound section's static members: nothing references a static in a bound section, so selection's edges alone
+// drop it and its section loses a member GNU ld's __stop covers. The bound references in the unit root the section's
+// members, the statics too, as gcc's objects keep them; clang's -c drops them, so the oracle is gcc's output: `expected`.
+// `stem` names the fixture's files and `what` its checks.
+static void check_test_driver_section_bounds_rooted(CheckTest* test, const char* executable, const char* directory, const char* program, const char* stem,
+                                                    const char* expected, const char* what)
+{
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    char message[160];
+    snprintf(source, sizeof(source), "%s/%s.c", directory, stem);
+    snprintf(object, sizeof(object), "%s/%s.o", directory, stem);
+    snprintf(linked_path, sizeof(linked_path), "%s/%s-cc", directory, stem);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/%s-%u", directory, stem, path);
+    }
+    const bool written = parse_test_write(source, program, strlen(program));
+    snprintf(message, sizeof(message), "the fixture of %s is written", what);
+    check_test_expect(test, written, message);
+    char* text = NULL;
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    snprintf(message, sizeof(message), "the object keeps %s, and cc's link's bounds cover them", what);
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0, message);
+    static const char* const option_names[] = { "the direct path", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        snprintf(message, sizeof(message), "%s covers %s", option_names[path], what);
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          message);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+}
+
+// The statics of a bound section, by plain bound names ("24 5", gcc's), and by bound names an asm label gives other
+// identifiers (#1187's review): the label is the bound's linkage name, so its section's members are rooted all the same
+// ("1 3 2", gcc's).
+static void check_test_driver_section_bounds_static(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "struct entry { long value; };\n"
+                                  "static __attribute__((section(\"st_sec\"), aligned(16))) struct entry s0 = { 7 };\n"
+                                  "static __attribute__((section(\"st_sec\"), aligned(16))) struct entry s1 = { 8 };\n"
+                                  "__attribute__((section(\"st_sec\"), aligned(16))) struct entry g0 = { 9 };\n"
+                                  "extern struct entry __start_st_sec[], __stop_st_sec[];\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    long total = 0;\n"
+                                  "    for (struct entry* e = __start_st_sec; e < __stop_st_sec; e += 1) total += e->value;\n"
+                                  "    printf(\"%ld %ld\\n\", total, (long)(__stop_st_sec - __start_st_sec));\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    static const char renamed[] = "#include <stdio.h>\n"
+                                  "__attribute__((section(\"mreg\"))) static int a = 1;\n"
+                                  "__attribute__((section(\"mreg\"))) static int b = 2;\n"
+                                  "extern int begin[] __asm__(\"__start_mreg\");\n"
+                                  "extern int end[] __asm__(\"__stop_mreg\");\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    int total = 0;\n"
+                                  "    for (int* p = begin; p < end; p++) total += *p;\n"
+                                  "    printf(\"%d %d %td\\n\", a, total, end - begin);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    check_test_driver_section_bounds_rooted(test, executable, directory, program, "section-bounds-static", "24 5\n", "the section's statics");
+    check_test_driver_section_bounds_rooted(test, executable, directory, renamed, "section-bounds-renamed", "1 3 2\n", "the statics of an asm-labelled bound");
+}
+
+// #1122: two bound sections of one bucket, whose largest member alignments match while their members' don't, so the
+// second run's start is its section's alignment's, not the alignment its first member's. GNU ld and lld align the run
+// as its output section's; a run that only aligned its first member to the member's own would start inside the first
+// section's alignment gap, changing the span the bounds report.
+static void check_test_driver_section_bounds_align(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "#include <stdint.h>\n"
+                                  "__attribute__((section(\"aaa\"), aligned(16), used)) int a0 = 1;\n"
+                                  "__attribute__((section(\"aaa\"), aligned(4), used)) int a1 = 2;\n"
+                                  "__attribute__((section(\"bbb\"), aligned(4), used)) int b0 = 3;\n"
+                                  "__attribute__((section(\"bbb\"), aligned(16), used)) int b1 = 4;\n"
+                                  "extern char __start_aaa[], __stop_aaa[], __start_bbb[], __stop_bbb[];\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    printf(\"aaa start%%16=%lu span=%ld; bbb start%%16=%lu span=%ld\\n\",\n"
+                                  "           (unsigned long)((uintptr_t)__start_aaa % 16),\n"
+                                  "           (long)(__stop_aaa - __start_aaa),\n"
+                                  "           (unsigned long)((uintptr_t)__start_bbb % 16),\n"
+                                  "           (long)(__stop_bbb - __start_bbb));\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    static const char expected[] = "aaa start%16=0 span=8; bbb start%16=0 span=20\n";
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    snprintf(source, sizeof(source), "%s/section-bounds-align.c", directory);
+    snprintf(object, sizeof(object), "%s/section-bounds-align.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-align-cc", directory);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-align-%u", directory, path);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the two sections' fixture is written");
+    char* text = NULL;
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[128];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "cc's link starts each run at its section's alignment");
+    static const char* const option_names[] = { "the direct path starts each run at its section's alignment", "--tier1 starts each run at its section's alignment",
+                                                "--tier1 --scalar starts each run at its section's alignment" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          option_names[path]);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+}
+
 // #591: member accesses whose lookups take every kind of record's: a struct of 2,000 members, with an anonymous union
 // every 40th and an anonymous struct of two bit-fields every 60th, written, read and their offsets taken; and 300 small
 // structs each read by a function of its own. Both paths must write the same object, which clang links into a program
@@ -2956,7 +3270,7 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tstage-system-validation\tdocs-compile-time-clock-accounting-control\n",
                                            "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t",
-                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
+                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t", "\ntime-process\thuge-pages\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
     double walk = -1;
@@ -2975,8 +3289,10 @@ static bool check_test_driver_time_report(const char* text, double* stages)
     {
         valid = strstr(text, process[p]) != NULL;
     }
-    // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too.
-    valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL;
+    // check_clock_read took the walk's row once, within the reader's stage; the walk's own line must say so too. Its parts
+    // (check_clock_read_walk) are each there once, adding up to no more than the walk.
+    double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+    valid = valid && walk >= 0 && strstr(text, "\ntime-check\texpressions\t") != NULL && check_clock_read_walk(text, parts);
     // The graph run's memoized transitions' counts (#1050), each on a line of its own.
     valid = valid && strstr(text, "\ntime-check\ttransition-hits\t") != NULL && strstr(text, "\ntime-check\ttransition-misses\t") != NULL &&
             strstr(text, "\ntime-check\ttransition-folds\t") != NULL && strstr(text, "\ntime-check\ttransition-entries\t") != NULL;
@@ -3022,6 +3338,104 @@ static bool check_test_driver_clock_text(char* text, size_t capacity, bool syste
     return fits;
 }
 
+// The report's walk lines as check_clock_report prints them from a clock (#1172's review): read back by name
+// (check_clock_read_walk), each part's ticks come back under its own name and the usage's columns in their order, or as
+// the unavailable pair where a unit's read failed; and measure-compile's rows of them (check_clock_print_walk) give each
+// median under its own name.
+static void check_test_driver_clock_printer(CheckTest* test)
+{
+    bool printed = true;
+    for (uint32_t failed = 0; failed < 2; failed += 1)
+    {
+        CheckClock stage_clock;
+        check_clock_start(&stage_clock);
+        // A billion ticks across a second and the report's own few microseconds: a millisecond is a million ticks to about
+        // one part in ten thousand, which the parts' ratios below allow.
+        stage_clock.monotonic.tv_sec -= 1;
+        stage_clock.last = stage_clock.start + 1000000000ull;
+        stage_clock.expression_ticks = 110000000ull;
+        for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            stage_clock.expression_part_ticks[p] = 10000000ull * (p + 1);
+        }
+        stage_clock.expression_system_us = 1234;
+        stage_clock.expression_faults = 5678;
+        stage_clock.expression_usage_failed = failed != 0;
+        FILE* stream = tmpfile();
+        char text[32768] = { 0 };
+        if (stream != NULL)
+        {
+            check_clock_report(&stage_clock, NULL, 0, stream);
+            rewind(stream);
+            const size_t length = fread(text, 1, sizeof(text) - 1, stream);
+            text[length] = 0;
+            fclose(stream);
+        }
+        double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+        bool valid = stream != NULL && check_clock_read_walk(text, parts) && parts[0] > 0;
+        for (uint32_t p = 1; valid && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            const double ratio = parts[p] / parts[0];
+            valid = ratio > (double)(p + 1) - 0.001 && ratio < (double)(p + 1) + 0.001;
+        }
+        printed = printed && valid && (failed != 0 ? parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == -1 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == -1
+                                                   : parts[BUSTER_CHECK_CLOCK_WALK_PARTS] == 1.234 && parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] == 5678);
+    }
+    check_test_expect(test, printed, "--time-stages prints each of the walk's parts under its own name, and its usage in order or as unavailable");
+    // measure-compile's rows: medians and ranges distinct per part, then the usage's.
+    double median[BUSTER_CHECK_CLOCK_WALK_PARTS + 2];
+    double low[BUSTER_CHECK_CLOCK_WALK_PARTS + 2];
+    double high[BUSTER_CHECK_CLOCK_WALK_PARTS + 2];
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS + 2; p += 1)
+    {
+        median[p] = 1.5 * (p + 1);
+        low[p] = median[p] - 0.25;
+        high[p] = median[p] + 0.25;
+    }
+    FILE* stream = tmpfile();
+    char text[4096] = { 0 };
+    if (stream != NULL)
+    {
+        check_clock_print_walk(stream, median, low, high, 100.0);
+        rewind(stream);
+        const size_t length = fread(text, 1, sizeof(text) - 1, stream);
+        text[length] = 0;
+        fclose(stream);
+    }
+    uint32_t seen[BUSTER_CHECK_CLOCK_WALK_PARTS + 1] = { 0 };
+    bool rows = stream != NULL;
+    for (const char* line = text; rows && *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        char name[64] = { 0 };
+        double value = 0;
+        double from = 0;
+        double to = 0;
+        double faults = 0;
+        const int fields = sscanf(line, "%63s %lf (%lf to %lf)", name, &value, &from, &to);
+        bool known = false;
+        for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+        {
+            char wanted[64];
+            snprintf(wanted, sizeof(wanted), "expressions.%s", check_clock_walk_parts[p]);
+            const bool match = strcmp(name, wanted) == 0;
+            known = known || match;
+            seen[p] += match;
+            rows = rows && (!match || (fields == 4 && value == median[p] && from == low[p] && to == high[p]));
+        }
+        const bool usage = strcmp(name, "expressions.usage") == 0 && sscanf(line, "%*s %lf %lf", &value, &faults) == 2;
+        seen[BUSTER_CHECK_CLOCK_WALK_PARTS] += usage;
+        rows = rows && (known || usage) &&
+               (!usage || (value == median[BUSTER_CHECK_CLOCK_WALK_PARTS] && faults == 9.0));
+        line = end != NULL ? end + 1 : line + strlen(line);
+    }
+    for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(seen); p += 1)
+    {
+        rows = rows && seen[p] == 1;
+    }
+    check_test_expect(test, rows, "measure-compile prints each of the walk's parts' median and range under its own name, and its usage in order");
+}
+
 // check_clock_read's availability contract: numeric legacy reports still read, an unavailable status needs every
 // system and fault column at -1, an available status or none refuses any -1, and one substituted numeric column in an
 // unavailable report is refused rather than hiding a distorted later delta.
@@ -3047,6 +3461,50 @@ static void check_test_driver_clock_reader(CheckTest* test)
                                         check_clock_read(text, stages, phases, &total, &walk, usage);
     check_test_expect(test, numeric && unavailable && false_available && mixed && numeric_without_status,
                       "--time-stages' reader accepts numeric and wholly unavailable system-time reports and refuses mixed or falsely available ones");
+    // The walk's parts (check_clock_read_walk): each once, nonnegative, within the walk's row, and its usage line, whose
+    // unavailable form is -1 in both columns and nowhere else.
+#define BUSTER_TEST_WALK_HEAD "time-check\texpressions\t1.000\t1.0\n"
+#define BUSTER_TEST_WALK_CLASSES "time-check\texpressions.classes\t0.100\t0.1\n"
+#define BUSTER_TEST_WALK_PREPARE "time-check\texpressions.prepare\t0.200\t0.2\n"
+#define BUSTER_TEST_WALK_ACTIONS "time-check\texpressions.actions\t0.400\t0.4\n"
+#define BUSTER_TEST_WALK_VISITS "time-check\texpressions.visits\t0.250\t0.2\n"
+#define BUSTER_TEST_WALK_PARTS BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PREPARE BUSTER_TEST_WALK_ACTIONS BUSTER_TEST_WALK_VISITS
+    const char* const walks[] = {
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t-1.000\t-1\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PREPARE BUSTER_TEST_WALK_VISITS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS BUSTER_TEST_WALK_ACTIONS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PREPARE "time-check\texpressions.actions\t0.600\t0.6\n" BUSTER_TEST_WALK_VISITS
+        "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_CLASSES BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS,
+        BUSTER_TEST_WALK_HEAD "time-check\texpressions.classes\t-0.100\t-0.1\n" BUSTER_TEST_WALK_PREPARE BUSTER_TEST_WALK_ACTIONS BUSTER_TEST_WALK_VISITS
+        "time-check\texpressions.usage\t0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t-0.300\t12\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t0.300\t-1\n",
+        BUSTER_TEST_WALK_HEAD BUSTER_TEST_WALK_PARTS "time-check\texpressions.usage\t-1.000\t12\n",
+    };
+#undef BUSTER_TEST_WALK_PARTS
+#undef BUSTER_TEST_WALK_VISITS
+#undef BUSTER_TEST_WALK_ACTIONS
+#undef BUSTER_TEST_WALK_PREPARE
+#undef BUSTER_TEST_WALK_CLASSES
+#undef BUSTER_TEST_WALK_HEAD
+    double parts[BUSTER_CHECK_CLOCK_WALK_PARTS + 2] = { 0 };
+    const bool whole = check_clock_read_walk(walks[0], parts) && parts[0] == 0.1 && parts[1] == 0.2 && parts[2] == 0.4 && parts[3] == 0.25 && parts[4] == 0.3 &&
+                       parts[5] == 12;
+    const bool unavailable_usage = check_clock_read_walk(walks[1], parts) && parts[3] == 0.25 && parts[4] == -1 && parts[5] == -1;
+    // A missing part, a repeated one, parts past the walk's row (actions' 0.6 makes their sum 1.15), a repeated part, a
+    // missing usage line, a negative part, and a negative or half-unavailable usage.
+    bool refused = true;
+    for (uint32_t w = 2; w < BUSTER_ARRAY_LENGTH(walks); w += 1)
+    {
+        refused = refused && !check_clock_read_walk(walks[w], parts);
+    }
+    check_test_expect(test, whole && unavailable_usage && refused,
+                      "--time-stages' walk reader takes each part once within the walk, and a numeric or wholly unavailable usage, and refuses a missing, "
+                      "repeated, excess or negative part, a missing or negative usage and a half-unavailable one");
+    check_test_driver_clock_printer(test);
 }
 
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
@@ -3110,10 +3568,10 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     const char* templates = coverage != NULL ? strstr(coverage, "\ttemplates=") : NULL;
     const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2 &&
                          templates != NULL && sscanf(templates, "\ttemplates=%" SCNu64, &template_nodes) == 1;
-    // The vector path's fragments (#624) and node templates (#1048) take some of the nodes; the scalar path's take none.
-    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes + template_nodes &&
-                                (BUSTER_HOST_VECTOR ? batch_nodes + template_nodes != 0 : batch_nodes == 0 && template_nodes == 0),
-                      "--time-stages reports evaluated expressions and the host's template share");
+    // No compile takes the vector path's fragments (#624) or the node templates (#1048), on either host (CheckLowerWriter's
+    // `fragments` and `templates`): their counts are reported, and none of the expressions.
+    check_test_expect(test, counted && expression_nodes != 0 && batch_nodes == 0 && template_nodes == 0,
+                      "--time-stages reports evaluated expressions, and no fragments or templates");
     free(text);
     text = NULL;
     memset(stages, 0, sizeof(stages));
@@ -3211,14 +3669,64 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                       "--time-stages -fsyntax-only reports the stages it ran, on one lane");
     free(text);
     text = NULL;
+    // BUSTER_HUGE_PAGES (#1109, arena_page_policy), each case with this process's own setting, which the child inherits,
+    // as the system's or off: "0" turns transparent huge pages off for the process; "1" leaves them as the system has
+    // them, even where the process that started it had them off; without it, they are off on a virtual machine (CPUID's
+    // hypervisor bit), which the child must decide itself, and elsewhere as the process that started it had them.
+    const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
+    char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
+    const int pages_own = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
+    uint32_t eax = 0;
+    uint32_t ebx = 0;
+    uint32_t ecx = 0;
+    uint32_t edx = 0;
+    const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
+    // Each case: the variable's value (null for none), this process's setting, and whether the child's are off.
+    const struct
+    {
+        const char* setting;
+        int inherited;
+        bool off;
+    } pages_cases[] = {
+        { "0", 0, true },
+        { "1", 1, false },
+        { NULL, 0, virtual_machine },
+        { NULL, 1, true },
+    };
+    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && pages_own >= 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pages_cases); c += 1)
+    {
+        paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 &&
+                (pages_cases[c].setting != NULL ? setenv("BUSTER_HUGE_PAGES", pages_cases[c].setting, 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
+        const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
+        const char* expected = pages_cases[c].off ? "\ntime-process\thuge-pages\toff\n" : "\ntime-process\thuge-pages\tsystem\n";
+        paged = pages_status == 0 && text != NULL && strstr(text, expected) != NULL;
+        free(text);
+        text = NULL;
+    }
+    paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
+    paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
+    free(pages_copy);
+    printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
+                                                   "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES");
+    check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
+                                                     "on this virtual machine they are off without it" :
+                                                     "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
+                                                     "on this machine, not virtual, they are as the process's parent had them without it");
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable") != NULL;
-    // The reader's expressions' walk (#1038), under its stage; and the lowering's coverage (#1048), the first report's
-    // `lowering-nodes` line, once.
-    const bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL;
+    // The reader's expressions' walk (#1038), under its stage, and its parts' and usage's rows under it; and the lowering's
+    // coverage (#1048), the first report's `lowering-nodes` line, once.
+    bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL && strstr(text, "\n      expressions.usage ") != NULL;
+    for (uint32_t p = 0; walked && p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+    {
+        char row[64];
+        snprintf(row, sizeof(row), "\n      expressions.%s ", check_clock_walk_parts[p]);
+        walked = strstr(text, row) != NULL;
+    }
     const char* covered = text != NULL ? strstr(text, "\nlowering coverage: lowering-nodes\tevaluated=") : NULL;
     const bool coverage_once = covered != NULL && strstr(covered + 1, "\nlowering coverage: ") == NULL;
     free(text);
@@ -3227,7 +3735,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
-    check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk under its stage");
+    check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk, its parts and its usage under its stage");
     check_test_expect(test, coverage_once, "measure-compile reports the lowering's coverage once");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
@@ -3289,7 +3797,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -3707,7 +4215,7 @@ static void check_test_driver_reports(CheckTest* test)
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
                                     (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {
@@ -4685,10 +5193,131 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+// Declaration specifiers that don't combine and numeric constants clang refuses (#1127): the first error's place and its
+// exact text are clang's, by every route, where the checker's own words were generic ("invalid or unsupported").
+static void check_test_driver_declspec_literals(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+    } fixtures[] =
+    {
+        { "a repeated type", "double double x;\n" },
+        { "a third long", "int a;\nlong long long x;\n" },
+        { "short then long", "short long x;\n" },
+        { "signed then unsigned", "signed unsigned x;\n" },
+        { "a typedef name then a type", "typedef int T; T int x;\n" },
+        { "a type then a struct's definition", "int struct S { int a; } x;\n" },
+        { "typedef then a storage class", "typedef static int x;\n" },
+        { "a thread storage class then register", "_Thread_local register int x;\n" },
+        { "a parameter's repeated type", "void f(int int x);\n" },
+        { "a cast's third long", "int g(int v) { return (long long long)v; }\n" },
+        { "an unsigned double, at the sign", "unsigned double x;\n" },
+        { "a long char, at the width", "char long x;\n" },
+        { "long long double, at the first long", "long double long x;\n" },
+        { "long __int128", "long __int128 x;\n" },
+        { "a signed float in sizeof", "int g(void) { return sizeof(signed float); }\n" },
+        { "_Complex _Bool", "_Complex _Bool b;\n" },
+        { "an exponent without digits", "double d = 1e;\n" },
+        { "a spliced exponent without digits", "double d = 1\\\ne;\n" },
+        { "an octal constant's decimal digit", "int o = 0129;\n" },
+        { "an octal digit from a macro", "#define L 08\nint c = L;\n" },
+        { "a binary constant's digit", "int b = 0b102;\n" },
+        { "a floating constant's suffix", "double q = 1.5b;\n" },
+        { "long long on a floating constant", "void f(void) { double a = 1.5ll; }\n" },
+        { "an integer constant's suffix", "int x = 1lul;\n" },
+        { "a hexadecimal floating constant without an exponent", "double h = 0x1.5;\n" },
+        { "an integer constant past 64 bits", "int big = 99999999999999999999999;\n" },
+        { "a struct, a #pragma pack, then another type", "#pragma pack(push, 1)\nstruct P { char c; int i; }\n#pragma pack(pop)\nint x;\n" },
+        { "a struct, a #pragma pack, then a typedef of a struct", "#pragma pack(push, 1)\nstruct P { char c; }\n#pragma pack(pop)\ntypedef struct node { int x; } node;\n" },
+        { "a struct, a _Pragma pack, then a storage class and a type", "struct P { char c; }\n_Pragma(\"pack(pop)\") static int x;\n" },
+        // A constant before a syntax error in its declaration, which only the parse reached: clang's error comes first.
+        { "an octal constant's digit before a missing operand", "int x = 08 +;\n" },
+        { "a floating constant's suffix before a missing `;`", "void f(void) { return 1.5b }\n" },
+        { "a condition's constant before a missing `;`", "void f(int a) { if (a == 0129) a = 1 }\n" },
+        { "an exponent without digits before a missing operand", "void f(void) { int x = 1e + ; }\n" },
+    };
+    const char* arguments[] = { "-std=gnu17", "-w" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[384];
+        snprintf(source, sizeof(source), "%s/declspec-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/declspec-%u.o", directory, i);
+        CheckCorpusOracle oracle = { 0 };
+        const bool ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        check_test_expect(test, ready && oracle.rejected, fixtures[i].name);
+        const uint32_t routes = executable != NULL ? 4 : 2;
+        for (uint32_t route = 0; ready && route < routes; route += 1)
+        {
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, true, lazy, &checked, &warnings);
+            snprintf(description, sizeof(description), "%s, route %u: first error %u:%u \"%s\", clang %u:%u \"%s\"", fixtures[i].name, route, checked.line,
+                     checked.column, checked.message, oracle.line, oracle.column, oracle.message);
+            check_test_expect(test, ran && checked.rejected && checked.line == oracle.line && checked.column == oracle.column &&
+                              strcmp(checked.message, oracle.message) == 0, description);
+        }
+        unlink(object);
+        unlink(source);
+    }
+    // What the checker refused where clang takes it (#1127): C2y's `0o` octal prefix, which clang takes in every mode
+    // and in #if, and GNU's array designator without its `=`, whose value has its own tree whatever begins it. The
+    // program's values are clang's, through both host paths.
+    static const char accepted[] =
+        "#if 0o17 != 15\n#error 0o\n#endif\n"
+        "int x = 5;\n"
+        "int a1[3] = { [1] -1, [2] ~1 };\n"
+        "int *a2[2] = { [1] &x };\n"
+        "int a3[] = { [0] 1, [3] 4 };\n"
+        "int a4[2][2] = { [1] { 1, 2 }, [0] { [1] -3 } };\n"
+        "char a5[2][4] = { [1] \"abc\" };\n"
+        "int a6[3] = { [0 ... 1] 7 };\n"
+        "int a7[2] = { [1] 1 + 2 * 3, [0] (int)2.5 };\n"
+        "static int g(int v) { return v * 3; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int i = 2;\n"
+        "    int b1[2] = { [1] g(i) + 1, [0] -i };\n"
+        "    int b2[2] = { [1] (int){ 3 }, [0] sizeof i };\n"
+        "    unsigned o = 0o17 + 0O7u;\n"
+        "    return a1[1] == -1 && a1[2] == -2 && *a2[1] == 5 && sizeof a3 == 16 && a3[3] == 4 && a4[0][1] == -3 && a4[1][1] == 2 &&\n"
+        "           a5[1][2] == 'c' && a6[1] == 7 && a6[2] == 0 && a7[1] == 7 && a7[0] == 2 && b1[1] == 7 && b1[0] == -2 && b2[1] == 3 &&\n"
+        "           b2[0] == 4 && o == 22 ? 42 : 1;\n"
+        "}\n";
+    char source[192];
+    snprintf(source, sizeof(source), "%s/declspec-accepted.c", directory);
+    const bool written = parse_test_write(source, accepted, sizeof(accepted) - 1);
+    for (uint32_t scalar = 0; executable != NULL && scalar < 2; scalar += 1)
+    {
+        char program[192];
+        snprintf(program, sizeof(program), "%s/declspec-accepted-%u", directory, scalar);
+        char* build[] = { (char*)executable, "-std=gnu17", scalar ? "--scalar" : "-w", "-w", "-o", program, source, NULL };
+        char* run[] = { program, NULL };
+        char* text = NULL;
+        const int built = written ? check_test_driver_spawn(build, &text) : -1;
+        free(text);
+        text = NULL;
+        const int status = built == 0 ? check_test_driver_spawn(run, &text) : -1;
+        free(text);
+        char description[192];
+        snprintf(description, sizeof(description), "0o and GNU's designators without '=' build and run with clang's values (%s path, status %d)",
+                 scalar ? "scalar" : "vector", status);
+        check_test_expect(test, status == 42, description);
+        unlink(program);
+    }
+    unlink(source);
+}
+
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
 #include "c_check_musttail_driver_test.c"
+#include "c_check_label_attribute_driver_test.c"
+#include "c_check_generic_builtin_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -5095,6 +5724,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // of section.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
+#include "c_check_common_driver_test.c"
+#include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_fence_driver_test.c"
 
@@ -5605,6 +6236,7 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
 }
 
 #include "c_check_hardening_driver_test.c"
+#include "c_check_deep_driver_test.c"
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
@@ -5645,6 +6277,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     check_test_expect(&test, options, "driver test options are recognized");
+    // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION: a different clang release is reported with
+    // both versions, and the library comparisons then skip only the names that depend on its table (#1131).
+    check_driver_clang_reference = clang_reference_report(clang, check_driver_clang_version, sizeof(check_driver_clang_version));
+    check_test_expect(&test, pp_test_clang_reference(), "clang reference: version comparison and mismatch reporting");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below and
@@ -6123,6 +6759,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     const bool temporary = options && mkdtemp(directory) != NULL;
     check_test_expect(&test, temporary, "driver test directory is available");
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
+    if (temporary && !lazy && check_test_driver_takes())
+    {
+        check_test_driver_deep(&test, clang, executable, directory);
+    }
     for (uint32_t i = 0; temporary && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         if (check_test_driver_takes())
@@ -6217,6 +6857,15 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
+            check_test_driver_label_attributes(&test, clang, executable, directory);
+            check_test_driver_unknown_attributes(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_generic_builtins(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_const(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -6254,6 +6903,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (check_test_driver_takes())
         {
             check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
+        }
+        if (check_test_driver_takes())
+        {
+            check_test_driver_declspec_literals(&test, clang, executable, directory, lazy);
         }
         if (check_test_driver_takes())
         {
@@ -6312,6 +6965,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_retained(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_commons(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_conventions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -6375,6 +7036,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_section_bounds(&test, clang, executable, directory);
+                check_test_driver_section_bounds_exact(&test, clang, executable, directory);
+                check_test_driver_section_bounds_static(&test, executable, directory);
+                check_test_driver_section_bounds_align(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_members(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -6431,7 +7099,27 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_wide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_shapes(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_tls(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_vectors(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_dynamic(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_bmi(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -6439,7 +7127,23 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_counters(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_helper_report(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_placed(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_unwind(&test, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_volatile_order(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

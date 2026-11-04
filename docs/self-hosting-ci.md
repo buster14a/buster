@@ -10,16 +10,24 @@ inventory changes, on the daily schedule (to catch compiler drift), and on a
 manual dispatch. It is not a required per-PR check. The daily schedule is the
 backstop for compiler changes that never touch the gate itself.
 
-## Hosted hardware and the current vector requirement
+## Hosted hardware and the two host paths
 
-The bootstrap needs the complete `host_isa.h` host vector feature set. Hosted CPU
-models vary, so the workflow checks the export
-`BUSTER_HOST_VECTOR` before building. A hosted runner without that path skips
-the bootstrap with a job warning and a **SKIPPED** entry in the step summary;
-the inexpensive harness job still runs. This is a temporary limitation:
-baseline `-march=x86-64` self-hosting still depends on #1108. Once #1108 is
-fixed, remove the check and the skip so the bootstrap runs on every hosted
-runner. Do not silently replace it with a scalar run before then.
+The bootstrap job runs twice, as a matrix of `BUSTER_HOST_ARCH`:
+
+- **`native`** qualifies the vector host path and needs the complete
+  `host_isa.h` host vector feature set. Hosted CPU models vary, so the workflow
+  checks the export `BUSTER_HOST_VECTOR` before building. A hosted runner
+  without that path skips this bootstrap with a job warning and a **SKIPPED**
+  entry in the step summary.
+- **`x86-64`** qualifies the baseline scalar host path (#1193): stage 1 is
+  `build.sh`'s `x86-64` build, and every unit compiles at `-march=x86-64`, with
+  vectors of 32 and 64 bytes returned split across XMM registers and their
+  operators split into SSE2 pieces, as clang's code does. It runs on every
+  hosted runner. Its staged Clang must select the scalar path there; a runner
+  whose compiler selects the vector path at `-march=x86-64` fails the job.
+
+The inexpensive harness job runs regardless. Each bootstrap uploads its own
+artifact, named by its `BUSTER_HOST_ARCH`.
 
 ## What must pass
 
@@ -86,7 +94,9 @@ compile/link/smoke/probe times needed to decide whether a tighter budget or a
 different cadence is warranted.
 
 From the repository root on an eligible native Linux host with Clang 23 on
-`PATH`, use these single-line commands (choose an unused absolute output path):
+`PATH`, use these single-line commands (choose an unused absolute output path).
+For the baseline bootstrap, set `BUSTER_HOST_ARCH=x86-64` in all three
+`build.sh` commands instead; it runs on any Linux/x86-64 host:
 
 ```sh
 BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 ./build.sh

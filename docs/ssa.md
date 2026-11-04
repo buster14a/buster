@@ -174,7 +174,8 @@ computed addresses, mismatched access types, volatile accesses and excluded
 slot flags keep the entire slot in memory. Other untyped storage stays in memory;
 typed temporary slots can promote, as can an untyped temporary slot whose
 accesses all agree on one scalar type (a depth slot's `&&`, `||` and `?:`
-values), which promotes with the agreed type. Eligibility relies on the supplied IR
+values, which the typed-stream lowering gives a slot per depth and type, #1189),
+which promotes with the agreed type. Eligibility relies on the supplied IR
 metadata; the source producer is responsible for marking volatility and
 address-taking correctly.
 

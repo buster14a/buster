@@ -55,7 +55,7 @@ static bool check_input_overload_active(const CheckInputReader* reader, uint32_t
     if (reader->overload_candidates != 0 && reader->declaration_kinds[token] == C_BINDING_FUNCTION)
     {
         const uint32_t name = reader->parser->tokens.names[token];
-        active = reader->overload_index.active[name] || (check_input_overload_flags(reader->output->attributes[token]) & BUSTER_CHECK_OVERLOADABLE) != 0;
+        active = reader->overload_index.active[name] || (check_input_overload_flags(check_input_attributes_at(reader->output, token)) & BUSTER_CHECK_OVERLOADABLE) != 0;
     }
     return active;
 }
@@ -78,7 +78,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .previous = head,
             .scope = scope,
             .position = point,
-            .flags = check_input_overload_flags(input->attributes[token]) | (reader->defined[token] ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
+            .flags = check_input_overload_flags(check_input_attributes_at(input, token)) | (check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
         };
         const CheckOverloadContext context = {
             .semantic = check_input_context(reader, point, token, false),
@@ -101,7 +101,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
             if ((old != 0 && reader->bindings.depth[old - 1] == reader->scope_count && reader->bindings.kind[old - 1] != C_BINDING_FUNCTION) ||
                 (linked != 0 && reader->declaration_kinds[linked - 1] != C_BINDING_FUNCTION) ||
-                (old != 0 && reader->linkage[previous] != 0 && reader->linkage[previous] != reader->linkage[token]))
+                (old != 0 && check_input_linkage(reader->declaration_bits, previous) != 0 && check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token)))
             {
                 declared.status = CHECK_OVERLOAD_CONFLICT;
             }
@@ -125,12 +125,12 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
                 else if (signature == TYPE_ANSWER_YES)
                 {
                     const TypeAnswer compatible = check_overload_compatible(reader->types, prior->type, candidate.type, &context);
-                    if (compatible != TYPE_ANSWER_YES || reader->linkage[prior->declaration] != reader->linkage[token] ||
+                    if (compatible != TYPE_ANSWER_YES || check_input_linkage(reader->declaration_bits, prior->declaration) != check_input_linkage(reader->declaration_bits, token) ||
                         ((prior->flags ^ candidate.flags) & BUSTER_CHECK_OVERLOADABLE) != 0)
                     {
                         declared.status = compatible == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_CONFLICT;
                     }
-                    else if (reader->defined[token] && (prior->flags & BUSTER_CHECK_OVERLOAD_DEFINED) != 0)
+                    else if (check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) && (prior->flags & BUSTER_CHECK_OVERLOAD_DEFINED) != 0)
                     {
                         declared.status = CHECK_OVERLOAD_REDEFINITION;
                     }

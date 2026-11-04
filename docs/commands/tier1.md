@@ -20,15 +20,26 @@ requirements. [Command index](README.md).
   self-loops. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. Long double, the 128-bit integers and the convention's rarer
-  aggregate shapes still refuse explicitly ([the Tier 1
-  guide](../../docs/tier1.md)'s list). AVX-512's
+  edge's stub. A straight line whose allocation can't place a value (an evicted
+  parameter whose incoming register another operand holds) goes through the CFG
+  consumer too. The 128-bit integers are split into 64-bit halves before the
+  optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
+  [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
+  random 128-bit programs, through the split by both paths, the optimizer and
+  both of Tier 1's paths natively, against the IR's interpreter on the unsplit
+  function and the programs' stack machine; and Tier 0's random long double
+  programs, whose values the CFG consumer keeps in frame objects and computes on
+  the x87 stack (`TIER1_RULE_X87`, #141), natively against their stack machine.
+  The convention's rarer aggregate shapes are taken; those of vectors still
+  refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
   stores, constants and bitcasts to and from integers of every width) and
   allocated in the opmask class by the CFG consumer, which moves and spills them
-  at their widths and saves them around calls; vectors are refused (#141). Run
+  at their widths and saves them around calls; and vectors (#141), in the vector
+  class at their widths, passed and returned by value as aggregates in a vector
+  register whole. Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
-  `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
+  `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
   natively against the IR's interpreter; Tier 0's mask programs and every `_k*`
   builtin's row through the IR, SSA and the optimizer to Tier 1's native code) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
@@ -46,3 +57,34 @@ requirements. [Command index](README.md).
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](../../docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
+- `measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR
+  --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep]
+  [--uncounted]` (`tier1_programs_measure.c`, #138 and #1189) builds the
+  programs Tier 1 is measured by against clang -O2: speedtest1 (DIR/sqlite3.c,
+  DIR/speedtest1.c, #136's flags and options) and Lua 5.4.8's interpreter (its
+  33 sources) running the five scripts of the `cc3387f` record. Each is built
+  by this compiler's Tier 0 and `--tier1 -fno-asynchronous-unwind-tables`, clang
+  -O0 and -O2, and tcc (left out without `--tcc`), as that record's `corpora.sh`
+  builds them: speedtest1 as one translation unit but by clang, which compiles an
+  object of each file and links them. It checks that speedtest1's `--verify`
+  gives one hash and each script prints clang -O0's output, then runs every
+  build of every program in `--runs` rounds (11) of a rotating order, as whole
+  processes (`profile.c`'s), each with its wall time and its user cycles and
+  instructions, every speedtest1 run from a fresh database: its files and
+  SQLite's temporary directory removed before it, outside its time, as the
+  record's runs were. It prints a tab-separated `tier1-programs-run` line per
+  run (its phase, round, position, program, build, wall time, counters, status
+  and whether it was counted), each pair's medians, then a table of
+  speedtest1's and Lua's (the sum of the scripts' medians) by build, with
+  `--tier1` against clang -O2 and -O0. Every run must exit 0 and be counted
+  (`--uncounted`, for a host without the counters, skips the latter). The
+  caller pins it; the 9700X job runs it under the `tier1_programs` gate (Tier
+  1's input and pipeline: the checker's lowering, the emission's Tier 1 step,
+  the IR's passes and Tier 1's own modules; and the measurement: its harness,
+  `profile.c` and `compile_measure.c`), and on its daily and dispatched runs,
+  with the scripts from a pinned buster-performance commit and the other inputs
+  by their hashes. Against the record, its clang builds link with clang rather
+  than `cc`, and each run's counters are its own rather than `perf stat`'s of
+  one run per build. `correctness.tests` checks its dispatch on every run: an
+  incomplete command prints its usage, and one without its inputs fails its
+  first build.

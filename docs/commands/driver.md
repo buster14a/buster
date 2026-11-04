@@ -23,10 +23,14 @@ requirements. [Command index](README.md).
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
-  unwind tables alike, #177's `check_tier1_frame`; without `-g`;
+  code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
+  Tier 1's rows at the function's granularity, the Tier 1 guide's "Debug
+  information";
   `--tier1-strict` fails qualification on an unsupported body rather than
   falling back, while resource and internal failures fail either mode;
-  `--tier1-report` and `--tier1-refusals` say which step refused the others,
+  `--tier1-report` and `--tier1-refusals` say which step refused the others
+  (and with `--verify`, how many functions' code its certificate proved,
+  `code_certified`, or left for a shape it doesn't decode, `code_uncertified`),
   and `--tier1-no-rematerialize` compiles them without rematerialization and
   `--tier1-no-lifetimes` without their objects' lifetimes: [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and [Tier 1 failure
@@ -52,8 +56,9 @@ requirements. [Command index](README.md).
   while lane 0 starts the command (`BUSTER_LANE_SESSION_LAZY`; lane 0 learns
   how many it asks for at its first wide part, `lane_session_asked`, and how
   they started, `lane_session_settle`), and kept parked until the process exits;
-  the jobserver's slots are taken per wide region, never at the start, and
-  lanes that can't start leave the command on one. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
+  the jobserver's slots are taken per wide region, never at the start, an
+  emission short of its lanes taking more as other recipes give theirs back
+  (#673), and lanes that can't start leave the command on one. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
   `-g`, its DWARF units' functions'). With several source files (#152,
   `c_checker_units.c`, the [translation units guide](../../docs/translation-units.md))
   the units compile on lanes instead, one unit a lane at a time, with lanes

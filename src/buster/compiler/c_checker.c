@@ -41,6 +41,13 @@ struct CheckBuiltinCall
     const uint8_t* nan_payload;
     uint32_t nan_payload_length;
     bool nan_payload_known;
+    // Whether an explicit cast was stripped before that literal: clang's literal-only arguments (allow_runtime_check's,
+    // allow_sanitize_check's, cpu_supports' and cpu_is') refuse one, as annotation's doesn't (#1126's review).
+    bool nan_payload_cast;
+    // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
+    // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
+    uint32_t function_objects[4];
+    uint32_t function_object_count;
     bool string_literal_start;
     bool absolute_address_constant;
     bool complex_constant;
@@ -297,14 +304,17 @@ struct CheckStatistics
     uint64_t output_bytes;
     uint64_t scratch_bytes;
     // The vector path's memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
-    // (hits), those probed and not found (misses), those whose operator memoizes but an operand or argument of which holds
-    // a payload, most often a constant to fold (folds), the entries inserted and the table's entries at the end, and with
-    // CheckOptions.verify_transitions, the hits whose action gave another answer.
+    // (hits, of which those found after the batch their operands waited in ran: flushed hits), those probed and not found
+    // (misses), those whose operator memoizes but an operand or argument of which has no class, a fault or an overload set
+    // (folds), the entries inserted and the table's entries at the end, and with CheckOptions.verify_transitions, the hits
+    // checked by their actions too (verified) and those whose action gave another answer (mismatches).
     uint32_t transition_hits;
+    uint32_t transition_flushed_hits;
     uint32_t transition_misses;
     uint32_t transition_folds;
     uint32_t transition_inserts;
     uint32_t transition_entries;
+    uint32_t transition_verified;
     uint32_t transition_mismatches;
 };
 
@@ -353,6 +363,8 @@ struct CheckBuiltinMiscEffect
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    // cpu_supports's word and bit, or cpu_is's field and value (CheckBuiltinMiscResult.cpu_test).
+    uint64_t cpu_test;
 };
 
 typedef struct CheckBuiltinFloatEffect CheckBuiltinFloatEffect;
@@ -541,6 +553,11 @@ struct CheckStream
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
     CheckReport* reports;
+    // Whether the columns whose empty value is zero are zero wherever no write has reached them, and each write is its
+    // node's first: check_graph_run's main loop, in an output arena whose bytes past its length are as the kernel mapped
+    // them (CheckOptions.fresh_output). Its writes then leave a zero unwritten, so that the diagnostics, their operands,
+    // the warnings and their ignored kinds, which few nodes have, take no memory where no node has one (#1050).
+    bool zero_columns;
     // Valid overflow stores in increasing graph-node order. This is a semantic descriptor stream: consumers
     // execute only effects belonging to reached expression nodes, never stores in an unselected branch.
     CheckStoreEffect* effects;
@@ -579,26 +596,88 @@ struct CheckOptions
     bool scalar;
     // Validate reader-owned graphs too, and compare their retained purity/allocation facts with the oracle.
     bool verify;
-    // 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
+    // With regions, 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
     uint32_t batch_size;
-    // The vector path's regions by dependency level (check_graph_region) rather than in postorder batches
-    // (check_graph_region_postorder), its default since the benchmark measured the two on the same actions and
-    // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
+    // The vector path's mutation-free regions: each run of pure nodes checked as a region, in postorder batches whose
+    // integer folds take 8 lanes at a time (check_graph_region_postorder), rather than each node in node order, the vector
+    // path's default since on sqlite3.c's -c a region's machinery cost more than its batches saved (#1050; docs/c-checker.md,
+    // "Node order or regions"). The typed stream is the same.
+    bool regions;
+    // The regions by dependency level (check_graph_region) rather than in postorder batches (check_graph_region_postorder),
+    // their order since the benchmark measured the two on the same actions and postorder won (#133's open question;
+    // docs/c-checker.md, "Level order or postorder"); it takes the regions. The typed stream is the same.
     bool level_order;
-    // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than its regions in postorder
-    // batches: opt in (the driver's --check-transitions), since on the 9700X they saved 4% of sqlite3.c's graph run, about
-    // 0.5% of its compile, and the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes
-    // none.
+    // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than in node order: opt in (the
+    // driver's --check-transitions), since they don't save a large fraction of check-expressions, and the benchmark compares
+    // them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
     bool transitions;
-    // With transitions, their alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
-    // (check_graph_transition_windows), rather than node by node, which the benchmark compares.
-    bool transition_windows;
     // Each transition hit's action run as well, its result stored and compared with the transition's
     // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
     bool verify_transitions;
+    // The caller knows that no copy of `output` pushed past its length, so that arena_untouched tells whether its bytes
+    // past it are as the kernel mapped them, zero (#628's fresh_output): the C driver's output arena, whose first user the
+    // run is. The run then clears no column and writes no zero in its main loop (CheckStream.zero_columns).
+    bool fresh_output;
 };
 
-// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628).
+_Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, category) == 4 && __builtin_offsetof(CheckValue, flags) == 8 && __builtin_offsetof(CheckValue, constant_kind) == 12 &&
+               __builtin_offsetof(CheckValue, integer) == 16 && __builtin_offsetof(CheckValue, object) == 64,
+               "check_stream_value_to writes a value as its first 64 bytes, its header and three payloads, and its last 32, from its object");
+
+// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), written to `destination` by
+// each case's own stores. On the vector path a value of columns is one 64-byte store of its header, the rest of those 64
+// bytes zero, and one 32-byte store of its object, the rest zero; a whole value is copied by the same two halves, so that
+// a load of a field, or of either half, lies within one store. Returned through a temporary instead, as check_stream_value
+// returns it, the columns' case was cleared by two overlapping 32-byte stores and copied into the action by a 32-byte load
+// across both, which no store can forward: the instruction most sampled in check-expressions of sqlite3.c's -c, at each
+// operand of each action (#1050). The scalar path is the same value by assignment.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_action, once per operand.
+static inline __attribute__((always_inline)) void check_stream_value_to(const CheckStream* stream, uint32_t node, CheckValue* destination)
+{
+    const CheckValue* whole = NULL;
+    if (stream->dense_values != NULL)
+    {
+        whole = stream->dense_values + node;
+    }
+    else
+    {
+        const uint32_t row = stream->payload_rows[node];
+        whole = row != 0 && row <= stream->payload_count ? stream->payloads + row - 1 : NULL;
+    }
+#if BUSTER_HOST_VECTOR
+    uint8_t* bytes = (uint8_t*)destination;
+    if (whole != NULL)
+    {
+        check_value_copy(destination, whole);
+    }
+    else
+    {
+        const __m128i header = _mm_setr_epi32((int)stream->value_types[node], (int)stream->value_categories[node], (int)stream->value_flags[node],
+                                              (int)stream->value_constants[node]);
+        _mm512_storeu_si512(bytes, _mm512_zextsi128_si512(header));
+        _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)stream->value_objects[node])));
+    }
+#else
+    if (whole != NULL)
+    {
+        *destination = *whole;
+    }
+    else
+    {
+        *destination = (CheckValue){
+            .type = stream->value_types[node],
+            .category = (CheckCategory)stream->value_categories[node],
+            .flags = stream->value_flags[node],
+            .constant_kind = (CheckConstantKind)stream->value_constants[node],
+            .object = stream->value_objects[node],
+        };
+    }
+#endif
+}
+
+// A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), by assignment: its callers,
+// the lowering's most of all, take it into registers or a value of their own, which check_stream_value_to's stores would
+// leave them to copy whole across its two halves (#1050).
 static CheckValue check_stream_value(const CheckStream* stream, uint32_t node)
 {
     CheckValue result;
@@ -691,20 +770,27 @@ static bool check_stream_value_rest(const CheckValue* value)
 // gave it (check_graph_run clears `payload_rows` first), so that it has at most one, and `payloads` needs no more rows
 // than the stream has nodes, whatever its writes.
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_leaf, once per leaf.
-static inline __attribute__((always_inline)) void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
+// check_stream_set_value of `value` but its flags, which are `flags`: check_graph_store writes an action's result so, field
+// by field from where the action wrote it, rather than copying the whole result to change its flags, a wide reload of the
+// action's narrow stores just made (#1050).
+// Always inlined (#880), as profile-guided builds do; hot callers: check_graph_leaf and check_graph_store, once per node.
+static inline __attribute__((always_inline)) void check_stream_set_value_flags(CheckStream* stream, uint32_t node, const CheckValue* value, uint32_t flags)
 {
     if (stream->dense_values != NULL)
     {
         stream->dense_values[node] = *value;
+        stream->dense_values[node].flags = flags;
     }
     else
     {
         stream->value_types[node] = value->type;
-        stream->value_flags[node] = value->flags;
+        stream->value_flags[node] = flags;
         stream->value_objects[node] = value->object;
         stream->value_categories[node] = (uint8_t)value->category;
         stream->value_constants[node] = (uint8_t)value->constant_kind;
-        uint32_t row = stream->payload_rows[node];
+        // A first write (CheckStream.zero_columns) has no row yet: it reads none, so that no page of the column is mapped
+        // but where a row is written.
+        uint32_t row = stream->zero_columns ? 0 : stream->payload_rows[node];
         row = row != 0 && row <= stream->payload_count ? row : 0;
         if (row == 0 && check_stream_value_rest(value))
         {
@@ -713,9 +799,19 @@ static inline __attribute__((always_inline)) void check_stream_set_value(CheckSt
         if (row != 0)
         {
             stream->payloads[row - 1] = *value;
+            stream->payloads[row - 1].flags = flags;
         }
-        stream->payload_rows[node] = row;
+        if (row != 0 || !stream->zero_columns)
+        {
+            stream->payload_rows[node] = row;
+        }
     }
+}
+
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_leaf, once per leaf.
+static inline __attribute__((always_inline)) void check_stream_set_value(CheckStream* stream, uint32_t node, const CheckValue* value)
+{
+    check_stream_set_value_flags(stream, node, value, value->flags);
 }
 
 // A VALUE node's leaf (CheckGraph.leaves).
@@ -784,8 +880,12 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
     return result;
 }
 
-// Always inlined (#880), as profile-guided builds do; hot caller: check_input_add_node, once per node.
-static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2)
+// A node of `op` at `token` with operands operand0 to operand2, each NONE or an earlier node, and its columns' defaults: a
+// VALUE node takes the next leaf, which `clear` clears for its maker to fill. Without `clear` its maker writes the whole
+// leaf itself (the reader's coded walk, #1038, whose leaves are written whole, so that each isn't written twice). Always
+// inlined (#880), as profile-guided builds do; hot callers: check_graph_add and check_input_add_columns, once per node.
+static inline __attribute__((always_inline)) uint32_t check_graph_add_node(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
+                                                                           uint32_t operand2, bool clear)
 {
     uint32_t result = BUSTER_CHECK_NONE;
     const uint32_t node = graph->count;
@@ -796,14 +896,13 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
         graph->operand0[node] = operand0;
         graph->operand1[node] = operand1;
         graph->operand2[node] = operand2;
-        // A VALUE node takes the next leaf, cleared for its maker to fill.
         const bool leaf = op == CHECK_OP_VALUE;
         graph->leaf_slots[node] = leaf ? graph->leaf_count : BUSTER_CHECK_NONE;
-        if (leaf)
+        if (leaf && clear)
         {
             graph->leaves[graph->leaf_count] = (CheckValue){ 0 };
-            graph->leaf_count += 1;
         }
+        graph->leaf_count += leaf;
         graph->types[node] = 0;
         graph->members[node] = 0;
         graph->contexts[node] = 0;
@@ -826,6 +925,13 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
         result = node;
     }
     return result;
+}
+
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_add_node, once per node.
+static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
+                                                                      uint32_t operand2)
+{
+    return check_graph_add_node(graph, op, token, operand0, operand1, operand2, true);
 }
 
 static bool check_graph_has_arguments(CheckOp op)
@@ -877,7 +983,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_LAUNDER))
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_COMPLEX) || cbuiltin_misc_last(id))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -1522,12 +1628,12 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
     {
         if (operands[i] != BUSTER_CHECK_NONE)
         {
-            action->operands[i] = check_stream_value(stream, operands[i]);
+            check_stream_value_to(stream, operands[i], &action->operands[i]);
         }
     }
     if (action->op == CHECK_OP_VALUE)
     {
-        action->operands[0] = *check_graph_leaf_of(graph, node);
+        check_value_copy(&action->operands[0], check_graph_leaf_of(graph, node));
     }
     if (check_graph_has_arguments(action->op) && graph->argument_counts != 0)
     {
@@ -1535,7 +1641,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
         action->argument_count = graph->argument_counts[node];
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
-            arguments[i] = check_stream_value(stream, graph->argument_nodes[offset + i]);
+            check_stream_value_to(stream, graph->argument_nodes[offset + i], &arguments[i]);
         }
         action->arguments = arguments;
         action->argument_conversions = action->argument_count != 0 ? stream->argument_conversions + offset : 0;
@@ -1585,16 +1691,44 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per node.
+// A conversion record by its two fields, each one load: an action writes a record's type and flags by separate stores, and
+// a wide copy of records just written, as check_graph_store's memcpy of an action's three was, spans several of them, which
+// a store can forward only one of (#1050). Relaxed atomic loads, which the compiler doesn't merge into wider ones, keep the
+// two loads apart; nothing else accesses the record meanwhile.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_store, four times per action.
+static inline __attribute__((always_inline)) CheckConversion check_conversion_fields(const CheckConversion* conversion)
+{
+    const CheckConversion result = {
+        .type = __atomic_load_n(&conversion->type, __ATOMIC_RELAXED),
+        .flags = __atomic_load_n(&conversion->flags, __ATOMIC_RELAXED),
+    };
+    return result;
+}
+
 static inline __attribute__((always_inline)) void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
 {
-    CheckValue value = result->value;
-    value.flags = check_value_source_flags((CheckOp)stream->graph->ops[node], value.flags);
-    check_stream_set_value(stream, node, &value);
-    memcpy(stream->conversions[node].operands, result->conversions, sizeof(result->conversions));
-    stream->conversions[node].store = result->store_conversion;
-    stream->diagnostics[node] = result->diagnostic;
-    stream->diagnostic_operands[node] = result->diagnostic_operand;
-    stream->warnings[node] = result->warnings;
+    check_stream_set_value_flags(stream, node, &result->value, check_value_source_flags((CheckOp)stream->graph->ops[node], result->value.flags));
+    CheckNodeConversions* conversions = stream->conversions + node;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->conversions); i += 1)
+    {
+        conversions->operands[i] = check_conversion_fields(&result->conversions[i]);
+    }
+    conversions->store = check_conversion_fields(&result->store_conversion);
+    // Few nodes have a diagnostic or a warning: in a fresh output (CheckStream.zero_columns), the run writes only those
+    // that do. A member's offset is written whatever it is, since the member accesses, a node in 13 of sqlite3.c's, touch
+    // every line of its column anyway.
+    if (result->diagnostic != CHECK_DIAG_NONE || !stream->zero_columns)
+    {
+        stream->diagnostics[node] = result->diagnostic;
+    }
+    if (result->diagnostic_operand != 0 || !stream->zero_columns)
+    {
+        stream->diagnostic_operands[node] = result->diagnostic_operand;
+    }
+    if (result->warnings != 0 || !stream->zero_columns)
+    {
+        stream->warnings[node] = result->warnings;
+    }
     stream->member_offsets[node] = result->member_offset;
 }
 
@@ -1604,10 +1738,39 @@ static inline __attribute__((always_inline)) void check_graph_store(CheckStream*
 #define BUSTER_CHECK_MARK_DONE 0x02u
 
 // Whether the vector path completes `node` as a leaf (check_graph_leaf): a VALUE without an overload set, about 45% of
-// sqlite3.c's body nodes.
+// sqlite3.c's body nodes. Without overload candidates no leaf has an overload set (check_graph_validate checks the leaves',
+// as check_graph_node_action relies on), and its record isn't read for it.
 static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 {
-    return graph->ops[node] == CHECK_OP_VALUE && check_graph_leaf_of(graph, node)->overload_head == 0;
+    return graph->ops[node] == CHECK_OP_VALUE && (graph->overload_candidate_count == 0 || check_graph_leaf_of(graph, node)->overload_head == 0);
+}
+
+// The end of the run of marked nodes from `node`, a region of check_graph_run's main loop: the first node from `node`
+// without a mark, or `count`. The vector path tests 64 marks at a time, masked to the graph's end, and takes the first
+// that is zero; the scalar path, and the vector path after it as a check that ends at once, take each node. Scanned a
+// node at a time, its exit, at a data-dependent length, was the main loop's most sampled branch on the 9700X (#1050).
+static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(const uint8_t* marks, uint32_t node, uint32_t count, bool scalar)
+{
+    (void)scalar;
+
+    uint32_t end = node;
+#if BUSTER_HOST_VECTOR
+    bool open = !BUSTER_SCALAR_PATH(scalar);
+    while (open && end < count)
+    {
+        const uint32_t live = count - end < 64 ? count - end : 64;
+        const __mmask64 lanes = (__mmask64)_bzhi_u64(~(uint64_t)0, live);
+        const __m512i block = _mm512_maskz_loadu_epi8(lanes, marks + end);
+        const uint64_t unmarked = (uint64_t)_mm512_mask_testn_epi8_mask(lanes, block, block);
+        open = unmarked == 0;
+        end += open ? live : (uint32_t)_tzcnt_u64(unmarked);
+    }
+#endif
+    while (end < count && marks[end] != 0)
+    {
+        end += 1;
+    }
+    return end;
 }
 
 // Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
@@ -1621,10 +1784,23 @@ static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTab
     const CheckValue* leaf = check_graph_leaf_of(graph, node);
     const bool valid = type_is_valid(types, leaf->type);
     check_stream_set_value(stream, node, valid ? leaf : &(const CheckValue){ 0 });
-    stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
-    stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
-    stream->warnings[node] = 0;
-    stream->member_offsets[node] = 0;
+    // In a fresh output (CheckStream.zero_columns) the record's other fields, the warnings, the member's offset and a
+    // valid leaf's diagnostic are zero already.
+    if (stream->zero_columns)
+    {
+        stream->conversions[node].operands[0].type = leaf->type;
+        if (!valid)
+        {
+            stream->diagnostics[node] = CHECK_DIAG_INVALID_TYPE;
+        }
+    }
+    else
+    {
+        stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
+        stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
+        stream->warnings[node] = 0;
+        stream->member_offsets[node] = 0;
+    }
     stream->statistics.vector_nodes += 1;
 }
 
@@ -1667,15 +1843,31 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     }
     const char* name = call->info->name;
     const uint32_t length = call->info->name_length;
-    // The library builtins (c_builtin_library.c) are calls of their prototypes too, those the lowering refuses by name
-    // among them, and a listed one folds where clang folds it.
+    // The library builtins (c_builtin_library.c) are calls of their prototypes too, and a listed one folds where clang
+    // folds it.
     const bool candidate = cbuiltin_library_candidate(name, length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
     const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
-                               (candidate && (cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC || cbuiltin_library_refusal(name, length) != NULL));
+                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC) ||
+                               (candidate && cbuiltin_library_alias(name, length) != CBUILTIN_LIBRARY_COUNT);
     if (library != CBUILTIN_LIBRARY_COUNT)
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
+    }
+    if (cbuiltin_library_half(library) && result->diagnostic == CHECK_DIAG_NONE)
+    {
+        // A builtin of __fp16 (#148, c_builtin_library.c): its function type's _Float16 stands for the prototype's __fp16,
+        // which the arguments convert to (binary16's rounding is the same) and the call's value has, a folded one too.
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, action->type, &count);
+        for (uint32_t i = 0; i < count && i < action->argument_count; i += 1)
+        {
+            if (parameters[i] == BUSTER_TYPE_FLOAT16 && action->argument_conversions[i].type == BUSTER_TYPE_FLOAT16)
+            {
+                action->argument_conversions[i].type = BUSTER_TYPE_HALF;
+            }
+        }
+        result->value.type = type_unqualified(result->value.type) == BUSTER_TYPE_FLOAT16 ? BUSTER_TYPE_HALF : result->value.type;
     }
     if (ordinary_call)
     {
@@ -1923,6 +2115,12 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
             .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
+            .string_known = witness != NULL && witness->nan_payload_known,
+            .string_cast = witness != NULL && witness->nan_payload_cast,
+            .function_objects = witness != NULL ? witness->function_objects : NULL,
+            .function_object_count = witness != NULL ? witness->function_object_count : 0,
+            .string_bytes = witness != NULL ? witness->nan_payload : NULL,
+            .string_length = witness != NULL ? witness->nan_payload_length : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
@@ -1953,6 +2151,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .allocates_stack = checked.allocates_stack,
             .alignment_offset_known = checked.alignment_offset_known,
+            .cpu_test = checked.cpu_test,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_FLOAT)
@@ -2433,10 +2632,66 @@ static void check_graph_guarded_node(TypeTable* types, const CheckGraph* graph, 
     check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, guards);
 }
 
+// Whether node `node` is a discard of an rvalue that check_graph_discard takes, with that rvalue in `value`: a cast to void,
+// a statement's value as the reader gives it (check_input_expression_terminator), of a valid rvalue without an overload set
+// that is no array, function, vector or complex value, outside a constant evaluation and FP_ENV_ACCESS, in a graph without
+// overload candidates. Its action then reads nothing else and makes no diagnostic (check_action_compute through
+// check_action_cast): the operand's conversion is none, and the cast's checks of its target all pass for void.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per impure node.
+static inline __attribute__((always_inline)) bool check_graph_discard_taken(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckValue* value)
+{
+    bool taken = graph->ops[node] == CHECK_OP_CAST && graph->types != NULL && graph->types[node] == BUSTER_TYPE_VOID && graph->overload_candidate_count == 0 &&
+                 (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
+                 (graph->fp_environments == NULL || (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) == 0) && graph->operand0[node] != BUSTER_CHECK_NONE;
+    if (taken)
+    {
+        check_stream_value_to(stream, graph->operand0[node], value);
+        taken = type_is_valid(types, value->type) && value->overload_head == 0 && value->category == CHECK_RVALUE;
+    }
+    if (taken)
+    {
+        const uint8_t kind = check_action_kind(types, value->type);
+        taken = !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR &&
+                kind != BUSTER_TYPE_KIND_COMPLEX;
+    }
+    return taken;
+}
+
+// A discard's record (check_graph_discard_taken), without its action: what check_action_compute gives a cast to void of the
+// rvalue `value`, by the same steps, check_action_cast's conversion of it to void and its provenance, and the source flags.
+// On sqlite3.c's -c, a statement's discard is one node in eight, and its action's machinery (building the action, its
+// result's clearing and the dispatch) most of its time (#1050). The scalar path takes the action, the twin whose streams the
+// tests compare.
+// Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per discard.
+static inline __attribute__((always_inline)) void check_graph_discard(TypeTable* types, CheckStream* stream, uint32_t node, CheckValue* value)
+{
+    // The cast converts its operand, then takes it as its value: here the value is converted where the record holds it,
+    // the same bytes without a copy after the conversion's narrow stores.
+    CheckActionResult result;
+    memset(&result, 0, sizeof(result));
+    result.conversions[0].type = value->type;
+    check_value_copy(&result.value, value);
+    check_action_conversion(types, &result.value, BUSTER_TYPE_VOID, BUSTER_CHECK_CONVERT_CAST, &result.conversions[0], node);
+    check_action_cast_provenance(&result.value, false, false, false, true, true);
+    result.value.flags = check_value_source_flags(CHECK_OP_CAST, result.value.flags);
+    check_graph_store(stream, node, &result);
+    stream->statistics.scalar_nodes += 1;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per impure node.
 static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
 {
-    check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, NULL);
+    (void)scalar;
+
+    CheckValue discarded;
+    if (!BUSTER_SCALAR_PATH(scalar) && check_graph_discard_taken(types, graph, stream, node, &discarded))
+    {
+        check_graph_discard(types, stream, node, &discarded);
+    }
+    else
+    {
+        check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, NULL);
+    }
 }
 
 // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
@@ -2565,7 +2820,25 @@ static void check_graph_region_postorder(TypeTable* types, const CheckGraph* gra
                 {
                     open &= operands[i] == BUSTER_CHECK_NONE || operands[i] < begin || (marks[operands[i]] & BUSTER_CHECK_MARK_DONE) != 0;
                 }
-                if (open || count == 0)
+                // Only the operators whose integer folds a batch takes 8 lanes at a time (check_action_fold_operator)
+                // join it. Another node whose operands are done is checked at once, a discard without its action
+                // (check_graph_discard), as the batch's actions read none of each other and a region's nodes intern no
+                // type: the same records, and the same table. On sqlite3.c's -c a batch held 1.4 nodes, and its
+                // machinery cost more than it saved where no fold went with it (#1050).
+                CheckValue discarded;
+                if (open && check_graph_discard_taken(types, graph, stream, node, &discarded))
+                {
+                    check_graph_discard(types, stream, node, &discarded);
+                    marks[node] |= BUSTER_CHECK_MARK_DONE;
+                    node += 1;
+                }
+                else if (open && !check_action_fold_operator(graph->ops[node]))
+                {
+                    check_graph_node_action(types, graph, stream, node, 0, 0, false, NULL);
+                    marks[node] |= BUSTER_CHECK_MARK_DONE;
+                    node += 1;
+                }
+                else if (open || count == 0)
                 {
                     members[count++] = node;
                     node += 1;
@@ -2933,31 +3206,62 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
     return found;
 }
 
+
+#define BUSTER_CHECK_CONTEXT_LANES 64u
+
 // Valid graphs are in postorder: one reverse pass marks each required context and all of its dependencies.
 // This proof changes no graph column and is retained with the output rather than in the scheduler's scratch.
-static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks)
+// Only a context and the nodes it reaches mark anything: the vector path passes over each 64 nodes that hold neither a
+// context nor a mark from a later node, as one test of their two columns, since in postorder only a later node marks one
+// (#1050). The scalar path takes every node. `zero` says `marks` is zero already (a fresh output, CheckOptions.fresh_output).
+static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks, bool zero, bool scalar)
 {
-    memset(marks, 0, graph->count);
-    for (uint32_t node = graph->count; node-- > 0;)
+    (void)scalar;
+
+    const uint8_t required = BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE;
+    if (!zero)
     {
-        marks[node] |= graph->contexts != NULL && (graph->contexts[node] &
-            (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
-        if (marks[node] != 0)
+        memset(marks, 0, graph->count);
+    }
+    for (uint32_t node = graph->count; node > 0;)
+    {
+        bool skipped = false;
+#if BUSTER_HOST_VECTOR
+        if (!BUSTER_SCALAR_PATH(scalar) && graph->contexts != NULL && node >= BUSTER_CHECK_CONTEXT_LANES)
         {
-            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-            for (uint32_t i = 0; i < 3; i += 1)
+            const uint32_t first = node - BUSTER_CHECK_CONTEXT_LANES;
+            const __m512i contexts = _mm512_and_si512(_mm512_loadu_si512(graph->contexts + first), _mm512_set1_epi8((char)required));
+            skipped = _mm512_test_epi8_mask(_mm512_or_si512(contexts, _mm512_loadu_si512(marks + first)), _mm512_set1_epi8(-1)) == 0;
+        }
+#endif
+        if (skipped)
+        {
+            node -= BUSTER_CHECK_CONTEXT_LANES;
+        }
+        else
+        {
+            node -= 1;
+            if (graph->contexts != NULL && (graph->contexts[node] & required) != 0)
             {
-                if (operands[i] != BUSTER_CHECK_NONE)
-                {
-                    marks[operands[i]] = 1;
-                }
+                marks[node] = 1;
             }
-            if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
+            if (marks[node] != 0)
             {
-                const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
-                for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+                const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                for (uint32_t i = 0; i < 3; i += 1)
                 {
-                    marks[graph->argument_nodes[first + i]] = 1;
+                    if (operands[i] != BUSTER_CHECK_NONE)
+                    {
+                        marks[operands[i]] = 1;
+                    }
+                }
+                if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
+                {
+                    const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+                    for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+                    {
+                        marks[graph->argument_nodes[first + i]] = 1;
+                    }
                 }
             }
         }
@@ -3020,13 +3324,16 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     const uint32_t* maximum_builtins = validation.builtins;
     CheckValue* arguments = result && maximum_arguments != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, maximum_arguments) : 0;
     bool constant_contexts = false;
+    bool zero_output = false;
     for (uint32_t node = 0; result && graph->const_values != NULL && graph->contexts != NULL && !constant_contexts && node < count; node += 1)
     {
         constant_contexts = (graph->contexts[node] & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
     }
     if (result && count != 0)
     {
-        // Room for a payload row per node, of which the run writes the first few: only those take memory.
+        // Room for a payload row per node, of which the run writes the first few: only those take memory. In a fresh output,
+        // every column pushed here is zero until written (CheckOptions.fresh_output), and none is cleared.
+        zero_output = options->fresh_output && arena_untouched(output);
         stream->value_types = BUSTER_ARENA_PUSH_ARRAY(output, TypeId, count);
         stream->value_flags = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->value_objects = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
@@ -3034,7 +3341,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->value_constants = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count);
         stream->payload_rows = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->payloads = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
-        if (stream->payload_rows != NULL)
+        if (stream->payload_rows != NULL && !zero_output)
         {
             memset(stream->payload_rows, 0, (uint64_t)count * sizeof(uint32_t));
         }
@@ -3086,43 +3393,48 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         if (count != 0)
         {
-            memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
-            memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
+            if (!zero_output)
+            {
+                memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
+                memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
+            }
             if (constant_contexts)
             {
-                check_graph_constant_contexts(graph, stream->constant_evaluated);
+                check_graph_constant_contexts(graph, stream->constant_evaluated, zero_output, BUSTER_SCALAR_PATH(options->scalar));
             }
         }
-        if (stream->argument_conversions != 0)
+        if (stream->argument_conversions != 0 && !zero_output)
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
         // The vector path's memoized transitions (#1050, c_check_transitions.c) where the options ask for them, unless
         // overload sets make operands contextual, a column its keys read is absent (as check_graph_validate_vector's blocks
-        // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's impure
-        // leaves without their actions, its other impure nodes one at a time, and each run of pure nodes as a region; the scalar
-        // path's nodes one at a time.
+        // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's leaves
+        // without their actions and its other nodes one at a time, or with its regions (CheckOptions.regions, level_order)
+        // each run of pure nodes as a region; the scalar path's nodes one at a time.
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
         const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
-                                 (options->transition_windows ?
-                                  check_graph_transition_windows(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions) :
-                                  check_graph_transitions(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions));
+                                 check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
         if (transitions && stream->statistics.transition_mismatches != 0)
         {
             result = false;
             stream->status = CHECK_STATUS_INVALID_GRAPH;
         }
+        // The main loop writes each node once, first: in a fresh output it writes no zero (CheckStream.zero_columns), which the
+        // passes after it, which may write a node again, do.
+        stream->zero_columns = zero_output;
         uint32_t node = transitions ? count : 0;
+        const bool regions = !BUSTER_SCALAR_PATH(options->scalar) && (options->regions || options->level_order);
         while (node < count)
         {
-            if (!BUSTER_SCALAR_PATH(options->scalar) && pure[node] == 0 && check_graph_is_leaf(graph, node))
+            if (!BUSTER_SCALAR_PATH(options->scalar) && (!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
             {
                 check_graph_leaf(types, graph, stream, node);
                 node += 1;
             }
-            else if (BUSTER_SCALAR_PATH(options->scalar) || pure[node] == 0)
+            else if (!regions || pure[node] == 0)
             {
                 check_graph_scalar_node(types, graph, stream, node, arguments, scratch, BUSTER_SCALAR_PATH(options->scalar));
                 node += 1;
@@ -3130,10 +3442,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             else
             {
                 const uint32_t begin = node;
-                while (node < count && pure[node] != 0)
-                {
-                    node += 1;
-                }
+                node = check_graph_marked_end(pure, node, count, BUSTER_SCALAR_PATH(options->scalar));
                 if (options->level_order)
                 {
                     check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
@@ -3144,6 +3453,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 }
             }
         }
+        stream->zero_columns = false;
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
             const uint32_t exhausted = check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));

@@ -170,7 +170,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/branch_sizing.c`, `src/buster/compiler/branch_sizing_benchmark.c`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/) | Original branch-sizing integration, lengths-only SIMD implementation, scalar reference, tests, timing and scaling harnesses, and generated observations for #305; Default. Existing repository generators supply the inputs. AMD's Zen 5 guide supplies architectural guidance, not copied implementation. Clang, GNU as and Linux perf run externally; no tool implementation or external fixture corpus is imported. The measurement record identifies source revisions, compiler/CPU identities, exact commands, hashes and qualification limits. |
 | `src/buster/compiler/x86_semantics.c`, `src/buster/compiler/x86_semantics_test.c`, `src/buster/compiler/x86_semantics_benchmark.c`, `docs/x86-semantics.md` | Original form-effects tables, immediate contracts, form choice, tests, benchmark and documentation; Default. Intel and AMD manuals supply architectural facts, not copied implementation. The existing encoder catalogue and branch-sizing generator are reused; original fixtures execute on the processor, and GNU as runs externally as a byte oracle. The benchmark's measurement helpers are original to the module. No external implementation or fixture corpus is imported. |
 | `src/buster/compiler/assembler.c`, `src/buster/compiler/assembler_words.c`, `src/buster/compiler/assembler_test.c`, `src/buster/compiler/assembler_benchmark.c`, `src/buster/compiler/x86_match.c`, `docs/assembler.md` | Original assembly frontend, register classifier, matcher, tests, benchmark and documentation; Default. Encoder form facts and the project's validation and ELF interfaces are reused. GNU as and Clang run externally on original fixtures; their implementation is not imported. uops.info supplies measured instruction costs. The digit pair/quartet multiply-add reduction is implemented from the arithmetic, without copied source. |
-| `src/buster/compiler/assembler_sections.c`, `src/buster/compiler/assembler_cfi.c`, `src/buster/compiler/assembler_compat_test.c`, `src/buster/compiler/assembler_corpus_test.c`, `examples/assembler/compiler-corpus.c`, `examples/assembler/compiler-caller.c` | Original GNU assembly section/CFI adapters, differential fixtures and independent executable/unwind corpus; Default. GNU as documentation and observed output supply syntax/encoding behavior; ELF and DWARF describe format facts. GCC 16.2.1 and Clang 23.1.1 generate assembly at test time from the original C corpus, and GNU as runs externally as its object oracle. No external implementation or fixture corpus is incorporated. The recovered syntax/corpus work is this same repository's original stopped #233 attempt; its source and recovery boundaries are recorded with the qualification evidence. |
+| `src/buster/compiler/assembler_sections.c`, `src/buster/compiler/assembler_cfi.c`, `src/buster/compiler/assembler_lines.c`, `src/buster/compiler/assembler_compat_test.c`, `src/buster/compiler/assembler_corpus_test.c`, `src/buster/compiler/assembler_programs_test.c`, `examples/assembler/compiler-corpus.c`, `examples/assembler/compiler-caller.c`, `examples/assembler/program-floating.c`, `examples/assembler/program-storage.c`, `examples/assembler/program-strings.c`, `examples/assembler/program-switch.c`, `examples/assembler/program-gather.c` | Original GNU assembly section/CFI adapters, differential fixtures and independent executable/unwind corpus, and #1115's original whole-program corpus, whose assembly GCC and Clang generate at test time (GCC 13.3 and Clang 23.1.5 when it was written) and whose objects GNU as's are compared with; Default. GNU as documentation and observed output supply syntax/encoding behavior; ELF and DWARF describe format facts. GCC 16.2.1 and Clang 23.1.1 generate assembly at test time from the original C corpus, and GNU as runs externally as its object oracle. No external implementation or fixture corpus is incorporated. #1115's line table (`assembler_lines.c`: `.file N`, `.loc` and view numbers) follows GNU as's behavior, read from binutils 2.42's and 2.47's `gas/dwarf2dbg.c` and `gas/as.c` (GPL-3.0-or-later, read for behavior only) and checked against GNU as's objects; none of their code or text is incorporated. Its `.debug_frame` (`assembler_cfi.c`, `.cfi_sections`) likewise follows GNU as's behavior, read from binutils 2.42's and 2.47's `gas/dw2gencfi.c` (GPL-3.0-or-later, read for behavior only) and checked against GNU as's objects, with none of its code or text incorporated. The recovered syntax/corpus work is this same repository's original stopped #233 attempt; its source and recovery boundaries are recorded with the qualification evidence. |
 | `src/buster/compiler/x86_zen5.c`, `src/buster/compiler/x86_zen5_measure.c`, `src/buster/compiler/x86_zen5_test.c`, `docs/x86-zen5.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-zen5-2026-10-22/) | Original partial instruction-cost model, C microbenchmark generator, tests and hardware observations; Default. Inputs are this repository's encoder forms and original operand fixtures executed on the owner's Ryzen 7 9700X. No external timing dataset or benchmark implementation is imported. Clang and Linux perf are external tools; PMCx0C1 is the architectural retired-macro-op event, not executed micro-ops. The guide records the generation procedure and evidence. |
 | `src/buster/compiler/x86_target.c`, `src/buster/compiler/x86_target_forms.c`, `src/buster/compiler/x86_target_test.c`, `docs/x86-target.md` | Original target policy, form requirement rows, tests, benchmark and documentation; Default. CPUID fields and psABI levels are architectural facts. Macro/profile and builtin-query data were checked against Clang 23.1.3; the live tests rerun Clang as an external oracle. LLVM's target parser, target macro and host-detection sources were consulted for behavior, not copied. The existing encoder's original form-family macros are reused. Sources and reproduction are recorded in `docs/x86-target.md`. |
 | `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembly.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
@@ -208,6 +208,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_types.c`, `src/buster/compiler/c_types_test.c`, `src/buster/compiler/c_types_benchmark.c`, `docs/c-types.md` | Original type table, hash-consing, record layout, conversion kernels, compatibility, composite types and printer, and their tests, benchmark and documentation; Default, with the public-domain SplitMix64 reference below. They follow clang 23's behaviour: clang's source (`ASTContext`, `ItaniumRecordLayoutBuilder`, `SemaExpr`'s conversions, `mergeTypes`, `TypePrinter`) was read for its rules and none of it is copied. clang runs externally as the tests' oracle on C the tests generate, and is not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `src/buster/compiler/c_check_*.c`, `src/buster/compiler/c_checker*.c`, `docs/c-checker.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-checker-2026-10-23/) | Original semantic actions, scalar/vector expression checker, source/declaration and binding-event adapters, literal decoder, static-data producer, command, tests, benchmarks and documentation; Default. Existing project type, parser, binding, arena, Link and ELF-writer interfaces are reused. Fixtures and deterministic generated source/expressions are authored for this module; Clang runs externally as an acceptance/diagnostic, numeric-conversion and object-byte/relocation oracle, with no Clang implementation or external corpus imported. C conversion and constant-expression rules and ELF layouts are specification facts; the documentation records the supported subset and oracle configuration. The benchmark's generators, timing, counter and sample-selection helpers are original. |
+| `src/buster/compiler/c_check_attribute_clang.inc` | Derived LLVM data, not first-party: the attribute spellings clang 23.1.5 knows in C for x86-64 Linux; Apache-2.0 WITH LLVM-exception ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), as its header says. "Clang's attribute vocabulary (#147)" below has its inputs and procedure. |
 | `src/buster/compiler/c_parser.c`, `src/buster/compiler/c_parser_test.c`, `docs/c-parser.md` | Original parser (the vector path's kernels and their scalar twins, the checks, the scalar parser, the postorder and the driver), its tests and documentation; Default, with the public-domain SplitMix64 reference below. The kernels are ported from this project's own spike, #186 (branch `claude/spike-186-k2-spills` at `e896031`), under Default too. The tree's construction follows Bar-On and Vishkin's published algorithm (1985), referenced, not copied. The diagnostics follow clang 23's behaviour: their messages are clang's texts for the same errors and their places are where clang reports them, as clang's output shows, and the tokens allowed after a tag's body follow clang's `Parser::isValidAfterTypeSpecifier`, read for its rule; no clang code is copied. The predeclared typedef names are clang's (names only). clang runs externally as the tests' oracle on the tests' snippets, generated inputs and corpora, which are read at run time and not vendored. |
 | `docs/c-parser-fragments.md` | Original record of the expression-fragment experiment (#104–#107), its measurements and its decision; Default. The experiment's code, removed by that decision, was original under Default too. Salter's operator-fragment discussion and Carbon's postorder bracketing are design references recorded in the document; no historical Zig implementation or external test fixture was copied. External corpora were runtime test inputs. |
 | `src/buster/compiler/c_parser_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c`, by way of #186's spike benchmark, retain MIT. |
@@ -219,6 +220,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_check_body_bindings.c`, `src/buster/compiler/c_check_body_bindings_test.c`, `docs/c-body-bindings.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-body-bindings-2026-10-23/) | Original independent body-event views, scalar/vector translation, file fallbacks, source/guarded fixtures and pipeline measurements; Default. Reuses the original binding kernels, retained source/checker test helpers, measurement helpers and frozen generated checker inputs. No external implementation or corpus is imported. |
 | `src/buster/compiler/c_parser_binding_trace.c`, `src/buster/compiler/c_parser_bindings.c`, `src/buster/compiler/c_parser_bindings_test.c`, `src/buster/compiler/c_parser_bindings_benchmark.c` | Original parser-to-binding source-event adapter, declaration columns, scope fixtures, seeded source generator and source benchmark; Default. Existing project grammar, arenas and original binding benchmark helpers are reused. Clang is an external acceptance oracle. SQLite 3.53.4, Zig 0.14.1 libc and c-testsuite at `5c7275656d751de0e68b2d340a95b5681858ed07` are external validation inputs, read at run time and not incorporated; input identities are recorded in `docs/c-bindings.md`. |
 | `build.sh`, `.gitignore`, `.gitattributes`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
+| `CMakeLists.txt`, `CMakePresets.json`, `cmake/*.cmake`, `tools/ci/build_regression.c`, `tools/ci/setup-build-tools.sh`, `.github/workflows/build.yml` | Original CMake build description, presets, post-link/print/call-graph scripts, regression checks and tool staging for #1182; Default. They use CMake's and Ninja's documented interfaces; no CMake module or third-party build code is copied. CI downloads the official CMake 4.4.3 and Ninja 1.13.2 releases, verified by SHA-256, as external tools; they are not vendored. |
 | `tools/ci/sanitizers.sh`, `tests/sanitizers/`, `src/buster/compiler/fuzz.c`, `tests/fuzz/` and the sanitizer/fuzz sections of `docs/ci.md` | Original detector canaries, compressed-ID tail regression, runtime policy, child-report audit, in-process compiler callback, entry overrides, crash/replay control, dictionary, C seeds and documentation; Default. Clang sanitizer and libFuzzer documentation supplies public flags and API contracts. The system's matching compiler-rt/libFuzzer runtimes and GitHub artifact action run externally and are not vendored. Legacy Buster was inspected for interface and coverage comparison only; no legacy implementation or fixture was copied. |
 | `src/buster/compiler/foreign_strings.c`, `src/buster/compiler/foreign_strings_link.c`, `src/buster/compiler/foreign_strings_test.c`, `src/buster/compiler/foreign_strings_output_test.c`, `src/buster/compiler/foreign_strings_benchmark.c`, `docs/foreign-string-merging.md` | Original string pooling, reference remapping, fixtures, measurements and documentation; Default. Existing masked-load, hashing, arena and ELF interfaces are reused. LLVM ELF symbol-address handling was consulted for semantics; no implementation or fixtures were copied. GNU ld and lld run externally on original fixtures. |
 | `src/buster/compiler/foreign_driver.c`, `src/buster/compiler/foreign_driver_test.c`, `src/buster/compiler/foreign_driver_symbols_test.c`, `src/buster/compiler/foreign_driver_dedup_test.c`, `src/buster/compiler/foreign_driver_pipeline_test.c`, `docs/foreign-driver.md`, `docs/foreign-interpreter.md` | Original raw linker command, ordered-argument and named-symbol selection adapters, guarded and command/runtime fixtures and documentation; Default. Existing project resolver, conversion, transformations, writer and test helpers are reused. GNU ld, lld, GCC and system runtimes are external test inputs/tools; their implementation is not incorporated. |
@@ -581,3 +583,93 @@ Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
 and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
 `CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
 as behavior references. No LLVM implementation or test fixtures were copied.
+
+### The CPU model's names and values (#148)
+
+`src/buster/compiler/c_builtin_cpu.inc` is derived LLVM data, not first-party
+material: the names `__builtin_cpu_supports` and `__builtin_cpu_is` take, and
+the CPU model's bits and values clang's code tests them against. It keeps the
+LLVM Project's `Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Input:** `llvm/include/llvm/TargetParser/X86TargetParser.def`, as
+  installed by apt.llvm.org's `llvm-23-dev`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92` (LLVM
+  23.1.5, built from llvm-project commit `a738f2737189`), at
+  `/usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def`, sha256
+  `cc59e275156d08b658cf23bc950237ee288a54477b16c08b4cbb00242fa60f50`.
+- **Rows taken:** the strings and ABI values of its `X86_FEATURE_COMPAT` and
+  `X86_MICROARCH_LEVEL` rows (a feature's word is the value divided by 32, its
+  bit the remainder), and of its `X86_VENDOR`, `X86_CPU_TYPE` and
+  `X86_CPU_SUBTYPE` rows, aliases included. The rows keep the input's order,
+  the features' first, and nothing else of it is copied.
+- **Generator:** `tools/generate_x86_cpu_model.c`, which is original project
+  code under the default terms. It was run as:
+
+  ```sh
+  cc -std=c17 -O2 -Wall -Wextra -Werror tools/generate_x86_cpu_model.c -o build/generate_x86_cpu_model
+  build/generate_x86_cpu_model --self-test
+  build/generate_x86_cpu_model /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def "llvm-23-dev 1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92 (apt.llvm.org)" "$(sha256sum /usr/include/llvm-23/llvm/TargetParser/X86TargetParser.def | cut -d' ' -f1)" > c_builtin_cpu.inc.new
+  ```
+
+  The generator succeeds only when it has read the whole input and written
+  and flushed the whole table. `--self-test` checks this against a synthetic
+  input, a write to `/dev/full`, an unreadable input and a malformed row.
+  The output's sha256 is
+  `fe9cf559b3168f24d27e2a228c980af2c0a4b0bab8d552b37422f9ffb47588d7`. Its 183
+  rows are byte-identical to the table that first came in with #148. That
+  table was read from an earlier clang 23.1's code for a call of each name,
+  with no record of its exact inputs.
+- **Oracle:** clang runs externally in `test-checker-driver`
+  (`check_test_cpu_model_runs` in `c_check_library_driver_test.c`). It checks
+  every row's test against clang's code over every bit and value of the
+  model. Its use as an oracle copies none of its code.
+
+### Clang's attribute vocabulary (#147)
+
+`src/buster/compiler/c_check_attribute_clang.inc` is derived LLVM data, not
+first-party material: the spellings of the attributes clang knows in C, by which
+the checker ignores the others with clang's `-Wunknown-attributes` warning
+(`c_check_attribute.c`). It keeps the LLVM Project's
+`Apache-2.0 WITH LLVM-exception` terms, whose text is
+[LICENSES/LLVM.txt](LICENSES/LLVM.txt), and its header says so.
+
+- **Generator:** clang 23.1.5 for `x86_64-pc-linux-gnu`, apt.llvm.org's
+  `clang-23` and `libclang-cpp23`
+  `1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92` (built from
+  llvm-project commit `a738f2737189`).
+- **Inputs:** the candidate names were the identifier-shaped strings of that
+  package's `libclang-cpp.so.23.1`, without a keyword's surrounding
+  underscores, without the preprocessor's own operators (`__has_*`,
+  `defined`, `_Pragma`, `__is_target_*` and the like) and without the
+  function-like macros clang predefines. Only the strings were read.
+- **Rows taken:** each candidate whose `__has_attribute` clang answers
+  nonzero under `-std=gnu17` (366 GNU names), and each spelling, plain or
+  scoped by `gnu::`, `clang::` or `msvc::`, whose `__has_c_attribute` clang
+  answers nonzero under `-std=gnu23` (283 C23 spellings), each list in byte
+  order. [The checker guide](docs/c-checker.md)'s "Attributes clang doesn't
+  know (#147)" records the procedure.
+- **Spelling list:** the 539 names and 9 scopes of every spelling in
+  `clang/include/clang/Basic/Attr.td` at `llvmorg-23.1.5` (sha256
+  `6014bff340878cf3c656bf3d1ccae64cfd33615d8245c4c5472d10ffd4dc6a1d`, with
+  `AttrDocs.td`, `ASTNode.td`, `DeclNodes.td` and `StmtNodes.td` it includes),
+  as `clang-tblgen --gen-attribute-spelling-list` of apt.llvm.org's
+  `clang-tools-23` of the same version writes them (clang's
+  `AttributeSpellingList.inc`), in its order, for clang's "did you mean"
+  suggestion. Only the names were taken. The file's sha256 is
+  `3eb1138c3a5692e91dc3a1b6a03afbbc0d6b94f76b4b732896eac951967bd218`.
+- **Statement attributes:** the parser's C23 statement-attribute spellings
+  (`parse_scalar_standard_statement_attribute`) are those of `Attr.td`'s
+  statement attributes, read from `clang-tblgen --gen-clang-attr-parsed-attr-impl`'s
+  output (names only).
+- **Cross-check:** the lists were compared with `clang/include/clang/Basic/Attr.td`
+  at `llvmorg-23.1.1`, read for its spellings and their targets, none of it
+  copied: the GNU list is the spelling list's names whose `__has_attribute` is
+  nonzero, and asking `__has_c_attribute` of them under every scope adds no C23
+  spelling. clang's `SimpleTypoCorrection.cpp`, `Attributes.cpp` and
+  `SemaDeclAttr.cpp`'s `DiagnoseUnknownAttribute`, and its parser's
+  `TryParseCXX11AttributeIdentifier` and `ParseStatementOrDeclaration`, at
+  `llvmorg-23.1.1`, were read for their rules, which `c_check_warning_render.c`
+  and `c_parser.c` write again in C. `test-checker-driver` asks the clang it runs every row again
+  (`check_test_driver_unknown_attributes` in
+  `c_check_label_attribute_driver_test.c`), which copies none of its code.

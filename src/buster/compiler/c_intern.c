@@ -216,13 +216,13 @@ typedef uint32_t IdentId;
     X(BUILTIN_OMP_REQUIRED_SIMD_ALIGN, "__builtin_omp_required_simd_align", BUSTER_C_KEYWORD_ALL) \
     X(BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR, "__builtin_ptrauth_type_discriminator", BUSTER_C_KEYWORD_ALL) \
     X(BUILTIN_VECTORELEMENTS, "__builtin_vectorelements", BUSTER_C_KEYWORD_ALL) \
+    X(IS_BITWISE_CLONEABLE, "__is_bitwise_cloneable", BUSTER_C_KEYWORD_ALL) \
+    X(IS_DESTRUCTIBLE, "__is_destructible", BUSTER_C_KEYWORD_ALL) \
+    X(IS_NOTHROW_DESTRUCTIBLE, "__is_nothrow_destructible", BUSTER_C_KEYWORD_ALL) \
     X(CDECL, "__cdecl", BUSTER_C_KEYWORD_ALL) \
     X(FASTCALL, "__fastcall", BUSTER_C_KEYWORD_ALL) \
     X(FP16, "__fp16", BUSTER_C_KEYWORD_ALL) \
     X(FUNCREF, "__funcref", BUSTER_C_KEYWORD_ALL) \
-    X(IS_BITWISE_CLONEABLE, "__is_bitwise_cloneable", BUSTER_C_KEYWORD_ALL) \
-    X(IS_DESTRUCTIBLE, "__is_destructible", BUSTER_C_KEYWORD_ALL) \
-    X(IS_NOTHROW_DESTRUCTIBLE, "__is_nothrow_destructible", BUSTER_C_KEYWORD_ALL) \
     X(MODULE_PRIVATE, "__module_private__", BUSTER_C_KEYWORD_ALL) \
     X(GNU_NULLPTR, "__nullptr", BUSTER_C_KEYWORD_ALL) \
     X(OB_TRAP, "__ob_trap", BUSTER_C_KEYWORD_ALL) \

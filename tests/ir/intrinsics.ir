@@ -1,0 +1,20 @@
+function (i64, i64, i32, i32) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = param.i32 2
+  %3 = param.i32 3
+  %4 = intrinsic.i64 %0, %1 mulhu
+  %5 = intrinsic.i64 %0, %1 pdep
+  %6 = intrinsic.i64 %5, %1 pext
+  %7 = intrinsic.i64 %6, %0 bzhi
+  %8 = intrinsic.i64 %7, %1 bextr
+  %9 = intrinsic.i32 %2, %3 pdep
+  %10 = intrinsic.i32 %3, %9 pext
+  %11 = intrinsic.i32 %10, %2 bzhi
+  %12 = intrinsic.i32 %11, %11 bextr
+  %13 = zext.i64 %12
+  %14 = xor.i64 %4, %8
+  %15 = add.i64 %14, %13
+  %16 = ret.void %15
+}

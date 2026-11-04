@@ -73,6 +73,10 @@ struct IrSimdTypedOperation
     uint8_t mask_step_count;
     uint8_t mask_result;
     IrSimdTypedMaskStep mask_steps[BUSTER_TIER0_OPERATION_RECORDS];
+    // A row of one scalar BMI instruction (#141, ir_simd_typed_intrinsic): its IR intrinsic plus one
+    // (BUSTER_IR_INTRINSIC_* + 1, 0 for any other row), and the operands its a and b are, the source and the other.
+    uint8_t intrinsic;
+    uint8_t intrinsic_operands[2];
 };
 
 typedef struct IrSimdTypedForm IrSimdTypedForm;
@@ -361,12 +365,84 @@ static IrSimdTypedStatus ir_simd_typed_mask_test(const Tier0Operation* source, u
     return status;
 }
 
-// A row's decoding: a mask result's by ir_simd_typed_mask_row, an int's of mask operands by ir_simd_typed_mask_test,
-// any other's by ir_simd_typed_operation.
+typedef struct IrSimdTypedIntrinsic IrSimdTypedIntrinsic;
+struct IrSimdTypedIntrinsic
+{
+    uint16_t forms[2];
+    uint8_t intrinsic;
+    // Whether its source is vvvv's operand (pdep's and pext's, whose mask is rm's), or rm's (bzhi's and bextr's, whose
+    // index or control is vvvv's).
+    bool source_in_vvvv;
+    uint64_t feature;
+};
+
+// A row of one BMI1 or BMI2 instruction of two operands of its result's class, an unsigned int's or long's (#141), on
+// their registers: the x86 builtins' pdep, pext, bzhi and bextr (c_builtin_x86_rows.inc's GENERAL rows, whose `swap`
+// puts bzhi's and bextr's source in rm) and the elementwise deposits' and extractions' (check_lower_vector_deposit), an
+// IR intrinsic of the operands its record names in their places.
+static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const IrSimdTypedIntrinsic intrinsics[] = {
+        { { X86_FORM_PDEP_R32_R32_RM32, X86_FORM_PDEP_R64_R64_RM64 }, BUSTER_IR_INTRINSIC_PDEP, true, BUSTER_X86_FEATURE(BMI2) },
+        { { X86_FORM_PEXT_R32_R32_RM32, X86_FORM_PEXT_R64_R64_RM64 }, BUSTER_IR_INTRINSIC_PEXT, true, BUSTER_X86_FEATURE(BMI2) },
+        { { X86_FORM_BZHI_R32_RM32_R32, X86_FORM_BZHI_R64_RM64_R64 }, BUSTER_IR_INTRINSIC_BZHI, false, BUSTER_X86_FEATURE(BMI2) },
+        { { X86_FORM_BEXTR_R32_RM32_R32, X86_FORM_BEXTR_R64_RM64_R64 }, BUSTER_IR_INTRINSIC_BEXTR, false, BUSTER_X86_FEATURE(BMI) },
+    };
+    IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_UNSUPPORTED : IR_SIMD_TYPED_INVALID;
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    const uint8_t class = source != NULL ? source->result_class : 0;
+    if (status != IR_SIMD_TYPED_INVALID && (class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_U64) && source->result_bytes == 0 && source->record_count == 1 &&
+        source->operand_count == 2 && source->operand_classes[0] == class && source->operand_classes[1] == class && source->operand_bytes[0] == 0 && source->operand_bytes[1] == 0)
+    {
+        const X86Instruction* record = source->records;
+        const uint8_t i0 = BUSTER_TIER0_ROLE_INTEGER(0);
+        const uint8_t i1 = BUSTER_TIER0_ROLE_INTEGER(1);
+        const bool wide = class == BUSTER_TYPED_CLASS_U64;
+        for (uint32_t k = 0; k < sizeof(intrinsics) / sizeof(*intrinsics); k += 1)
+        {
+            for (uint32_t order = 0; order < 2; order += 1)
+            {
+                const uint8_t first = order == 0 ? i0 : i1;
+                const uint8_t second = order == 0 ? i1 : i0;
+                const X86Instruction expected = {
+                    .form = intrinsics[k].forms[wide],
+                    .reg = BUSTER_TIER0_ROLE_INTEGER_RESULT,
+                    .vvvv = intrinsics[k].source_in_vvvv ? first : second,
+                    .rm = intrinsics[k].source_in_vvvv ? second : first,
+                    .mode = BUSTER_X86_REGISTER_DIRECT,
+                };
+                if (memcmp(record, &expected, sizeof(expected)) == 0)
+                {
+                    candidate.intrinsic = (uint8_t)(intrinsics[k].intrinsic + 1);
+                    candidate.intrinsic_operands[0] = (uint8_t)(first & 1);
+                    candidate.intrinsic_operands[1] = (uint8_t)(second & 1);
+                    candidate.required_features = intrinsics[k].feature;
+                }
+            }
+        }
+        if (candidate.intrinsic != 0)
+        {
+            status = (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_TARGET;
+        }
+    }
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
+// A row's decoding: a mask result's by ir_simd_typed_mask_row, an int's of mask operands by ir_simd_typed_mask_test, an
+// unsigned int's or long's of integers by ir_simd_typed_intrinsic, any other's by ir_simd_typed_operation.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
+    const bool scalar = source != NULL && (source->result_class == BUSTER_TYPED_CLASS_U32 || source->result_class == BUSTER_TYPED_CLASS_U64) && !masks;
     return source != NULL && source->result_class == BUSTER_TYPED_CLASS_MASK ? ir_simd_typed_mask_row(source, target_features, result) :
            masks                                                             ? ir_simd_typed_mask_test(source, target_features, result) :
+           scalar                                                            ? ir_simd_typed_intrinsic(source, target_features, result) :
                                                                                ir_simd_typed_operation(source, target_features, result);
 }
