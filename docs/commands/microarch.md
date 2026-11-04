@@ -21,10 +21,25 @@ traffic. It changes no host setting and needs no root. It needs
   and `fanout` run processes and write raw files. `summarize`, `stages`, `symbols`,
   `branches`, `memory` and `topdown` only read them, so every table can be rebuilt
   from a record. `generate-generic N` writes #1341's `_Generic` unit, and `test`
-  checks every parser against fixtures of perf's and the compiler's real output.
-  Every run command resumes: a run whose status file exists is skipped.
+  checks every parser against fixtures of perf's and the compiler's real output,
+  and the resume and failure rules below.
+  - **Resuming.** Every run writes its completion record after the run ends,
+    through a rename:
+    - `stat`, `sweep` and `metrics` write a `.status` file;
+    - `time` writes a `logs/LABEL.rN.time` row;
+    - `fanout` writes a `logs/LABEL.rN.fanout` row.
+
+    `time.tsv` and `fanout.tsv` are rebuilt from those rows. A rerun skips the
+    runs that have a record and runs again those that don't (an interrupted run
+    leaves its log but no record), so each run gives exactly one row.
+  - **Failure.** A command fails when a run failed, now or in an earlier
+    invocation. In `sweep` and `metrics`, perf's refusal of an event or metric it
+    can't open (nonzero status, no counted line) is a result their tables record,
+    not a failure; a counted run with a nonzero status is a failure.
 - `run.sh` holds the steps (listed in its header). Each step, or each chunk of a
   long one, takes the host's lock or core grant itself, for that chunk alone.
+  Every step returns its real status; the first step that fails stops the run
+  (`KEEP_GOING=1` runs the rest) and `run.sh` exits nonzero.
 - `hosts/zen4-7940hs.sh` and `hosts/zen5-9700x.sh` hold each host's hold
   functions, CPUs, dispatch width, the event names that differ between
   generations, and chunk sizes. A new host needs a profile like these.
@@ -37,12 +52,16 @@ traffic. It changes no host setting and needs no root. It needs
   `inline-split.sh` splits IBS samples by inlined function or by line.
   `pack.sh` copies a host's results into a buster-performance record.
 
-Check the tool before a campaign:
+Check the tool and the driver before a campaign. `test.sh` runs `run.sh` on fake
+compilers, a fake perf and a fake tcc. It checks the driver's exit status and
+`KEEP_GOING`, and `validate`'s comparisons and fresh outputs. It also checks that
+a profile whose perf record or reducer fails is never marked done:
 
 ```sh
 mkdir -p build/microarch
 clang -std=c17 -O2 -Wall -Wextra -Werror -o build/microarch/uarch tools/microarch/uarch.c -lm
 build/microarch/uarch test
+tools/microarch/test.sh
 ```
 
 ### Running
@@ -90,12 +109,12 @@ tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/
 
 | step | what | runs |
 | --- | --- | --- |
-| `validate` | each build's object, `-E` output and diagnostics, hashed (they must agree) | 1 |
+| `validate` | each build's object, `-E` output, default-lanes object and diagnostics, from fresh outputs; a failed command stops the step, and outputs that differ between builds fail it (diagnostics only warn with `VALIDATE_DIAGNOSTICS=warn`, for #1339) | 1 |
 | `time`, `time-self` | whole processes (wall, rusage), with `--time-stages` runs | 11 / 3 rotated rounds |
 | `groups`, `groups-self` | six perf stat groups of at most five counters: user and kernel cycles and instructions; top-down level 1; level 2 (with the frontend stall at `cmask` = width and microcoded ops); branches; frontend; memory | 5 / 2 per build and workload |
 | `sweep` | every core event, user and kernel, each in one group with `cycles:u` and `instructions:u`, with a one-event fallback | 2 |
 | `metrics` | every perf metric, one `perf stat -M` each | 2 |
-| `profiles`, `profiles-same` | leader-sampled groups (`{...}:S`, 50,021-cycle period) reduced per function; IBS ops with data source and latency, all and L3 misses only; LBR mispredicts by site; cycles with the kernel; musl's cycles; the microcode group | 8 compiles each |
+| `profiles`, `profiles-same` | leader-sampled groups (`{...}:S`, 50,021-cycle period) reduced per function; IBS ops with data source and latency, all and L3 misses only; LBR mispredicts by site; cycles with the kernel; musl's cycles; the microcode group. A profile is done (`NAME.done`, written last) only when perf record and its reducers succeeded with rows; a failed one is removed and recorded again on the next run | 8 compiles each |
 | `profile-self` | IBS ops of `self-syn`, by function and by `check_common_evaluated`'s lines | 1 |
 | `scaling` | `sq-c` and `musl-syn` on 1..N lanes; K independent compiles on K cores with package energy | 5 / 2 / 4 rounds |
 | `energy` | package and per-core energy, APERF/MPERF | 10 compiles per build |

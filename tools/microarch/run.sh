@@ -109,31 +109,74 @@ COUNTER_GROUPS="basic td1 td2 br fe mem"
 # ---------------------------------------------------------------------------
 # Steps inside a hold (pinned to one CPU).
 
+# Runs one validation command into a fresh output: the output is removed first,
+# and a failed command is reported and fails the step (no stale output is hashed).
+validate_run()
+{
+    local output=${1:?an output path} log=$2; shift 2
+    rm -f -- "$output"
+    "$@" > "$log" 2>&1
+    local status=$?
+    if [[ $status -ne 0 || ! -f $output ]]; then
+        log "validate: '$*' failed (status $status, output ${output##*/} $([[ -f $output ]] && echo present || echo missing))"
+        return 1
+    fi
+}
+
+# The hash validate.tsv holds for VARIANT and WORKLOAD.
+validated()
+{
+    awk -F'\t' -v v="$1" -v w="$2" '$1 == v && $2 == w { print $4 }' "$OUT/validate.tsv"
+}
+
+# Every variant's object, -E output, default-lanes object and diagnostics, hashed
+# into validate.tsv. The objects and -E outputs of every variant must be the same
+# bytes, the default-lanes object the one-lane object's, and the diagnostics the
+# same text. A failed command stops the step; a mismatch fails it. Diagnostics
+# that differ fail it too unless VALIDATE_DIAGNOSTICS=warn (#1339's divergence).
 inner_validate()
 {
-    local v f="$OUT/validate.tsv" status
+    local v f="$OUT/validate.tsv" first="" status=0 object preprocessed default diagnostics
     : > "$f"
     for v in $VARIANTS; do
-        workload "$v" sq-c && "${WL[@]}" > "$SCRATCH/validate-$v-sq-c.log" 2>&1
-        status=$?
-        printf '%s\tsq-c\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/$v-sq.o" | cut -d' ' -f1)" >> "$f"
-        workload "$v" sq-E && "${WL[@]}" > "$SCRATCH/validate-$v-sq-E.log" 2>&1
-        status=$?
-        printf '%s\tsq-E\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/$v-sq.i" | cut -d' ' -f1)" >> "$f"
-        workload "$v" sq-c-default && "${WL[@]}" > "$SCRATCH/validate-$v-sq-c-default.log" 2>&1
-        status=$?
-        printf '%s\tsq-c-default\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/$v-sq-default.o" | cut -d' ' -f1)" >> "$f"
-        # The diagnostics, which every variant must print alike.
-        workload "$v" sq-syn && "${WL[@]}" > "$SCRATCH/validate-$v-sq-syn.log" 2>&1
-        status=$?
-        printf '%s\tsq-syn\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/validate-$v-sq-syn.log" | cut -d' ' -f1)" >> "$f"
+        workload "$v" sq-c && validate_run "$SCRATCH/$v-sq.o" "$SCRATCH/validate-$v-sq-c.log" "${WL[@]}" || return 1
+        object=$(sha256sum < "$SCRATCH/$v-sq.o" | cut -d' ' -f1)
+        workload "$v" sq-E && validate_run "$SCRATCH/$v-sq.i" "$SCRATCH/validate-$v-sq-E.log" "${WL[@]}" || return 1
+        preprocessed=$(sha256sum < "$SCRATCH/$v-sq.i" | cut -d' ' -f1)
+        workload "$v" sq-c-default && validate_run "$SCRATCH/$v-sq-default.o" "$SCRATCH/validate-$v-sq-c-default.log" "${WL[@]}" || return 1
+        default=$(sha256sum < "$SCRATCH/$v-sq-default.o" | cut -d' ' -f1)
+        # The diagnostics are the output: the log itself.
+        workload "$v" sq-syn && validate_run "$SCRATCH/validate-$v-sq-syn.log" "$SCRATCH/validate-$v-sq-syn.log" "${WL[@]}" || return 1
+        diagnostics=$(sha256sum < "$SCRATCH/validate-$v-sq-syn.log" | cut -d' ' -f1)
+        printf '%s\tsq-c\t0\t%s\n%s\tsq-E\t0\t%s\n%s\tsq-c-default\t0\t%s\n%s\tsq-syn\t0\t%s\n' \
+            "$v" "$object" "$v" "$preprocessed" "$v" "$default" "$v" "$diagnostics" >> "$f"
+        if [[ $default != "$object" ]]; then
+            log "validate: $v's default-lanes object differs from its one-lane object"
+            status=1
+        fi
+        if [[ -z $first ]]; then
+            first=$v
+            continue
+        fi
+        if [[ $object != "$(validated "$first" sq-c)" ]]; then
+            log "validate: $v's object differs from $first's"
+            status=1
+        fi
+        if [[ $preprocessed != "$(validated "$first" sq-E)" ]]; then
+            log "validate: $v's -E output differs from $first's"
+            status=1
+        fi
+        if [[ $diagnostics != "$(validated "$first" sq-syn)" ]]; then
+            log "validate: $v's diagnostics differ from $first's ($SCRATCH/validate-$v-sq-syn.log, $SCRATCH/validate-$first-sq-syn.log)"
+            [[ ${VALIDATE_DIAGNOSTICS:-fail} == warn ]] || status=1
+        fi
     done
     if command -v tcc > /dev/null; then
-        workload x tcc-c && "${WL[@]}" > "$SCRATCH/validate-tcc.log" 2>&1
-        status=$?
-        printf 'tcc\ttcc-c\t%s\t%s\n' "$status" "$(sha256sum < "$SCRATCH/tcc-sq.o" | cut -d' ' -f1)" >> "$f"
+        workload x tcc-c && validate_run "$SCRATCH/tcc-sq.o" "$SCRATCH/validate-tcc.log" "${WL[@]}" || return 1
+        printf 'tcc\ttcc-c\t0\t%s\n' "$(sha256sum < "$SCRATCH/tcc-sq.o" | cut -d' ' -f1)" >> "$f"
     fi
     cat "$f"
+    return $status
 }
 
 inner_time()
@@ -175,34 +218,42 @@ inner_ab()
             args+=(--list "$v:$w" "${WL[@]}" --time-stages)
         done
     done
-    "$UARCH" time "$OUT/$dir" "$rounds" "${args[@]}"
+    local status=0
+    "$UARCH" time "$OUT/$dir" "$rounds" "${args[@]}" || status=1
     if [[ $* == *sq-c* ]]; then
         for v in $AB_BUILDS; do
             workload "$v" sq-c
             # shellcheck disable=SC2046
-            "$UARCH" stat "$OUT/$dir" "$v.sq-c.basic" 5 $(group_spec basic) -- "${WL[@]}"
+            "$UARCH" stat "$OUT/$dir" "$v.sq-c.basic" 5 $(group_spec basic) -- "${WL[@]}" || status=1
             # shellcheck disable=SC2046
-            "$UARCH" stat "$OUT/$dir" "$v.sq-c.br" 5 $(group_spec br) -- "${WL[@]}"
+            "$UARCH" stat "$OUT/$dir" "$v.sq-c.br" 5 $(group_spec br) -- "${WL[@]}" || status=1
             # shellcheck disable=SC2046
-            "$UARCH" stat "$OUT/$dir" "$v.sq-c.td1" 5 $(group_spec td1) -- "${WL[@]}"
+            "$UARCH" stat "$OUT/$dir" "$v.sq-c.td1" 5 $(group_spec td1) -- "${WL[@]}" || status=1
         done
     fi
+    return $status
 }
 
 # -fsyntax-only --time-stages of generated units of N _Generic selections, 3 runs
 # each, for AB_BUILDS (#1341).
 inner_generic_scaling()
 {
-    local dir="$OUT/generic-scaling" v n r
+    local dir="$OUT/generic-scaling" v n r status=0
     mkdir -p "$dir"
     for n in 250 500 1000 2000 4000; do
-        "$UARCH" generate-generic "$n" > "$SCRATCH/generic-$n.c"
+        "$UARCH" generate-generic "$n" > "$SCRATCH/generic-$n.c" || return 1
     done
     for v in ${AB_BUILDS:?AB_BUILDS names bin/compiler-NAME builds}; do
         for n in 250 500 1000 2000 4000; do
             for r in 0 1 2; do
-                [[ -s $dir/$v.$n.r$r.log ]] && continue
-                "bin/compiler-$v" -fsyntax-only --time-stages "$SCRATCH/generic-$n.c" > "$dir/$v.$n.r$r.log" 2>&1
+                # A run's .done record follows its success; a run without one runs again.
+                [[ -f $dir/$v.$n.r$r.done ]] && continue
+                if "bin/compiler-$v" -fsyntax-only --time-stages "$SCRATCH/generic-$n.c" > "$dir/$v.$n.r$r.log" 2>&1; then
+                    : > "$dir/$v.$n.r$r.done"
+                else
+                    log "generic-scaling: $v on $n selections failed (run $r)"
+                    status=1
+                fi
             done
         done
     done
@@ -217,19 +268,21 @@ inner_generic_scaling()
         done
     } > "$dir/generic-scaling.tsv"
     cat "$dir/generic-scaling.tsv"
+    return $status
 }
 
 inner_groups()
 {
     local v=$1 runs=$2; shift 2
-    local w g
+    local w g status=0
     for w in "$@"; do
         workload "$v" "$w"
         for g in $COUNTER_GROUPS; do
             # shellcheck disable=SC2046
-            "$UARCH" stat "$OUT/groups" "$v.$w.$g" "$runs" $(group_spec "$g") -- "${WL[@]}"
+            "$UARCH" stat "$OUT/groups" "$v.$w.$g" "$runs" $(group_spec "$g") -- "${WL[@]}" || status=1
         done
     done
+    return $status
 }
 
 inner_sweep()
@@ -249,75 +302,109 @@ inner_metrics()
 # Records 8 compiles of sq-c (or PROFILE_RUNS of PROFILE_WORKLOAD) under one perf
 # record and reduces the samples. Leader-sampled groups use a 50,021-cycle period:
 # each sample's member deltas go to the leader's address, so a long period blends
-# short functions with their neighbours. perf.data stays in scratch/HOST.
+# short functions with their neighbours. perf.data stays in scratch/HOST. The
+# profile is done (NAME.done, written last, through a rename) only when perf record
+# succeeded and every reducer succeeded with rows; otherwise its outputs are
+# removed, the step fails, and a rerun records it again.
 profile_one()
 {
-    local name=$1 v=$2; shift 2
-    local dir="$OUT/profiles/$v" data="$SCRATCH/profile-$v-$name.data"
+    local name=${1:?a profile name} v=${2:?a variant}; shift 2
+    local dir="$OUT/profiles/$v" data="$SCRATCH/profile-$v-$name.data" status=0 output
     mkdir -p "$dir"
-    [[ -s $dir/$name.done ]] && return 0
+    [[ -f $dir/$name.done ]] && return 0
     workload "$v" "${PROFILE_WORKLOAD:-sq-c}"
     local loop="" runs=${PROFILE_RUNS:-8}
     printf -v loop '%q ' "${WL[@]}"
     perf record -q -o "$data" "$@" -- bash -c "for ((i = 0; i < $runs; i++)); do $loop > /dev/null 2>&1 || exit 1; done" \
-        > "$dir/$name.record.log" 2>&1
-    echo "status $?" >> "$dir/$name.record.log"
-    case $name in
-        cycles | musl-cycles | self-cycles)
-            perf report -i "$data" --no-children --sort dso,sym --stdio -q --percent-limit 0.05 > "$dir/$name.txt" 2>/dev/null
-            perf report -i "$data" --no-children --sort dso --stdio -q > "$dir/$name-dso.txt" 2>/dev/null ;;
-        lbr)
-            perf script -i "$data" -F brstacksym 2>/dev/null | "$UARCH" branches - 120 > "$dir/lbr.tsv" ;;
-        ibs | ibs-l3)
-            perf script -i "$data" -F ip,sym,data_src,weight 2>/dev/null | "$UARCH" memory - > "$dir/$name.tsv" ;;
-        self-ibs)
-            perf report -i "$data" --no-children --sort sym --stdio -q --percent-limit 0.3 > "$dir/self-ibs.txt" 2>/dev/null
-            "$here/inline-split.sh" "bin/compiler-$v" "$data" '^check_common_evaluated$' check_common_evaluated --lines \
-                > "$dir/self-ibs-check-common-evaluated-lines.tsv" ;;
-        *)
-            perf script -i "$data" -F period,event,ip,sym 2>/dev/null | "$UARCH" symbols - > "$dir/$name.tsv" ;;
-    esac
-    perf report -i "$data" --header-only > "$dir/$name.header.txt" 2>/dev/null
-    stat -c %s "$data" > "$dir/$name.done"
+        > "$dir/$name.record.log" 2>&1 || status=1
+    echo "status $status" >> "$dir/$name.record.log"
+    local outputs=("$dir/$name.header.txt")
+    if [[ $status -eq 0 ]]; then
+        set -o pipefail
+        case $name in
+            cycles | musl-cycles | self-cycles)
+                outputs+=("$dir/$name.txt" "$dir/$name-dso.txt")
+                perf report -i "$data" --no-children --sort dso,sym --stdio -q --percent-limit 0.05 > "$dir/$name.txt" 2>> "$dir/$name.record.log" || status=1
+                perf report -i "$data" --no-children --sort dso --stdio -q > "$dir/$name-dso.txt" 2>> "$dir/$name.record.log" || status=1 ;;
+            lbr)
+                outputs+=("$dir/lbr.tsv")
+                perf script -i "$data" -F brstacksym 2>> "$dir/$name.record.log" | "$UARCH" branches - 120 > "$dir/lbr.tsv" || status=1 ;;
+            ibs | ibs-l3)
+                outputs+=("$dir/$name.tsv")
+                perf script -i "$data" -F ip,sym,data_src,weight 2>> "$dir/$name.record.log" | "$UARCH" memory - > "$dir/$name.tsv" || status=1 ;;
+            self-ibs)
+                outputs+=("$dir/self-ibs.txt" "$dir/self-ibs-check-common-evaluated-lines.tsv")
+                perf report -i "$data" --no-children --sort sym --stdio -q --percent-limit 0.3 > "$dir/self-ibs.txt" 2>> "$dir/$name.record.log" || status=1
+                "$here/inline-split.sh" "bin/compiler-$v" "$data" '^check_common_evaluated$' check_common_evaluated --lines \
+                    > "$dir/self-ibs-check-common-evaluated-lines.tsv" 2>> "$dir/$name.record.log" || status=1 ;;
+            *)
+                outputs+=("$dir/$name.tsv")
+                perf script -i "$data" -F period,event,ip,sym 2>> "$dir/$name.record.log" | "$UARCH" symbols - > "$dir/$name.tsv" || status=1 ;;
+        esac
+        set +o pipefail
+        perf report -i "$data" --header-only > "$dir/$name.header.txt" 2>> "$dir/$name.record.log" || status=1
+        # A reducer that read no samples writes only its headers (uarch's tables start
+        # their header lines with "symbol", "site" or "#"): no row is a failure.
+        for output in "${outputs[@]:1}"; do
+            if [[ $(grep -c -v -E $'^(#|symbol\t|site\t|symbol_level\t|$)' "$output" 2>/dev/null) -lt 1 ]]; then
+                log "profile $v $name: ${output##*/} has no rows"
+                status=1
+            fi
+        done
+    fi
+    if [[ $status -eq 0 ]]; then
+        { stat -c %s "$data" > "$dir/$name.done.tmp" && mv -- "$dir/$name.done.tmp" "$dir/$name.done"; } || status=1
+    else
+        log "profile $v $name failed; see $dir/$name.record.log"
+        for output in "${outputs[@]}"; do
+            rm -f -- "${output:?}"
+        done
+    fi
+    return $status
 }
 
 inner_profiles()
 {
-    local v=$1 part=$2
+    local v=$1 part=$2 status=0
     case $part in
         a)
-            profile_one cycles "$v" -e cycles -c 100003
-            profile_one td1 "$v" -e "{ls_not_halted_cyc:u,de_src_op_disp.all:u,ex_ret_ops:u,de_no_dispatch_per_slot.no_ops_from_frontend:u,de_no_dispatch_per_slot.backend_stalls:u}:S" -c 50021
-            profile_one td2 "$v" -e "{ls_not_halted_cyc:u,ex_no_retire.load_not_complete:u,ex_no_retire.not_complete:u,instructions:u,ex_ret_brn_misp:u}:S" -c 50021 ;;
+            profile_one cycles "$v" -e cycles -c 100003 || status=1
+            profile_one td1 "$v" -e "{ls_not_halted_cyc:u,de_src_op_disp.all:u,ex_ret_ops:u,de_no_dispatch_per_slot.no_ops_from_frontend:u,de_no_dispatch_per_slot.backend_stalls:u}:S" -c 50021 || status=1
+            profile_one td2 "$v" -e "{ls_not_halted_cyc:u,ex_no_retire.load_not_complete:u,ex_no_retire.not_complete:u,instructions:u,ex_ret_brn_misp:u}:S" -c 50021 || status=1 ;;
         b)
-            profile_one mem "$v" -e "{cycles:u,ls_dmnd_fills_from_sys.all:u,ls_dmnd_fills_from_sys.dram_io_near:u,l2_cache_req_stat.ic_dc_miss_in_l2:u,ls_l1_d_tlb_miss.all:u}:S" -c 50021
-            profile_one fe "$v" -e "{cycles:u,ic_tag_hit_miss.instruction_cache_miss:u,op_cache_hit_miss.op_cache_miss:u,op_cache_hit_miss.all_op_cache_accesses:u,bp_l1_tlb_miss_l2_tlb_miss.all:u}:S" -c 50021 ;;
+            profile_one mem "$v" -e "{cycles:u,ls_dmnd_fills_from_sys.all:u,ls_dmnd_fills_from_sys.dram_io_near:u,l2_cache_req_stat.ic_dc_miss_in_l2:u,ls_l1_d_tlb_miss.all:u}:S" -c 50021 || status=1
+            profile_one fe "$v" -e "{cycles:u,ic_tag_hit_miss.instruction_cache_miss:u,op_cache_hit_miss.op_cache_miss:u,op_cache_hit_miss.all_op_cache_accesses:u,bp_l1_tlb_miss_l2_tlb_miss.all:u}:S" -c 50021 || status=1 ;;
         c)
-            profile_one ibs "$v" -e "ibs_op/cnt_ctl=1,swfilt=1/u" -d -W -c 200000
-            profile_one ibs-l3 "$v" -e "ibs_op/cnt_ctl=1,swfilt=1,l3missonly=1/u" -d -W -c 4000
-            profile_one lbr "$v" -j any,u -e cycles:u -c 1000003 ;;
+            profile_one ibs "$v" -e "ibs_op/cnt_ctl=1,swfilt=1/u" -d -W -c 200000 || status=1
+            profile_one ibs-l3 "$v" -e "ibs_op/cnt_ctl=1,swfilt=1,l3missonly=1/u" -d -W -c 4000 || status=1
+            profile_one lbr "$v" -j any,u -e cycles:u -c 1000003 || status=1 ;;
         d)
-            PROFILE_WORKLOAD=musl-syn PROFILE_RUNS=2 profile_one musl-cycles "$v" -e cycles -c 100003 ;;
+            PROFILE_WORKLOAD=musl-syn PROFILE_RUNS=2 profile_one musl-cycles "$v" -e cycles -c 100003 || status=1 ;;
         e)
-            profile_one ucode "$v" -e "{cycles:u,ex_ret_ucode_ops:u,ex_ret_ops:u,fp_ops_retired_by_width.pack_512_uops_retired:u,ls_bad_status2.stli_other:u}:S" -c 50021 ;;
+            profile_one ucode "$v" -e "{cycles:u,ex_ret_ucode_ops:u,ex_ret_ops:u,fp_ops_retired_by_width.pack_512_uops_retired:u,ls_bad_status2.stli_other:u}:S" -c 50021 || status=1 ;;
         self)
-            PROFILE_WORKLOAD=self-syn PROFILE_RUNS=1 profile_one self-ibs "$v" -e "ibs_op/cnt_ctl=1,swfilt=1/u" -c 400000 ;;
+            PROFILE_WORKLOAD=self-syn PROFILE_RUNS=1 profile_one self-ibs "$v" -e "ibs_op/cnt_ctl=1,swfilt=1/u" -c 400000 || status=1 ;;
     esac
+    return $status
 }
 
 inner_energy()
 {
-    local cpu=$1 v loop dir="$OUT/energy"
+    local cpu=$1 v loop dir="$OUT/energy" status=0
     mkdir -p "$dir"
-    perf stat -a -x, -o "$dir/idle.csv" -e power/energy-pkg/ -- sleep 3 2>/dev/null
+    perf stat -a -x, -o "$dir/idle.csv" -e power/energy-pkg/ -- sleep 3 2>/dev/null || status=1
     for v in $VARIANTS; do
         workload "$v" sq-c
         printf -v loop '%q ' "${WL[@]}"
-        perf stat -a -x, -o "$dir/$v.pkg.csv" -e power/energy-pkg/ -- bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1; done"
+        # Each loop stops at its first failed compile; perf passes that status on.
+        perf stat -a -x, -o "$dir/$v.pkg.csv" -e power/energy-pkg/ -- \
+            bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
         perf stat -C "$cpu" -x, -o "$dir/$v.freq.csv" -e msr/aperf/,msr/mperf/,msr/tsc/,cycles,instructions -- \
-            bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1; done"
-        perf stat -a --per-core -x, -o "$dir/$v.core.csv" -e power_core/energy-core/ -- bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1; done"
+            bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
+        perf stat -a --per-core -x, -o "$dir/$v.core.csv" -e power_core/energy-core/ -- \
+            bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
     done
+    return $status
 }
 
 # ---------------------------------------------------------------------------
@@ -325,7 +412,7 @@ inner_energy()
 
 inner_scaling()
 {
-    local cpus=$1 dir="$OUT/scaling" n k r list args=()
+    local cpus=$1 dir="$OUT/scaling" n k r list args=() status=0
     mkdir -p "$dir"
     echo "$cpus" > "$dir/cpus.txt"
     # One compile on N lanes and musl's sources on N lanes, rotated.
@@ -337,12 +424,14 @@ inner_scaling()
     done
     workload "$NATIVE" sq-c-default
     args+=(--list "sq-c-default" taskset -c "$cpus" "${WL[@]}")
-    "$UARCH" time "$dir" 5 "${args[@]}"
+    "$UARCH" time "$dir" 5 "${args[@]}" || status=1
     for n in $SCALING_LANES; do
         workload "$NATIVE:$n" sq-c
-        "$UARCH" stat "$dir" "sq-c-lanes$n" 3 -e task-clock,cycles:u,instructions:u,cycles:k,instructions:k,context-switches,cpu-migrations,page-faults -- taskset -c "$cpus" "${WL[@]}"
+        "$UARCH" stat "$dir" "sq-c-lanes$n" 3 -e task-clock,cycles:u,instructions:u,cycles:k,instructions:k,context-switches,cpu-migrations,page-faults \
+            -- taskset -c "$cpus" "${WL[@]}" || status=1
         workload "$NATIVE:$n" musl-syn
-        "$UARCH" stat "$dir" "musl-lanes$n" 2 -e task-clock,cycles:u,instructions:u,cycles:k,instructions:k,context-switches,cpu-migrations,page-faults -- taskset -c "$cpus" "${WL[@]}"
+        "$UARCH" stat "$dir" "musl-lanes$n" 2 -e task-clock,cycles:u,instructions:u,cycles:k,instructions:k,context-switches,cpu-migrations,page-faults \
+            -- taskset -c "$cpus" "${WL[@]}" || status=1
     done
     # K independent single-lane compiles on K cores, each batch under package energy.
     for k in $FANOUT_WORKERS; do
@@ -351,25 +440,29 @@ inner_scaling()
         local command=("${WL[@]}")
         command[${#command[@]}-3]="$SCRATCH/fan-{i}.o"
         for r in 0 1 2 3; do
-            [[ -s $dir/fanout-energy-$k.r$r.csv ]] && continue
+            # The batch's completion record, not its energy file, says it ran.
+            [[ -f $dir/logs/fanout$k-r$r.r0.fanout ]] && continue
             perf stat -a -x, -o "$dir/fanout-energy-$k.r$r.csv" -e power/energy-pkg/ -- \
-                "$UARCH" fanout "$dir" "fanout$k-r$r" 1 "$list" -- "${command[@]}"
+                "$UARCH" fanout "$dir" "fanout$k-r$r" 1 "$list" -- "${command[@]}" || status=1
         done
     done
+    return $status
 }
 
 inner_uncore()
 {
-    local cpus=$1 dir="$OUT/uncore" loop
+    local cpus=$1 dir="$OUT/uncore" loop status=0
     mkdir -p "$dir"
     local events="amd_umc/umc_cas_cmd.rd/,amd_umc/umc_cas_cmd.wr/,amd_umc/umc_act_cmd.all/,amd_umc/umc_mem_clk/"
-    perf stat -a -x, -o "$dir/idle.csv" -e "$events" -- sleep 2
+    perf stat -a -x, -o "$dir/idle.csv" -e "$events" -- sleep 2 || status=1
     workload "$NATIVE" sq-c
     printf -v loop '%q ' "${WL[@]}"
-    perf stat -a -x, -o "$dir/single.csv" -e "$events" -- taskset -c "$(single_cpu)" bash -c "for i in 1 2 3 4 5 6 7 8; do $loop > /dev/null 2>&1; done"
+    perf stat -a -x, -o "$dir/single.csv" -e "$events" -- taskset -c "$(single_cpu)" \
+        bash -c "for i in 1 2 3 4 5 6 7 8; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
     local command=("${WL[@]}")
     command[${#command[@]}-3]="$SCRATCH/fan-{i}.o"
-    perf stat -a -x, -o "$dir/fanout8.csv" -e "$events" -- "$UARCH" fanout "$dir" fanout8 2 "$cpus" -- "${command[@]}"
+    perf stat -a -x, -o "$dir/fanout8.csv" -e "$events" -- "$UARCH" fanout "$dir" fanout8 2 "$cpus" -- "${command[@]}" || status=1
+    return $status
 }
 
 inner()
@@ -391,8 +484,15 @@ inner()
         metrics) inner_metrics "$@" ;;
         profiles) inner_profiles "$@" ;;
         energy) inner_energy "$cpu" ;;
+        *) log "inner: unknown step $step"; false ;;
     esac
-    log "inner $step $* done"
+    local status=$?
+    if [[ $status -eq 0 ]]; then
+        log "inner $step $* done"
+    else
+        log "inner $step $* failed (status $status)"
+    fi
+    return $status
 }
 
 inner_multi()
@@ -404,8 +504,15 @@ inner_multi()
     case $step in
         scaling) inner_scaling "$cpus" ;;
         uncore) inner_uncore "$cpus" ;;
+        *) log "inner-multi: unknown step $step"; false ;;
     esac
-    log "inner-multi $step done"
+    local status=$?
+    if [[ $status -eq 0 ]]; then
+        log "inner-multi $step done"
+    else
+        log "inner-multi $step failed (status $status)"
+    fi
+    return $status
 }
 
 # ---------------------------------------------------------------------------
@@ -520,7 +627,7 @@ step_sweep()
             for ((from = 0; from < n; from += SWEEP_CHUNK)); do
                 chunk_done "$OUT/sweep-$v-$w/sweep" "$from" "$SWEEP_CHUNK" "$n" && continue
                 log "sweep $v $w $from"
-                held sweep "$v" "$w" "$from" $((from + SWEEP_CHUNK))
+                held sweep "$v" "$w" "$from" $((from + SWEEP_CHUNK)) || return 1
             done
         done
     done
@@ -534,7 +641,7 @@ step_metrics()
         for ((from = 0; from < n; from += METRIC_CHUNK)); do
             chunk_done "$OUT/metrics-$NATIVE-$w/metrics" "$from" "$METRIC_CHUNK" "$n" && continue
             log "metrics $w $from"
-            held metrics "$NATIVE" "$w" "$from" $((from + METRIC_CHUNK))
+            held metrics "$NATIVE" "$w" "$from" $((from + METRIC_CHUNK)) || return 1
         done
     done
 }
@@ -563,6 +670,7 @@ elif [[ ${1:-} == --inner-multi ]]; then
     exit $?
 fi
 
+failed=0
 while [[ $# -gt 0 ]]; do
     step=$1
     shift
@@ -581,22 +689,43 @@ while [[ $# -gt 0 ]]; do
         ab-self) held ab-self ;;
         generic-scaling) held generic-scaling ;;
         groups)
+            status=0
             first=1
             for v in $VARIANTS; do
-                held groups "$v" 5 sq-c sq-syn sq-E
-                if [[ $first == 1 ]] && command -v tcc > /dev/null; then held groups tcc 5 tcc-c; fi
+                held groups "$v" 5 sq-c sq-syn sq-E || status=1
+                if [[ $first == 1 ]] && command -v tcc > /dev/null; then held groups tcc 5 tcc-c || status=1; fi
                 first=0
-            done ;;
-        groups-self) for v in $SELF_VARIANTS; do held groups "$v" 2 self-syn; done ;;
+            done
+            [[ $status -eq 0 ]] ;;
+        groups-self)
+            status=0
+            for v in $SELF_VARIANTS; do held groups "$v" 2 self-syn || status=1; done
+            [[ $status -eq 0 ]] ;;
         sweep) step_sweep ;;
         metrics) step_metrics ;;
-        profiles) for part in a b c d e; do held profiles "$NATIVE" "$part"; done ;;
-        profiles-same) for part in a b c e; do held profiles znver4 "$part"; done ;;
+        profiles)
+            status=0
+            for part in a b c d e; do held profiles "$NATIVE" "$part" || status=1; done
+            [[ $status -eq 0 ]] ;;
+        profiles-same)
+            status=0
+            for part in a b c e; do held profiles znver4 "$part" || status=1; done
+            [[ $status -eq 0 ]] ;;
         profile-self) held profiles "$NATIVE" self ;;
         scaling) held_multi scaling ;;
         energy) held energy ;;
-        uncore) [[ $UNCORE == 1 ]] && held_multi uncore ;;
+        uncore) [[ $UNCORE != 1 ]] || held_multi uncore ;;
         summarize) step_summarize ;;
-        *) log "unknown step $step" ;;
+        *) log "unknown step $step"; false ;;
     esac
+    status=$?
+    if [[ $status -ne 0 ]]; then
+        log "step $step failed (status $status)"
+        failed=1
+        [[ ${KEEP_GOING:-0} == 1 ]] || break
+    fi
 done
+if [[ $failed -ne 0 ]]; then
+    log "run failed: see $OUT/run.log"
+fi
+exit $failed

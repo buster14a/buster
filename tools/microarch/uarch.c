@@ -24,6 +24,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <math.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -47,6 +48,9 @@
 #define BUSTER_UARCH_MAX_CPUS 256
 #define BUSTER_UARCH_MAX_RUNS 64
 #define BUSTER_UARCH_FULL_DUTY 99.0
+// A perf stat completion record: "status N wall_ms .. user_ms .. system_ms ..
+// maxrss_kb .. failed F", F in its twelfth field.
+#define BUSTER_UARCH_STATUS_FAILED_FIELD 11
 
 typedef struct Strings Strings;
 struct Strings
@@ -404,17 +408,6 @@ static bool file_exists(const char* path)
     return stat(path, &information) == 0;
 }
 
-static void append_line(const char* path, const char* line)
-{
-    FILE* file = fopen(path, "a");
-    if (file == NULL)
-    {
-        fail(strerror(errno));
-    }
-    fputs(line, file);
-    fclose(file);
-}
-
 static char* trim(char* text)
 {
     while (isspace((unsigned char)*text))
@@ -491,6 +484,9 @@ static int split_tabs(char* line, char** fields, int capacity)
 // ---------------------------------------------------------------------------
 // Processes.
 
+static Strings list_directory(const char* path, const char* suffix);
+static void rebuild_table(const char* out, const char* name, const char* suffix, const char* header);
+
 // Runs ARGV with stdout and stderr appended to LOG (kept when LOG is NULL), in the
 // C locale so that perf's CSV fields use '.' decimals.
 static RunResult run_process(char** argv, const char* log)
@@ -554,18 +550,51 @@ static RunResult perf_stat(const char* csv, const char* log, char** perf_args, i
     return result;
 }
 
-static void write_status(const char* path, RunResult run)
+// Writes TEXT to PATH through a temporary file and a rename, so that PATH is either
+// absent or whole: a run's completion record is never half written.
+static void write_text_atomic(const char* path, const char* text)
 {
-    char line[BUSTER_UARCH_LINE_BYTES];
-    format_into(line, sizeof(line), "status\t%d\twall_ms\t%.3f\tuser_ms\t%.3f\tsystem_ms\t%.3f\tmaxrss_kb\t%ld\n", run.status, run.wall_ms,
-                timeval_ms(run.usage.ru_utime), timeval_ms(run.usage.ru_stime), run.usage.ru_maxrss);
-    FILE* file = fopen(path, "w");
+    char temporary[BUSTER_UARCH_PATH_BYTES];
+    format_into(temporary, sizeof(temporary), "%s.tmp", path);
+    FILE* file = fopen(temporary, "w");
     if (file == NULL)
     {
         fail(strerror(errno));
     }
-    fputs(line, file);
-    fclose(file);
+    bool written = fputs(text, file) >= 0;
+    written = fclose(file) == 0 && written;
+    if (!written || rename(temporary, path) != 0)
+    {
+        fail(strerror(errno));
+    }
+}
+
+// The completion record of one perf stat run, written after the run ends: perf's
+// status, the run's resources, and whether the run failed (its twelfth field), so
+// that a resumed command still reports a failure recorded earlier.
+static void write_status(const char* path, RunResult run, bool failed)
+{
+    char line[BUSTER_UARCH_LINE_BYTES];
+    format_into(line, sizeof(line), "status\t%d\twall_ms\t%.3f\tuser_ms\t%.3f\tsystem_ms\t%.3f\tmaxrss_kb\t%ld\tfailed\t%d\n", run.status, run.wall_ms,
+                timeval_ms(run.usage.ru_utime), timeval_ms(run.usage.ru_stime), run.usage.ru_maxrss, failed);
+    write_text_atomic(path, line);
+}
+
+// The number in FIELD of a completion record's first line (a time record's status
+// is its third field, a fanout record's failed copies its fourth, a perf stat
+// record's failure its twelfth). A record without the field, written before it
+// existed, gives its second field, perf's status.
+static int recorded_status(const char* path, int field)
+{
+    int result = -1;
+    Strings lines = read_lines(path);
+    if (lines.count > 0)
+    {
+        char* fields[16];
+        int count = split_tabs(lines.items[0], fields, 16);
+        result = count > field ? atoi(fields[field]) : (count > 1 ? atoi(fields[1]) : -1);
+    }
+    return result;
 }
 
 static int find_separator(int argc, char** argv, int from)
@@ -585,7 +614,9 @@ static int find_separator(int argc, char** argv, int from)
 // Run commands.
 
 // time OUT ROUNDS --list LABEL ARG... [--list LABEL ARG...]...: whole processes in
-// a rotating order, with wall time and wait4's rusage per run, to OUT/time.tsv.
+// a rotating order, with wall time and wait4's rusage per run. Each run's row is
+// its completion record, OUT/logs/LABEL.rN.time, written after wait4; OUT/time.tsv
+// is rebuilt from the records. Returns 1 when any run, done now or before, failed.
 static int command_time(int argc, char** argv)
 {
     int result = 0;
@@ -618,31 +649,34 @@ static int command_time(int argc, char** argv)
         char path[BUSTER_UARCH_PATH_BYTES];
         format_into(path, sizeof(path), "%s/logs", out);
         make_directory(path);
-        char table_path[BUSTER_UARCH_PATH_BYTES];
-        format_into(table_path, sizeof(table_path), "%s/time.tsv", out);
-        if (!file_exists(table_path))
-        {
-            append_line(table_path, "label\tround\tstatus\twall_ms\tuser_ms\tsystem_ms\tmaxrss_kb\tminflt\tmajflt\tnvcsw\tnivcsw\n");
-        }
         for (int round = 0; round < rounds; round += 1)
         {
             for (int k = 0; k < command_count; k += 1)
             {
                 Command* command = &commands[(round + k) % command_count];
                 char log[BUSTER_UARCH_PATH_BYTES];
+                char record[BUSTER_UARCH_PATH_BYTES];
                 format_into(log, sizeof(log), "%s/logs/%s.r%d.log", out, command->label, round);
-                if (!file_exists(log))
+                format_into(record, sizeof(record), "%s/logs/%s.r%d.time", out, command->label, round);
+                if (file_exists(record))
                 {
+                    result |= recorded_status(record, 2) != 0;
+                }
+                else
+                {
+                    // A log without a record is an interrupted run: start it again.
+                    unlink(log);
                     RunResult run = run_process(command->argv, log);
                     char line[BUSTER_UARCH_LINE_BYTES];
                     format_into(line, sizeof(line), "%s\t%d\t%d\t%.3f\t%.3f\t%.3f\t%ld\t%ld\t%ld\t%ld\t%ld\n", command->label, round, run.status, run.wall_ms,
                                 timeval_ms(run.usage.ru_utime), timeval_ms(run.usage.ru_stime), run.usage.ru_maxrss, run.usage.ru_minflt,
                                 run.usage.ru_majflt, run.usage.ru_nvcsw, run.usage.ru_nivcsw);
-                    append_line(table_path, line);
+                    write_text_atomic(record, line);
                     result |= run.status != 0;
                 }
             }
         }
+        rebuild_table(out, "time.tsv", ".time", "label\tround\tstatus\twall_ms\tuser_ms\tsystem_ms\tmaxrss_kb\tminflt\tmajflt\tnvcsw\tnivcsw\n");
     }
     return result;
 }
@@ -672,11 +706,15 @@ static int command_stat(int argc, char** argv)
             format_into(csv, sizeof(csv), "%s/%s.r%d.csv", directory, argv[3], run);
             format_into(log, sizeof(log), "%s/%s.r%d.log", directory, argv[3], run);
             format_into(status, sizeof(status), "%s/%s.r%d.status", directory, argv[3], run);
-            if (!file_exists(status))
+            if (file_exists(status))
+            {
+                result |= recorded_status(status, BUSTER_UARCH_STATUS_FAILED_FIELD) != 0;
+            }
+            else
             {
                 unlink(log);
                 RunResult outcome = perf_stat(csv, log, &argv[5], separator - 5, &argv[separator + 1], argc - separator - 1);
-                write_status(status, outcome);
+                write_status(status, outcome, outcome.status != 0);
                 result |= outcome.status != 0;
             }
         }
@@ -742,9 +780,34 @@ static bool csv_complete(const char* path)
     return result;
 }
 
+// True when perf printed at least one counted line: the workload ran under perf.
+// perf refuses an event or metric it can't open (unsupported on the host, uncore
+// or system-wide only) before the workload starts, with a nonzero status and no
+// counted line; that refusal is a result the tables record, not a failure.
+static bool csv_counted(const char* path)
+{
+    Strings lines = read_lines(path);
+    bool result = false;
+    for (size_t i = 0; i < lines.count && !result; i += 1)
+    {
+        CsvLine line = csv_split(lines.items[i]);
+        result = line.count >= 5 && line.fields[0][0] != '<';
+    }
+    return result;
+}
+
+// A run failed when it was not refused: perf counted the workload and the
+// workload's status (perf's) is nonzero, or perf failed without a record of why.
+static bool run_failed(RunResult run, const char* csv)
+{
+    return run.status != 0 && (csv_counted(csv) || !file_exists(csv));
+}
+
 // sweep OUT EVENTS FROM TO RUNS ANCHORS -- ARG...: one perf stat per event and run,
-// {ANCHORS,EVENT:u,EVENT:k} as one group; when that group cannot be scheduled whole,
-// {instructions:u,EVENT:u} and {instructions:u,EVENT:k} one after the other.
+// {ANCHORS,EVENT:u,EVENT:k} as one group; when that group cannot be scheduled whole
+// or perf refuses it, {instructions:u,EVENT:u} and {instructions:u,EVENT:k} one
+// after the other. Returns 1 when a run failed (run_failed), not when perf refused
+// an event.
 static int command_sweep(int argc, char** argv)
 {
     int result = 0;
@@ -788,13 +851,16 @@ static int command_sweep(int argc, char** argv)
                 format_into(status, sizeof(status), "%s/%04zu.r%d.status", directory, i, run);
                 if (file_exists(status))
                 {
+                    result |= recorded_status(status, BUSTER_UARCH_STATUS_FAILED_FIELD) != 0;
                     continue;
                 }
                 unlink(log);
                 format_into(spec, sizeof(spec), "{%s,%s:u,%s:k}", anchors, event, event);
                 char* perf_args[2] = { "-e", spec };
                 RunResult outcome = perf_stat(csv, log, perf_args, 2, &argv[separator + 1], argc - separator - 1);
-                if (outcome.status == 0 && !csv_complete(csv))
+                bool failed = run_failed(outcome, csv);
+                bool refused = outcome.status != 0 && !failed;
+                if (!failed && (refused || !csv_complete(csv)))
                 {
                     for (int mode = 0; mode < 2; mode += 1)
                     {
@@ -802,11 +868,13 @@ static int command_sweep(int argc, char** argv)
                         format_into(fallback_csv, sizeof(fallback_csv), "%s/%04zu.r%d.f%d.csv", directory, i, run, mode);
                         format_into(spec, sizeof(spec), "{instructions:u,%s:%s}", event, mode == 0 ? "u" : "k");
                         RunResult fallback = perf_stat(fallback_csv, log, perf_args, 2, &argv[separator + 1], argc - separator - 1);
-                        outcome.status = fallback.status != 0 ? fallback.status : outcome.status;
+                        // The fallback's statuses replace the refused or partial group's.
+                        outcome.status = mode == 0 || outcome.status == 0 ? fallback.status : outcome.status;
+                        failed = failed || run_failed(fallback, fallback_csv);
                     }
                 }
-                write_status(status, outcome);
-                result |= outcome.status != 0;
+                write_status(status, outcome, failed);
+                result |= failed;
             }
         }
     }
@@ -814,6 +882,7 @@ static int command_sweep(int argc, char** argv)
 }
 
 // metrics OUT METRICS FROM TO RUNS -- ARG...: one perf stat -M per metric and run.
+// Returns 1 when a run failed (run_failed), not when perf refused a metric.
 static int command_metrics(int argc, char** argv)
 {
     int result = 0;
@@ -852,13 +921,18 @@ static int command_metrics(int argc, char** argv)
                 format_into(csv, sizeof(csv), "%s/%04zu.r%d.csv", directory, i, run);
                 format_into(log, sizeof(log), "%s/%04zu.r%d.log", directory, i, run);
                 format_into(status, sizeof(status), "%s/%04zu.r%d.status", directory, i, run);
-                if (!file_exists(status))
+                if (file_exists(status))
+                {
+                    result |= recorded_status(status, BUSTER_UARCH_STATUS_FAILED_FIELD) != 0;
+                }
+                else
                 {
                     unlink(log);
                     char* perf_args[2] = { "-M", metrics.items[i] };
                     RunResult outcome = perf_stat(csv, log, perf_args, 2, &argv[separator + 1], argc - separator - 1);
-                    write_status(status, outcome);
-                    result |= outcome.status != 0;
+                    bool failed = run_failed(outcome, csv);
+                    write_status(status, outcome, failed);
+                    result |= failed;
                 }
             }
         }
@@ -868,7 +942,9 @@ static int command_metrics(int argc, char** argv)
 
 // fanout OUT LABEL ROUNDS CPU,CPU,... -- ARG...: one copy of the command per listed
 // CPU at once, each pinned to its CPU ("{i}" in an argument becomes the copy's
-// index); the batch's wall time and the copies' summed rusage per round.
+// index); the batch's wall time and the copies' summed rusage per round. Each
+// round's row is its completion record, OUT/logs/LABEL.rN.fanout, written after
+// every copy ends; OUT/fanout.tsv is rebuilt from the records.
 static int command_fanout(int argc, char** argv)
 {
     int result = 0;
@@ -901,20 +977,18 @@ static int command_fanout(int argc, char** argv)
         char path[BUSTER_UARCH_PATH_BYTES];
         format_into(path, sizeof(path), "%s/logs", out);
         make_directory(path);
-        char table_path[BUSTER_UARCH_PATH_BYTES];
-        format_into(table_path, sizeof(table_path), "%s/fanout.tsv", out);
-        if (!file_exists(table_path))
-        {
-            append_line(table_path, "label\tround\tworkers\tfailed\twall_ms\tuser_ms_sum\tsystem_ms_sum\tmaxrss_kb_max\tminflt_sum\n");
-        }
         for (int round = 0; round < rounds; round += 1)
         {
             char log[BUSTER_UARCH_PATH_BYTES];
+            char record[BUSTER_UARCH_PATH_BYTES];
             format_into(log, sizeof(log), "%s/logs/%s.r%d.log", out, label, round);
-            if (file_exists(log))
+            format_into(record, sizeof(record), "%s/logs/%s.r%d.fanout", out, label, round);
+            if (file_exists(record))
             {
+                result |= recorded_status(record, 3) != 0;
                 continue;
             }
+            // A log without a record is an interrupted batch: start it again.
             int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             pid_t children[BUSTER_UARCH_MAX_CPUS];
             double start = now_ms();
@@ -973,9 +1047,10 @@ static int command_fanout(int argc, char** argv)
             }
             char line[BUSTER_UARCH_LINE_BYTES];
             format_into(line, sizeof(line), "%s\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%ld\t%.0f\n", label, round, cpu_count, failed, wall, user, system, maxrss, minflt);
-            append_line(table_path, line);
+            write_text_atomic(record, line);
             result |= failed != 0;
         }
+        rebuild_table(out, "fanout.tsv", ".fanout", "label\tround\tworkers\tfailed\twall_ms\tuser_ms_sum\tsystem_ms_sum\tmaxrss_kb_max\tminflt_sum\n");
     }
     return result;
 }
@@ -1007,6 +1082,41 @@ static Strings list_directory(const char* path, const char* suffix)
         qsort(result.items, result.count, sizeof(char*), name_compare);
     }
     return result;
+}
+
+// OUT/NAME, rebuilt from the completion records OUT/logs/*SUFFIX (one row each) in
+// name order, under HEADER. The records are the source of truth: a run that was
+// interrupted before its record has no row, and its retry adds exactly one.
+static void rebuild_table(const char* out, const char* name, const char* suffix, const char* header)
+{
+    char directory[BUSTER_UARCH_PATH_BYTES];
+    format_into(directory, sizeof(directory), "%s/logs", out);
+    Strings records = list_directory(directory, suffix);
+    size_t capacity = strlen(header) + 1;
+    char* text = checked_realloc(NULL, capacity);
+    size_t used = 0;
+    memcpy(text, header, strlen(header) + 1);
+    used = strlen(header);
+    for (size_t i = 0; i < records.count; i += 1)
+    {
+        char path[BUSTER_UARCH_PATH_BYTES];
+        format_into(path, sizeof(path), "%s/%s", directory, records.items[i]);
+        Strings lines = read_lines(path);
+        for (size_t l = 0; l < lines.count; l += 1)
+        {
+            size_t length = strlen(lines.items[l]);
+            text = checked_realloc(text, used + length + 2);
+            memcpy(text + used, lines.items[l], length);
+            used += length;
+            text[used] = '\n';
+            used += 1;
+            text[used] = 0;
+        }
+    }
+    char table_path[BUSTER_UARCH_PATH_BYTES];
+    format_into(table_path, sizeof(table_path), "%s/%s", out, name);
+    write_text_atomic(table_path, text);
+    free(text);
 }
 
 static FILE* open_output(const char* out, const char* name)
@@ -2040,12 +2150,85 @@ static void test_topdown(void)
     expect(near(row.backend_memory, 0.25) && near(row.backend_cpu, 0.25) && near(row.ipc, 2.5) && near(row.mispredicts_pki, 20), "topdown: level 2, IPC, mispredicts");
 }
 
+static int remove_entry(const char* path, const struct stat* information, int flag, struct FTW* walk)
+{
+    (void)information;
+    (void)flag;
+    (void)walk;
+    return remove(path);
+}
+
+static Strings read_table_rows(const char* path)
+{
+    Strings lines = read_lines(path);
+    Strings result = { 0 };
+    for (size_t i = 1; i < lines.count; i += 1)
+    {
+        strings_add(&result, lines.items[i]);
+    }
+    return result;
+}
+
+// time and fanout resume from their completion records: an interrupted run (its
+// log but no record) runs again and adds exactly one row; a recorded failure is
+// reported again on resume.
+static void test_resume(void)
+{
+    const char* temporary = getenv("TMPDIR");
+    char directory[BUSTER_UARCH_PATH_BYTES];
+    format_into(directory, sizeof(directory), "%s/uarch-test.XXXXXX", temporary != NULL && *temporary ? temporary : "/tmp");
+    bool made = mkdtemp(directory) != NULL;
+    expect(made, "resume: a temporary directory");
+    if (made)
+    {
+        char path[BUSTER_UARCH_PATH_BYTES];
+        char* first[] = { "uarch", "time", directory, "2", "--list", "ok", "true", "--list", "bad", "sh", "-c", "exit 3", NULL };
+        int status = command_time(12, first);
+        format_into(path, sizeof(path), "%s/time.tsv", directory);
+        expect(status == 1 && read_table_rows(path).count == 4, "resume: time runs every round and reports the failing list");
+        // Interrupted: the log is there, the record is not.
+        format_into(path, sizeof(path), "%s/logs/ok.r1.time", directory);
+        unlink(path);
+        char* second[] = { "uarch", "time", directory, "2", "--list", "ok", "true", "--list", "bad", "sh", "-c", "exit 3", NULL };
+        status = command_time(12, second);
+        expect(file_exists(path), "resume: the interrupted run ran again");
+        format_into(path, sizeof(path), "%s/time.tsv", directory);
+        Strings rows = read_table_rows(path);
+        int bad = 0;
+        for (size_t i = 0; i < rows.count; i += 1)
+        {
+            bad += strncmp(rows.items[i], "bad\t", 4) == 0 && strstr(rows.items[i], "\t3\t") != NULL;
+        }
+        expect(status == 1 && rows.count == 4 && bad == 2, "resume: one row per run, and the recorded failure reported again");
+        char* fan[] = { "uarch", "fanout", directory, "fan", "2", "0,0", "--", "true", NULL };
+        status = command_fanout(8, fan);
+        format_into(path, sizeof(path), "%s/logs/fan.r0.fanout", directory);
+        unlink(path);
+        char* fan_again[] = { "uarch", "fanout", directory, "fan", "2", "0,0", "--", "true", NULL };
+        status |= command_fanout(8, fan_again);
+        format_into(path, sizeof(path), "%s/fanout.tsv", directory);
+        expect(status == 0 && read_table_rows(path).count == 2, "resume: fanout reruns an interrupted round once");
+        char* failing[] = { "uarch", "fanout", directory, "fail", "1", "0", "--", "false", NULL };
+        expect(command_fanout(8, failing) == 1, "resume: a failed fanout copy fails the command");
+        char csv[BUSTER_UARCH_PATH_BYTES];
+        format_into(csv, sizeof(csv), "%s/refused.csv", directory);
+        write_text_atomic(csv, "# started on Wed Nov  4 20:56:07 2026\n\n");
+        RunResult refused = { .status = 1 };
+        expect(!run_failed(refused, csv), "resume: perf's refusal of an event is no failure");
+        format_into(csv, sizeof(csv), "%s/counted.csv", directory);
+        write_text_atomic(csv, "1072229971,,ls_not_halted_cyc:u,246891943,100.00,,\n");
+        expect(run_failed(refused, csv), "resume: a counted run with a nonzero status failed");
+        nftw(directory, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
+    }
+}
+
 static int command_test(void)
 {
     test_csv();
     test_values();
     test_parsers();
     test_topdown();
+    test_resume();
     printf("uarch test: %d checks, %d failed\n", test_checks, test_failures);
     return test_failures != 0;
 }
