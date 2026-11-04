@@ -1,0 +1,367 @@
+--- a/src/buster/compiler/c_check_literal_diagnostic.c
++++ b/src/buster/compiler/c_check_literal_diagnostic.c
+@@ -11,3 +11,7 @@
++#ifndef BUSTER_CHECK_LITERAL_DIAGNOSTIC_C
++#define BUSTER_CHECK_LITERAL_DIAGNOSTIC_C
++
++// Shared by the checker and the preprocessor; only a refused constant reaches this cold scan.
+ typedef enum CheckLiteralDiagnosticKind
+ {
+     CHECK_LITERAL_DIAGNOSTIC_NONE,
+--- a/src/buster/compiler/c_check_literal_diagnostic.c
++++ b/src/buster/compiler/c_check_literal_diagnostic.c
+@@ -360,3 +360,11 @@
+     *diagnostic = scan.error;
++    if (scan.error.kind == CHECK_LITERAL_DIAGNOSTIC_NONE)
++    {
++        // A well-formed floating constant is still forbidden in #if; keep the separator error
++        // above free to use this field for its start/end distinction.
++        diagnostic->floating = floating;
++    }
+     return scan.error.kind != CHECK_LITERAL_DIAGNOSTIC_NONE;
+ }
++
++#endif
+--- a/src/buster/compiler/c_preprocessor_history.c
++++ b/src/buster/compiler/c_preprocessor_history.c
+@@ -914,16 +914,17 @@
+-// pp_diagnose_output_at at the `offset`th character of the token's spelling after translation phases 1 and 2 (as
+-// pp_spelling gives it), as clang's AdvanceToTokenCharacter places a diagnostic inside a numeric constant: a line splice
+-// in the spelling moves the place past it.
+-BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
+-                                                                                                           uint32_t position, const char* format, ...)
++// The `offset`th character of a spelling after translation phases 1 and 2 (pp_spelling), in its source range.
++// Both #if's temporary tokens and the checker's output tokens use this mapping; neither counts a splice as a byte.
++static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location, uint32_t offset)
+ {
+-    uint32_t location = token < pp->output.count ? pp->output.locations[token] : 0;
+-    const uint32_t range = token < pp->output.count ? pp_find_range(pp, location) : BUSTER_PP_NONE;
++    const uint32_t range = pp_find_range(pp, location);
+     if (range != BUSTER_PP_NONE)
+     {
+-        const PPRange* bytes = &pp->ranges[range];
+-        uint32_t at = location - bytes->base;
+-        for (uint32_t left = offset; left != 0 && at < bytes->length; left -= 1)
++        // The range is immutable throughout this scan; no helper can append or replace its storage here.
++        const PPRange* range_bytes = &pp->ranges[range];
++        const uint8_t* bytes = range_bytes->bytes;
++        const uint32_t length = range_bytes->length;
++        const uint32_t base = range_bytes->base;
++        uint32_t at = location - base;
++        for (uint32_t left = offset; left != 0 && at < length; left -= 1)
+         {
+             // Past the character, then past any splices after it: a backslash, perhaps spaces, and a line break.
+             at += 1;
+@@ -931,19 +932,27 @@
+             while (spliced)
+             {
+                 uint32_t after = at;
+-                spliced = at < bytes->length && bytes->bytes[at] == '\\';
++                spliced = at < length && bytes[at] == '\\';
+                 after += spliced;
+-                while (spliced && after < bytes->length && (bytes->bytes[after] == ' ' || bytes->bytes[after] == '\t'))
++                while (spliced && after < length && (bytes[after] == ' ' || bytes[after] == '\t'))
+                 {
+                     after += 1;
+                 }
+-                const uint32_t line = after < bytes->length && bytes->bytes[after] == '\r' ? 1 : 0;
+-                spliced &= after + line < bytes->length && bytes->bytes[after + line] == '\n';
++                const uint32_t line = after < length && bytes[after] == '\r' ? 1 : 0;
++                spliced &= after + line < length && bytes[after + line] == '\n';
+                 at = spliced ? after + line + 1 : at;
+             }
+         }
+-        location = bytes->base + (at < bytes->length ? at : bytes->length);
++        location = base + (at < length ? at : length);
+     }
++    return location;
++}
++
++// pp_diagnose_output_at at a character of the token's spelling, retaining its output origin and publication order.
++BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_offset_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t offset,
++                                                                                                           uint32_t position, const char* format, ...)
++{
++    const uint32_t location = token < pp->output.count ? pp_spelling_offset_location(pp, pp->output.locations[token], offset) : 0;
+     va_list arguments;
+     va_start(arguments, format);
+     pp_diagnose_output_location(pp, severity, token, location, position, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -15036,3 +15036,5 @@
++#include "c_preprocessor_literal.c"
++
+ // Parses an integer constant's spelling (C 6.4.4.1, with C23's binary prefix, C2y's 0o and digit separators, and the suffixes
+ // u, l, ll, z, wb in any case and order). Returns false (with an error) if it isn't one.
+ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location, PPValue* value)
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -15127,7 +15127,5 @@
+     if (!valid)
+     {
+-        const bool floating = memchr(spelling, '.', length) != 0 || (radix != 16 && (memchr(spelling, 'e', length) != 0 || memchr(spelling, 'E', length) != 0));
+-        pp_diagnose(pp, PP_SEVERITY_ERROR, location, floating ? "floating point literal in preprocessor expression" : "invalid integer constant '%.*s' in preprocessor expression",
+-                    (int)length, (const char*)spelling);
++        pp_diagnose_integer(pp, spelling, length, location);
+     }
+     else if (overflow)
+--- /dev/null
++++ b/src/buster/compiler/c_preprocessor_literal.c
+@@ -0,0 +1,55 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// Diagnostics for numeric constants refused by #if/#elif's integer reader (#1254). The shared classifier supplies
++// malformed-literal errors; only well-formed floating constants get the preprocessor-specific message. Included
++// before pp_parse_integer. Valid integers never call this scalar, cold path or pay for a second spelling scan.
++
++#include "c_check_literal_diagnostic.c"
++
++static __attribute__((noinline, cold)) void pp_diagnose_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t length, uint32_t location)
++{
++    CheckLiteralDiagnostic diagnostic;
++    const bool malformed = check_literal_diagnose(spelling, length, pp->options.language.standard >= 2023, &diagnostic);
++    if (malformed)
++    {
++        const uint32_t offset = diagnostic.offset;
++        const uint32_t at = pp_spelling_offset_location(pp, location, offset);
++        const char* radix = diagnostic.radix == 2 ? "binary" : diagnostic.radix == 8 ? "octal" : "decimal";
++        switch (diagnostic.kind)
++        {
++            case CHECK_LITERAL_DIAGNOSTIC_EXPONENT:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, at, "exponent has no digits");
++                break;
++            case CHECK_LITERAL_DIAGNOSTIC_DIGIT:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid digit '%c' in %s constant", diagnostic.character, radix);
++                break;
++            case CHECK_LITERAL_DIAGNOSTIC_SUFFIX:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, at, "invalid suffix '%.*s' on %s constant", (int)(length - offset),
++                            (const char*)spelling + offset, diagnostic.floating ? "floating" : "integer");
++                break;
++            case CHECK_LITERAL_DIAGNOSTIC_HEX_EXPONENT:
++            case CHECK_LITERAL_DIAGNOSTIC_HEX_SIGNIFICAND:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, at, "hexadecimal floating constant requires %s",
++                            diagnostic.kind == CHECK_LITERAL_DIAGNOSTIC_HEX_EXPONENT ? "an exponent" : "a significand");
++                break;
++            case CHECK_LITERAL_DIAGNOSTIC_SEPARATOR:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, at, "digit separator cannot appear at %s of digit sequence", diagnostic.floating ? "end" : "start");
++                break;
++            case CHECK_LITERAL_DIAGNOSTIC_TOO_LARGE:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "integer literal is too large to be represented in any integer type");
++                break;
++            case CHECK_LITERAL_DIAGNOSTIC_SIZE_T:
++                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "'size_t' suffix for literals is a C++23 feature");
++                break;
++            default:
++                break;
++        }
++    }
++    else
++    {
++        // Keep the reader's own refusal for extensions it cannot evaluate; a valid hex float is floating too.
++        pp_diagnose(pp, PP_SEVERITY_ERROR, location, diagnostic.floating ? "floating point literal in preprocessor expression" : "invalid integer constant '%.*s' in preprocessor expression",
++                    (int)length, (const char*)spelling);
++    }
++}
+--- a/src/buster/compiler/c_preprocessor_directives_test.c
++++ b/src/buster/compiler/c_preprocessor_directives_test.c
+@@ -673,4 +673,6 @@
+     const char* source;
+     const char* header;
+     const char* standard;
++    // Optional exact diagnostic after the main file's path, including the newline. Empty expects no diagnostic.
++    const char* diagnostic;
+ };
+--- a/src/buster/compiler/c_preprocessor_directives_test.c
++++ b/src/buster/compiler/c_preprocessor_directives_test.c
+@@ -699,2 +699,153 @@
+ static const PPDirectiveTestStructure pp_directive_test_structures[] = {
++    // #1254: exact error text and source character, even without the optional Clang oracle.
++    {
++        .name = "invalid octal digit",
++        .source = "#if 08\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:6: error: invalid digit '8' in octal constant\n",
++    },
++    {
++        .name = "invalid explicit octal digit",
++        .source = "#if 0o18\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:8: error: invalid digit '8' in octal constant\n",
++    },
++    {
++        .name = "invalid binary digit",
++        .source = "#if 0b102\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:9: error: invalid digit '2' in binary constant\n",
++    },
++    {
++        .name = "invalid integer suffix",
++        .source = "#if 1lul\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:6: error: invalid suffix 'lul' on integer constant\n",
++    },
++    {
++        .name = "missing hexadecimal digits",
++        .source = "#if 0x\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:6: error: invalid suffix 'x' on integer constant\n",
++    },
++    {
++        .name = "missing exponent digits",
++        .source = "#if 1e\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:6: error: exponent has no digits\n",
++    },
++    {
++        .name = "missing signed exponent digits",
++        .source = "#if 1e+\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:6: error: exponent has no digits\n",
++    },
++    {
++        .name = "missing hexadecimal exponent digits",
++        .source = "#if 0x1p\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:8: error: exponent has no digits\n",
++    },
++    {
++        .name = "missing hexadecimal exponent",
++        .source = "#if 0x1.\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:9: error: hexadecimal floating constant requires an exponent\n",
++    },
++    {
++        .name = "missing hexadecimal significand",
++        .source = "#if 0x.p1\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:8: error: hexadecimal floating constant requires a significand\n",
++    },
++    {
++        .name = "invalid floating suffix",
++        .source = "#if 1.0fblah\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:8: error: invalid suffix 'fblah' on floating constant\n",
++    },
++    {
++        .name = "separator at exponent start",
++        .source = "#if 1e'2\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:7: error: digit separator cannot appear at start of digit sequence\n",
++    },
++    {
++        .name = "separator at mantissa end",
++        .source = "#if 1'.0\n#endif\n",
++        .standard = "c23",
++        .diagnostic = ":1:6: error: digit separator cannot appear at end of digit sequence\n",
++    },
++    {
++        .name = "well-formed decimal floating constant",
++        .source = "#if 1.5\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:5: error: floating point literal in preprocessor expression\n",
++    },
++    {
++        .name = "well-formed hexadecimal floating constant",
++        .source = "#if 0x1p2\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:5: error: floating point literal in preprocessor expression\n",
++    },
++    {
++        .name = "integer overflow unchanged",
++        .source = "#if 99999999999999999999999\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:5: error: integer literal is too large to be represented in any integer type\n",
++    },
++    {
++        .name = "invalid digit after LF splice",
++        .source = "#if 0\\\n8\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":2:1: error: invalid digit '8' in octal constant\n",
++    },
++    {
++        .name = "invalid digit after CRLF splice",
++        .source = "#if 0\\\r\n8\r\n#endif\r\n",
++        .standard = "gnu17",
++        .diagnostic = ":2:1: error: invalid digit '8' in octal constant\n",
++    },
++    {
++        .name = "invalid suffix after repeated splices",
++        .source = "#if 1\\\n\\\nlul\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":3:1: error: invalid suffix 'lul' on integer constant\n",
++    },
++    {
++        .name = "missing exponent after splice",
++        .source = "#if 1\\\ne\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":2:1: error: exponent has no digits\n",
++    },
++    {
++        .name = "malformed selected elif",
++        .source = "#if 0\n#elif 08\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":2:8: error: invalid digit '8' in octal constant\n",
++    },
++    {
++        .name = "short circuit still checks literal syntax",
++        .source = "#if 0 && 08\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = ":1:11: error: invalid digit '8' in octal constant\n",
++    },
++    {
++        .name = "skipped group does not check literal syntax",
++        .source = "#if 0\n#if 08\n#endif\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = "",
++    },
++    {
++        .name = "untaken elif does not check literal syntax",
++        .source = "#if 1\n#elif 08\n#endif\n",
++        .standard = "gnu17",
++        .diagnostic = "",
++    },
++    {
++        .name = "valid integer forms unchanged",
++        .source = "#if 0xffu == 255 && 077LL == 63 && 0b10 == 2 && 1ULL == 1\nkept\n#endif\n",
++        .standard = "c23",
++        .diagnostic = "",
++    },
+     { "#else after #else", "#if 1\n#else\n#else\n#endif\n", 0, 0 },
+--- a/src/buster/compiler/c_preprocessor_directives_test.c
++++ b/src/buster/compiler/c_preprocessor_directives_test.c
+@@ -918,4 +918,14 @@
+         result = result && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0;
+         char* oracle = result && with_clang ? pp_directive_test_clang(path, fixture->standard) : 0;
+         result = result && (!with_clang || (oracle != 0 && strcmp(diagnostics[0], oracle) == 0));
++        if (result && fixture->diagnostic != NULL)
++        {
++            char expected[8192];
++            const int length = snprintf(expected, sizeof(expected), "%s%s", fixture->diagnostic[0] != 0 ? path : "", fixture->diagnostic);
++            result = length >= 0 && (size_t)length < sizeof(expected) && strcmp(diagnostics[0], expected) == 0;
++            if (!result)
++            {
++                printf("expected numeric diagnostic:\n%s", length >= 0 && (size_t)length < sizeof(expected) ? expected : "<too long>\n");
++            }
++        }
+         if (!result)
+--- a/docs/commands/preprocessor.md
++++ b/docs/commands/preprocessor.md
+@@ -1,2 +1,18 @@
+ # preprocessor
+ 
++## Numeric constants in conditional directives
++
++Malformed numeric constants in evaluated `#if` and `#elif` expressions use the
++checker's cold `check_literal_diagnose` classifier. The error names the fault
++and points at its character, including across LF and CRLF line splices.
++Well-formed floating constants retain the preprocessor-specific rejection;
++integer overflow retains its existing diagnostic. Valid integer evaluation
++does not run the extra diagnostic scan.
++
++The directive diagnostic fixtures in `c_preprocessor_directives_test.c` check
++exact messages and columns with both kernels, independently of Clang.
++`test-preprocessor --clang` also compares them with Clang's complete diagnostic
++text. They cover malformed digits, suffixes, exponents and separators, floating
++and overflow controls, splices, selected and skipped conditionals, and syntax
++errors in short-circuited expressions.
++
