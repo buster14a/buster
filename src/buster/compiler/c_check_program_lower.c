@@ -1460,6 +1460,23 @@ static uint8_t check_lower_value_class(const CheckLowerWriter* writer, TypeId ty
     return check_lower_aggregate(writer, type) ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
 }
 
+// A type's class and facts in one word, CheckLowerShared.type_templates' layout (the vector path's alone, which has the
+// table), and whether they are a plain scalar's: a class from I8 to F64 (or VOID, where `void_ok`), and none of the facts
+// whose rules go elsewhere (an aggregate's, a complex value's, an atomic's, a _BitInt's).
+static inline __attribute__((always_inline)) uint32_t check_lower_type_info(const CheckLowerWriter* writer, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    return index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
+}
+
+static inline __attribute__((always_inline)) bool check_lower_plain_scalar(uint32_t info, bool void_ok)
+{
+    const uint8_t class = (uint8_t)info;
+    const uint8_t facts = (uint8_t)(info >> 8);
+    const bool classed = (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64) || (void_ok && class == BUSTER_TYPED_CLASS_VOID);
+    return classed && (facts & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ATOMIC | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+}
+
 // A type's half-precision format (CheckHalf, c_check_program_half.c's values): an _Atomic one's value's too, as its class
 // is (check_lower_type_class), whose loads and stores are the atomics'.
 static CheckHalf check_lower_half(const TypeTable* types, TypeId type)
@@ -5553,11 +5570,26 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
     // its address, and its bytes go where abi_assign puts them), after the callee's calling convention.
     const char* passed = check_lower_convention(types, type, true);
-    for (uint32_t a = 0; a < parameters && passed == NULL; a += 1)
+    // A plain call: a source call whose parameters and arguments are all plain scalars (check_lower_plain_scalar), none a
+    // transparent union's, and whose result is one or void, which passes every check below and records its arguments by
+    // their packed classes and facts alone, on the vector path (#1048: 0.05 ms of sqlite3.c's lowering on the 9700X,
+    // docs/c-lowering.md's "Plain calls and compact locals"). Any other takes each type's helpers, the scalar path's too.
+    const TypeId result = check_stream_type(stream, node);
+    bool plain = writer->type_templates != NULL && !halves && !builtin && omitted == 0 && check_lower_plain_scalar(check_lower_type_info(writer, result), true);
+    for (uint32_t a = 0; plain && a < parameters; a += 1)
+    {
+        plain = check_lower_plain_scalar(check_lower_type_info(writer, parameter_types[a]), false);
+    }
+    for (uint32_t a = 0; plain && a < count; a += 1)
+    {
+        const CheckConversion* conversion = stream->argument_conversions + first + a;
+        plain = check_lower_plain_scalar(check_lower_type_info(writer, conversion->type), false) && (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) == 0;
+    }
+    for (uint32_t a = 0; !plain && a < parameters && passed == NULL; a += 1)
     {
         passed = halves ? check_lower_passed(writer, parameter_types[a]) : check_lower_call_passed(writer, parameter_types[a]);
     }
-    for (uint32_t kept = 0; kept < count && passed == NULL; kept += 1)
+    for (uint32_t kept = 0; !plain && kept < count && passed == NULL; kept += 1)
     {
         const uint32_t a = kept + (kept >= omit ? omitted : 0);
         const TypeId argument = stream->argument_conversions[first + a].type;
@@ -5565,10 +5597,9 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     }
     // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
     // 128-bit integer's and a vector's, which LOCAL then reads.
-    const TypeId result = check_stream_type(stream, node);
-    const bool aggregate_result = check_lower_aggregate(writer, result);
-    const bool wide_result = check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0;
-    const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
+    const bool aggregate_result = !plain && check_lower_aggregate(writer, result);
+    const bool wide_result = !plain && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0);
+    const char* returned = plain ? NULL : aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
@@ -5616,7 +5647,15 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         abi->variadic[abi->count++] = variadic;
         // Whether an argument is a transparent union's, which the operands' loop asks again only then.
         bool transparent = false;
-        for (uint32_t kept = 0; kept < count; kept += 1)
+        // A plain call's arguments: each its own type, a value of its class.
+        for (uint32_t kept = 0; plain && kept < count; kept += 1)
+        {
+            const TypeId argument = stream->argument_conversions[first + kept].type;
+            abi->arguments[abi->argument_count++] = argument;
+            writer->argument_sizes[writer->argument_count] = 0;
+            writer->argument_classes[writer->argument_count++] = (uint8_t)check_lower_type_info(writer, argument);
+        }
+        for (uint32_t kept = 0; !plain && kept < count; kept += 1)
         {
             const uint32_t a = kept + (kept >= omit ? omitted : 0);
             // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made, and a
@@ -5660,7 +5699,11 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         }
         check_lower_instruction(writer, tail ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL,
                                 tail || aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : result_class, call);
-        for (uint32_t kept = count; kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        for (uint32_t kept = count; plain && kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            check_lower_operand(writer, node, kept + 3, false, stream->argument_conversions[first + kept].type);
+        }
+        for (uint32_t kept = count; !plain && kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const uint32_t a = kept + (kept >= omit ? omitted : 0);
             const CheckConversion* conversion = stream->argument_conversions + first + a;
@@ -11735,8 +11778,15 @@ struct CheckLowerShared
     uint32_t* switch_locals;
     uint32_t* vla_identities;
     uint32_t* save_locals;
-    uint32_t* local_first;
-    uint32_t* local_next;
+    // Each body's locals, its own objects' declarations, a slice of `local_tokens` in token order from local_start[b + 1] to
+    // local_start[b + 2], and their objects in `local_objects` alike: arrays its walks read in order, where a list linked
+    // through every token cost each local a dependent load (#1048). `opening_bodies` and `local_bodies` are the
+    // preparation's maps of a body's opening token to its index and of a declaring token to its body's.
+    uint32_t* local_start;
+    uint32_t* local_tokens;
+    uint32_t* local_objects;
+    uint32_t* opening_bodies;
+    uint32_t* local_bodies;
     // Each body's own signature, its index in its part's batch, and whether the body starts its variadic list.
     uint32_t* signatures;
     uint8_t* incoming;
@@ -11870,8 +11920,7 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
     }
 }
 
-// Whether `token` declares a body's own object, which its body's locals' list holds (CheckLowerShared.local_first): the
-// list's links and the clearing of its heads before them test the same tokens.
+// Whether `token` declares a body's own object, which its body's locals' slice holds (CheckLowerShared.local_tokens).
 static bool check_lower_local_declaration(const CheckProgram* program, uint32_t token)
 {
     const CheckInput* input = program->input;
@@ -12191,13 +12240,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
-    shared->local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    shared->local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->opening_bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->local_bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->local_start = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 2) : 0;
     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
-    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->local_first != 0 && shared->local_next != 0 && declaring != 0 &&
+    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
             (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
@@ -12231,44 +12281,65 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         const uint32_t declaring_count = check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
-        // Each body's locals' list is empty before the links below, where it is read (each body's, at its opening) and
-        // where it is written (each local's body), rather than at every token (#877).
+        // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
+        // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
         for (uint32_t b = 0; b < program->body_count; b += 1)
         {
-            shared->local_first[program->bodies[b].opening] = BUSTER_CHECK_NONE;
+            shared->opening_bodies[program->bodies[b].opening] = b;
         }
-        // Each declaring token's body where it declares a local (check_lower_local_declaration), none for every other, in its
-        // `local_next` until the links below replace it, and the local's body's list's head cleared: the test once a token
-        // (#1048: its loads are a declaration's first touches, which two passes paid twice).
+        memset(shared->local_start, 0, ((uint64_t)program->body_count + 2) * sizeof(uint32_t));
+        // Each declaring token that declares a local (check_lower_local_declaration), tested once (#1048: its loads are a
+        // declaration's first touches), its body's index in `local_bodies` (none for every other token, and for a local
+        // whose body isn't lowered) and counted in local_start[b + 1]. The objects whose local_map entries a body writes,
+        // its parameters' and its locals' (check_lower_part sets them as the body starts and puts them back to none as it
+        // ends), are each cleared and marked in `locals` before any body is lowered, after which the bodies' writers only
+        // read the bits (#877): every local's whatever its body (one no writer lowers keeps an entry that reads as none
+        // either way), and the parameters' of each body below. Every other object's entry, which nothing writes, reads as
+        // none without being cleared.
+        uint32_t local_count = 0;
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
             const uint32_t token = declaring[d];
-            const uint32_t body = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
-            shared->local_next[token] = body;
-            if (body != BUSTER_CHECK_NONE)
+            const uint32_t opening = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
+            const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
+            const uint32_t b = candidate < program->body_count && program->bodies[candidate].opening == opening ? candidate : BUSTER_CHECK_NONE;
+            shared->local_bodies[token] = b;
+            if (opening != BUSTER_CHECK_NONE)
             {
-                shared->local_first[body] = BUSTER_CHECK_NONE;
+                check_lower_local_keep(shared, input->objects[token], count);
+            }
+            if (b != BUSTER_CHECK_NONE)
+            {
+                shared->local_start[b + 1] += 1;
+                local_count += 1;
             }
         }
-        // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
-        // The objects whose local_map entries a body writes, its parameters' and its locals' (check_lower_part sets them as
-        // the body starts and puts them back to none as it ends), are each cleared and marked in `locals` before any body
-        // is lowered, after which the bodies' writers only read the bits (#877): a local's as it is linked, every local's
-        // whatever its body (one no writer lowers keeps an entry that reads as none either way), and the parameters' of
-        // each body below. Every other object's entry, which nothing writes, reads as none without being cleared.
-        for (uint32_t d = declaring_count; d-- > 0;)
+        // The counts' prefix sums, each body's end (local_start[b + 1]), which the placing below moves back to its first.
+        for (uint32_t b = 1; b <= program->body_count; b += 1)
+        {
+            shared->local_start[b + 1] += shared->local_start[b];
+        }
+        shared->local_tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)local_count + 1);
+        shared->local_objects = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)local_count + 1);
+        if (shared->local_tokens == 0 || shared->local_objects == 0)
+        {
+            lowered->status = CHECK_PROGRAM_RESOURCE;
+        }
+        // In reverse, so that a node's declaration is its first token and each body's locals are placed back from its end,
+        // in token order.
+        for (uint32_t d = declaring_count; lowered->status == CHECK_PROGRAM_OK && d-- > 0;)
         {
             const uint32_t token = declaring[d];
             if (check_sparse_get(input->initializer_nodes, token) < nodes)
             {
                 shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
             }
-            const uint32_t body = shared->local_next[token];
-            if (body != BUSTER_CHECK_NONE)
+            const uint32_t b = shared->local_bodies[token];
+            if (b != BUSTER_CHECK_NONE)
             {
-                shared->local_next[token] = shared->local_first[body];
-                shared->local_first[body] = token;
-                check_lower_local_keep(shared, input->objects[token], count);
+                const uint32_t k = --shared->local_start[b + 1];
+                shared->local_tokens[k] = token;
+                shared->local_objects[k] = input->objects[token];
             }
         }
         for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -12778,9 +12849,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             writer->result_object = check_lower_temporary_of(writer, result);
         }
-        for (uint32_t declaration = bare ? BUSTER_CHECK_NONE : shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
+        for (uint32_t slot = bare ? 0 : shared->local_start[b + 1]; !bare && slot < shared->local_start[b + 2]; slot += 1)
         {
-            if (check_lower_local_of(writer, input->objects[declaration]) == BUSTER_CHECK_NONE)
+            const uint32_t declaration = shared->local_tokens[slot];
+            const uint32_t declared_object = shared->local_objects[slot];
+            if (check_lower_local_of(writer, declared_object) == BUSTER_CHECK_NONE)
             {
                 const TypeId local_type = input->declared_types[declaration];
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
@@ -12848,7 +12921,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 {
                     writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
                 }
-                writer->local_map[input->objects[declaration]] = local;
+                writer->local_map[declared_object] = local;
             }
         }
         // #1048's node templates: the body's nodes' contexts and closed subtrees' entries, before its statements.
@@ -13078,9 +13151,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->call_count = writer->call_count;
         function->argument_count = writer->argument_count;
         part->entries += writer->count;
-        for (uint32_t declaration = shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
+        for (uint32_t slot = shared->local_start[b + 1]; slot < shared->local_start[b + 2]; slot += 1)
         {
-            writer->local_map[input->objects[declaration]] = BUSTER_CHECK_NONE;
+            writer->local_map[shared->local_objects[slot]] = BUSTER_CHECK_NONE;
         }
         for (uint32_t parameter = check_sparse_get(input->parameters, body.opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
         {

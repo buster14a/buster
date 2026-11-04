@@ -866,6 +866,41 @@ options; every variant's object was the base's, which the run checked too):
   another shape before the tasks lowered it, the duplicated work this issue's
   pre-passes paid. Its code stays in #1235's history (`cf254b58`).
 
+## Plain calls and compact locals (#1048)
+
+The next run ([run at `7513c6f0`](https://github.com/buster14a/buster/actions/runs/41764265315/job/126362024774)),
+on the base with the overload and control cuts, measured two more, the same
+way (every variant's object was the base's):
+
+| row | the base | plain calls | compact locals | both |
+| --- | ---: | ---: | ---: | ---: |
+| `lower` | 11.639 [11.616 to 11.767] | 11.590 | 11.572 | 11.503 [11.490 to 11.521] |
+| `lower.prepare` | 1.187 | 1.189 | 1.244 | 1.245 |
+| `lower.statements` | 7.735 | 7.631 | 7.699 | 7.652 |
+| `lower.bodies` | 1.435 [1.434 to 1.477] | 1.446 | 1.330 [1.308 to 1.344] | 1.335 |
+
+- **Plain calls.** `check_lower_call_body` tested each parameter's and
+  argument's type with its helpers (`check_lower_call_passed`, the
+  aggregate's, the wide value's, the vector's and the atomic's tests), in
+  four loops. A call whose parameters and arguments are all plain scalars
+  (a class from I8 to F64 and none of the facts whose rules go elsewhere,
+  `check_lower_plain_scalar`), none a transparent union's, with such a
+  result or void, now passes those checks and records its arguments by their
+  packed classes and facts alone, on the vector path, which has the table;
+  the scalar path keeps the helpers.
+- **Compact locals.** Each body's locals were a list linked through every
+  token (`local_first`, `local_next`), which the body's walks followed a
+  dependent load at a time, twice. They are now a slice of one array in
+  token order (`CheckLowerShared.local_tokens`, with their objects in
+  `local_objects`), which the preparation builds in the passes over the
+  declaring tokens it made anyway: the first tests each for a local and
+  counts its body's, the second, in reverse, places each at its body's end.
+  The run's variant built the slices beside the lists, with a third pass,
+  which the preparation's row shows; the change leaves the lists out.
+
+Every round of the two together was below every round of the base: `lower`
+0.136 ms lower.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
