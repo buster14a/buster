@@ -12458,65 +12458,6 @@ static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool so
     return check_lower_writer_begin(&writer, &abi, &status, shared, sources, &measure) ? measure.length : UINT64_MAX;
 }
 
-// The most nodes a statement's prefetch takes (check_lower_prefetch): its root's and those just before it, the first the
-// tasks' loop expands.
-#define BUSTER_CHECK_LOWER_PREFETCH_NODES 64u
-
-// Prefetches the checked values and conversions of the nodes from `from` to `node`, a statement's root (the last
-// BUSTER_CHECK_LOWER_PREFETCH_NODES of them): a statement's nodes come before its root in the graph, and the tasks' loop
-// waited on its first touch of each node's checked value and 32 bytes of conversions (#531): the value's columns, and its
-// payload row's index (a row itself is wherever the run wrote it, #628). Returns the node after the last one prefetched, or
-// `from` for a root that isn't past it.
-static uint32_t check_lower_prefetch(const CheckProgram* program, uint32_t from, uint32_t node)
-{
-    uint32_t result = from;
-    if (node != BUSTER_CHECK_NONE && node < program->stream->count && node >= from)
-    {
-        const uint32_t first = node - from >= BUSTER_CHECK_LOWER_PREFETCH_NODES ? node + 1 - BUSTER_CHECK_LOWER_PREFETCH_NODES : from;
-        const CheckStream* stream = program->stream;
-        const bool dense = stream->dense_values != NULL;
-        const uintptr_t ranges[][2] = {
-            {
-                (uintptr_t)(stream->conversions + first),
-                (uintptr_t)(stream->conversions + node + 1),
-            },
-            {
-                dense ? (uintptr_t)(stream->dense_values + first) : (uintptr_t)(stream->value_types + first),
-                dense ? (uintptr_t)(stream->dense_values + node + 1) : (uintptr_t)(stream->value_types + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_flags + first),
-                dense ? 0 : (uintptr_t)(stream->value_flags + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_objects + first),
-                dense ? 0 : (uintptr_t)(stream->value_objects + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->payload_rows + first),
-                dense ? 0 : (uintptr_t)(stream->payload_rows + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_categories + first),
-                dense ? 0 : (uintptr_t)(stream->value_categories + node + 1),
-            },
-            {
-                dense ? 0 : (uintptr_t)(stream->value_constants + first),
-                dense ? 0 : (uintptr_t)(stream->value_constants + node + 1),
-            },
-        };
-        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(ranges); r += 1)
-        {
-            for (uintptr_t line = ranges[r][0] & ~(uintptr_t)63; line < ranges[r][1]; line += 64)
-            {
-                _mm_prefetch((const char*)line, _MM_HINT_T0);
-            }
-        }
-        result = node + 1;
-    }
-    return result;
-}
-
 // Lowers `part`'s bodies, in order, with `writer` (check_lower_writer_begin's), each into the program's Tier0Function, its
 // columns from `output`, and its writer's room for its signatures: the part's calls' locations from `output` after its
 // bodies, as abi_assign gives them together, and each body's parameters, then tier0_validate's check of it. Stops at the
@@ -12893,9 +12834,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             check_lower_template_body(writer, program->bodies + b);
         }
-        // Each statement's nodes are prefetched a statement before the tasks' loop expands them, the first two's before the
-        // first (check_lower_prefetch).
-        uint32_t prefetched = 0;
+        // The statements' nodes aren't prefetched: #531's prefetch of each next statement's checked values and conversions
+        // paid while the values were 96-byte records, and once they were columns (#628) its own work cost the 9700X more
+        // than its misses did (#1048: docs/c-lowering.md, "The statements' prefetch").
         const uint64_t statements_start = timed ? __rdtsc() : 0;
         for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
@@ -12903,10 +12844,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 // A statement's entries are its token's (check_lower_task_source sets a nested one's).
                 check_lower_change_source(writer, program->controls[body.first + i].token);
-            }
-            for (uint32_t ahead = i == 0 ? 0 : 1; ahead < 2 && i + ahead < body.entry_count; ahead += 1)
-            {
-                prefetched = check_lower_prefetch(program, prefetched, program->controls[body.first + i + ahead].node);
             }
             check_lower_control(writer, i);
             if (sources)

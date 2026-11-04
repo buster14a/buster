@@ -788,6 +788,47 @@ task's dispatch. That is skid's resolution, not a load's own address. No one
 limit dominates, and the warm passes weren't much faster than `-c`'s cold
 stage.
 
+## The statements' prefetch (#1048)
+
+#531 had the lowering prefetch, before each statement, the next statement's
+checked values and conversions, up to its last 64 nodes (`check_lower_prefetch`),
+when each value was a 96-byte record. #628 made the values columns. The
+statements row moves by about 0.4 ms between separate 9700X runs, more than
+the prefetch could be worth, so #1235's run at `c2e691e0`
+([run](https://github.com/buster14a/buster/actions/runs/41755115082/job/126335142288))
+ran variants of one build in turn, chosen by an environment variable the
+lowering read only for that run: three rounds, each a `measure-compile`
+(medians of 11) of every variant, on `sqlite3.c` with the compile-time step's
+options. Each cell is the median of the three rounds' medians, the rounds in
+brackets:
+
+| row | main's | no prefetch | the graph's columns too | every node | a sweep of loads |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `lower` | 12.345 | 11.988 [11.933 to 12.025] | 12.345 | 12.280 | 13.206 |
+| `lower.statements` | 8.427 [8.375 to 8.443] | 8.049 [8.005 to 8.103] | 8.407 | 8.352 | 7.662 |
+| `lower.bodies` | 1.425 | 1.416 | 1.431 | 1.446 | 3.045 |
+| Tier 0 | 4.804 | 4.818 | 4.806 | 4.809 | 4.805 |
+
+- **No prefetch.** Every round's statements row was lower without it than every
+  round's with it, by 0.38 ms in the medians. The prefetch's own work, two calls
+  a statement of a loop over seven ranges, now costs more than the misses it
+  hides, so the lowering no longer prefetches.
+- **More prefetching.** Adding the graph's `ops`, operands, tokens and member
+  offsets, two statements ahead, changed nothing; every node of a statement
+  instead of its last 64 gained 0.07 ms, less than leaving it out.
+- **A sweep of loads.** Before each statement's tasks, a loop loaded every
+  column the expansion reads of each of its nodes, and what they name: the
+  type's class and facts, the object's local, the payload row's type. It took
+  0.77 ms off the statements and cost 1.62 ms in the bodies' row, over
+  304,321 nodes: 5.3 ns a node. So the tasks' loop waits on its first touches
+  for about 9% of its time, and a pass that only touches the nodes in order
+  costs a fifth of what the loop costs per node (8.4 ms over about 290,000
+  nodes, 29 ns a node).
+
+On this session's container, every variant's object of `sqlite3.c` was main's,
+and with the sweep of loads the default compile's objects of `sqlite3.c`, Lua's
+units and c-testsuite's subset were `--scalar`'s; the run itself compared none.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
