@@ -817,6 +817,9 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 1: a plain scalar local's fast path
+    // in each body's locals; bit 2: a plain scalar parameter's in its parameters (check_lower_part_body).
+    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -12638,6 +12641,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
+    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -12835,42 +12840,65 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const bool named = parameter != BUSTER_CHECK_NONE && check_sparse_get(input->parameters, parameter) == p;
             const TypeId declared_type = named ? input->declared_types[parameter] : parameter_types[p];
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
-            const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
-            // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
-            const CheckInputAttributes* attributes = named && !promoted ? check_input_attributes_at(input, parameter) : NULL;
-            // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
-            // realigned frame, or where they arrive).
-            const bool aggregate = check_lower_aggregate(writer, parameter_type);
-            const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
-            const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
-            const char* passed = check_lower_passed(writer, parameter_type);
-            // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
-            // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
-            // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
-            const bool object = aggregate || check_lower_memory(writer, parameter_type) || alignment > 3;
-            writer->token = named ? parameter : body.declaration;
-            if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+            // #1048's experiment (bit 2): a plain scalar parameter of a prototype (as a local, above), whose type
+            // check_lower_passed takes, is a temporary of its class.
+            const uint32_t info = (writer->experiment & 2) != 0 && !kr && writer->type_templates != NULL ? check_lower_type_info(writer, parameter_type) : UINT8_MAX;
+            const bool plain = check_lower_plain_scalar(info, false) && ((info >> 8) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) == 0;
+            const CheckInputAttributes* plain_attributes = plain && named ? check_input_attributes_at(input, parameter) : NULL;
+            if (plain && (plain_attributes == 0 || plain_attributes->alignment_log2 == 0) && type_alignment_log2(types, parameter_type) <= 3)
             {
-                check_lower_unsupported(writer, "parameters aligned past 1 GB");
+                writer->token = named ? parameter : body.declaration;
+                const uint32_t local = check_lower_temporary(writer, (uint8_t)info);
+                if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+                {
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                if (named)
+                {
+                    writer->local_map[input->objects[parameter]] = local;
+                    parameter = check_sparse_get(input->parameter_next, parameter);
+                }
+                abi->arguments[abi->argument_count++] = parameter_type;
             }
-            if (passed != NULL)
+            else
             {
-                check_lower_unsupported(writer, passed);
+                const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
+                // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
+                const CheckInputAttributes* attributes = named && !promoted ? check_input_attributes_at(input, parameter) : NULL;
+                // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
+                // realigned frame, or where they arrive).
+                const bool aggregate = check_lower_aggregate(writer, parameter_type);
+                const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+                const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
+                const char* passed = check_lower_passed(writer, parameter_type);
+                // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
+                // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
+                // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
+                const bool object = aggregate || check_lower_memory(writer, parameter_type) || alignment > 3;
+                writer->token = named ? parameter : body.declaration;
+                if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+                {
+                    check_lower_unsupported(writer, "parameters aligned past 1 GB");
+                }
+                if (passed != NULL)
+                {
+                    check_lower_unsupported(writer, passed);
+                }
+                const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
+                                                check_lower_temporary(writer, check_lower_class(writer, parameter_type));
+                if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                                  type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+                {
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                if (named)
+                {
+                    writer->local_map[input->objects[parameter]] = local;
+                    parameter = check_sparse_get(input->parameter_next, parameter);
+                }
+                // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
+                abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
             }
-            const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
-                                            check_lower_temporary(writer, check_lower_class(writer, parameter_type));
-            if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
-                              type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
-            {
-                writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-            }
-            if (named)
-            {
-                writer->local_map[input->objects[parameter]] = local;
-                parameter = check_sparse_get(input->parameter_next, parameter);
-            }
-            // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
-            abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
             function->parameter_count += 1;
             declared += 1;
         }
@@ -12962,72 +12990,90 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             if (check_lower_local_of(writer, declared_object) == BUSTER_CHECK_NONE)
             {
                 const TypeId local_type = input->declared_types[declaration];
-                const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
-                const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
-                // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
-                // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
-                // compound literal, which takes its type's.
-                const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
-                const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
-                                                    !check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && type_large_array(types, local_type) ? 4 : 0;
-                const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
-                uint32_t local = BUSTER_CHECK_NONE;
-                writer->token = declaration;
-                if (check_action_runtime_size(types, local_type))
+                // #1048's experiment (bit 1): a plain scalar's local (check_lower_plain_scalar, neither an array's nor a
+                // function's), of no attribute's alignment nor one past 8 bytes, is a temporary of its class, as below.
+                const uint32_t info = (writer->experiment & 1) != 0 && writer->type_templates != NULL ? check_lower_type_info(writer, local_type) : UINT8_MAX;
+                const bool plain = check_lower_plain_scalar(info, false) && ((info >> 8) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) == 0;
+                const CheckInputAttributes* plain_attributes = plain ? check_input_attributes_at(input, declaration) : NULL;
+                if (plain && (plain_attributes == 0 || plain_attributes->alignment_log2 == 0) && type_alignment_log2(types, local_type) <= 3)
                 {
-                    // A variable-length array lives on the stack from its declaration (CHECK_CONTROL_ALLOCATE) to its
-                    // block's end: its local holds its address.
-                    local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-                    if (local < writer->local_count)
+                    writer->token = declaration;
+                    const uint32_t local = check_lower_temporary(writer, (uint8_t)info);
+                    if ((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
                     {
-                        writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_DECLARED;
+                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
                     }
-                }
-                else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ATOMIC || check_lower_aggregate(writer, local_type))
-                {
-                    // Arrays, structs, unions, complex values and __float128s are frame objects (aligned past 16 bytes, in a
-                    // realigned frame). An incomplete type has no size at all.
-                    if (!type_is_complete(types, local_type))
-                    {
-                        check_lower_unsupported(writer, "local objects of incomplete type");
-                    }
-                    local = check_lower_object(writer, type_size(types, local_type), alignment);
-                }
-                else if (check_lower_memory(writer, local_type))
-                {
-                    // A memory class's value is a frame object too (check_lower_memory_class), aligned to 16.
-                    local = check_lower_object(writer, type_size(types, local_type), alignment);
-                }
-                else if (check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && check_lower_classless_vector(writer, local_type))
-                {
-                    // A compound literal of a vector Tier 0 has no class for (of 2, 4 or 8 bytes) has no local: a
-                    // narrowing shuffle reads its constants at compile time (the intrinsics' (__v4qi){0, 0, 0, 0}:
-                    // check_lower_constant_bytes), and its evaluation is refused anywhere else (check_lower_expand).
-                }
-                else if (!type_kind_is_array(kind) && check_lower_class(writer, local_type) == UINT8_MAX)
-                {
-                    // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
-                    check_lower_unsupported(writer, check_lower_type_feature(types, local_type));
-                }
-                else if (type_kind_is_array(kind))
-                {
-                    check_lower_unsupported(writer, "local values aligned past 8 bytes");
-                }
-                else if (alignment > 3)
-                {
-                    // A value aligned past 8 bytes, whose slot would be aligned to 8: a frame object of its alignment, which
-                    // LOCAL, STORE_LOCAL and SET_LOCAL of its class read and write (tier0_value_object).
-                    local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    writer->local_map[declared_object] = local;
                 }
                 else
                 {
-                    local = check_lower_temporary(writer, check_lower_class(writer, local_type));
+                    const uint8_t kind = type_kind(types, type_strip_aligned(types, local_type));
+                    const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
+                    // The attribute's alignment is its log2 plus one, 0 for none. Without one, an array of 16 bytes or more is
+                    // aligned to at least 16, as the x86-64 psABI and clang align a local array (type_large_array, #978), but a
+                    // compound literal, which takes its type's.
+                    const bool attributed = attributes != 0 && attributes->alignment_log2 != 0;
+                    const uint32_t declared_alignment = attributed ? attributes->alignment_log2 - 1u :
+                                                        !check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && type_large_array(types, local_type) ? 4 : 0;
+                    const uint32_t alignment = type_alignment_log2(types, local_type) > declared_alignment ? type_alignment_log2(types, local_type) : declared_alignment;
+                    uint32_t local = BUSTER_CHECK_NONE;
+                    writer->token = declaration;
+                    if (check_action_runtime_size(types, local_type))
+                    {
+                        // A variable-length array lives on the stack from its declaration (CHECK_CONTROL_ALLOCATE) to its
+                        // block's end: its local holds its address.
+                        local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                        if (local < writer->local_count)
+                        {
+                            writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_DECLARED;
+                        }
+                    }
+                    else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ATOMIC || check_lower_aggregate(writer, local_type))
+                    {
+                        // Arrays, structs, unions, complex values and __float128s are frame objects (aligned past 16 bytes, in a
+                        // realigned frame). An incomplete type has no size at all.
+                        if (!type_is_complete(types, local_type))
+                        {
+                            check_lower_unsupported(writer, "local objects of incomplete type");
+                        }
+                        local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    }
+                    else if (check_lower_memory(writer, local_type))
+                    {
+                        // A memory class's value is a frame object too (check_lower_memory_class), aligned to 16.
+                        local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    }
+                    else if (check_input_bit(input->declaration_bits, input->objects[declaration] - 1, BUSTER_CHECK_BITS_COMPOUND) && check_lower_classless_vector(writer, local_type))
+                    {
+                        // A compound literal of a vector Tier 0 has no class for (of 2, 4 or 8 bytes) has no local: a
+                        // narrowing shuffle reads its constants at compile time (the intrinsics' (__v4qi){0, 0, 0, 0}:
+                        // check_lower_constant_bytes), and its evaluation is refused anywhere else (check_lower_expand).
+                    }
+                    else if (!type_kind_is_array(kind) && check_lower_class(writer, local_type) == UINT8_MAX)
+                    {
+                        // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
+                        check_lower_unsupported(writer, check_lower_type_feature(types, local_type));
+                    }
+                    else if (type_kind_is_array(kind))
+                    {
+                        check_lower_unsupported(writer, "local values aligned past 8 bytes");
+                    }
+                    else if (alignment > 3)
+                    {
+                        // A value aligned past 8 bytes, whose slot would be aligned to 8: a frame object of its alignment, which
+                        // LOCAL, STORE_LOCAL and SET_LOCAL of its class read and write (tier0_value_object).
+                        local = check_lower_object(writer, type_size(types, local_type), alignment);
+                    }
+                    else
+                    {
+                        local = check_lower_temporary(writer, check_lower_class(writer, local_type));
+                    }
+                    if (((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+                    {
+                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                    }
+                    writer->local_map[declared_object] = local;
                 }
-                if (((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
-                {
-                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-                }
-                writer->local_map[declared_object] = local;
             }
         }
         // #1048's node templates: the body's nodes' contexts and closed subtrees' entries, before its statements.
