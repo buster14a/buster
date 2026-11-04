@@ -537,13 +537,10 @@ The decoding:
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
   register and frame byte its records write (by their effects) killed, its
-  definition written where its interval starts. A register the records give
-  back as they found it isn't killed (`tier1_cert_emitted_kept`): the first
-  record copies it whole (a 64-bit `mov`) into another register, the last
-  copies it back, and no record between writes the copy, leaves the node or
-  calls, by its effects, in a node that makes no call. The compare-exchange
-  (#1059) keeps rax so in r11 around its `lock cmpxchg`, and the allocation may
-  keep a value in rax across it. A call's sequence is checked
+  definition written where its interval starts. A general register the records
+  give back is not killed: one holding its own value at the run's end, followed
+  through their 64-bit `mov`s between general registers (the compare-exchange's
+  save of rax in the scratch register and its restore, #1059). A call's sequence is checked
   against the IR (its target's reference, `al`, its result's extension), its
   arguments read in their ABI registers and outgoing slots (a value passed
   twice at each of its locations), then every register the SysV ABI lets the
@@ -626,6 +623,9 @@ refused. A conditional tail `je false; edge move; jne true`, walked directly, is
 refused when the move is a zero's `xor`, whose flags the `jne` would read. A
 fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
 its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
+A compare-exchange with four values live across it, rax among the four
+allocatable registers, is certified; its restore of rax made `mov rax, rax` or
+`mov rax, rcx` is refused.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an

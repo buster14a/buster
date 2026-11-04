@@ -167,18 +167,18 @@ struct ObjectOptions
     const uint8_t* temporary_symbols;
     uint32_t temporary_symbol_count;
     // Optional, for an assembler's objects (#1115): undefined symbols the object lists though no relocation refers to
-    // them, after those that do, in this order (GNU as's .comm symbols and the _GLOBAL_OFFSET_TABLE_ it declares); and
-    // indexed by SymbolId, a common symbol's alignment, or 0 for any other symbol. An undefined symbol with an alignment
-    // is a common one: SHN_COMMON, an OBJECT whose st_value is the alignment and st_size its size.
+    // them, after those that do, in this order (each that GNU as lists: `.globl x`, `.size x, 4`, an alias's target, the
+    // _GLOBAL_OFFSET_TABLE_ it declares). A common symbol is no undefined one: BUSTER_LINK_SYMBOL_COMMON's (#147).
     const SymbolId* declared_symbols;
     uint32_t declared_symbol_count;
-    const uint32_t* common_alignments;
-    uint32_t common_alignment_count;
     // Optional, for an assembler's objects (#1115): indexed by SymbolId, a defined symbol's st_size, at least the Link's.
     // GNU as writes a size that reaches past the symbol's section end (`.size` beyond it, or `.set tail, object+2` of a
     // 4-byte object, which takes its size), where a Link symbol lies within its atom.
     const uint64_t* symbol_sizes;
     uint32_t symbol_size_count;
+    // For an assembler's objects (#1115): an undefined symbol keeps its type and size, as GNU as writes `.type x,
+    // @function` and `.size x, 4` of one; otherwise only TLS's, as compilers write an undefined symbol of every other.
+    bool undefined_types;
     // The DWARF of each unit's functions, indexed by unit (debug_count of them, the units' count), or null for none:
     // each object takes its unit's entry (in object_write_units too), and an entry without sections or functions gives
     // it none. A unit's entry describes its functions alone: object_build refuses another unit's.
@@ -406,6 +406,8 @@ static const uint32_t object_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_TLSGD] = R_X86_64_TLSGD,
     [BUSTER_LINK_FIXUP_TLSLD] = R_X86_64_TLSLD,
     [BUSTER_LINK_FIXUP_DTPOFF32] = R_X86_64_DTPOFF32,
+    [BUSTER_LINK_FIXUP_TPOFF64] = R_X86_64_TPOFF64,
+    [BUSTER_LINK_FIXUP_DTPOFF64] = R_X86_64_DTPOFF64,
 };
 
 // The prefix of a relocation section's name: ".rela" and its section's, which .shstrtab shares.
@@ -792,7 +794,8 @@ static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t adde
 {
     const bool kept = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_TPOFF32 ||
                       kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64 || kind == BUSTER_LINK_FIXUP_TLSGD ||
-                      kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 || (code & BUSTER_OBJECT_SYMBOL_IFUNC) != 0;
+                      kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 || kind == BUSTER_LINK_FIXUP_DTPOFF64 ||
+                      (code & BUSTER_OBJECT_SYMBOL_IFUNC) != 0;
     const bool pool = (code & BUSTER_OBJECT_SYMBOL_IN_POOL) != 0 && (link_fixup_kinds[kind].pc_relative || addend != 0);
     return !kept && !pool;
 }
@@ -1883,24 +1886,23 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
         }
         entry += 1;
     }
-    // The undefined symbols: no type but TLS, as GNU as writes them, with their binding and visibility; and the common
-    // ones (ObjectOptions.common_alignments), OBJECTs of SHN_COMMON with their alignment and size.
+    // The undefined symbols: no type but TLS (or each its own, and its size, ObjectOptions.undefined_types), with their
+    // binding and visibility.
     const SymbolId* undefined = builder->undefined;
-    const uint32_t* common_alignments = builder->options.common_alignments;
+    const bool typed = builder->options.undefined_types;
     for (uint64_t i = 0; i < builder->undefined_count; i += 1)
     {
         const SymbolId symbol = undefined[i];
         const uint32_t name_bytes_with_nul = symbol_name_bytes[symbol];
         const uint8_t flags = symbol_flags[symbol];
         const bool tls = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
-        const uint32_t alignment = common_alignments != 0 ? common_alignments[symbol] : 0;
         *entry = (Elf64_Sym){
             .st_name = name_bytes_with_nul != 0 ? (uint32_t)name : 0,
-            .st_info = (flags & BUSTER_LINK_SYMBOL_BINDING) | (alignment != 0 ? STT_OBJECT : tls ? STT_TLS : STT_NOTYPE),
+            .st_info = typed ? link_symbol_elf_info(flags) : (uint8_t)((flags & BUSTER_LINK_SYMBOL_BINDING) | (tls ? STT_TLS : STT_NOTYPE)),
             .st_other = flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT,
-            .st_shndx = alignment != 0 ? SHN_COMMON : SHN_UNDEF,
-            .st_value = alignment,
-            .st_size = alignment != 0 ? symbol_sizes[symbol] : 0,
+            .st_shndx = SHN_UNDEF,
+            .st_value = 0,
+            .st_size = typed ? symbol_sizes[symbol] : 0,
         };
         if (name_bytes_with_nul != 0)
         {
@@ -2010,7 +2012,6 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
     };
     bool built = unit < units->count && (options.atom_sections == 0 || options.atom_section_count == link->atoms.count) &&
                  (options.temporary_symbols == 0 || options.temporary_symbol_count == link->symbols.count) &&
-                 (options.common_alignments == 0 || options.common_alignment_count == link->symbols.count) &&
                  (options.symbol_sizes == 0 || options.symbol_size_count == link->symbols.count) &&
                  (options.declared_symbol_count == 0 || options.declared_symbols != 0);
     for (uint32_t i = 0; built && options.symbol_sizes != 0 && i < options.symbol_size_count; i += 1)

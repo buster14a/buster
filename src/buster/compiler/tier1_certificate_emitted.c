@@ -23,9 +23,7 @@
 //   its bytes say, at the width its form has; a recomputation is a constant's edit only where tier1_rematerialize writes
 //   exactly that record (and its reference) for the value its origin names. A node's records are one ORIGINAL: its
 //   operands read where the allocation has them at its use phase, every register and frame byte its records write
-//   killed, its definition where the allocation's interval starts. A register its records give back as they found it is
-//   not killed: the first record copies it whole into another register, the last copies it back, and nothing between
-//   writes the copy, leaves the node or calls (the compare-exchange's rax, kept in r11 around its lock cmpxchg). A call's sequence is checked against what the IR says
+//   killed, its definition where the allocation's interval starts. A call's sequence is checked against what the IR says
 //   it is (its target, al, the result's extension into its register), its arguments read in their ABI registers.
 // - Control: each block's tail (its jumps and its edges' moves) is walked for each successor; every path must reach the
 //   successor's first record through that edge's moves alone, or reach a successor whose only predecessor it is, whose
@@ -692,46 +690,48 @@ static bool tier1_cert_emitted_original(Tier1CertEmittedBuild* build, uint32_t n
     return room;
 }
 
-// The general register that a node's records [0, count) give back as it was (its resource bit, or 0 for none): the first
-// record copies it whole into another general register, the last copies that back into it, and no record between them
-// writes the copy or leaves the node (a form x86_semantics.c doesn't cover writes every resource, so it does both).
-// TIER1_RULE_ATOMIC_RMW's compare-exchange keeps rax so in the scratch register around its lock cmpxchg (#1059), and the
-// allocation may keep a value in rax across it. The caller excludes a node that calls, whose callee may change the copy.
-static uint64_t tier1_cert_emitted_kept(const X86Instruction* records, uint32_t count)
-{
-    const X86Instruction save = count >= 2 ? records[0] : (X86Instruction){ 0 };
-    const X86Instruction copy = { .form = X86_FORM_MOV_R64_RM64, .reg = save.reg, .rm = save.rm };
-    const X86Instruction back = { .form = X86_FORM_MOV_R64_RM64, .reg = save.rm, .rm = save.reg };
-    bool kept = count >= 2 && save.reg < 16 && save.rm < 16 && save.reg != save.rm && save.reg != X86_REGISTER_RSP && save.rm != X86_REGISTER_RSP &&
-                memcmp(&save, &copy, sizeof(save)) == 0 && memcmp(&records[count - 1], &back, sizeof(back)) == 0;
-    for (uint32_t r = 1; kept && r + 1 < count; r += 1)
-    {
-        uint64_t read = 0;
-        uint64_t written = 0;
-        x86_instruction_effects_scalar(&records[r], &read, &written);
-        kept = (written & (BUSTER_X86_RESOURCE_GPR(save.reg) | BUSTER_X86_RESOURCE_CONTROL | BUSTER_X86_RESOURCE_CALL)) == 0;
-    }
-    return kept ? BUSTER_X86_RESOURCE_GPR(save.rm) : 0;
-}
-
 // Node `node`'s ORIGINALs, its records [first, first + count) its kernel's: its uses in eights, then every register and
-// frame range its records write, killed in eights (but a register they give back as it was, tier1_cert_emitted_kept),
-// then its definition.
+// frame range its records write, killed in eights, then its definition. A general register its records give back is not
+// killed: one that holds its own value at the run's end, followed through the records' full-width copies between general
+// registers (a compare-exchange's save of rax in the scratch register and its restore, tier1_select's
+// TIER1_RULE_ATOMIC_RMW); any other write leaves a register holding nothing known.
 static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t node, const Tier1CertEmittedKernel* kernel, const X86Instruction* records, uint32_t count)
 {
     uint64_t writes = 0;
     uint16_t masks = 0;
     uint32_t clobbers[16 + 16 + 8 + BUSTER_CERT_EMITTED_KERNEL];
     uint32_t clobber_count = 0;
+    // Whose value at the run's start each general register holds, or UINT8_MAX for none known.
+    uint8_t holds[16];
+    for (uint32_t reg = 0; reg < 16; reg += 1)
+    {
+        holds[reg] = (uint8_t)reg;
+    }
     bool valid = true;
     for (uint32_t r = 0; valid && r < count; r += 1)
     {
         uint64_t read = 0;
         uint64_t written = 0;
         uint16_t opmasks = 0;
-        x86_instruction_effects_opmasks_scalar(&records[r], &read, &written, &opmasks);
+        const X86Instruction record = records[r];
+        x86_instruction_effects_opmasks_scalar(&record, &read, &written, &opmasks);
         writes |= written;
         masks |= opmasks;
+        // A copy is a 64-bit mov between general registers with no other field: its destination then holds what its
+        // source held, after every other register the record writes holds nothing known.
+        const bool plain = record.mode == BUSTER_X86_REGISTER_DIRECT && record.immediate == 0 && record.index == 0 && record.vvvv == 0 && record.decorations == 0 &&
+                           record.displacement == 0 && record.reg < 16 && record.rm < 16;
+        const bool load = plain && record.form == X86_FORM_MOV_R64_RM64;
+        const bool store = plain && record.form == X86_FORM_MOV_RM64_R64;
+        const uint8_t copied = load ? holds[record.rm] : store ? holds[record.reg] : UINT8_MAX;
+        for (uint32_t reg = 0; reg < 16; reg += 1)
+        {
+            holds[reg] = (written & BUSTER_X86_RESOURCE_GPR(reg)) != 0 ? UINT8_MAX : holds[reg];
+        }
+        if (load || store)
+        {
+            holds[load ? record.reg : record.rm] = copied;
+        }
         // No record writes the frame base register but the prologue and the epilogues, nor rsp but a call's and a ret's
         // own push and pop.
         const bool control = (written & (BUSTER_X86_RESOURCE_CALL | BUSTER_X86_RESOURCE_CONTROL)) != 0;
@@ -757,6 +757,10 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
             }
         }
     }
+    for (uint32_t reg = 0; reg < 16; reg += 1)
+    {
+        writes &= holds[reg] == reg ? ~BUSTER_X86_RESOURCE_GPR(reg) : ~UINT64_C(0);
+    }
     // A call's callee may change every caller-saved register (the SysV ABI's: rax, rcx, rdx, rsi, rdi, r8 to r11, every
     // xmm and opmask register), which x86_semantics' effects of the call instruction itself don't say; and it owns its
     // outgoing area.
@@ -767,8 +771,6 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
                   BUSTER_X86_RESOURCE_GPR(X86_REGISTER_R11) | BUSTER_X86_RESOURCE_LOWER_VECTORS;
         masks |= 0xff00;
     }
-    // A register the records give back as it was keeps its value; the copy they kept it in is killed.
-    writes &= kernel->call ? ~UINT64_C(0) : ~tier1_cert_emitted_kept(records, count);
     for (uint32_t at = 0; valid && at < kernel->outgoing; at += BUSTER_CERT_MAX_WIDTH)
     {
         const uint32_t width = kernel->outgoing - at < BUSTER_CERT_MAX_WIDTH ? kernel->outgoing - at : BUSTER_CERT_MAX_WIDTH;

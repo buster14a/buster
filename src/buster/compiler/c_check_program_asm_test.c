@@ -88,6 +88,145 @@ static void check_test_program_asm_room(CheckTest* test)
     intern_release(&identifiers);
 }
 
+// The statements placed in their caller (#1059, check_asm_row) and the ones that keep their helper, as both paths plan
+// them, with the same rows: each placed statement's row by its records (its template's forms, its operands' roles, the
+// register outputs' stores) and its operands' classes; each other one's helper, and the plans' helper count. Placed:
+// a `+` register (its address, then its value), two early-clobbered outputs in scratch registers, an XMM output from an
+// XMM input, the fences and pause of no operand, a locked xadd of a `+` register and a `+` memory operand, a matching
+// input converted to its output's type, a constant, and a clobber of a register the records don't write. Kept: fixed
+// registers (cpuid's, rdtsc's, a shift's count in cl), a literal register (`%%rsp`), a branch to a label, a syntax
+// switch, more records than a row takes, an x87 operand, a form x86_semantics.c doesn't cover (ldmxcsr), an explicit
+// register variable, and a register class narrower than the sixteen (Q's).
+static void check_test_program_asm_placement(CheckTest* test)
+{
+    static const char source[] =
+        "unsigned swapped(unsigned x){__asm__(\"bswap %0\" : \"+r\"(x));return x;}"
+        "int pair(long a){int lo,hi;__asm__(\"movl %k2, %0\\n\\tleal 1(%2), %1\" : \"=&r\"(lo), \"=&r\"(hi) : \"r\"(a));return lo+hi;}"
+        "double root(double x){double r;__asm__(\"sqrtsd %1, %0\" : \"=x\"(r) : \"x\"(x));return r;}"
+        "void fences(void){__asm__ volatile(\"mfence\\n\\tlfence\\n\\tsfence\\n\\tpause\" ::: \"memory\");}"
+        "int fetched(int* p, int v){__asm__ volatile(\"lock; xaddl %0, %1\" : \"+r\"(v), \"+m\"(*p) : : \"memory\");return v;}"
+        "long widened(unsigned char c){long r;__asm__(\"addq %2, %0\" : \"=r\"(r) : \"0\"(c), \"i\"(7));return r;}"
+        "void clobbering(void){__asm__ volatile(\"mfence\" ::: \"rax\", \"cc\", \"memory\");}"
+        "unsigned identified(void){unsigned a,b,c,d;__asm__ volatile(\"cpuid\" : \"=a\"(a),\"=b\"(b),\"=c\"(c),\"=d\"(d) : \"0\"(0u),\"2\"(0u));return b;}"
+        "unsigned stamped(void){unsigned lo,hi;__asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));return lo^hi;}"
+        "int shifted(int x, int n){__asm__(\"shll %b1, %0\" : \"+r\"(x) : \"c\"(n));return x;}"
+        "long stack(void){long s;__asm__(\"movq %%rsp, %0\" : \"=r\"(s));return s;}"
+        "int branched(int n){int r;__asm__(\"testl %1, %1\\n\\tjle 1f\\n\\tmovl $5, %0\\n1:\" : \"=r\"(r) : \"r\"(n), \"0\"(0));return r;}"
+        "int intel(int n){__asm__ volatile(\".intel_syntax noprefix\\n\\tmfence\\n\\t.att_syntax\" : : \"r\"(n));return n;}"
+        "int many(int n){__asm__(\"incl %0\\n\\tincl %0\\n\\tincl %0\\n\\tincl %0\\n\\tincl %0\\n\\tincl %0\\n\\tincl %0\\n\\tincl %0\" : \"+r\"(n));return n;}"
+        "long double rooted(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
+        "void loaded(unsigned m){__asm__ volatile(\"ldmxcsr %0\" : : \"m\"(m));}"
+        "long fixed(long a){register long r10 __asm__(\"r10\") = a;__asm__(\"incq %0\" : \"+r\"(r10));return r10;}"
+        "int high(int x){__asm__(\"incl %0\" : \"+Q\"(x));return x;}";
+    static const uint16_t first_forms[] = {
+        X86_FORM_BSWAP_R32, X86_FORM_MOV_RM32_R32, X86_FORM_SQRTSD_X_XM64, X86_FORM_MFENCE, X86_FORM_LOCK_XADD_M32_R32, X86_FORM_ADD_RM64_IMM8, X86_FORM_MFENCE,
+    };
+    static const uint8_t record_counts[] = { 2, 4, 2, 4, 2, 2, 1 };
+    static const uint8_t operand_counts[] = { 2, 3, 2, 0, 3, 2, 0 };
+    enum
+    {
+        PLACED = 7,
+        KEPT = 11,
+    };
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PredefinesOptions predefines = check_test_program_predefines();
+    bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                        pp_run_source(&pp, "asm-placement", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "asm placement: source preprocessing");
+    Tier0Operation rows[2][PLACED];
+    memset(rows, 0, sizeof(rows));
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                     parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                     check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                     check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                     check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                     check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == PLACED + KEPT;
+        CheckProgramAsms planned = { 0 };
+        CheckProgramHelpers helpers = { 0 };
+        ready = ready && check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch) && planned.plans != NULL;
+        char description[256];
+        snprintf(description, sizeof(description), "asm placement, %s: the statements are planned", path == 0 ? "scalar" : "vector");
+        check_test_expect(test, ready, description);
+        for (uint32_t s = 0; ready && s < PLACED + KEPT; s += 1)
+        {
+            const CheckProgramAsm* plan = planned.plans + s;
+            const Tier0Operation* row = plan->row;
+            const bool placed = s < PLACED;
+            bool right = plan->planned && plan->reason == NULL && (row != NULL) == placed && (plan->helper != BUSTER_CHECK_NONE) == !placed;
+            if (right && placed)
+            {
+                rows[path][s] = *row;
+                right = row->record_count == record_counts[s] && row->operand_count == operand_counts[s] && row->records[0].form == first_forms[s] &&
+                        row->result_class == BUSTER_TYPED_CLASS_VOID && tier0_operation_valid(row);
+            }
+            snprintf(description, sizeof(description), "asm placement, %s: statement %u %s", path == 0 ? "scalar" : "vector", s,
+                     placed ? "is a row of its records in its caller" : "keeps its helper");
+            check_test_expect(test, right, description);
+            for (uint32_t r = 0; !right && row != NULL && r < row->record_count; r += 1)
+            {
+                const X86Instruction* record = row->records + r;
+                fprintf(stderr, "test-checker: asm placement row %u record %u: %s reg=0x%x rm=0x%x mode=0x%x immediate=%d (%u operands)\n", s, r,
+                        x86_form_description(record->form)->mnemonic, record->reg, record->rm, record->mode, record->immediate, row->operand_count);
+            }
+        }
+        if (ready)
+        {
+            // The roles: bswap's register is the `+` value's operand (1, after its address), stored through operand 0; the
+            // early clobbers' are SCRATCH(0) and SCRATCH(1), stored through operands 0 and 1, the input operand 2 (mov's
+            // source, lea's base); sqrtsd's output VECTOR(0), its input
+            // FLOATING(1); the xadd's register INTEGER(1), its memory operand's base INTEGER(2); the matching input's
+            // operand (1) is its output's U64 class, converted from its unsigned char.
+            const Tier0Operation* swap = &rows[path][0];
+            const Tier0Operation* early = &rows[path][1];
+            const Tier0Operation* root = &rows[path][2];
+            const Tier0Operation* xadd = &rows[path][4];
+            const Tier0Operation* widened = &rows[path][5];
+            const bool roles = swap->records[0].rm == BUSTER_TIER0_ROLE_INTEGER(1) && swap->records[1].form == X86_FORM_MOV_RM32_R32 &&
+                               swap->records[1].reg == BUSTER_TIER0_ROLE_INTEGER(1) && swap->records[1].rm == BUSTER_TIER0_ROLE_INTEGER(0) &&
+                               swap->operand_classes[0] == BUSTER_TYPED_CLASS_U64 && swap->operand_classes[1] == BUSTER_TYPED_CLASS_U32 &&
+                               early->records[0].rm == BUSTER_TIER0_ROLE_SCRATCH(0) && early->records[0].reg == BUSTER_TIER0_ROLE_INTEGER(2) &&
+                               early->records[1].reg == BUSTER_TIER0_ROLE_SCRATCH(1) && early->records[1].rm == BUSTER_TIER0_ROLE_INTEGER(2) &&
+                               early->records[2].reg == BUSTER_TIER0_ROLE_SCRATCH(0) && early->records[2].rm == BUSTER_TIER0_ROLE_INTEGER(0) &&
+                               early->records[3].reg == BUSTER_TIER0_ROLE_SCRATCH(1) && early->records[3].rm == BUSTER_TIER0_ROLE_INTEGER(1) &&
+                               root->records[0].reg == BUSTER_TIER0_ROLE_VECTOR(0) && root->records[0].rm == BUSTER_TIER0_ROLE_FLOATING(1) &&
+                               root->records[1].form == X86_FORM_MOVSD_XM64_X && root->operand_classes[1] == BUSTER_TYPED_CLASS_F64 &&
+                               xadd->records[0].reg == BUSTER_TIER0_ROLE_INTEGER(1) && xadd->records[0].rm == BUSTER_TIER0_ROLE_INTEGER(2) &&
+                               xadd->operand_classes[2] == BUSTER_TYPED_CLASS_U64 && widened->operand_classes[1] == BUSTER_TYPED_CLASS_I64 &&
+                               widened->records[0].immediate == 7;
+            snprintf(description, sizeof(description), "asm placement, %s: the rows' roles are the operands', scratch's and stores' as planned", path == 0 ? "scalar" : "vector");
+            check_test_expect(test, roles, description);
+            snprintf(description, sizeof(description), "asm placement, %s: the kept statements' %u helpers", path == 0 ? "scalar" : "vector", helpers.count);
+            check_test_expect(test, helpers.count == KEPT, description);
+        }
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    check_test_expect(test, preprocessed && memcmp(rows[0], rows[1], sizeof(rows[0])) == 0, "asm placement: both paths plan the same rows");
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 // Flag outputs (#147): every condition clang takes, after compares of values around each one's edges, into objects of
 // every size an integer store covers (bool, char, short, int, long, __int128, a float's bits and a struct of 4 bytes),
 // a `+` one, several beside register outputs and an x87 one, and one of a template of no instructions, whose condition
@@ -198,6 +337,58 @@ static void check_test_program_asm_goto(CheckTest* test, const char* clang)
 static void check_test_program_asm(CheckTest* test, const char* clang)
 {
     check_test_program_asm_room(test);
+    check_test_program_asm_placement(test);
+    // Statements placed in their caller (#1059), each run against clang's build: values live across them in Tier 0's
+    // depth registers and register homes, in a loop and under an expression 18 values deep (past the depth registers,
+    // in the deep slots), a + register and a memory operand on the stack below them.
+    check_test_program_source(test,
+        "int tested(int n){unsigned long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6,h=n+7;unsigned s=0;"
+        "for(int i=0;i<5;i++){unsigned x=(unsigned)(i*n)+(unsigned)a;__asm__(\"bswap %0\" : \"+r\"(x));s+=x^(unsigned)(a+b+c+d+e+f+g+h);a+=1;h-=1;}"
+        "unsigned long t=a*(b+(c*(d+(e*(f+(g*(h+(a*(b+(c*(d+(e*(f+(g*(h+(a*(b+({unsigned long u=n;__asm__(\"negq %0\" : \"+r\"(u));u;}))))))))))))))))));"
+        "int m=n;__asm__ volatile(\"lock; addl %1, %0\" : \"+m\"(m) : \"r\"((int)(t&7)) : \"memory\");"
+        "return (int)(s^(unsigned)t^(unsigned)(a*3+h)^(unsigned)m);}",
+        "asm-placed-live-values", clang);
+    // Tied operands and early clobbers: a matching input narrower than its output (zero-extended), an output the template
+    // writes before it reads its inputs (=&r), two early-clobbered outputs, a short + register and narrow outputs (a byte
+    // from %b, a bool from setz), a constant, and an address computed from two registers.
+    check_test_program_source(test,
+        "int tested(int n){unsigned char c=(unsigned char)n;long w;__asm__(\"addq $3, %0\" : \"=r\"(w) : \"0\"(c));"
+        "int r;__asm__(\"movl %1, %0\\n\\tsubl %2, %0\" : \"=&r\"(r) : \"r\"(n), \"r\"(7));int lo,hi;"
+        "__asm__(\"movl %k2, %0\\n\\tleal 5(%2), %1\" : \"=&r\"(lo), \"=&r\"(hi) : \"r\"((long)n));short s=(short)n;__asm__(\"incw %0\" : \"+r\"(s));"
+        "unsigned char b;__asm__(\"movb %b1, %0\" : \"=r\"(b) : \"r\"(n+200));_Bool z;__asm__(\"testl %1, %1\\n\\tsetz %0\" : \"=r\"(z) : \"r\"(n) : \"cc\");"
+        "long p;__asm__(\"leaq %c3(%1,%2,4), %0\" : \"=r\"(p) : \"r\"((long)n), \"r\"((long)r), \"i\"(9));"
+        "return (int)((unsigned)w+(unsigned)r*3u+(unsigned)lo*5u+(unsigned)hi*7u+(unsigned)s*11u+(unsigned)b*13u+(unsigned)z*17u+(unsigned)p*19u);}",
+        "asm-placed-tied-early", clang);
+    // Memory operands: a + one under a locked add, a + register and a struct member's under xadd and xchg, an output of
+    // memory, an array element whose index has a side effect (evaluated once), and a memory input.
+    check_test_program_source(test,
+        "struct S{int a;long b;};int tested(int n){int v=n;struct S s={n,2L*n};__asm__ volatile(\"lock; addl %1, %0\" : \"+m\"(v) : \"r\"(5) : \"memory\");"
+        "int old=10;__asm__ volatile(\"lock; xaddl %0, %1\" : \"+r\"(old), \"+m\"(s.a) : : \"memory\");__asm__(\"movq %1, %0\" : \"=m\"(s.b) : \"r\"((long)v*3));"
+        "int arr[4]={1,2,3,4};int i=0;__asm__(\"addl $100, %0\" : \"+m\"(arr[i++]));int m;__asm__(\"movl %1, %0\" : \"=r\"(m) : \"m\"(arr[1]));"
+        "unsigned x=(unsigned)n;__asm__(\"xchgl %0, %1\" : \"+r\"(x), \"+m\"(arr[2]));"
+        "return (int)((unsigned)v+(unsigned)old*3u+(unsigned)s.a*5u+(unsigned)s.b*7u+(unsigned)arr[0]*11u+(unsigned)i*13u+(unsigned)m*17u+x*19u+(unsigned)arr[2]*23u);}",
+        "asm-placed-memory", clang);
+    // The flags: a template that changes them (cc) inside a condition's chain, a compare and setl of the template's own,
+    // and a not in a loop's body, between the loop's compares.
+    check_test_program_source(test,
+        "int tested(int n){unsigned z=(unsigned)n;int r=0;if(n>3&&({__asm__(\"addl $1, %0\" : \"+r\"(z) : : \"cc\");z;})>5u)r=1;"
+        "int lt;__asm__(\"cmpl %2, %1\\n\\tsetl %b0\\n\\tmovzbl %b0, %0\" : \"=&r\"(lt) : \"r\"(n), \"r\"(10) : \"cc\");"
+        "for(int i=0;i<(n&7);i++){__asm__(\"notl %0\" : \"+r\"(z) : : \"cc\");}return r*1000+lt*100+(int)(z&0xff);}",
+        "asm-placed-flags", clang);
+    // XMM operands of floats and doubles, with floating values live across them: sqrtsd into an output of its own, a +
+    // float's mulss, conversions to and from a general register, and a + double under an expression of live values.
+    check_test_program_source(test,
+        "int tested(int n){double d=(double)n,a=1.5,b=2.5,c=3.5;double r;__asm__(\"sqrtsd %1, %0\" : \"=x\"(r) : \"x\"(d*d));"
+        "float f=(float)n;__asm__(\"mulss %1, %0\" : \"+x\"(f) : \"x\"(2.0f));double s;__asm__(\"cvtsi2sdl %1, %0\" : \"=x\"(s) : \"r\"(n));"
+        "long t;__asm__(\"cvttsd2si %1, %0\" : \"=r\"(t) : \"x\"(d+0.75));"
+        "double u=a+b*c+({double v=d;__asm__(\"addsd %0, %0\" : \"+x\"(v));v;})*(a-c);return (int)(r*1000+f*100+s*10+u)+(int)t;}",
+        "asm-placed-floating", clang);
+    // Fences, pause and prefetches in a loop, beside a store and a load across them.
+    check_test_program_source(test,
+        "int data[8];int tested(int n){int s=0;for(int i=0;i<8;i++){data[i]=n+i;__asm__ volatile(\"mfence\" ::: \"memory\");"
+        "__asm__ volatile(\"prefetcht0 %0\\n\\tprefetchw %0\" : : \"m\"(data[(i+1)&7]));__asm__ volatile(\"lfence\\n\\tpause\\n\\tsfence\" ::: \"memory\");s+=data[i];}"
+        "return s;}",
+        "asm-placed-fences", clang);
     // Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
     // operands substituted into it assembles to nothing too.
     check_test_program_source(test,

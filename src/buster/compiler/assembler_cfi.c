@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // GNU-style CFI adapter. Parsing retains fragment identities, never provisional PCs. After relaxation, the writer
-// encodes bounded DWARF events, interns identical CIE bytes and publishes one .eh_frame atom plus PC32 fixups.
+// encodes bounded DWARF events, interns identical CIE bytes and publishes one .eh_frame atom plus PC32 fixups, and,
+// where .cfi_sections names it, a .debug_frame of GNU as's form with its ABS32 and ABS64 fixups (#1115).
 // This producer is independent of the code generator's fixed-frame unwind templates. No external code is copied.
 
 #define BUSTER_ASM_CFI_ESCAPE UINT32_MAX
@@ -62,10 +63,32 @@ static void asm_cfi_directive(AsmParser* parser, uint32_t token, uint32_t end)
     }
     if (parser->result.error == 0 && asm_is(parser, token, ".cfi_sections"))
     {
-        if (parser->procedure_count != 0 || !asm_is(parser, parser->at++, ".eh_frame"))
+        // GNU as's sections of CFI, named before the first procedure: .eh_frame, .debug_frame (GCC's and Clang's for
+        // -g without unwind tables, #1115) or both, separated by commas; none names neither.
+        bool eh_frame = false;
+        bool debug_frame = false;
+        bool valid = parser->procedure_count == 0;
+        bool more = parser->at < end;
+        while (valid && more)
         {
-            asm_fail(parser, location, "CFI output supports .eh_frame selected before the first procedure");
+            const bool eh = asm_is(parser, parser->at, ".eh_frame");
+            const bool debug = asm_is(parser, parser->at, ".debug_frame");
+            eh_frame |= eh;
+            debug_frame |= debug;
+            valid = eh || debug;
+            parser->at += 1;
+            more = valid && parser->at < end;
+            if (more)
+            {
+                valid = asm_take(parser, ',') && parser->at < end;
+            }
         }
+        if (!valid)
+        {
+            asm_fail(parser, location, "CFI output supports .eh_frame and .debug_frame, selected before the first procedure");
+        }
+        parser->cfi_no_eh_frame = !eh_frame;
+        parser->cfi_debug_frame = debug_frame;
     }
     else if (parser->result.error == 0 && asm_is(parser, token, ".cfi_startproc"))
     {
@@ -334,6 +357,198 @@ static void asm_cfi_length(AsmCfiWriter* writer, uint32_t begin)
     }
 }
 
+// After the source, as GNU as's cfi_finish begins .debug_frame, after the line table's sections (#1115): the section,
+// a label at its start, against which its FDEs' CIE pointers are relocated, and the fragment asm_cfi_emit fills.
+static void asm_cfi_finish(AsmParser* parser)
+{
+    if (parser->cfi_debug_frame && parser->procedure_count != 0 && parser->result.error == 0)
+    {
+        const uint32_t previous = parser->section;
+        const uint32_t existing = asm_find_section(parser, BUSTER_S8(".debug_frame"));
+        if (asm_section_holds(parser, existing))
+        {
+            asm_fail(parser, 0, "explicit .debug_frame conflicts with CFI");
+        }
+        else
+        {
+            parser->section = asm_debug_section(parser, ".debug_frame", false);
+        }
+        if (parser->result.error == 0)
+        {
+            parser->cfi_debug_section = parser->section;
+            parser->sections[parser->section].alignment = 3;
+            parser->cfi_debug_label = asm_dot(parser, 0);
+            parser->cfi_debug_fragment = asm_fragment(parser, ASM_BYTES, 0);
+        }
+        parser->section = previous;
+    }
+}
+
+// One section of the procedures' frames, as GNU as's output_cie and output_fde write it: .eh_frame's, or with debug
+// .debug_frame's (#1115). Its CIE has the id 0xffffffff and no augmentation; its FDE takes its CIE's offset in the
+// section and 64-bit addresses, each a relocation (AsmCfiProcedure.debug_relocation), and every entry is padded to 8
+// bytes with DW_CFA_nop. Identical CIEs are shared.
+static void asm_cfi_frame(AsmParser* parser, bool debug, uint64_t bound, uint64_t candidate_bound)
+{
+    const uint32_t alignment = debug ? 8 : 4;
+    uint8_t* bytes = bound <= BUSTER_ASM_MAX_SECTION ? arena_push(parser->arena, bound, 8) : 0;
+    Scratch scratch = scratch_begin(parser->arena);
+    uint8_t* candidate_bytes = candidate_bound <= BUSTER_ASM_MAX_SECTION ? arena_push(scratch.arena, candidate_bound, 8) : 0;
+    uint32_t slots = 16;
+    while (slots < parser->procedure_count * 2)
+    {
+        slots *= 2;
+    }
+    uint32_t* cies = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, slots);
+    AsmCfiWriter writer = {.bytes = bytes, .capacity = bound <= BUSTER_ASM_MAX_SECTION ? bound : 0};
+    if (bytes == 0 || candidate_bytes == 0 || cies == 0 || (!debug && parser->sections[BUSTER_LINK_CLASS_EH_FRAME].declared))
+    {
+        asm_fail(parser, 0, "CFI output capacity exhausted or explicit .eh_frame conflicts with CFI");
+    }
+    if (cies != 0)
+    {
+        memset(cies, 0, slots * sizeof(uint32_t));
+    }
+    for (uint32_t i = 0; parser->result.error == 0 && i < parser->procedure_count; i += 1)
+    {
+        AsmCfiProcedure* procedure = &parser->procedures[i];
+        const AsmFragment* start = &parser->fragments[parser->symbols[procedure->symbol].fragment];
+        const AsmFragment* finish = &parser->fragments[procedure->end];
+        AsmCfiWriter candidate = {.bytes = candidate_bytes, .capacity = candidate_bound <= BUSTER_ASM_MAX_SECTION ? candidate_bound : 0};
+        asm_cfi_integer(&candidate, 0, 4);
+        asm_cfi_integer(&candidate, debug ? UINT32_MAX : 0, 4); // CIE id
+        asm_cfi_integer(&candidate, 1, 1); // version
+        if (!debug)
+        {
+            asm_cfi_integer(&candidate, 'z', 1);
+            asm_cfi_integer(&candidate, 'R', 1);
+        }
+        if (procedure->signal)
+        {
+            asm_cfi_integer(&candidate, 'S', 1);
+        }
+        asm_cfi_integer(&candidate, 0, 1);
+        asm_cfi_integer(&candidate, 1, 1); // code alignment
+        asm_cfi_integer(&candidate, 0x78, 1); // SLEB128(-8), data alignment
+        asm_cfi_integer(&candidate, procedure->return_column, 1);
+        if (!debug)
+        {
+            asm_cfi_integer(&candidate, 1, 1); // augmentation length
+            asm_cfi_integer(&candidate, 0x1b, 1); // pcrel sdata4
+        }
+        if (!procedure->simple)
+        {
+            static const uint8_t initial[] = {0x0c, 7, 8, 0x90, 1};
+            for (uint32_t j = 0; j < sizeof(initial); j += 1)
+            {
+                asm_cfi_integer(&candidate, initial[j], 1);
+            }
+        }
+        const uint32_t first = procedure->initial_count;
+        for (uint32_t initial = 0; initial < first; initial += 1)
+        {
+            asm_cfi_event(&candidate, &parser->cfi[procedure->first + initial]);
+        }
+        asm_cfi_pad(&candidate, alignment);
+        asm_cfi_length(&candidate, 0);
+        uint32_t cie = UINT32_MAX;
+        uint32_t slot = candidate.failed ? 0 : link_hash(candidate.bytes, candidate.size) & (slots - 1);
+        while (!candidate.failed && cies[slot] != 0)
+        {
+            const uint32_t offset = cies[slot] - 1;
+            uint32_t length;
+            memcpy(&length, bytes + offset, 4);
+            if (length + 4 == candidate.size && memcmp(bytes + offset, candidate.bytes, candidate.size) == 0)
+            {
+                cie = offset;
+                break;
+            }
+            slot = (slot + 1) & (slots - 1);
+        }
+        if (cie == UINT32_MAX && !candidate.failed && candidate.size <= writer.capacity - writer.size)
+        {
+            cie = writer.size;
+            cies[slot] = cie + 1;
+            memcpy(bytes + writer.size, candidate.bytes, candidate.size);
+            writer.size += candidate.size;
+        }
+        else if (cie == UINT32_MAX)
+        {
+            writer.failed = true;
+        }
+        const uint32_t fde = writer.size;
+        asm_cfi_integer(&writer, 0, 4);
+        if (debug)
+        {
+            // The CIE's offset and the first address, zeros under their relocations, then the 64-bit range.
+            procedure->debug_relocation = writer.size;
+            procedure->debug_cie = cie;
+            asm_cfi_integer(&writer, 0, 4);
+            asm_cfi_integer(&writer, 0, 4);
+            asm_cfi_integer(&writer, 0, 4);
+            asm_cfi_integer(&writer, finish->offset - start->offset, 4);
+            asm_cfi_integer(&writer, 0, 4);
+        }
+        else
+        {
+            asm_cfi_integer(&writer, fde + 4 - cie, 4);
+            procedure->relocation = writer.size;
+            asm_cfi_integer(&writer, 0, 4);
+            asm_cfi_integer(&writer, finish->offset - start->offset, 4);
+            asm_cfi_integer(&writer, 0, 1); // FDE augmentation length
+        }
+        uint32_t previous = start->offset;
+        for (uint32_t j = first; j < procedure->count; j += 1)
+        {
+            const AsmCfiEvent* event = &parser->cfi[procedure->first + j];
+            const uint32_t offset = parser->fragments[event->fragment].offset;
+            const uint32_t delta = offset - previous;
+            if (offset < previous || offset > finish->offset)
+            {
+                writer.failed = true;
+            }
+            else if (delta != 0)
+            {
+                const uint32_t count = delta <= UINT8_MAX ? 1 : delta <= UINT16_MAX ? 2 : 4;
+                asm_cfi_integer(&writer, delta < 64 ? 0x40 | delta : count == 1 ? 2 : count == 2 ? 3 : 4, 1);
+                if (delta >= 64)
+                {
+                    asm_cfi_integer(&writer, delta, count);
+                }
+            }
+            asm_cfi_event(&writer, event);
+            previous = offset;
+        }
+        asm_cfi_pad(&writer, debug || i + 1 == parser->procedure_count ? 8 : 4);
+        asm_cfi_length(&writer, fde);
+        if (writer.failed || candidate.failed)
+        {
+            asm_fail(parser, start->location, "CFI emission exceeds its bounded output or PC range");
+        }
+    }
+    if (parser->result.error == 0 && debug)
+    {
+        AsmFragment* fragment = &parser->fragments[parser->cfi_debug_fragment];
+        fragment->bytes = bytes;
+        fragment->size = writer.size;
+        parser->sections[parser->cfi_debug_section].size = fragment->offset + writer.size;
+    }
+    else if (parser->result.error == 0)
+    {
+        const uint32_t previous = parser->section;
+        parser->section = BUSTER_LINK_CLASS_EH_FRAME;
+        const uint32_t id = asm_fragment(parser, ASM_BYTES, 0);
+        AsmFragment* fragment = &parser->fragments[id];
+        fragment->bytes = bytes;
+        fragment->size = writer.size;
+        parser->sections[parser->section].size = writer.size;
+        parser->sections[parser->section].alignment = 3;
+        asm_partition_append(parser, id);
+        parser->section = previous;
+    }
+    scratch_end(scratch);
+}
+
 static void asm_cfi_emit(AsmParser* parser)
 {
     if (parser->procedure_count != 0)
@@ -363,134 +578,13 @@ static void asm_cfi_emit(AsmParser* parser)
         // never embed escapes, so scratch covers the largest understood initial program rather than all source.
         const uint64_t bound = (uint64_t)parser->cfi_count * 64 + (uint64_t)parser->procedure_count * 128 + escape_bytes;
         const uint64_t candidate_bound = (uint64_t)initial_max * 64 + 64;
-        uint8_t* bytes = bound <= BUSTER_ASM_MAX_SECTION ? arena_push(parser->arena, bound, 8) : 0;
-        Scratch scratch = scratch_begin(parser->arena);
-        uint8_t* candidate_bytes = candidate_bound <= BUSTER_ASM_MAX_SECTION ? arena_push(scratch.arena, candidate_bound, 8) : 0;
-        uint32_t slots = 16;
-        while (slots < parser->procedure_count * 2)
+        if (!parser->cfi_no_eh_frame)
         {
-            slots *= 2;
+            asm_cfi_frame(parser, false, bound, candidate_bound);
         }
-        uint32_t* cies = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, slots);
-        AsmCfiWriter writer = {.bytes = bytes, .capacity = bound <= BUSTER_ASM_MAX_SECTION ? bound : 0};
-        if (bytes == 0 || candidate_bytes == 0 || cies == 0 || parser->sections[BUSTER_LINK_CLASS_EH_FRAME].declared)
+        if (parser->cfi_debug_section != 0 && parser->result.error == 0)
         {
-            asm_fail(parser, 0, "CFI output capacity exhausted or explicit .eh_frame conflicts with CFI");
+            asm_cfi_frame(parser, true, bound, candidate_bound);
         }
-        if (cies != 0)
-        {
-            memset(cies, 0, slots * sizeof(uint32_t));
-        }
-        for (uint32_t i = 0; parser->result.error == 0 && i < parser->procedure_count; i += 1)
-        {
-            AsmCfiProcedure* procedure = &parser->procedures[i];
-            const AsmFragment* start = &parser->fragments[parser->symbols[procedure->symbol].fragment];
-            const AsmFragment* finish = &parser->fragments[procedure->end];
-            AsmCfiWriter candidate = {.bytes = candidate_bytes, .capacity = candidate_bound <= BUSTER_ASM_MAX_SECTION ? candidate_bound : 0};
-            asm_cfi_integer(&candidate, 0, 4);
-            asm_cfi_integer(&candidate, 0, 4);
-            asm_cfi_integer(&candidate, 1, 1);
-            asm_cfi_integer(&candidate, 'z', 1);
-            asm_cfi_integer(&candidate, 'R', 1);
-            if (procedure->signal)
-            {
-                asm_cfi_integer(&candidate, 'S', 1);
-            }
-            asm_cfi_integer(&candidate, 0, 1);
-            asm_cfi_integer(&candidate, 1, 1); // code alignment
-            asm_cfi_integer(&candidate, 0x78, 1); // SLEB128(-8), data alignment
-            asm_cfi_integer(&candidate, procedure->return_column, 1);
-            asm_cfi_integer(&candidate, 1, 1); // augmentation length
-            asm_cfi_integer(&candidate, 0x1b, 1); // pcrel sdata4
-            if (!procedure->simple)
-            {
-                static const uint8_t initial[] = {0x0c, 7, 8, 0x90, 1};
-                for (uint32_t j = 0; j < sizeof(initial); j += 1)
-                {
-                    asm_cfi_integer(&candidate, initial[j], 1);
-                }
-            }
-            const uint32_t first = procedure->initial_count;
-            for (uint32_t initial = 0; initial < first; initial += 1)
-            {
-                asm_cfi_event(&candidate, &parser->cfi[procedure->first + initial]);
-            }
-            asm_cfi_pad(&candidate, 4);
-            asm_cfi_length(&candidate, 0);
-            uint32_t cie = UINT32_MAX;
-            uint32_t slot = candidate.failed ? 0 : link_hash(candidate.bytes, candidate.size) & (slots - 1);
-            while (!candidate.failed && cies[slot] != 0)
-            {
-                const uint32_t offset = cies[slot] - 1;
-                uint32_t length;
-                memcpy(&length, bytes + offset, 4);
-                if (length + 4 == candidate.size && memcmp(bytes + offset, candidate.bytes, candidate.size) == 0)
-                {
-                    cie = offset;
-                    break;
-                }
-                slot = (slot + 1) & (slots - 1);
-            }
-            if (cie == UINT32_MAX && !candidate.failed && candidate.size <= writer.capacity - writer.size)
-            {
-                cie = writer.size;
-                cies[slot] = cie + 1;
-                memcpy(bytes + writer.size, candidate.bytes, candidate.size);
-                writer.size += candidate.size;
-            }
-            else if (cie == UINT32_MAX)
-            {
-                writer.failed = true;
-            }
-            const uint32_t fde = writer.size;
-            asm_cfi_integer(&writer, 0, 4);
-            asm_cfi_integer(&writer, fde + 4 - cie, 4);
-            procedure->relocation = writer.size;
-            asm_cfi_integer(&writer, 0, 4);
-            asm_cfi_integer(&writer, finish->offset - start->offset, 4);
-            asm_cfi_integer(&writer, 0, 1); // FDE augmentation length
-            uint32_t previous = start->offset;
-            for (uint32_t j = first; j < procedure->count; j += 1)
-            {
-                const AsmCfiEvent* event = &parser->cfi[procedure->first + j];
-                const uint32_t offset = parser->fragments[event->fragment].offset;
-                const uint32_t delta = offset - previous;
-                if (offset < previous || offset > finish->offset)
-                {
-                    writer.failed = true;
-                }
-                else if (delta != 0)
-                {
-                    const uint32_t count = delta <= UINT8_MAX ? 1 : delta <= UINT16_MAX ? 2 : 4;
-                    asm_cfi_integer(&writer, delta < 64 ? 0x40 | delta : count == 1 ? 2 : count == 2 ? 3 : 4, 1);
-                    if (delta >= 64)
-                    {
-                        asm_cfi_integer(&writer, delta, count);
-                    }
-                }
-                asm_cfi_event(&writer, event);
-                previous = offset;
-            }
-            asm_cfi_pad(&writer, i + 1 == parser->procedure_count ? 8 : 4);
-            asm_cfi_length(&writer, fde);
-            if (writer.failed || candidate.failed)
-            {
-                asm_fail(parser, start->location, "CFI emission exceeds its bounded output or PC range");
-            }
-        }
-        if (parser->result.error == 0)
-        {
-            const uint32_t previous = parser->section;
-            parser->section = BUSTER_LINK_CLASS_EH_FRAME;
-            const uint32_t id = asm_fragment(parser, ASM_BYTES, 0);
-            AsmFragment* fragment = &parser->fragments[id];
-            fragment->bytes = bytes;
-            fragment->size = writer.size;
-            parser->sections[parser->section].size = writer.size;
-            parser->sections[parser->section].alignment = 3;
-            asm_partition_append(parser, id);
-            parser->section = previous;
-        }
-        scratch_end(scratch);
     }
 }

@@ -2,12 +2,13 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Included after assembler_corpus_test.c. #1115's whole-program corpus: ordinary C programs (examples/assembler/
 // program-*.c: floating point of every width, thread-local storage of every model with threads, common and static
-// zero-initialized storage, wide string literals) that GCC and Clang compile to assembly, at -O0, -O2, -O2 -fPIC and
-// -O3 -march=x86-64-v4, in AT&T and Intel syntax. Each source must assemble by both paths into the same object, by
-// the `assemble` command too, into GNU as's sections, symbols and relocations (the existing comparator's); and the
-// program linked from it must print what the one linked from GNU as's object prints, and succeed. Every refusal is then
-// a named gap of the compilers' ordinary output, rather than one a user meets. The x86-64-v4 programs run where the
-// host has every feature of x86-64-v4; elsewhere their objects are still compared.
+// zero-initialized storage, wide string literals, dense switches' jump tables, gathers) that GCC and Clang compile to
+// assembly, at -O0, -O2, -O2 -fPIC, -O3 -march=x86-64-v4, and -O0 and -O2 with -g (whose DWARF leaves its line table
+// and view numbers to the assembler), in AT&T and Intel syntax. Each source must assemble by both paths into the same
+// object, by the `assemble` command too, into GNU as's sections, symbols and relocations (the existing comparator's);
+// and the program linked from it must print what the one linked from GNU as's object prints, and succeed. Every refusal
+// is then a named gap of the compilers' ordinary output, rather than one a user meets. The x86-64-v4 programs run where
+// the host has every feature of x86-64-v4; elsewhere their objects are still compared.
 
 // #1115's fixtures, each compared with GNU as by --cross-check: the TLS models' relocation modifiers in both cases and
 // syntaxes, on instructions and on .long (with GNU as's prefixes written as statements, data16 and rex64, and its
@@ -16,6 +17,8 @@
 // implicit operands, LLVM's fucompi and AT&T's reversed subtractions and divisions; and the compare-predicate names.
 static const char asm_test_tls_fixture[] =
     ".text\ntls:\nmovl %fs:tl@TPOFF, %esi\nmovl %fs:tl@tpoff+4, %esi\nleaq tl@TPOFF(%rax), %rax\nmovq $tl@tpoff, %rax\naddq $tl@tpoff, %rax\n"
+    // The 64-bit offsets (R_X86_64_TPOFF64 and DTPOFF64): a 64-bit immediate's, and data's below.
+    "movabsq $tl@tpoff, %rax\nmovabsq $tl@dtpoff+4, %rdx\nmovabsq $ext@TPOFF, %rcx\n"
     "movq ext@GOTTPOFF(%rip), %rax\naddq ext@gottpoff(%rip), %rax\n"
     "data16\nleaq ext@TLSGD(%rip), %rdi\ndata16\ndata16\nrex64\ncall __tls_get_addr@PLT\n"
     "data16 leaq ext@tlsgd(%rip), %rdi\n.value 0x6666\nrex64\ncall __tls_get_addr@PLT\n"
@@ -26,6 +29,7 @@ static const char asm_test_tls_fixture[] =
     ".set tls_alias, tls_alias_target\nmovq %fs:tls_alias@TPOFF, %rax\nmovq tls_alias@GOTTPOFF(%rip), %rax\nleaq tls_alias@TLSGD(%rip), %rdi\n"
     "leaq tls_alias@TLSLD(%rip), %rdi\nmovl tls_alias@DTPOFF(%rax), %eax\n.set tls_local_alias, tl+4\nmovl %fs:tls_local_alias@tpoff, %eax\n.p2align 4\n"
     ".section .rodata.offsets,\"a\",@progbits\n.long tl@dtpoff\n.long stl@DTPOFF+4\n.long tl@tpoff\n.long tls_alias@DTPOFF\n"
+    ".quad tl@dtpoff\n.quad tl@tpoff+8\n.quad ext@DTPOFF\n.quad tls_alias@dtpoff\n"
     ".section .tbss,\"awT\",@nobits\n.type tl, @object\ntl: .zero 16\n.local stl\nstl: .zero 4\n"
     ".section .tdata,\"awT\",@progbits\n.globl data\ndata: .long 7\n";
 static const char asm_test_common_fixture[] =
@@ -36,7 +40,13 @@ static const char asm_test_common_fixture[] =
     // A global's repeated .comm, as GNU as takes it: the first size, the last alignment (its default, by the kept size).
     ".comm ra,4,4\n.comm ra,4,16\n.comm rb,4,16\n.comm rb,4,4\n.comm rc,4,4\n.comm rc,8,16\n.comm rd,8,8\n.comm rd,4,2\n.comm re,4,8\n.comm re,4\n"
     ".comm rf,4\n.comm rf,4,32\n.comm rg,24\n.comm rg,24\n.comm rh,4,4\n.comm rh,4,0\n.comm rx,4,4\n.comm rx,100\n.comm ry,100,64\n.comm ry,2\n"
-    ".comm rz,0,8\n.comm rz,0\n";
+    ".comm rz,0,8\n.comm rz,0\n"
+    // A global common made local and declared again, which GNU as places in .bss (subsection 1, after .lcomm's) at its
+    // new alignment's place plus its first size, of that first size: by .comm with the same size, a larger one, none
+    // and no alignment, and by .lcomm; then one made local without being declared again, which stays a global common.
+    ".text\nmovl ma(%rip), %eax\nmovl mf(%rip), %eax\n.comm ma,4,4\n.local ma\n.comm ma,4,4\n.comm mb,4,4\n.local mb\n.comm mb,8,8\n"
+    ".comm mc,4,4\n.local mc\n.lcomm mc,4\n.comm md,4,4\n.local md\n.comm md,4\n.comm me,24,4\n.local me\n.comm me,24,8\n"
+    ".comm mf,4,4\n.local mf\n.lcomm mg,3\n.data\n.quad me+4\n";
 static const char asm_test_wide_fixture[] =
     ".section .rodata.str4.8,\"aMS\",@progbits,4\n.align 8\n.LC2:\n.string \"h\"\n.string \"\"\n.string \"\"\n.string \"i\"\n.string \"\"\n.string \"\"\n"
     ".string \"\"\n.string \"\"\n.string \"\"\n.string \"\"\n"
@@ -152,6 +162,118 @@ static void asm_test_relax_programs(AsmTest* test, const char* directory, bool c
     }
 }
 
+// A jump table as GCC's -O2 PIE code writes one (#1115): label differences whose subtrahend is the table's own label in
+// .rodata and whose minuend is .text's, which GNU as makes PC-relative relocations of the minuend; with an undefined
+// minuend, `.`, an addend, and `.quad`'s PC64.
+static const char asm_test_jump_fixture[] =
+    ".text\n.globl dispatch\ndispatch: cmpl $3, %edi\nja .Ldef\nleaq .Ltab(%rip), %rdx\nmovslq (%rdx,%rdi,4), %rax\naddq %rdx, %rax\n"
+    "notrack jmp *%rax\n.L1: movl $1, %eax\nret\n.L2: movl $2, %eax\nret\n.Ldef: xorl %eax, %eax\nret\n"
+    ".section .rodata\n.align 4\n.Ltab: .long .L1-.Ltab\n.long .L2-.Ltab\n.long .Ldef-.Ltab\n.long ext-.Ltab\n.long ext-.\n"
+    ".long .L2-.Ltab+8\n.quad .L1-.\n.quad dispatch-.Ltab\n";
+// Undefined symbols as GNU as lists them (#1115): each named one is a global, from .globl, a TLS or GOT reference, an
+// expression, an alias's target, .hidden, .protected, .internal, .size, .type and even .local, keeping its .type and
+// .size; a weak one only when something refers to it. An alias of an undefined symbol, exported or not, isn't listed:
+// its references are its target's, whose binding is its own (`wtarget` stays weak), and a chain resolves through each.
+static const char asm_test_undefined_fixture[] =
+    ".text\n.globl alias1\n.set alias1, ext1\ncall alias1\nmovq alias1@GOTPCREL(%rip), %rax\n.weak walias\n.set walias, ext2\n"
+    ".globl galias\n.type galias,@function\n.set galias, ext3\n.size galias, 8\n.globl unused\n.set unused, ext4\ncall walias\n"
+    ".set quiet, ext5\n.weak wtarget\n.globl alias6\n.set alias6, wtarget\ncall alias6\n.globl halias\n.hidden halias\n"
+    ".set halias, ext6\n.local lalias\n.set lalias, ext7\n.globl declared\n.weak wunused\n.hidden hidden_undefined\n"
+    ".protected protected_undefined\n.internal internal_undefined\n.size sized_undefined, 4\n.type typed_undefined, @function\n"
+    ".local local_undefined\n.set chain_b, chain_a\n.set chain_a, ext13 + 4\n.data\n.long ext14 - ext14\n.quad alias1+4\n.quad chain_b\n";
+
+// A section's name as a symbol (clang's DWARF writes `.long .debug_abbrev`), which GNU as writes as that section's
+// symbol, not an undefined one, and of no symbol of its own: as data, with an addend, and RIP-relative.
+static const char asm_test_section_name_fixture[] =
+    ".section .foo,\"a\",@progbits\n.byte 1\n.section .bar,\"a\",@progbits\n.quad .foo\n.long .foo+1\n.text\nleaq .foo(%rip), %rax\n"
+    ".section .debug_abbrev,\"\",@progbits\n.byte 0\n.section .debug_aranges,\"\",@progbits\n.long .debug_abbrev\n";
+
+// String instructions' explicit operands, as GNU as takes them (#1115: clang's `rep;movsq (%rsi), %es:(%rdi)`, and
+// Intel's `rep movsb es:[rdi], [rsi]`): each instruction's in both syntaxes, a source's segment (DS's as none), 32-bit
+// addresses, sizes from a register or `ptr`, with rep and a rep statement, and SSE's movsd beside them; and .zero's
+// fill (clang's `.zero 16,63`).
+static const char asm_test_string_fixture[] =
+    ".text\nstrings:\nmovsq (%rsi), %es:(%rdi)\nmovsq %ds:(%rsi), %es:(%rdi)\nmovsq %fs:(%rsi), %es:(%rdi)\nmovsq (%esi), %es:(%edi)\n"
+    "stos %eax, %es:(%rdi)\nstosl %eax, (%rdi)\nlods (%rsi), %ax\nlodsb %fs:(%rsi), %al\nscasq %es:(%rdi), %rax\ncmpsl %es:(%rdi), (%rsi)\n"
+    "insb (%dx), %es:(%rdi)\ninsl %dx, %es:(%rdi)\noutsw %gs:(%rsi), (%dx)\nrep movsq %fs:(%rsi), %es:(%rdi)\nrep movsq %fs:(%esi), %es:(%edi)\n"
+    "rep stosw %ax, %es:(%edi)\nrepne scasb %es:(%rdi), %al\nrep;movsb (%rsi), %es:(%rdi)\nrep;stosb %al, %es:(%rdi)\nmovsb %cs:(%rsi), %es:(%rdi)\n"
+    "movsb %es:(%rsi), %es:(%rdi)\nmovsb %ss:(%rsi), (%rdi)\nmovsd %xmm0, %xmm1\nmovsd (%rsi), %xmm1\n.intel_syntax noprefix\n"
+    "rep movsb es:[rdi], [rsi]\nrep stosb es:[rdi], al\nmovs qword ptr es:[rdi], qword ptr fs:[rsi]\nlods eax, dword ptr [rsi]\n"
+    "cmps byte ptr [rsi], byte ptr es:[rdi]\nscasb al, byte ptr es:[rdi]\nmovsd dword ptr es:[rdi], dword ptr [rsi]\noutsb dx, byte ptr [rsi]\n"
+    "movsd xmm0, qword ptr [rsi]\n.att_syntax prefix\n.data\n.zero 16,63\n.zero 3\n.zero 2,0x90\n";
+// AVX's vmovq between memory and an XMM register in its own form where VEX's three bytes make the general register's
+// as long (#1115), and AVX-512's in the general register's, as GNU as chooses them.
+static const char asm_test_vmovq_fixture[] =
+    ".text\nvmovq_forms:\nvmovq %xmm1, (%r14,%rcx)\nvmovq (%r13,%rax), %xmm1\nvmovq %xmm9, (%rax)\nvmovq (%rax), %xmm9\nvmovq %xmm1, (%rax)\nvmovq %rax, %xmm9\n"
+    "vmovq %xmm9, %r10\nvmovq %xmm9, %xmm2\nvmovq %xmm17, (%r14)\nvmovq (%r14), %xmm17\n.intel_syntax noprefix\nvmovq qword ptr [r14+rcx], xmm1\n";
+
+// AVX2's and AVX-512's gathers and scatters, of vector-indexed (VSIB) memory (#1115: clang's `vpgatherqd
+// 32(%rdx,%ymm7), %xmm8 {%k1}`): each index class, with and without a base, a displacement and a scale, high
+// registers, in both syntaxes (Intel's vector index wherever it is written).
+static const char asm_test_gather_fixture[] =
+    ".text\ngathers:\nvpgatherqd 32(%rdx,%ymm7), %xmm8 {%k1}\nvpgatherqq (%rax,%zmm1,8), %zmm2 {%k3}\nvpgatherdd %ymm1, (%rax,%ymm2,4), %ymm0\n"
+    "vgatherdps %xmm1, 8(%rax,%xmm9,2), %xmm3\nvpscatterdd %zmm0, (%rax,%zmm1,4) {%k1}\nvgatherqpd (,%zmm20,8), %zmm5 {%k2}\n"
+    "vpgatherdd (%r12,%zmm31), %zmm30 {%k7}\nvscatterqps %ymm3, -64(%r9,%zmm4,4) {%k5}\nvgatherdpd 0x80(%rsp,%xmm4,8), %ymm2 {%k1}\n"
+    "vpgatherqd %xmm0, (%rbp,%ymm1), %xmm2\n.intel_syntax noprefix\nvpgatherdd ymm0, dword ptr [rax+ymm2*4], ymm1\n"
+    "vpgatherqd xmm8 {k1}, dword ptr [rdx+ymm7+32]\nvpscatterdd dword ptr [rax+4*zmm1] {k1}, zmm0\nvgatherqpd zmm5 {k2}, qword ptr [8*zmm20]\n"
+    "vgatherdps xmm3, dword ptr [rax+xmm9*2+8], xmm1\n.att_syntax prefix\n";
+// GNU as's line table of `.file` and `.loc` (#1115), compared byte for byte: DWARF 5's tables with MD5s and each way
+// a file names its directory; each row's file, column, discriminator, isa, is_stmt, basic_block, prologue_end and
+// epilogue_begin; line advances in and out of a special opcode's range, address advances by special opcode,
+// DW_LNS_const_add_pc and DW_LNS_advance_pc, and sequences' ends; a row of line 0, which is none but keeps its column;
+// two `.loc`s in a row; a sequence per code section, which keeps the isa; and GCC's view numbers, as data, with `view
+// 0` and `view -0`.
+static const char asm_test_lines_fixture[] =
+    ".file 0 \"/work\" \"/src/main.c\" md5 0x00112233445566778899aabbccddeeff\n.file 1 \"/src/main.c\" md5 0x00112233445566778899aabbccddeeff\n"
+    ".file 2 \"include/header.h\"\n.file 3 \"/usr/include\" \"stdio.h\"\n"
+    ".text\n.globl f\nf:\n.loc 1 10 5\npushq %rbp\n.loc 1 11 9 prologue_end\nmovl $1, %eax\n.loc 2 3 1 is_stmt 0\nnop\n.loc 1 200 2 discriminator 3\nnop\n"
+    ".loc 1 190 1 basic_block epilogue_begin\n.loc 1 191 1 isa 2\n.skip 300\nnop\n.loc 1 0 7\nnop\n.loc 1 192 is_stmt 1\n.skip 20\nnop\n.loc 3 1 0\n.skip 17\nret\n"
+    ".section .text.other,\"ax\",@progbits\ng:\n.loc 1 50 0 view .LVU1\n.loc 1 51 0 view .LVU2\nnop\n.loc 1 52 0 view .LVU3\n.p2align 4, 0xcc\n"
+    ".loc 1 53 0 view -0\nnop\n.loc 1 54 0 view 0\n.loc 1 55 0 view .LVU4\njmp .Lnext\n.Lnext:\n.loc 1 56 0 view -0\nnop\n.loc 1 57 0 view -0\n"
+    ".loc 1 58 0 view .LVU5\n.skip 17\n"
+    ".section .debug_info,\"\",@progbits\n.long 0\n.section .debug_loclists,\"\",@progbits\n.uleb128 .LVU1\n.uleb128 .LVU2\n.uleb128 .LVU3\n.uleb128 .LVU4\n"
+    ".byte .LVU5\n";
+// Where GNU as states a `view -0` row's address again, by its frags (asm_line_emit): at the previous row's address,
+// after a .skip that the previous row ended its frag's bytes at, after two alignments with code between them (as the
+// previous row ended its frag), but not after a byte of data before an alignment.
+static const char asm_test_line_frags_fixture[] =
+    ".file 0 \"/w\" \"m.c\"\n.text\nnop\n.loc 0 1 0 view .LVU1\n.loc 0 2 0 view -0\nnop\n.loc 0 3 0 view .LVU2\n.skip 4\n.loc 0 4 0 view -0\nnop\n"
+    ".loc 0 5 0 view .LVU3\n.p2align 3, 0xcc\nnop\n.p2align 4, 0xcc\n.loc 0 6 0 view -0\nnop\n.loc 0 7 0 view .LVU4\n.byte 1\n.p2align 4, 0xcc\n"
+    ".loc 0 8 0 view -0\nret\n.section .debug_info,\"\",@progbits\n.long 0\n.section .debug_loclists,\"\",@progbits\n.uleb128 .LVU1\n.uleb128 .LVU2\n"
+    ".uleb128 .LVU3\n.uleb128 .LVU4\n";
+// DWARF 3's table, without `.file 0`: its directories and files in .debug_line itself.
+static const char asm_test_line_three_fixture[] =
+    ".file 1 \"a.c\"\n.file 2 \"dir/b.c\"\n.file 3 \"/abs/c.h\"\n.text\n.loc 1 3 0\nnop\n.loc 2 4 2\nnop\n.loc 3 10 1 prologue_end\nret\n"
+    ".section .debug_info,\"\",@progbits\n.long 0\n";
+// The header GNU as writes for a .debug_info without rows: of no files, and of DWARF 5's files.
+static const char asm_test_line_empty_fixture[] = ".text\nempty: ret\n.section .debug_info,\"\",@progbits\n.long 0\n";
+static const char asm_test_line_files_fixture[] =
+    ".file 0 \"/w\" \"/src/m.c\" md5 0x00112233445566778899aabbccddeeff\n.file 1 \"/src/m.c\"\n.section .debug_info,\"\",@progbits\n.long 0\n.text\nret\n";
+// GCC's empty .debug_line with its label, which .debug_info refers to; a row before an alignment, which waits for the
+// instruction after it, a branch that grows past a large address advance, and a second section's sequence.
+static const char asm_test_line_label_fixture[] =
+    ".file 0 \"/w\" \"m.c\"\n.text\n.loc 0 1 0\n.p2align 4, 0xcc\nnop\n.loc 0 2 0\njmp .L1\n.loc 0 300 0\n.zero 274\n.L1:\nret\n"
+    ".section .text.b,\"ax\",@progbits\n.loc 0 9 0\nret\n.section .debug_info,\"\",@progbits\n.long 0\n.section .debug_line,\"\",@progbits\n.Lline0:\n"
+    ".section .debug_info\n.long .Lline0\n";
+
+// GNU as's .debug_frame, which GCC and Clang write for -g without unwind tables (#1115): CIEs of version 1 without
+// augmentation, shared between FDEs, whose addresses are 64-bit relocations, every entry padded to 8 bytes; a simple
+// procedure's CIE, a signal frame's and another return column's, advances of each width, saved state, an escape, and
+// a second code section.
+static const char asm_test_debug_frame_fixture[] =
+    ".cfi_sections .debug_frame\n.text\n.globl f\nf:\n.cfi_startproc\npushq %rbp\n.cfi_def_cfa_offset 16\n.cfi_offset 6, -16\nmovq %rsp, %rbp\n"
+    ".cfi_def_cfa_register 6\n.skip 70\n.cfi_remember_state\npopq %rbp\n.cfi_def_cfa 7, 8\n.skip 300\n.cfi_restore_state\n.skip 70000\nleave\n"
+    ".cfi_def_cfa 7, 8\nret\n.cfi_endproc\ng:\n.cfi_startproc\nret\n.cfi_endproc\n.section .text.other,\"ax\",@progbits\nh:\n"
+    ".cfi_startproc simple\n.cfi_signal_frame\n.cfi_def_cfa 7, 8\nnop\n.cfi_escape 0x2e, 0x10\nret\n.cfi_endproc\nk:\n.cfi_startproc\n"
+    ".cfi_return_column 17\nnop\n.cfi_undefined 3\nret\n.cfi_endproc\nm:\n.cfi_startproc\nret\n.cfi_endproc\n";
+// Both sections, .eh_frame's first; and no section: an empty .cfi_sections writes neither, and .debug_frame without
+// procedures is not written.
+static const char asm_test_both_frames_fixture[] =
+    ".cfi_sections .eh_frame, .debug_frame\n.text\nf:\n.cfi_startproc\npushq %rbx\n.cfi_def_cfa_offset 16\n.cfi_offset 3, -16\npopq %rbx\n"
+    ".cfi_def_cfa_offset 8\nret\n.cfi_endproc\ng:\n.cfi_startproc\nret\n.cfi_endproc\n";
+static const char asm_test_no_frames_fixture[] = ".cfi_sections\n.text\nf:\n.cfi_startproc\npushq %rbx\n.cfi_def_cfa_offset 16\npopq %rbx\nret\n.cfi_endproc\n";
+static const char asm_test_unused_frames_fixture[] = ".cfi_sections .debug_frame\n.text\nf: ret\n";
+
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
     static const struct
@@ -166,6 +288,22 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_predicate_fixture, X86_ARCH_V4 },
         { asm_test_relax_fixture, X86_ARCH_BASELINE },
         { asm_test_alias_fixture, X86_ARCH_BASELINE },
+        { asm_test_jump_fixture, X86_ARCH_BASELINE },
+        { asm_test_undefined_fixture, X86_ARCH_BASELINE },
+        { asm_test_section_name_fixture, X86_ARCH_BASELINE },
+        { asm_test_lines_fixture, X86_ARCH_BASELINE },
+        { asm_test_line_frags_fixture, X86_ARCH_BASELINE },
+        { asm_test_line_three_fixture, X86_ARCH_BASELINE },
+        { asm_test_line_empty_fixture, X86_ARCH_BASELINE },
+        { asm_test_line_files_fixture, X86_ARCH_BASELINE },
+        { asm_test_line_label_fixture, X86_ARCH_BASELINE },
+        { asm_test_string_fixture, X86_ARCH_BASELINE },
+        { asm_test_vmovq_fixture, X86_ARCH_V4 },
+        { asm_test_gather_fixture, X86_ARCH_V4 },
+        { asm_test_debug_frame_fixture, X86_ARCH_BASELINE },
+        { asm_test_both_frames_fixture, X86_ARCH_BASELINE },
+        { asm_test_no_frames_fixture, X86_ARCH_BASELINE },
+        { asm_test_unused_frames_fixture, X86_ARCH_BASELINE },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -186,20 +324,29 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // compared with GNU as here; the program corpus compares GCC 15's with a GNU as that does.
     static const uint8_t base64[] = { 'h', 'e', 'l', 'l', 'o', 0, 1, 2, 0xff, 'h', 'i' };
     asm_test_bytes(test, ".data\n.base64 \"aGVsbG8=\", \"AAEC/w==\"\n.base64 \"\"\n.base64 \"aGk=\"\n", 2, base64, sizeof(base64), ".base64 decodes each string");
-    // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`) or a
-    // 64-bit one, @GOTTPOFF without RIP, 64-bit TLS offsets as data, a TLS modifier on a symbol outside a TLS section;
-    // .comm's alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined
-    // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
-    // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
-    // characters; %st(8); fsubp of ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an
-    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); and malformed base64.
+    // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`),
+    // @GOTTPOFF without RIP, a 2-byte TLS offset as data, a TLS modifier on a symbol outside a TLS section; .comm's
+    // alignment that isn't a power of two, .lcomm's alignment operand (GNU as's ELF .lcomm takes none), a defined or
+    // weak common symbol, a local's .comm or .lcomm declared again, an alias of a global common (before or after its
+    // .comm) and a TLS modifier on one; strings of 8-byte characters; %st(8); fsubp of ST(0) and ST(i), and Intel's
+    // arithmetic without operands, which GNU as refuses; an uppercase mnemonic, as every mnemonic is lowercase here
+    // (GNU as takes either); malformed base64; a label difference whose subtrahend is in neither the datum's section
+    // nor the minuend's, which GNU as can't resolve; and, deliberately, an undefined .L label, which GNU as lists as an
+    // undefined global for the link to fail on. Of the line table: a .debug_line of bytes beside rows, a row of an
+    // unassigned file, `view 0` where the view isn't 0, a numeric view but 0, is_stmt but 0 or 1, an unknown `.loc`
+    // option, a file slot named again for another file, an MD5 within 64 bits, a view of a defined symbol; and,
+    // deliberately, rows without a .debug_info, where GNU as writes its own DWARF, and a DWARF 5 table without `.file
+    // 0`'s directory, where GNU as takes its working directory. Of string instructions' operands: a destination of
+    // another segment than ES, a register of another size than the suffix's, mixed address sizes, Intel's without a
+    // size, and, deliberately, AT&T's without one (where GNU as warns and takes 32 bits) and RDI's memory as the source
+    // (where it warns and takes the instruction's own). Of .cfi_sections: a trailing comma, names without a comma, and,
+    // deliberately, .sframe, a choice after the first procedure (which GNU as applies to the procedures after it), and
+    // a .debug_frame of the source's own bytes beside CFI's (which GNU as appends to).
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
-        ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",
         ".text\nleaq ext@tlsgd(%rax), %rdi\n",
         ".text\nmovl tl@tpoff(%rip), %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
-        ".data\n.quad tl@dtpoff\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".data\n.short tl@dtpoff\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".data\n.long tl@gottpoff\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".data\nd: .long 0\n.text\nmovl %fs:d@tpoff, %eax\n",
@@ -210,8 +357,28 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".lcomm x,4\n.data\nx: .long 0\n",
         ".weak x\n.comm x,4,4\n",
         ".local x\n.comm x,4,4\n.comm x,4,16\n",
-        ".comm x,4,4\n.local x\n.comm x,4,4\n",
         ".lcomm x,4\n.lcomm x,4\n",
+        ".comm c,4,4\n.globl a\n.set a, c\n.data\n.quad a\n",
+        ".set a, c+4\n.comm c,4,4\n",
+        ".comm t,4,4\n.text\nmovl %fs:t@tpoff, %eax\n",
+        ".text\njmp .Lnowhere\n",
+        ".file 0 \"/d\" \"x.c\"\n.text\n.loc 0 1 0\nnop\n.section .debug_info,\"\",@progbits\n.long 0\n.section .debug_line,\"\",@progbits\n.byte 0\n",
+        ".file 1 \"x.c\"\n.text\n.loc 2 1 0\nnop\n",
+        ".file 0 \"/d\" \"x.c\"\n.text\n.loc 0 1 0 view .LVU1\n.loc 0 2 0 view 0\nnop\n.section .debug_info,\"\",@progbits\n.long 0\n",
+        ".file 0 \"/d\" \"x.c\"\n.text\n.loc 0 1 0 view 1\n",
+        ".file 1 \"x.c\"\n.text\n.loc 1 1 0 is_stmt 2\n",
+        ".file 1 \"x.c\"\n.text\n.loc 1 1 0 bogus\n",
+        ".file 1 \"x.c\"\n.file 1 \"y.c\"\n",
+        ".file 0 \"/d\" \"x.c\" md5 0x1234\n",
+        ".file 1 \"x.c\"\n.text\nl: nop\n.loc 1 1 0 view l\n",
+        ".file 0 \"/d\" \"x.c\"\n.text\n.loc 0 1 0\nnop\n",
+        ".file 0 \"x.c\"\n.text\n.loc 0 1 0\nnop\n.section .debug_info,\"\",@progbits\n.long 0\n",
+        ".text\nmovsq (%rsi), %ds:(%rdi)\n",
+        ".text\nstosb %ax, %es:(%rdi)\n",
+        ".text\nmovsq (%esi), %es:(%rdi)\n",
+        ".intel_syntax noprefix\nmovs es:[rdi], [rsi]\n",
+        ".text\nmovs (%rsi), %es:(%rdi)\n",
+        ".text\nmovsq (%rdi), %es:(%rsi)\n",
         ".section .rodata.str8.8,\"aMS\",@progbits,8\n.quad 0\n",
         "fadd %st(8)\n",
         "fld %st(x)\n",
@@ -226,14 +393,39 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".data\n.base64 \"A=AA\"\n",
         ".data\n.base64 \"AA==AAAA\"\n",
         ".data\n.base64 label\n",
+        ".data\n.long a - b\n.text\na: nop\n.section .rodata\nb: .byte 0\n",
+        ".cfi_sections .debug_frame,\n",
+        ".cfi_sections .debug_frame .eh_frame\n",
+        ".cfi_sections .sframe\n",
+        ".text\nf: .cfi_startproc\nret\n.cfi_endproc\n.cfi_sections .debug_frame\n",
+        ".cfi_sections .debug_frame\n.section .debug_frame,\"\",@progbits\n.byte 1\n.text\nf: .cfi_startproc\nret\n.cfi_endproc\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
         asm_test_pair(test, (String8){ .pointer = (char*)rejected[i], .length = strlen(rejected[i]) }, 0, X86_ARCH_BASELINE);
     }
+    // Gathers' and scatters' operands on x86-64-v4, where their forms are (#1115): what GNU as refuses too, k0 or no
+    // mask of AVX-512's, a zeroing mask, an index of another class, a vector index on an instruction without VSIB, a
+    // vector base and RIP's; and, deliberately, the mask, index and destination registers that aren't distinct, which
+    // GNU as warns of (the instruction faults).
+    static const char* const rejected_vsib[] = {
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm2 {%k0}\n",
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm2\n",
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm2 {%k1}{z}\n",
+        ".text\nvpgatherdd %ymm1, (%rax,%xmm2,4), %ymm0\n",
+        ".text\nmovl (%rax,%xmm1), %eax\n",
+        ".text\nvpgatherdd %ymm1, (%ymm2), %ymm0\n",
+        ".text\nvpgatherdd %ymm1, (%rip,%ymm2), %ymm0\n",
+        ".text\nvpgatherdd %ymm1, (%rax,%ymm1,4), %ymm0\n",
+        ".text\nvpgatherdd (%rax,%zmm1), %zmm1 {%k1}\n",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected_vsib); i += 1)
+    {
+        asm_test_pair(test, (String8){ .pointer = (char*)rejected_vsib[i], .length = strlen(rejected_vsib[i]) }, 0, X86_ARCH_V4);
+    }
     // The object's common symbols and _GLOBAL_OFFSET_TABLE_, without --cross-check too: SHN_COMMON with the alignment as
-    // the value, and an undefined global no relocation refers to; and a C template's .comm, which the checker refuses
-    // (asm_assemble's common_count).
+    // the value (each its own atom, BUSTER_LINK_SYMBOL_COMMON's, which the object leaves to the linker), and an
+    // undefined global no relocation refers to; asm_assemble counts the commons (AsmResult.common_count).
     AsmResult common = asm_test_pair(test, BUSTER_S8(".comm block,40\n.comm word,4,8\ncommon_reader: movq x@GOTPCREL(%rip), %rax\n"), 1, X86_ARCH_BASELINE);
     const Object object = common.error == 0 ? asm_object(&common, BUSTER_S8("common.s"), &test->vector) : (Object){ .error = OBJECT_ERROR_RANGE };
     ObjectView view;
@@ -251,8 +443,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         okay = okay && (ELF64_ST_TYPE(symbol->st_info) == STT_OBJECT) == (block || word || (name != 0 && symbol->st_shndx == SHN_COMMON));
     }
     asm_test_check(test, okay && found == 3, "common symbols are SHN_COMMON objects and the GOT symbol is declared", error);
-    // The writer refuses declared symbols it can't take before it writes: a count without a list, a defined symbol, an
-    // id past the table, common alignments short of the symbols, and the same of symbol sizes.
+    // The writer refuses declared symbols it can't take before it writes: a count without a list, a defined symbol (the
+    // first with an atom, a common one), an id past the table, and symbol sizes short of the symbols.
     ObjectUnits units;
     ObjectSymbols symbols;
     if (common.error == 0 && object_prepare(&units, &common.link, 1, &test->vector) && object_map_symbols(&symbols, &common.link, &test->vector))
@@ -273,9 +465,6 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         const Object declared_defined = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
         options.declared_symbols = &wrong[1];
         const Object declared_past = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
-        options = common.object_options;
-        options.common_alignment_count -= 1;
-        const Object short_alignments = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
         // And symbol sizes short of the symbols, or one below the Link's size.
         uint64_t sizes[64] = { 0 };
         SymbolId sized = 0;
@@ -292,9 +481,9 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         options.symbol_size_count = common.link.symbols.count;
         const Object smaller_size = object_build(&common.link, &units, &symbols, 0, options, BUSTER_S8("common.s"), &test->vector);
         asm_test_check(test, defined != 0 && sized != 0 && common.link.symbols.count <= BUSTER_ARRAY_LENGTH(sizes) && no_list.error == OBJECT_ERROR_RANGE &&
-                                 declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE && short_alignments.error == OBJECT_ERROR_RANGE &&
+                                 declared_defined.error == OBJECT_ERROR_RANGE && declared_past.error == OBJECT_ERROR_RANGE &&
                                  short_sizes.error == OBJECT_ERROR_RANGE && smaller_size.error == OBJECT_ERROR_RANGE && test->vector.length == saved,
-                       "invalid declared symbols, common alignments and symbol sizes are refused before output allocation", 0);
+                       "invalid declared symbols and symbol sizes are refused before output allocation", 0);
     }
     else
     {
@@ -338,8 +527,9 @@ typedef struct AsmProgramVariant AsmProgramVariant;
 struct AsmProgramVariant
 {
     const char* name;
-    // Each variant names its -march: a compiler's default may be another (Ubuntu 26.04's GCC 15 writes AVX's at -O2).
-    const char* flags[3];
+    // Each variant names its -march: a compiler's default may be another (Ubuntu 26.04's GCC 15 writes AVX's at -O2); its
+    // debug information, -g0 or -g; and any other option.
+    const char* flags[5];
     X86Architecture architecture;
 };
 
@@ -452,9 +642,22 @@ static bool asm_test_program_padding(AsmTest* test, String8 source, X86Architect
     const String8 filled = asm_test_program_filled(arena, source);
     AsmResult result = filled.length != 0 ? asm_test_pair(test, filled, 1, architecture) : (AsmResult){ .error = "arena exhausted" };
     const Object object = result.error == 0 ? asm_object(&result, BUSTER_S8("filled.s"), arena) : (Object){ .error = OBJECT_ERROR_RANGE };
+    if (result.error != 0)
+    {
+        uint32_t line = 1;
+        for (uint64_t i = 0; i < result.location && i < filled.length; i += 1)
+        {
+            line += filled.pointer[i] == '\n';
+        }
+        printf("assembler program padding: the int3-filled source's line %u: %s\n", line, result.error);
+    }
     ObjectView padded;
     char error[256] = { 0 };
     bool valid = object.error == OBJECT_ERROR_NONE && object_view_open(&padded, object.bytes, object.size, false, error, sizeof(error));
+    if (result.error == 0 && !valid)
+    {
+        printf("assembler program padding: the int3-filled source's object: error %u, %s\n", (unsigned)object.error, error);
+    }
     for (uint64_t i = 1; valid && i < ours->section_count; i += 1)
     {
         const Elf64_Shdr* section = &ours->sections[i];
@@ -542,14 +745,19 @@ static bool asm_test_program_link(const char* compiler, const char* object, cons
 
 static void asm_test_program_corpus(AsmTest* test, const char* directory, bool keep)
 {
-    static const char* const programs[] = { "floating", "storage", "strings" };
+    static const char* const programs[] = { "floating", "storage", "strings", "switch", "gather" };
     static const char* const compilers[] = { "gcc", "clang" };
     static const char* const syntaxes[] = { "-masm=att", "-masm=intel" };
     static const AsmProgramVariant variants[] = {
-        { .name = "O0", .flags = { "-O0", "-march=x86-64", "-fPIE" }, .architecture = X86_ARCH_BASELINE },
-        { .name = "O2", .flags = { "-O2", "-march=x86-64", "-fPIE" }, .architecture = X86_ARCH_BASELINE },
-        { .name = "O2-pic", .flags = { "-O2", "-march=x86-64", "-fPIC" }, .architecture = X86_ARCH_BASELINE },
-        { .name = "O3-v4", .flags = { "-O3", "-march=x86-64-v4", "-fPIE" }, .architecture = X86_ARCH_V4 },
+        { .name = "O0", .flags = { "-O0", "-march=x86-64", "-fPIE", "-g0" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O2", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g0" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O2-pic", .flags = { "-O2", "-march=x86-64", "-fPIC", "-g0" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O3-v4", .flags = { "-O3", "-march=x86-64-v4", "-fPIE", "-g0" }, .architecture = X86_ARCH_V4 },
+        // -g's DWARF (#1115): the line table GNU as makes of .loc, GCC's view numbers and its location lists.
+        { .name = "O0-g", .flags = { "-O0", "-march=x86-64", "-fPIE", "-g" }, .architecture = X86_ARCH_BASELINE },
+        { .name = "O2-g", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g" }, .architecture = X86_ARCH_BASELINE },
+        // Without unwind tables, -g's CFI is GNU as's .debug_frame (`.cfi_sections .debug_frame`).
+        { .name = "O2-g-frame", .flags = { "-O2", "-march=x86-64", "-fPIE", "-g", "-fno-asynchronous-unwind-tables" }, .architecture = X86_ARCH_BASELINE },
     };
     static const char* const targets[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3", "-march=x86-64-v4" };
     // The x86-64-v4 programs run where the host has every feature of x86-64-v4, not only AVX-512's: clang's code for it
@@ -606,21 +814,19 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                     char* const reference_output = paths[6];
                     char* const program_output = paths[7];
                     char* const error_path = paths[8];
-                    char* generate[] = {
-                        (char*)compilers[compiler],
-                        (char*)chosen->flags[0],
-                        (char*)chosen->flags[1],
-                        (char*)chosen->flags[2],
-                        (char*)syntaxes[syntax],
-                        "-fcf-protection=none",
-                        "-fcommon",
-                        "-S",
-                        source_path,
-                        "-o",
-                        assembly,
-                        compiler == 1 ? "-fno-integrated-as" : 0,
-                        0,
-                    };
+                    // The compiler's arguments: the variant's flags it gives, then the corpus's.
+                    char* generate[16] = { (char*)compilers[compiler] };
+                    uint32_t argument = 1;
+                    for (uint32_t flag = 0; flag < BUSTER_ARRAY_LENGTH(chosen->flags); flag += 1)
+                    {
+                        generate[argument] = (char*)chosen->flags[flag];
+                        argument += chosen->flags[flag] != 0;
+                    }
+                    char* const common_arguments[] = { (char*)syntaxes[syntax], "-fcf-protection=none", "-fcommon", "-S", source_path, "-o", assembly, compiler == 1 ? "-fno-integrated-as" : 0 };
+                    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(common_arguments); i += 1)
+                    {
+                        generate[argument + i] = common_arguments[i];
+                    }
                     okay = okay && asm_test_tool(generate, assembly, program_output, error_path) == 0;
                     const String8 source = okay ? object_test_read_file(&files, assembly) : (String8){ 0 };
                     okay = okay && source.pointer != 0 && source.length != 0;
@@ -631,7 +837,9 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                     if (okay)
                     {
                         const char* target = targets[chosen->architecture <= X86_ARCH_V4 ? chosen->architecture : 0];
-                        char* gas[] = { "as", "--64", "-o", reference_path, assembly, 0 };
+                        // GNU as compresses debug sections where its build makes that the default (Arch's binutils
+                        // does, Ubuntu's doesn't); the assembler's are uncompressed, as the comparison needs (#1115).
+                        char* gas[] = { "as", "--64", "--nocompress-debug-sections", "-o", reference_path, assembly, 0 };
                         char* vector[] = { "/proc/self/exe", "assemble", (char*)target, "-o", vector_path, assembly, 0 };
                         char* scalar[] = { "/proc/self/exe", "assemble", "--scalar", (char*)target, "-o", scalar_path, assembly, 0 };
                         const bool runs = chosen->architecture != X86_ARCH_V4 || runs_v4;

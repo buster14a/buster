@@ -31,10 +31,7 @@ requirements. [Command index](README.md).
   counts, an accepted one runs natively and must agree with the interpreter.
   `test-tier1-emit`'s call fixture (`tier1_code_certificate_test.c`) leaves an
   argument register stale (a value passed twice) and leaves out saves and
-  spills around calls: each must be refused. Its compare-exchange fixture keeps
-  a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
-  certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
-  its own cases too.
+  spills around calls: each must be refused.
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and
