@@ -204,6 +204,24 @@ static void ir_inline_test_by_value(IrInlineTest* test, Arena* input, Arena* out
         functions[1].passed[1].size = size;
         arena_pop_to(output, 0);
         arena_pop_to(twin, 0);
+        // A 256 MiB aggregate by value on both sides (#1324's review): its copy's size is counted, not walked, and is
+        // past the instruction bound, so the call stays a call whatever the cost threshold.
+        const uint32_t first = functions[1].passed[0].size;
+        functions[0].passed[0].size = UINT32_C(1) << 28;
+        functions[1].passed[0].size = UINT32_C(1) << 28;
+        IrInlineOptions unbounded = ir_inline_options();
+        unbounded.maximum_cost = UINT32_MAX - 1;
+        unbounded.vector_copies = 7;
+        IrInlineResult huge = { 0 };
+        if (ir_inline_test_run(test, &unit, unbounded, output, twin, scratch, &huge))
+        {
+            ir_inline_test_expect(test, huge.inlined_calls == 0 && huge.decisions[0] == IR_INLINE_BODY && huge.costs[0] == UINT32_MAX,
+                                  "a huge by-value aggregate's call is refused by its counted size");
+        }
+        functions[0].passed[0].size = first;
+        functions[1].passed[0].size = first;
+        arena_pop_to(output, 0);
+        arena_pop_to(twin, 0);
     }
     arena_pop_to(input, 0);
 }

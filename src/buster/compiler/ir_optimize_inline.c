@@ -118,13 +118,14 @@ struct IrInlineBody
 };
 
 // What one expansion adds to its caller past the callee's cloned body (#1282): the aggregate copies' instructions,
-// addresses and slots.
+// addresses and slots. 64-bit, so that a call's aggregates of up to 4 GiB each sum without wrapping and the bounds refuse
+// it.
 typedef struct IrInlineCopies IrInlineCopies;
 struct IrInlineCopies
 {
-    uint32_t instructions;
-    uint32_t addresses;
-    uint32_t slots;
+    uint64_t instructions;
+    uint64_t addresses;
+    uint64_t slots;
 };
 
 static __attribute__((unused)) IrInlineOptions ir_inline_options(void)
@@ -545,22 +546,16 @@ static IrType ir_inline_result_whole(AbiReturn result, uint64_t size, uint8_t al
 }
 
 // A copy's instructions and addresses (ir_inline_emit_copy's): one vector load and store, or an integer's of 8, 4, 2 or
-// 1 bytes at a time, each past the first through an ADDRESS of each side.
+// 1 bytes at a time, each past the first through an ADDRESS of each side. Counted from the size alone, not by its pieces:
+// a call that passes a huge aggregate is refused by the bounds in constant time (#1324's review). Its pieces are size / 8
+// of 8 bytes and one per set bit of the remainder's 4, 2 and 1.
 static IrInlineCopies ir_inline_copy_size(uint64_t size, IrType whole)
 {
-    IrInlineCopies copies = { 0 };
-    if (whole != IR_VOID)
-    {
-        copies.instructions = 2;
-    }
-    for (uint64_t offset = 0; whole == IR_VOID && offset < size;)
-    {
-        const uint64_t remaining = size - offset;
-        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-        copies.instructions += offset != 0 ? 4 : 2;
-        copies.addresses += offset != 0 ? 2 : 0;
-        offset += piece;
-    }
+    const uint64_t pieces = size / 8 + (uint64_t)__builtin_popcountll(size % 8);
+    const IrInlineCopies copies = {
+        .instructions = whole != IR_VOID ? 2 : pieces != 0 ? pieces * 4 - 2 : 0,
+        .addresses = whole == IR_VOID && pieces != 0 ? (pieces - 1) * 2 : 0,
+    };
     return copies;
 }
 
