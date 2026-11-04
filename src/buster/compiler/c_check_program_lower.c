@@ -730,6 +730,9 @@ struct CheckLowerWriter
     // Whether the program's type table has a _BitInt type, the only one whose operations can have narrow operands
     // (check_lower_computed): a conversion, a constant, an update and a compare test their types for one only then.
     bool bit_ints;
+    // Whether the program may have overloaded functions (CheckLowerShared.overloads): an operand tests its overload set and
+    // its selected overload's address only then.
+    bool overloads;
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
@@ -2131,10 +2134,13 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
     }
 }
 
+// An operand pushed with its conversion. A pending overload set's leaf (its value's overload head) is refused; a unit
+// without overload sets has none, and its operands don't read their payload rows for it (#1048: on the 9700X that read
+// cost sqlite3.c's statements 0.38 ms, docs/c-lowering.md's "The operands' overload tests").
 static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
-    if (node < program->stream->count && check_stream_overload_head(program->stream, node) == 0)
+    if (node < program->stream->count && (!writer->overloads || check_stream_overload_head(program->stream, node) == 0))
     {
         // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
         // bit-field (an update's too) leaves no value. A discarded comma discards its right operand in its place.
@@ -2162,7 +2168,7 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckOverloadResult* selected = check_program_overload_address(program, node, operand);
+    const CheckOverloadResult* selected = writer->overloads ? check_program_overload_address(program, node, operand) : NULL;
     if (selected != NULL)
     {
         if (!check_program_overload_valid(program, selected))
@@ -11708,6 +11714,10 @@ struct CheckLowerShared
     uint32_t type_count;
     // Whether the program's type table has a _BitInt type (CheckLowerWriter.bit_ints).
     bool bit_ints;
+    // Whether an operand may name an overload set or take a selected overload's address (CheckLowerWriter.overloads): only
+    // in a unit that has the overloadable attribute's sets (CheckInput.overload_heads, which every overload set's head comes
+    // from), or whose stream records an overload's address or holds its values whole (a hand-built one).
+    bool overloads;
     uint32_t* initializer_declarations;
     // local_map's entries and the objects whose entries are kept, the bodies' parameters' and locals' (CheckLowerWriter).
     uint32_t* local_map;
@@ -12070,6 +12080,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         shared->bit_ints = memchr(types->types.kind, BUSTER_TYPE_KIND_BIT_INT, types->types.count) != NULL;
+        shared->overloads = input == 0 || program->stream == NULL || input->overload_heads != NULL || program->stream->overload_address_count != 0 ||
+                            program->stream->dense_values != NULL;
     }
     if (valid && !check_lower_init_pools(&lowered->initializers, program, shared->type_facts, shared->type_count, output, scratch))
     {
@@ -12351,6 +12363,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .class_limit = BUSTER_TYPED_CLASSES,
         .target = program->target,
         .bit_ints = shared->bit_ints,
+        .overloads = shared->overloads,
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,

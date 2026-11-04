@@ -829,6 +829,43 @@ On this session's container, every variant's object of `sqlite3.c` was main's,
 and with the sweep of loads the default compile's objects of `sqlite3.c`, Lua's
 units and c-testsuite's subset were `--scalar`'s; the run itself compared none.
 
+## The operands' overload tests (#1048)
+
+#1235's next run ([run at `cf254b58`](https://github.com/buster14a/buster/actions/runs/41760729792/job/126350645649))
+measured four cuts of the work the lowering does for every statement and
+operand in the same way, three rounds of each variant of one build, on the
+base without the statements' prefetch (sqlite3.c, the compile-time step's
+options; every variant's object was the base's, which the run checked too):
+
+| row | the base | one tasks' loop a body | no overload tests | common controls first | the three | the statement sweep |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lower` | 12.114 | 12.266 | 11.755 | 12.013 | 11.790 | 12.943 |
+| `lower.statements` | 8.189 [8.177 to 8.228] | 8.343 | 7.809 [7.806 to 7.869] | 8.052 [8.048 to 8.131] | 7.849 | 9.016 |
+
+- **The operands' overload tests.** Every operand's push read its value's
+  overload head (`check_stream_overload_head`: its payload row's index, and
+  the row where it has one) and looked its operand up among the selected
+  overloads' addresses (`check_program_overload_address`). An overload set's
+  head comes only from the overloadable attribute's sets
+  (`CheckInput.overload_heads`), so a unit without them
+  (`CheckLowerShared.overloads`) skips both. That took 0.38 ms off the
+  statements, every round.
+- **The common controls first.** An expression statement and a branch, most
+  of the controls, were the last case of `check_lower_control`'s chain of
+  kinds. Testing them first took 0.14 ms.
+- **One tasks' loop a body**, its controls pushed as tasks rather than a loop
+  entered for each statement, cost 0.15 ms, and isn't kept.
+- **The statement sweep** lowered a statement whose nodes were all of the
+  plainest shapes (reads of locals and globals, integer constants, casts,
+  the unary, truth and binary operators of the scalar classes, and stores to
+  a local or a global) by two passes over its nodes in postorder rather than
+  by the tasks: the first, from its root down, gave each operand its context
+  and its conversion's target, the second wrote each node's entries and then
+  its conversion. It took 12,267 statements and 33,836 nodes of `sqlite3.c`,
+  and cost 0.83 ms: each statement it didn't take was walked until a node of
+  another shape before the tasks lowered it, the duplicated work this issue's
+  pre-passes paid. Its code stays in #1235's history (`cf254b58`).
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
