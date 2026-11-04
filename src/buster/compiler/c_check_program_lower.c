@@ -11442,7 +11442,22 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
-    if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
+    // An expression statement and a branch, most of the controls, first: they are the chain's last case below, which
+    // tested every other kind before them (#1048: 0.14 ms of sqlite3.c's statements on the 9700X, docs/c-lowering.md's
+    // "The operands' overload tests").
+    if (control.kind == CHECK_CONTROL_EVALUATE || control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
+    {
+        if (control.kind != CHECK_CONTROL_EVALUATE)
+        {
+            check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32,
+                                    control.target);
+        }
+        if (control.node != BUSTER_CHECK_NONE)
+        {
+            check_lower_expression(writer, control.node, false, control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0);
+        }
+    }
+    else if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
     }
@@ -11562,14 +11577,9 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         {
             check_lower_instruction(writer, BUSTER_TYPED_RETURN, check_lower_class(writer, writer->result), 0);
         }
-        else if (control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
-        {
-            check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE,
-                                    BUSTER_TYPED_CLASS_I32, control.target);
-        }
         if (control.node != BUSTER_CHECK_NONE)
         {
-            check_lower_expression(writer, control.node, false, control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0);
+            check_lower_expression(writer, control.node, false, 0);
         }
     }
 }
