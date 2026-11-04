@@ -755,9 +755,38 @@ lowered function, timed in the lowering's stage. It took `lower.rest` on
 `sqlite3.c` from 0.07 to 0.87 ms on the 9700X (#1235's diagnostic run on main at
 `747ab617`) and 1.25 ms on this session's Xeon, where bisecting main found it.
 The emission now makes the report only where the command asks for it
-(`CheckProgramLanes.helper_reporting`, set by `--helper-report`), and
-`lower.rest` is 0.07 ms again on the Xeon. The objects are the same, and
-`--helper-report`'s counts too.
+(`CheckProgramLanes.helper_reporting`, set by `--helper-report`). The objects
+are the same, and `--helper-report`'s counts too. `lower.rest` is 0.07 ms again
+on the Xeon. On the 9700X, #1235's run at `b20fcdbf` (main at `2fef25b0` merged
+with it, [run](https://github.com/buster14a/buster/actions/runs/41750312371/job/126317031501))
+gave 0.042 ms (0.034 to 0.050) in its `measure-compile` of the compile with
+`--check-transitions` and 0.048 ms (0.041 to 0.051) in the compile-time step's.
+
+The same run measured a change to the preparation: its first pass over the
+declaring tokens keeps each one's body and tests it for a local once, where
+it had tested it twice, and its reverse pass links the locals and keeps
+their `local_map` entries. On the Xeon, `lower.prepare` went from 2.138 to
+1.931 ms (15 alternating runs against main). The 9700X's two medians, 1.227 and
+1.206 ms, against 1.254 ms in the diagnostic run below, are separate runs and
+don't resolve a change of that size.
+
+## Where the lowering's cycles go on Zen 5 (#1048)
+
+A temporary step of #1235's 9700X job (`d72188fb`,
+[run](https://github.com/buster14a/buster/actions/runs/41743889750/job/126295817133))
+profiled `benchmark-lowering-source --passes 40` on `sqlite3.c`, a build with
+debug information, each pass a warm selection, lowering, Tier 0 and emission,
+the lowering about half of each pass's cycles. perf's top-down metrics put the
+slots at 29.5% retiring, 30.4% frontend-bound (17.8% latency, 12.3%
+bandwidth), 30.4% backend-bound (25.8% memory) and 9.3% bad speculation, at
+2.52 instructions a cycle. `check_lower_drain` had 19% of the cycles, 19% of
+the branch misses and 13% of the L1D misses; `check_lower_part` 7%, and 10% of
+the L1D misses. Inside the tasks' loop the three events fell on the same lines,
+where a node's data is first touched: the `ops[node]` test,
+`check_stream_value`'s columns, the expansion's first use of the value and the
+task's dispatch. That is skid's resolution, not a load's own address. No one
+limit dominates, and the warm passes weren't much faster than `-c`'s cold
+stage.
 
 ## Against clang -O0's objects
 
