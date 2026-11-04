@@ -870,9 +870,10 @@ are:
 At a target with AVX but not AVX2 (Sandy Bridge's, `Tier1EmitPrepared.avx2`
 from the allow-list's `vpcmpeqd` of a ymm register), a ymm register's integer
 forms are AVX2's, so a 32-byte vector's bitwise operations take the packed
-singles' `vandps`, `vorps` and `vxorps` (the same bits), its ones `vcmpps y, y,
-y, 15` (always true), and its splat `vmovd`, `vpshufd x, x, 0` and `vinsertf128
-y, y, x, 1`; its additions, subtractions and multiplications are AVX2's alone,
+singles' `vandps`, `vorps` and `vxorps` (the same bits), its ones `vpcmpeqd x,
+x, x` and `vinsertf128 y, y, x, 1`, and its splat `vmovd`, `vpshufd x, x, 0` and
+`vinsertf128 y, y, x, 1`: no record reads the register's old bits as floats,
+which a signaling NaN or a denormal among them would raise MXCSR's flags for; its additions, subtractions and multiplications are AVX2's alone,
 which the decoder admits only where the target has them.
 
 VEX has no ternary logic, no compare into a mask and no blend under one: a target

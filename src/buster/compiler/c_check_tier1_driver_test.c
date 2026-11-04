@@ -3148,7 +3148,7 @@ static void check_test_driver_tier1_vex(CheckTest* test, const char* clang, cons
 }
 
 // The AVX fixture (#1281's review): Sandy Bridge's AVX without AVX2, whose ymm integer forms Tier 1 doesn't take: 32-byte
-// vectors' bitwise operators and constants of every kind (AVX's vandps, vorps, vxorps, vcmpps and vinsertf128), 16-byte
+// vectors' bitwise operators and constants of every kind (AVX's vandps, vorps, vxorps, vpcmpeqd, vpshufd and vinsertf128), 16-byte
 // vectors' arithmetic, and AVX's float builtins, every function Tier 1's.
 static const char check_test_tier1_avx_header[] =
     "#include <immintrin.h>\n"

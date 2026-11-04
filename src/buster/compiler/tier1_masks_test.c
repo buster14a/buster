@@ -1304,9 +1304,11 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
     },
     {
         // #1281's review: 32-byte vectors at a target with AVX but not AVX2, whose ymm integer forms are AVX2's: their
-        // bitwise operations by vandps, vorps and vxorps, every bit by vcmpps's always-true predicate, a splat by vmovd,
-        // vpshufd and vinsertf128, zeros by vpxor of the xmm register, others loaded, and copies, loads and stores by
-        // vmovdqa and vmovdqu; and 16-byte vectors' AVX operations beside them.
+        // bitwise operations by vandps, vorps and vxorps, every bit by vpcmpeqd of the xmm register and vinsertf128, a
+        // splat by vmovd, vpshufd and vinsertf128, zeros by vpxor of the xmm register, others loaded, and copies, loads
+        // and stores by vmovdqa and vmovdqu; and 16-byte vectors' AVX operations beside them. Its native runs start with
+        // a signaling NaN in every ymm register and MXCSR's flags clear, which must stay clear: no record reads a
+        // register's old bits as floats (#1293's review).
         .name = "vectors at a target with AVX but not AVX2",
         .text = "function (ptr) -> void {\n"
                 "b0:\n"
@@ -1487,6 +1489,52 @@ static __attribute__((no_sanitize("function"))) void tier1_masks_test_call(const
     Tier1MasksTestEntry entry;
     memcpy(&entry, &code, sizeof(entry));
     entry(buffer, count);
+}
+
+// A native run of an `avx` fixture (#1293's review), with every ymm register a signaling NaN and MXCSR's status flags
+// clear, its invalid and denormal exceptions unmasked, so that a record reading a register's old bits as floats traps
+// (SIGFPE): whether MXCSR's status flags are still clear after it. MXCSR is restored after the call; the stack pointer is
+// kept in rbx, below the red zone and aligned to 32 bytes for the call, and the state in r12, so that no operand is
+// addressed from rsp once it moves.
+static __attribute__((no_sanitize("function"))) bool tier1_masks_test_call_seeded(const uint8_t* code, uint8_t* buffer, uint64_t count)
+{
+    // The signaling NaN's bits, MXCSR's control for the run (every exception masked but invalid and denormal), its value
+    // after the run, and its value before, restored.
+    static uint32_t state[4] = { 0x7fa00000u, 0x1f80u & ~0x0180u, 0, 0 };
+    uint8_t* first = buffer;
+    uint64_t second = count;
+    __asm__ volatile("mov %[state], %%r12\n\t"
+                     "stmxcsr 12(%%r12)\n\t"
+                     "vbroadcastss (%%r12), %%ymm0\n\t"
+                     "vmovaps %%ymm0, %%ymm1\n\t"
+                     "vmovaps %%ymm0, %%ymm2\n\t"
+                     "vmovaps %%ymm0, %%ymm3\n\t"
+                     "vmovaps %%ymm0, %%ymm4\n\t"
+                     "vmovaps %%ymm0, %%ymm5\n\t"
+                     "vmovaps %%ymm0, %%ymm6\n\t"
+                     "vmovaps %%ymm0, %%ymm7\n\t"
+                     "vmovaps %%ymm0, %%ymm8\n\t"
+                     "vmovaps %%ymm0, %%ymm9\n\t"
+                     "vmovaps %%ymm0, %%ymm10\n\t"
+                     "vmovaps %%ymm0, %%ymm11\n\t"
+                     "vmovaps %%ymm0, %%ymm12\n\t"
+                     "vmovaps %%ymm0, %%ymm13\n\t"
+                     "vmovaps %%ymm0, %%ymm14\n\t"
+                     "vmovaps %%ymm0, %%ymm15\n\t"
+                     "ldmxcsr 4(%%r12)\n\t"
+                     "mov %%rsp, %%rbx\n\t"
+                     "sub $128, %%rsp\n\t"
+                     "and $-32, %%rsp\n\t"
+                     "call *%[entry]\n\t"
+                     "mov %%rbx, %%rsp\n\t"
+                     "stmxcsr 8(%%r12)\n\t"
+                     "ldmxcsr 12(%%r12)\n\t"
+                     "vzeroupper"
+                     : "+D"(first), "+S"(second)
+                     : [state] "r"(state), [entry] "r"(code)
+                     : "rax", "rbx", "rcx", "rdx", "r8", "r9", "r10", "r11", "r12", "memory", "cc", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9",
+                       "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+    return (state[2] & 0x3fu) == 0;
 }
 
 // The emitted function's records, sized, encoded by both encoders (which must agree) with the helper after them, its
@@ -1728,13 +1776,24 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         if (child == 0)
         {
             alarm(10);
+            // An `avx` fixture's runs start from signaling NaNs in every ymm register, and must leave MXCSR's status flags
+            // clear (#1293's review).
+            bool clear = true;
             for (uint32_t input = 0; input < BUSTER_TIER1_MASKS_TEST_INPUTS; input += 1)
             {
-                tier1_masks_test_call(machine, buffers + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER, counts[input]);
+                uint8_t* bytes = buffers + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER;
+                if (fixture->avx)
+                {
+                    clear &= tier1_masks_test_call_seeded(machine, bytes, counts[input]);
+                }
+                else
+                {
+                    tier1_masks_test_call(machine, bytes, counts[input]);
+                }
             }
-            _exit(0);
+            _exit(clear ? 0 : 1);
         }
-        ok = tier1_masks_test_expect(test, child > 0 && tier1_pipeline_wait(child), "the native code exits normally within its budget");
+        ok = tier1_masks_test_expect(test, child > 0 && tier1_pipeline_wait(child), "the native code exits normally within its budget, raising no floating exception where it starts from signaling NaNs");
         for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_INPUTS; input += 1)
         {
             const uint8_t* actual = buffers + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER;

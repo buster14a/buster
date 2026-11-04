@@ -797,7 +797,7 @@ static const Tier1SelectFloatForms* tier1_select_class_forms(uint32_t width, boo
 // class's are: vmovdqa, vpaddd, vpsubd, vpmulld, vpand, vpor and vpxor; its ones by vpcmpeqd of a register with itself
 // (`ones`, no immediate), and its broadcast from the low doubleword of an xmm register (vmovd into it first): vpshufd's
 // with 0 of an xmm's and vpbroadcastd's of a ymm's (at a target with AVX but not AVX2, TIER1_RULE_VECTOR's AVX forms
-// in their place: vandps, vorps, vxorps, vcmpps and vinsertf128). VEX has no ternary logic, no compare into a mask and no blend under
+// in their place: vandps, vorps, vxorps, and vpcmpeqd or vpshufd of the xmm register with vinsertf128). VEX has no ternary logic, no compare into a mask and no blend under
 // one (X86_FORM_NONE): the IR's NOT, COMPARE and SELECT come of EVEX rows alone (ir_simd_typed_operation), which such a
 // target has none of.
 typedef struct Tier1SelectVectorForms Tier1SelectVectorForms;
@@ -1288,8 +1288,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const bool vex = holes->vex && width < 64;
         const Tier1SelectVectorForms* forms = tier1_select_vector_forms(width, vex);
         // At a target with AVX but not AVX2, a ymm register's integer forms are AVX2's: there a 32-byte vector's bitwise
-        // operations take the packed singles' forms (the same bits), its ones vcmpps's always-true predicate, and its
-        // splat vpshufd of the xmm register and vinsertf128 of it into the upper half. Its additions, subtractions and
+        // operations take the packed singles' forms (the same bits), its ones vpcmpeqd of the xmm register (which zeroes
+        // the upper half) and vinsertf128 of it into the upper half, and its splat vpshufd of the xmm register and
+        // vinsertf128 the same way. No record evaluates the register's old bits as floats (#1293's review: vcmpps's
+        // always-true predicate would, and a signaling NaN or a denormal among them would raise MXCSR's flags or trap). Its additions, subtractions and
         // multiplications have no AVX form: the IR has them of AVX2's rows alone (ir_simd_typed_operation).
         const bool avx = vex && width == 32 && !holes->avx2;
         static const uint16_t avx_bitwise[3] = { X86_FORM_VANDPS_Y_Y_YM256, X86_FORM_VORPS_Y_Y_YM256, X86_FORM_VXORPS_Y_Y_YM256 };
@@ -1302,14 +1304,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             // VEX's zero is vpxor of the xmm register, which zeroes the ymm one's upper half too; its ones vpcmpeqd.
             const bool ones = kind == BUSTER_TIER1_VECTOR_ONES;
             const X86Instruction record = {
-                .form = !ones ? (vex ? X86_FORM_VPXOR_X_X_XM128 : forms->binary[5]) : avx ? X86_FORM_VCMPPS_Y_Y_YM256_IMM8 : vex ? forms->ones : forms->ternary,
+                .form = !ones ? (vex ? X86_FORM_VPXOR_X_X_XM128 : forms->binary[5]) : avx ? X86_FORM_VPCMPEQD_X_X_XM128 : vex ? forms->ones : forms->ternary,
                 .reg = x,
                 .vvvv = x,
                 .rm = x,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
-                .immediate = ones && avx ? 0x0f : ones && !vex ? 0xff : 0,
+                .immediate = ones && !vex ? 0xff : 0,
             };
             tier1_select_append(&result, record);
+            if (ones && avx)
+            {
+                const X86Instruction insert = { .form = X86_FORM_VINSERTF128_Y_Y_XM128_IMM8, .reg = x, .vvvv = x, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 1 };
+                tier1_select_append(&result, insert);
+            }
         }
         else if (kind == BUSTER_TIER1_VECTOR_SPLAT)
         {
