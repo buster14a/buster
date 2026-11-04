@@ -1,0 +1,97 @@
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -2124,7 +2124,7 @@
+     if (input->multiversion_report_count == input->multiversion_report_capacity)
+     {
+         const uint64_t capacity = input->multiversion_report_capacity != 0 ? (uint64_t)input->multiversion_report_capacity * 2 : 4;
+-        CheckInputReport* records = capacity <= UINT32_MAX ? arena_push_array(reader->arena, capacity, sizeof(CheckInputReport), 4) : 0;
++        CheckInputReport* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputReport, capacity) : 0;
+         if (records == NULL)
+         {
+             input->resource = true;
+@@ -10198,7 +10198,7 @@
+         reader.predefined_names[i] = intern_find(pp->table, (const uint8_t*)parse_predeclared_typedefs[i], (uint32_t)strlen(parse_predeclared_typedefs[i]));
+     }
+     input->report_capacity = count + 1;
+-    input->reports = valid ? arena_push_array(arena, input->report_capacity, sizeof(CheckInputReport), 4) : 0;
++    input->reports = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputReport, input->report_capacity) : 0;
+     input->declarations = input->reports != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
+     input->declared_types = input->declarations != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(TypeId), 4) : 0;
+     input->declaration_kinds = input->declared_types != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1) : 0;
+--- a/src/buster/compiler/c_check_semantic_diagnostic.c
++++ b/src/buster/compiler/c_check_semantic_diagnostic.c
+@@ -98,10 +98,12 @@
+     if (source < pp->output.count && pp->output.kinds[source] != BUSTER_PP_KIND_EMBED)
+     {
+         const uint8_t kind = pp->output.kinds[source];
+-        const uint64_t capacity = kind == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[source] - pp->output.locations[source] + 1;
+-        uint8_t* buffer = arena_push(scratch, capacity, 1);
++        // Names carry intern handles rather than end locations, and pp_spelling borrows their interned bytes.
++        const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
++        const uint64_t capacity = named ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[source] - pp->output.locations[source] + 1;
++        uint8_t* buffer = !named ? arena_push(scratch, capacity, 1) : NULL;
+         const uint8_t* bytes = NULL;
+-        const uint32_t length = buffer != NULL ? pp_spelling(pp, kind, pp->output.values[source], pp->output.locations[source], buffer, &bytes) : 0;
++        const uint32_t length = named || buffer != NULL ? pp_spelling(pp, kind, pp->output.values[source], pp->output.locations[source], buffer, &bytes) : 0;
+         result = (String8){ .pointer = (char*)bytes, .length = length };
+     }
+     return result;
+@@ -132,9 +134,8 @@
+     {
+         const uint8_t role = parser->tree.roles[first + i];
+         const uint8_t previous = i != 0 ? parser->tree.roles[first + i - 1] : PARSE_ROLE_NONE;
+-        const bool word = i != 0 && ((parts[i - 1].pointer[parts[i - 1].length - 1] >= 'a' && parts[i - 1].pointer[parts[i - 1].length - 1] <= 'z') ||
+-                                    (parts[i - 1].pointer[parts[i - 1].length - 1] >= '0' && parts[i - 1].pointer[parts[i - 1].length - 1] <= '9')) &&
+-                                   ((parts[i].pointer[0] >= 'a' && parts[i].pointer[0] <= 'z') || (parts[i].pointer[0] >= '0' && parts[i].pointer[0] <= '9'));
++        const bool word = i != 0 && pp_word_character((uint8_t)parts[i - 1].pointer[parts[i - 1].length - 1], pp_dollar_punctuation(&pp->options)) &&
++                                   pp_word_character((uint8_t)parts[i].pointer[0], pp_dollar_punctuation(&pp->options));
+         if (i != 0 && (check_semantic_binary(role) || check_semantic_binary(previous) || word))
+         {
+             result[at++] = ' ';
+--- a/src/buster/compiler/c_checker_driver_test.c
++++ b/src/buster/compiler/c_checker_driver_test.c
+@@ -4053,8 +4053,12 @@
+             {
+                 const uint32_t index = (uint32_t)first[token];
+                 const uint32_t phase = (uint32_t)(first[token] >> 32);
+-                const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
+-                                                                                     check_driver_input_report_message(input, input->reports + index);
++                // Share the text renderer, not the sparse walk's selection or ordering. The exact semantic
++                // catalogue separately compares this spelling and its caret against Clang (#1107).
++                uint32_t location = phase == 2 ? extra[index].token : token;
++                const char* message = phase == 2 ? extra[index].message :
++                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, scratch) :
++                                                   check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
+                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                 if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                 {
+@@ -4068,7 +4072,7 @@
+                 }
+                 else
+                 {
+-                    check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
++                    check_driver_diagnose(parser, pp, location, message);
+                 }
+             }
+         }
+--- a/src/buster/compiler/c_check_constraints_test.c
++++ b/src/buster/compiler/c_check_constraints_test.c
+@@ -3186,6 +3186,18 @@
+         53,
+         "no member named 'b' in 'struct s'",
+     },
++    {
++        "_Static_assert(sizeof(int) == 0, \"size\");\n",
++        "_Static_assert(sizeof(int) == 4, \"size\");\n",
++        16,
++        "static assertion failed due to requirement 'sizeof(int) == 0': size",
++    },
++    {
++        "enum { VALUE = 1 }; _Static_assert(VALUE == 2, \"value\");\n",
++        "enum { VALUE = 1 }; _Static_assert(VALUE == 1, \"value\");\n",
++        36,
++        "static assertion failed due to requirement 'VALUE == 2': value",
++    },
+ };
+ 
+ static void check_test_semantic_diagnostics(CheckTest* test, const char* clang)
