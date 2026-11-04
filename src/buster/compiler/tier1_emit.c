@@ -181,6 +181,32 @@ struct Tier1EmitPrepared
     const IrFunction* function;
 };
 
+// A machine row's placement as the CFG consumer claims it (#1284, tier1_emit_cfg_row): each of its roles' register, by
+// role, and the registers its records name by number renamed (k's at k). Untrusted: the code's certificate places the
+// row's records by it on its own, compares them with the emitted ones, checks that no two roles share a register but
+// where the row's semantics lets them (tier1_cert_emitted_row), and proves its operands are where it reads them.
+typedef struct Tier1RowPlacement Tier1RowPlacement;
+struct Tier1RowPlacement
+{
+    // VECTOR(j)'s register.
+    uint8_t vectors[BUSTER_TIER0_OPERATION_VECTORS];
+    // INTEGER(j)'s general register, or FLOATING(j)'s vector one; and MASK(j)'s opmask register.
+    uint8_t operands[BUSTER_TIER0_OPERATION_OPERANDS];
+    uint8_t masks[BUSTER_TIER0_OPERATION_OPERANDS];
+    uint8_t scratch[BUSTER_TIER0_SCRATCH];
+    uint8_t mask_scratch[BUSTER_TIER0_SCRATCH];
+    uint8_t integer_result;
+    uint8_t floating_result;
+    uint8_t mask_result;
+    uint8_t renamed[8];
+    // VECTOR(0)'s register up to the result's first write, record `split` (an index plus one, 0 for none), where the first
+    // operand is read in its own register (#1283: tier1_emit_cfg_row_place's `early`), and that write's field
+    // (BUSTER_X86_ROLE_REG, _RM or _VVVV): the fields naming VECTOR(0) before it, and that record's others, read `early`.
+    uint8_t early;
+    uint8_t split;
+    uint8_t position;
+};
+
 typedef struct Tier1EmitResult Tier1EmitResult;
 struct Tier1EmitResult
 {
@@ -258,6 +284,9 @@ struct Tier1EmitResult
     uint32_t* stub_records;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
     uint8_t* dropped;
+    // Each machine row's placement as the consumer claims it (#1284, tier1_emit_cfg_row), by node, in a function with rows;
+    // null otherwise.
+    Tier1RowPlacement* row_placements;
     // And the certificate of that code (tier1_certificate_emitted_check): its reason (Tier1CertEmittedReason: 0 where it
     // proved the code, a shape's it doesn't decode yet, or a refusal's, which fails the function), and its decoded edits
     // and nodes' instructions.

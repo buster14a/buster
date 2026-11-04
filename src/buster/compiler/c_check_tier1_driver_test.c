@@ -2429,9 +2429,10 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
 // build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the
 // checks' messages. `option` (as -march=x86-64-v4), where it isn't NULL, every build takes, and only where the host can
-// (`runs`) are the programs run: elsewhere the builds are checked alone.
+// (`runs`) are the programs run: elsewhere the builds are checked alone. With --verify, the code's certificate (#939,
+// #1284) leaves exactly `uncertified` of their functions' code uncertified, for shapes it doesn't decode, and refuses none.
 static void check_test_driver_tier1_units(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* what, const char* header_source,
-                                          const char* unit_source, const char* other_source, const char* option, bool runs)
+                                          const char* unit_source, const char* other_source, const char* option, bool runs, uint32_t uncertified)
 {
     char header[512];
     char unit[512];
@@ -2494,10 +2495,16 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
     memcpy(both_arguments + 5 + optioned, both_tail, sizeof(both_tail));
     text = NULL;
     const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+    uint64_t certified = 0;
+    uint64_t left = 0;
+    const bool counted = both_built && check_test_tier1_field(text, "code_certified", &certified) && check_test_tier1_field(text, "code_uncertified", &left) && certified != 0 &&
+                         left == uncertified;
     free(text);
     char actual[4096] = { 0 };
     snprintf(message, sizeof(message), "both units of the %s fixture by --tier1, every function Tier 1's, print clang's build's output", what);
     check_test_expect(test, both_built && (!runs || (check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+    snprintf(message, sizeof(message), "both units of the %s fixture by --tier1 --verify have their code certified but %u functions'", what, uncertified);
+    check_test_expect(test, !both_built || counted, message);
     unlink(header);
     unlink(unit);
     unlink(other);
@@ -2506,18 +2513,20 @@ static void check_test_driver_tier1_units(CheckTest* test, const char* clang, co
     unlink(both);
 }
 
-// The by-value aggregates' fixture (#789), the other unit's va_arg of an aggregate among its functions.
+// The by-value aggregates' fixture (#789), the other unit's va_arg of an aggregate among its functions: that variadic
+// definition's code alone is left uncertified (its register save area isn't decoded).
 static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-records", "by-value aggregates'", check_test_tier1_records_header, check_test_tier1_records_source,
-                                  check_test_tier1_records_other_source, NULL, true);
+                                  check_test_tier1_records_other_source, NULL, true, 1);
 }
 
-// The wide values' fixture (#141).
+// The wide values' fixture (#141): the code of its 11 functions of long doubles (the x87's) and of its variadic one is left
+// uncertified.
 static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source,
-                                  NULL, true);
+                                  NULL, true, 12);
 }
 
 // Stack-passed vectors' alignment (#1204's review). A call whose 32- or 64-byte vector argument goes on the stack (its
@@ -2686,10 +2695,10 @@ static void check_test_driver_tier1_vectors(CheckTest* test, const char* clang, 
     const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vectors", "vectors'", check_test_tier1_vectors_header, check_test_tier1_vectors_source,
-                                  check_test_tier1_vectors_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_vectors_other_source, "-march=x86-64-v4", host, 0);
     check_test_driver_tier1_stack_vectors(test, clang, executable, directory, host);
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-zmm", "64-byte vector arguments'", check_test_tier1_zmm_header, check_test_tier1_zmm_source,
-                                  check_test_tier1_zmm_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_zmm_other_source, "-march=x86-64-v4", host, 0);
 }
 
 // The x86 builtins' bit manipulations' fixture (#141): BMI2's pdep, pext and bzhi and BMI1's bextr of unsigned ints and
@@ -2763,7 +2772,7 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
     const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
     const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-bmi", "x86 builtins' bit manipulations'", check_test_tier1_bmi_header, check_test_tier1_bmi_source,
-                                  check_test_tier1_bmi_other_source, "-march=x86-64-v3", host);
+                                  check_test_tier1_bmi_other_source, "-march=x86-64-v3", host, 0);
 }
 
 // The machine rows' fixture (#141): x86-64-v4's vector builtins and the vector operators on elements other than 32-bit
@@ -2941,7 +2950,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-rows", "machine rows'", check_test_tier1_rows_header, check_test_tier1_rows_source,
-                                  check_test_tier1_rows_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_rows_other_source, "-march=x86-64-v4", host, 0);
     // #1283: Tier 1 places a row's vector roles one at a time, so that most rows take no move into or out of place: by
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows).
@@ -3378,7 +3387,7 @@ static void check_test_driver_tier1_vex(CheckTest* test, const char* clang, cons
     const bool parsed = x86_target_parse("x86-64-v3", 9, &v3);
     const bool host = parsed && (x86_target_native().features & v3.features) == v3.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-vex", "VEX vectors'", check_test_tier1_vex_header, check_test_tier1_vex_source, check_test_tier1_vex_other_source,
-                                  "-march=x86-64-v3", host);
+                                  "-march=x86-64-v3", host, 0);
 }
 
 // The AVX fixture (#1281's review): Sandy Bridge's AVX without AVX2, whose ymm integer forms Tier 1 doesn't take: 32-byte
@@ -3437,7 +3446,7 @@ static void check_test_driver_tier1_avx(CheckTest* test, const char* clang, cons
     const uint64_t features = v2.features | BUSTER_X86_FEATURE(AVX);
     const bool host = parsed && (x86_target_native().features & features) == features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-avx", "AVX vectors'", check_test_tier1_avx_header, check_test_tier1_avx_source, check_test_tier1_avx_other_source,
-                                  "-march=sandybridge", host);
+                                  "-march=sandybridge", host, 0);
 }
 
 // Its builds, by x86-64-v4, run where the host has every feature of it.
@@ -3447,7 +3456,7 @@ static void check_test_driver_tier1_carriers(CheckTest* test, const char* clang,
     const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-carriers", "SSE carriers'", check_test_tier1_carriers_header, check_test_tier1_carriers_source,
-                                  check_test_tier1_carriers_other_source, "-march=x86-64-v4", host);
+                                  check_test_tier1_carriers_other_source, "-march=x86-64-v4", host, 0);
 }
 
 // A machine row with a floating role in a VEX form (#141, #1281): F16C's half-precision conversions at x86-64-v3, whose
@@ -3518,7 +3527,7 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
 static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
-                                  check_test_tier1_shapes_other_source, NULL, true);
+                                  check_test_tier1_shapes_other_source, NULL, true, 0);
 }
 
 // The thread-locals' fixture (#141): this unit's own thread-locals (a long, a static array and a struct), whose addresses
@@ -3579,7 +3588,7 @@ static const char check_test_tier1_tls_other_source[] =
 static void check_test_driver_tier1_tls(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-tls", "thread-locals'", check_test_tier1_tls_header, check_test_tier1_tls_source, check_test_tier1_tls_other_source, NULL,
-                                  true);
+                                  true, 0);
 }
 
 // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every

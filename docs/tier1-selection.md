@@ -935,7 +935,7 @@ but for its vector roles, which it places one at a time (#1283,
 | other `VECTOR(j)` | zmm16 + j, which no value takes and an EVEX form names, or for a row with a VEX or legacy form's vector register, and at a target without AVX512VL a row with a vector narrower than 64 bytes or any row where there is no AVX512F (#1281; a 64-byte EVEX row at Knights Landing's AVX512F without VL keeps zmm16 and on), a free xmm register below 16 (xmm15 among them, the class's scratch), each taken as its role is placed rather than a run of them, which register pressure could leave none of, and none the destination where the result is written there; a vector operand copied in at its width first (`vmovdqa64`, or `vmovdqa` at a target without AVX512VL), a vector result moved into the destination at its width last. An SSE carrier (#1280) is copied and moved zero-extended (`tier1_select_carrier_move`, by VEX's `vmovq` or `vinsertps` at a target without AVX512VL): its value's register may hold anything past its bytes, which every vector field reads past, so it never stays in its own register |
 | `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last. For a row that names a floating role in a VEX or legacy form's field, and every row at a target without AVX512VL (#1281), all below 16: a written operand's a free xmm register no vector role takes (nor the destination a vector result is written in), from the vector roles' pool, and the result's the destination itself where no other operand is there, else such a free register; each copy `movaps` |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
-| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
+| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written: `MASK_RESULT` the first mask operand's, `INTEGER_RESULT` the first operand's of Tier 0's integer stack where that is an integer (a vector's place on that stack is no general register: after one, `INTEGER_RESULT` shares no operand's register, #1284) |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
 
 `tier1_select_row_vectors` reads what the records do with each vector role from
@@ -958,10 +958,22 @@ node's own error rather than the block's owed call saves' (`TIER1_EMIT_INVALID`,
 which a refusal mid-block left owed). A move into place never
 overwrites another's source: its destination is free, a vector role's or the
 node's destination with no other operand in it. Each row
-node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
-certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
-it doesn't decode the rows' records. The free xmm registers are those below 16
-that hold no value live past the node and no operand.
+node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share. The free xmm
+registers below 16 are those that hold no value live past the node and no operand.
+
+The emitter publishes each row's placement under `Tier1EmitOptions.certify`
+(`Tier1RowPlacement`, `Tier1EmitResult.row_placements`, by node): each role's
+register as the records name it, VECTOR(0)'s early register up to the result's
+first write where the first operand is read in its own register (#1283), and the
+renamed opmask registers. The code's certificate takes it as a claim (#1284, [the
+certificate guide](tier1-certificate.md)'s "Machine rows"): it places the template
+by it itself and compares, refuses roles in one register while both hold values
+that Tier 0's placement keeps apart, and proves each operand is at its role's
+register when the row reads it; the staging copies and the borrowed masks' saves
+are moves at the node's definition phase (`TIER1_ORIGIN_MOVE`), the row's records,
+its result's move and the reloads its node's (`TIER1_ORIGIN_NODE`). A row whose
+records read or write a role's register implicitly, or of a form x86_semantics.c's
+effects don't cover, leaves its function uncertified (`TIER1_CERT_EMITTED_VECTOR`).
 
 An SSE carrier (#1280), a vector of 4 or 8 bytes, is an f32 or f64 in the IR
 ([the IR guide](ir.md)'s "Machine rows"), so it is the vector class's value as
@@ -1021,7 +1033,8 @@ staging copy it read the NaNs.
 Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
 places below 16 (#1281), every function Tier 1's, and the program runs as clang
--O0's does.
+-O0's does. With `--verify`, the fixture's every function's code is certified
+(#1284).
 
 Its VEX fixture (#1281) compiles a unit of x86-64-v3's AVX2 and F16C builtins and
 vector operators the same way, every function Tier 1's, by both paths and with and
@@ -1066,7 +1079,11 @@ of rows too: a VEX row of 32-byte vectors, one live past it; a floating row whos
 result is read as its first operand and one that writes its second floating
 operand first, both operands live past them; and a 16-byte vector's row. Its
 random mask programs whose rows the decoders refuse run as machine rows against
-the generator's model.
+the generator's model. Every row's code is certified, and its corruptions refused
+(#1284, [the certificate guide](tier1-certificate.md)'s tests): a borrowed mask's
+reload left out, a staging copy onto a live register, a claimed placement whose
+roles share a register Tier 0 keeps apart or whose opmask register named by number
+is k0.
 
 ## Tests and benchmark
 
