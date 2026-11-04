@@ -121,7 +121,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             output->parameter_types[p] = (uint8_t)type;
         }
         const uint32_t parameter = ir_typed_emit(&sink, IR_PARAM, type, p, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        if (object)
+        const IrType whole = object ? ir_typed_vector_whole(input->parameters[p], input->local_sizes[p], plan->vector_copies) : IR_VOID;
+        if (whole != IR_VOID)
+        {
+            // A vector's bytes (#1282): one load and one store, which SROA and promotion make the parameter's value.
+            const uint32_t loaded = ir_typed_emit(&sink, IR_LOAD, whole, parameter, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            ir_typed_emit(&sink, IR_STORE, IR_VOID, p, loaded, BUSTER_IR_NONE, input->local_alignments[p]);
+        }
+        else if (object)
         {
             ir_typed_copy_pointers(&sink, p, parameter, input->local_sizes[p]);
         }
