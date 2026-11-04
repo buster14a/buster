@@ -939,7 +939,14 @@ around them counted by each path: a two-operand form's, its result in a dying
 second operand's register; a tied operand's; a merging opmask's; an operand
 written and dying under an integer result; a VEX form's /is4 blend in the run
 below xmm16; a narrow result written at a wider width and a narrow operand read
-at one; and a widening conversion. Its refusals take a row with a floating role in a VEX form, refused at
+at one; and a widening conversion. Two more take the forms whose destination
+can't be a source's register (#1283's review): gathers whose source and index
+are one value dying at the row, and AVX512-FP16's complex multiplications whose
+factors die at it, the allocation giving the result such a register. The test
+checks that every record is valid and that each such destination is none of
+its sources, and runs them against a model, the complex multiplications only
+where the host has AVX512-FP16 (not the 9700X), on a forms table that allows
+that form, which no target of Tier 1's does yet. Its refusals take a row with a floating role in a VEX form, refused at
 selection by both paths; and its random mask programs whose rows the decoders
 refuse run as machine rows against the generator's model.
 
