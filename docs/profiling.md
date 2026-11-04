@@ -163,6 +163,7 @@ The noise sets which comparison to use.
   the executable out of `build/` after each, then give each offset to `time-runs` as a placement of its build:
 
   ```sh
+  mkdir -p ../offsets/mine
   for n in 0 16 32 48 1040 2080 3120 4032; do
       BUSTER_BUILD_DEFINES="-DBUSTER_CHECKER_OFFSET=$n" ./build.sh && cp build/compiler "../offsets/mine/compiler-$n"
   done
