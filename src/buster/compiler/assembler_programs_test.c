@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Included after assembler_corpus_test.c. #1115's whole-program corpus: ordinary C programs (examples/assembler/
 // program-*.c: floating point of every width, thread-local storage of every model with threads, common and static
-// zero-initialized storage, wide string literals) that GCC and Clang compile to assembly, at -O0, -O2, -O2 -fPIC and
+// zero-initialized storage, wide string literals, dense switches' jump tables) that GCC and Clang compile to assembly, at -O0, -O2, -O2 -fPIC and
 // -O3 -march=x86-64-v4, in AT&T and Intel syntax. Each source must assemble by both paths into the same object, by
 // the `assemble` command too, into GNU as's sections, symbols and relocations (the existing comparator's); and the
 // program linked from it must print what the one linked from GNU as's object prints, and succeed. Every refusal is then
@@ -152,6 +152,15 @@ static void asm_test_relax_programs(AsmTest* test, const char* directory, bool c
     }
 }
 
+// A jump table as GCC's -O2 PIE code writes one (#1115): label differences whose subtrahend is the table's own label in
+// .rodata and whose minuend is .text's, which GNU as makes PC-relative relocations of the minuend; with an undefined
+// minuend, `.`, an addend, and `.quad`'s PC64.
+static const char asm_test_jump_fixture[] =
+    ".text\n.globl dispatch\ndispatch: cmpl $3, %edi\nja .Ldef\nleaq .Ltab(%rip), %rdx\nmovslq (%rdx,%rdi,4), %rax\naddq %rdx, %rax\n"
+    "notrack jmp *%rax\n.L1: movl $1, %eax\nret\n.L2: movl $2, %eax\nret\n.Ldef: xorl %eax, %eax\nret\n"
+    ".section .rodata\n.align 4\n.Ltab: .long .L1-.Ltab\n.long .L2-.Ltab\n.long .Ldef-.Ltab\n.long ext-.Ltab\n.long ext-.\n"
+    ".long .L2-.Ltab+8\n.quad .L1-.\n.quad dispatch-.Ltab\n";
+
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
     static const struct
@@ -166,6 +175,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_predicate_fixture, X86_ARCH_V4 },
         { asm_test_relax_fixture, X86_ARCH_BASELINE },
         { asm_test_alias_fixture, X86_ARCH_BASELINE },
+        { asm_test_jump_fixture, X86_ARCH_BASELINE },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -192,7 +202,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // or weak common symbol, a local's .comm or .lcomm declared again; a common symbol made local and declared again,
     // which GNU as places in .bss at its common size past its alignment's place, a quirk not followed; strings of 8-byte
     // characters; %st(8); fsubp of ST(0) and ST(i), and Intel's arithmetic without operands, which GNU as refuses; an
-    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); and malformed base64.
+    // uppercase mnemonic, as every mnemonic is lowercase here (GNU as takes either); malformed base64; and a label
+    // difference whose subtrahend is in neither the datum's section nor the minuend's, which GNU as can't resolve.
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovabsq $tl@tpoff, %rax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
@@ -226,6 +237,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".data\n.base64 \"A=AA\"\n",
         ".data\n.base64 \"AA==AAAA\"\n",
         ".data\n.base64 label\n",
+        ".data\n.long a - b\n.text\na: nop\n.section .rodata\nb: .byte 0\n",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)
     {
@@ -542,7 +554,7 @@ static bool asm_test_program_link(const char* compiler, const char* object, cons
 
 static void asm_test_program_corpus(AsmTest* test, const char* directory, bool keep)
 {
-    static const char* const programs[] = { "floating", "storage", "strings" };
+    static const char* const programs[] = { "floating", "storage", "strings", "switch" };
     static const char* const compilers[] = { "gcc", "clang" };
     static const char* const syntaxes[] = { "-masm=att", "-masm=intel" };
     static const AsmProgramVariant variants[] = {

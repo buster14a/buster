@@ -4250,7 +4250,25 @@ static void asm_layout(AsmParser* parser)
 
 static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment)
 {
-    AsmExpr expression = asm_resolve(parser, fragment->expression, fragment->location);
+    // GNU as's `.long A - B` where B is in the datum's section and A isn't (#1115: GCC's -O2 PIE jump tables, `.long
+    // .L45-.L35` in .rodata with .L45 in .text): A's distance from the datum, plus the datum's from B, which is constant,
+    // so a PC-relative relocation of A (PC32, and PC64 for `.quad`). A B elsewhere stays refused, as GNU as refuses it.
+    AsmExpr source = fragment->expression;
+    bool relative = false;
+    if (source.plus != 0 && source.minus != 0 && source.relocation == ASM_RELOCATION_NONE)
+    {
+        const AsmSymbol* positive = &parser->symbols[source.plus];
+        const AsmSymbol* negative = &parser->symbols[source.minus];
+        const bool here = negative->defined && !negative->absolute && !negative->section_start && parser->fragments[negative->fragment].section == fragment->section;
+        const bool elsewhere = !positive->absolute && (!positive->defined || parser->fragments[positive->fragment].section != fragment->section);
+        if (here && elsewhere)
+        {
+            source.value += (__int128)fragment->offset - asm_symbol_position(parser, negative);
+            source.minus = 0;
+            relative = true;
+        }
+    }
+    AsmExpr expression = asm_resolve(parser, source, fragment->location);
     // A TLS variable's 32-bit offset as data (#1115): `.long x@dtpoff` (DWARF's location of a TLS variable in 32-bit
     // DWARF expressions) and `.long x@tpoff`. The 64-bit ones are DTPOFF64 and TPOFF64, which the Link doesn't have.
     const bool offset = expression.relocation == ASM_RELOCATION_TPOFF || expression.relocation == ASM_RELOCATION_DTPOFF;
@@ -4285,6 +4303,7 @@ static void asm_data_value(AsmParser* parser, AtomId atom, AsmFragment* fragment
     {
         const uint8_t kind = expression.relocation == ASM_RELOCATION_TPOFF  ? BUSTER_LINK_FIXUP_TPOFF32
                            : expression.relocation == ASM_RELOCATION_DTPOFF ? BUSTER_LINK_FIXUP_DTPOFF32
+                           : relative                                       ? (fragment->size == 4 ? BUSTER_LINK_FIXUP_PC32 : BUSTER_LINK_FIXUP_PC64)
                            : fragment->size == 4                            ? BUSTER_LINK_FIXUP_ABS32
                                                                             : BUSTER_LINK_FIXUP_ABS64;
         memset(bytes + fragment->offset, 0, fragment->size);
