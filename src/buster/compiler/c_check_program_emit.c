@@ -266,15 +266,18 @@ struct CheckEmitBoard
 
 // A team that grows while it runs (#673's tail): in a command's flow, an emission whose GNU make jobserver gave it fewer
 // lanes than its bodies pay for, as when another recipe held the spare tokens as it started. Its parts are cut for every
-// lane it may take (BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE each) and taken in one order, the costliest first and the
-// others in source order, a place in it a take of
-// `ticket`: by lane 0 alone, then in a
-// round of all those lanes once it has admitted another (check_program_emit_growing), in which each lane past the
-// admitted ones sleeps until lane 0 admits it (check_program_emit_admitted). Between its parts, lane 0 reads whether the
-// jobserver has spare tokens, at most every BUSTER_CHECK_EMIT_GROW_NANOSECONDS, and takes them under a lease of its own,
-// up to BUSTER_CHECK_EMIT_GROW_LEASES in all, when the parts left pay for it (check_program_emit_grow): `rest` holds the
-// tokens of the parts from each place in the order on. `admission` is the lanes admitted, shifted left by two, with bit
-// 1 set once lane 0 has no part left to take, so that the lanes still asleep leave (bit 0 is lane_sleep's).
+// lane it may take (BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE each) and put in one order, the costliest first and the others
+// in source order, and each part is two items, its lowering and its code (CheckEmitHalf). A take of `ticket` is an item
+// of twice the parts: the parts' lowering in that order, then their code in it, each part's once its place's word in
+// `lowered` says its lowering is done (check_program_emit_item). Lane 0 takes them alone, then in a round of all those
+// lanes once it has admitted another (check_program_emit_growing), in which each lane past the admitted ones sleeps
+// until lane 0 admits it (check_program_emit_admitted). Lowering every part before any part's code keeps each half's
+// locality: on one lane, the parts' halves by turns cost sqlite3.c's -c 0.35% more user cycles with its bodies in 2 parts
+// than in 1, 0.79% in 16 and 0.92% in 128, and the halves in this order none (#673). Between items, lane 0 reads whether
+// the jobserver has spare tokens, at most every BUSTER_CHECK_EMIT_GROW_NANOSECONDS, and takes them under a lease of its
+// own, up to BUSTER_CHECK_EMIT_GROW_LEASES in all, when the work left pays for it (check_program_emit_grow): `rest` holds
+// the tokens of the parts from each place in the order on. `admission` is the lanes admitted, shifted left by two, with
+// bit 1 set once lane 0 has no item left to take, so that the lanes still asleep leave (bit 0 is lane_sleep's).
 typedef struct CheckEmitGrowth CheckEmitGrowth;
 struct CheckEmitGrowth
 {
@@ -283,6 +286,8 @@ struct CheckEmitGrowth
     uint64_t parts;
     const uint32_t* order;
     uint64_t* rest;
+    // Each place's word: 2 once its part's lowering is done (lane_publish), for the lane that takes its code (lane_wait).
+    uint32_t* lowered;
 };
 // About 100 µs: a team grows that much later than the tokens it takes are spare, at worst, plus a part's time; and a team
 // that never grows reads the clock once per part and the jobserver once per interval.
@@ -291,11 +296,12 @@ struct CheckEmitGrowth
 // (worker_budget_grow: 161 to 164 µs on the 9700X, #937), at about 10 ns a token (sqlite3.c's on one lane).
 #define BUSTER_CHECK_EMIT_GROW_TOKENS 16384u
 #define BUSTER_CHECK_EMIT_GROW_LEASES 8u
-// A growing team's parts per lane it may take, a quarter of a round's (BUSTER_LANE_PARTS_PER_LANE): each part costs lane
-// 0, which takes most of a team's parts that grows late or never, some of one lane's locality. On the 9700X, sqlite3.c's
-// -c under a jobserver without a spare token took 0.83% more wall time than one lane's emission with 64 parts per lane,
-// 0.70% with 32 and 0.20% with 16 (medians of 22 runs).
+// A growing team's parts per lane it may take, a quarter of a round's (BUSTER_LANE_PARTS_PER_LANE).
 #define BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE 16u
+// The lowering's share of a token's emission, in sixteenths, by which the growth gate weighs the parts not lowered yet
+// against those not coded yet (check_program_emit_grow): sqlite3.c's on one lane on the 9700X, whose parts' lowering
+// took 11.0 ms (--time-stages' lower.statements, lower.bodies and lower.validate) and their code 4.9 (tier0).
+#define BUSTER_CHECK_EMIT_GROW_LOWER_SIXTEENTHS 11u
 // The first of a test's supplied tokens (CheckProgramLanes.grow_supply).
 #define BUSTER_CHECK_EMIT_SUPPLY_BYTE 0xa0u
 
@@ -524,7 +530,8 @@ struct CheckProgramLanes
     // Optional external ownership for the extra workers. The C driver supplies it; isolated callers/tests may omit it.
     WorkerBudget* budget;
     // A test's lane that sleeps `slow_microseconds` after each part it takes, its index plus one (0 for none), so that the
-    // other lanes take the parts it would have and finish theirs first.
+    // other lanes take the parts it would have and finish theirs first; in a growing team (CheckEmitGrowth), before each
+    // part's lowering it takes, so that the lanes that take that part's code wait for it.
     uint32_t slow_lane;
     uint32_t slow_microseconds;
     // A test's lane short of room: the lane that takes the part holding body `squeeze_body` (its index plus one, 0 for
@@ -550,7 +557,7 @@ struct CheckProgramLanes
     // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
     // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
     struct CheckUnitsLane* units_lane;
-    // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first part, as
+    // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first item, as
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
     // What the last emission ran: its lanes (a growing team's at its end) and parts, the lanes a growing team admitted
@@ -954,9 +961,17 @@ static bool check_program_emit_common(uint8_t bits, bool all)
                         BUSTER_CHECK_EMIT_COMMON_TENTATIVE;
 }
 
-// A part of the bodies on lane `lane`: their lowering (check_lower_part), then each one's Tier 0 code, the lane's
-// function access column given, and its code after Tier 0 (check_program_emit_code) until one of them fails.
-static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
+// Which of a part's halves a take runs (check_program_emit_part): both, as every team's lanes take their parts but a
+// growing one's, or for a growing team (CheckEmitGrowth) its lowering, or its code once its lowering is done.
+typedef enum CheckEmitHalf
+{
+    CHECK_EMIT_HALF_BOTH,
+    CHECK_EMIT_HALF_LOWER,
+    CHECK_EMIT_HALF_CODE,
+} CheckEmitHalf;
+
+// A part's lowering (check_lower_part) on lane `lane`.
+static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
     if (run->sources)
     {
@@ -970,6 +985,12 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_STATEMENTS, part->lower.statement_ticks);
     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_BODIES, part->lower.body_ticks);
     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
+}
+
+// A lowered part's code on lane `lane`: each body's Tier 0 code, the lane's function access column given, and its code
+// after Tier 0 (check_program_emit_code) until one of them fails.
+static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
+{
     const uint32_t end = part->lower.end;
     part->tier0_failed = end;
     part->code_failed = end;
@@ -1037,6 +1058,19 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     }
 }
 
+// A part of the bodies on lane `lane`, its halves that `half` names: its lowering, then its code.
+static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, CheckEmitHalf half)
+{
+    if (half != CHECK_EMIT_HALF_CODE)
+    {
+        check_program_emit_lower_half(run, lane, part);
+    }
+    if (half != CHECK_EMIT_HALF_LOWER)
+    {
+        check_program_emit_code_half(run, lane, part);
+    }
+}
+
 // Lane `index`'s arenas, for its first part: the caller's for lane 0, but its writer's columns' (CheckEmitRun.columns),
 // and for another lane its own, reserved the first time and otherwise put back (the emission before this one's are done
 // with), its scratch its writer's columns'. Returns false if one can't be reserved.
@@ -1099,11 +1133,11 @@ static void check_program_emit_part_refused(CheckEmitPart* part)
     part->code_failed = part->lower.end;
 }
 
-// The part `part` on lane `index`, which holds the test's squeezed body (CheckProgramLanes.squeeze_body): each of the
-// lane's arenas that squeeze_arenas names has only squeeze_room bytes to spare while the lane makes its writer, if this
-// is its first part, and works on the part; then its room comes back. Lane 0's writer's columns, an arena of their own,
-// are squeezed with its scratch. Out of line, so that the lanes' loop carries none of it.
-static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint32_t index)
+// The halves `half` of the part `part` on lane `index`, which holds the test's squeezed body (CheckProgramLanes.squeeze_body):
+// each of the lane's arenas that squeeze_arenas names has only squeeze_room bytes to spare while the lane makes its
+// writer, if this is its first part, and works on the part; then its room comes back. Lane 0's writer's columns, an
+// arena of their own, are squeezed with its scratch. Out of line, so that the lanes' loop carries none of it.
+static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint32_t index, CheckEmitHalf half)
 {
     CheckProgramLanes* lanes = run->lanes;
     const bool arenas = lane->prepared ? lane->ready : check_program_emit_lane_arenas(run, lane, index);
@@ -1122,7 +1156,7 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     lane->prepared = true;
     if (lane->ready)
     {
-        check_program_emit_part(run, lane, part);
+        check_program_emit_part(run, lane, part, half);
     }
     else
     {
@@ -1135,9 +1169,17 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     lanes->squeezed = index + 1;
 }
 
-// Part `part` of the bodies, cut by CheckEmitRun.boundaries, on lane `index`, whose state is `lane`. A lane prepares its
-// writer when it takes its first part, so that one that takes none spends nothing on it.
-static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index, uint32_t part)
+// A test's slow lane's sleep (CheckProgramLanes.slow_lane). Out of line, so that the lanes' loops carry none of it.
+static __attribute__((noinline)) void check_program_emit_pause(const CheckProgramLanes* lanes)
+{
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)lanes->slow_microseconds * 1000 };
+    nanosleep(&pause, NULL);
+}
+
+// The halves `half` of part `part` of the bodies, cut by CheckEmitRun.boundaries, on lane `index`, whose state is `lane`.
+// A lane prepares its writer when it takes its first part, so that one that takes none spends nothing on it; one that
+// can't refuses the part, whichever half it took.
+static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index, uint32_t part, CheckEmitHalf half)
 {
     CheckEmitPart* result = run->parts + part;
     result->lower.first = (uint32_t)run->boundaries[part];
@@ -1145,7 +1187,7 @@ static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint32_t squeeze = run->lanes->squeeze_body;
     if (squeeze != 0 && squeeze - 1 >= result->lower.first && squeeze - 1 < result->lower.end)
     {
-        check_program_emit_squeezed(run, lane, result, index);
+        check_program_emit_squeezed(run, lane, result, index, half);
     }
     else
     {
@@ -1153,17 +1195,16 @@ static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint
         lane->prepared = true;
         if (lane->ready)
         {
-            check_program_emit_part(run, lane, result);
+            check_program_emit_part(run, lane, result, half);
         }
         else
         {
             check_program_emit_part_refused(result);
         }
     }
-    if (run->lanes->slow_lane == index + 1)
+    if (half == CHECK_EMIT_HALF_BOTH && run->lanes->slow_lane == index + 1)
     {
-        const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)run->lanes->slow_microseconds * 1000 };
-        nanosleep(&pause, NULL);
+        check_program_emit_pause(run->lanes);
     }
 }
 
@@ -1176,7 +1217,7 @@ static void check_program_emit_lane(void* argument)
     const uint64_t parts = lane_parts_by_cost(run->costs, run->body_count, run->boundaries, run->orders[index]);
     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
     {
-        check_program_emit_take(run, lane, index, run->orders[index][taken]);
+        check_program_emit_take(run, lane, index, run->orders[index][taken], CHECK_EMIT_HALF_BOTH);
     }
     if (index == 0)
     {
@@ -1200,19 +1241,24 @@ static bool check_program_emit_round(LaneFlow* flow, CheckEmitRun* run, uint32_t
 }
 
 // How many more lanes a growing team (CheckEmitGrowth) of `admitted` lanes, of up to `lanes`, admits now, under the
-// lease `lease`: as many as the jobserver has spare tokens, up to the lanes it may take and the parts left, if the parts
-// left pay for the guardian's start: their tokens on `admitted` lanes less on that many more (rest × more / (admitted ×
-// (admitted + more))) at least BUSTER_CHECK_EMIT_GROW_TOKENS, or whatever they pay with --lanes N (every_lane).
+// lease `lease`: as many as the jobserver has spare tokens, up to the lanes it may take and the items left, if the work
+// left pays for the guardian's start: its tokens on `admitted` lanes less on that many more (rest × more / (admitted ×
+// (admitted + more))) at least BUSTER_CHECK_EMIT_GROW_TOKENS, or whatever they pay with --lanes N (every_lane). The work
+// left is the lowering's share (BUSTER_CHECK_EMIT_GROW_LOWER_SIXTEENTHS) of the tokens of the parts not taken for their
+// lowering yet, and the code's of those not taken for their code.
 static uint32_t check_program_emit_grow(const CheckEmitRun* run, const CheckEmitGrowth* growth, uint32_t admitted, uint32_t lanes, WorkerBudget* budget,
                                         WorkerBudgetLease* lease)
 {
     const uint64_t ticket = __atomic_load_n(&growth->ticket, __ATOMIC_RELAXED);
-    const uint64_t left = ticket < growth->parts ? growth->parts - ticket : 0;
+    const uint64_t parts = growth->parts;
+    const uint64_t left = ticket < 2 * parts ? 2 * parts - ticket : 0;
     uint64_t more = lanes - admitted;
     more = left < more ? left : more;
     const uint32_t spare = more != 0 ? worker_budget_available(budget) : 0;
     more = spare < more ? spare : more;
-    const uint64_t rest = left != 0 ? growth->rest[ticket] : 0;
+    const uint64_t lowering = ticket < parts ? growth->rest[ticket] : 0;
+    const uint64_t coding = ticket < parts ? growth->rest[0] : left != 0 ? growth->rest[ticket - parts] : 0;
+    const uint64_t rest = (lowering * BUSTER_CHECK_EMIT_GROW_LOWER_SIXTEENTHS + coding * (16 - BUSTER_CHECK_EMIT_GROW_LOWER_SIXTEENTHS)) / 16;
     const bool pays = run->lanes->every_lane || rest * more >= (uint64_t)BUSTER_CHECK_EMIT_GROW_TOKENS * admitted * (admitted + more);
     *lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
     const uint32_t granted = more != 0 && pays ? worker_budget_grow(budget, (uint32_t)more, lease) : 0;
@@ -1246,11 +1292,34 @@ static __attribute__((noinline)) void check_program_emit_supply(int fd, uint32_t
     }
 }
 
-// Lane 0's growing team (CheckEmitGrowth, whose `rest` has room for a place per part and one more) of up to `lanes` of
-// the flow's lanes, `admitted` of them as it starts, its first lease leases[0]: the parts cut for `lanes` lanes
-// (parts_by_cost), taken by lane 0 alone until it admits another lane, then in a round of `lanes` lanes. Each growth's
-// lease goes in `leases` after the others, `*lease_count` of them. When lane 0 finds no part left it closes the
-// admission, and the round ends as every round does, once every lane has met. Returns the lanes it admitted.
+// Item `item` of a growing team's (CheckEmitGrowth) twice `parts`, on lane `index`, whose state is `lane`: the lowering
+// of the part at its place in `order`, after which that place's word in `lowered` turns 2, or past the parts, the code
+// of the part at its place less `parts`, once that place's word has turned (another lane may still be lowering it).
+static void check_program_emit_item(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index, uint64_t item, uint64_t parts, const uint32_t* order, uint32_t* lowered)
+{
+    const bool lowering = item < parts;
+    const uint64_t place = lowering ? item : item - parts;
+    if (!lowering && (__atomic_load_n(lowered + place, __ATOMIC_ACQUIRE) & ~1u) == 0)
+    {
+        lane_wait(lowered + place, 0);
+    }
+    if (lowering && run->lanes->slow_lane == index + 1)
+    {
+        check_program_emit_pause(run->lanes);
+    }
+    check_program_emit_take(run, lane, index, order[place], lowering ? CHECK_EMIT_HALF_LOWER : CHECK_EMIT_HALF_CODE);
+    if (lowering)
+    {
+        lane_publish(lowered + place, 2);
+    }
+}
+
+// Lane 0's growing team (CheckEmitGrowth, whose `rest` has room for a place per part and one more, and `lowered` a word
+// per part) of up to `lanes` of the flow's lanes, `admitted` of them as it starts, its first lease leases[0]: the parts
+// cut for `lanes` lanes (parts_by_cost), their items taken by lane 0 alone until it admits another lane, then in a round
+// of `lanes` lanes. Each growth's lease goes in `leases` after the others, `*lease_count` of them. When lane 0 finds no
+// item left it closes the admission, and the round ends as every round does, once every lane has met. Returns the lanes
+// it admitted.
 static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, CheckEmitGrowth* growth, uint32_t lanes, uint32_t admitted, WorkerBudget* budget,
                                            WorkerBudgetLease* leases, uint32_t* lease_count)
 {
@@ -1270,6 +1339,8 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
     }
     growth->parts = parts;
     growth->order = order;
+    uint32_t* const lowered = growth->lowered;
+    memset(lowered, 0, parts * sizeof(uint32_t));
     // The tokens of the parts from each place in the order on, its last place's first.
     uint64_t rest = 0;
     growth->rest[parts] = 0;
@@ -1293,10 +1364,11 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
     uint32_t supply = run->lanes->grow_supply;
     uint32_t count = *lease_count;
     uint64_t polled = 0;
+    const uint64_t items = 2 * parts;
     uint64_t taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED);
-    for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
+    for (; taken < items; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
     {
-        check_program_emit_take(run, lane, 0, order[taken]);
+        check_program_emit_item(run, lane, 0, taken, parts, order, lowered);
         if (supply != 0)
         {
             check_program_emit_supply(budget->write_fd, supply);
@@ -1332,8 +1404,8 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
     return admitted;
 }
 
-// A lane of a growing team's round past lane 0 (CheckEmitGrowth): asleep until lane 0 admits it, then the parts left, or
-// none once lane 0 has closed the admission.
+// A lane of a growing team's round past lane 0 (CheckEmitGrowth): asleep until lane 0 admits it, then the items left,
+// or none once lane 0 has closed the admission.
 static void check_program_emit_admitted(CheckEmitRun* run)
 {
     CheckEmitGrowth* growth = run->growth;
@@ -1345,11 +1417,13 @@ static void check_program_emit_admitted(CheckEmitRun* run)
     }
     const uint64_t parts = growth->parts;
     const uint32_t* const order = growth->order;
+    uint32_t* const lowered = growth->lowered;
     CheckEmitLane* lane = run->lane_states + index;
-    uint64_t taken = admission >> 2 > index ? __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED) : parts;
-    for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
+    const uint64_t items = 2 * parts;
+    uint64_t taken = admission >> 2 > index ? __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED) : items;
+    for (; taken < items; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
     {
-        check_program_emit_take(run, lane, index, order[taken]);
+        check_program_emit_item(run, lane, index, taken, parts, order, lowered);
     }
 }
 
@@ -1385,7 +1459,7 @@ static void check_program_emit_alone(CheckEmitRun* run)
     lane->prepared = true;
     if (lane->ready)
     {
-        check_program_emit_part(run, lane, part);
+        check_program_emit_part(run, lane, part, CHECK_EMIT_HALF_BOTH);
     }
     else
     {
@@ -1424,7 +1498,7 @@ static void check_program_share_run(CheckEmitShare* share, uint64_t taken, uint3
     lane->prepared = true;
     if (lane->ready)
     {
-        check_program_emit_part(run, lane, part);
+        check_program_emit_part(run, lane, part, CHECK_EMIT_HALF_BOTH);
     }
     else
     {
@@ -2264,8 +2338,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     CheckEmitGrowth growth = { 0 };
     growth.rest = valid && growing ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
+    growth.lowered = valid && growing ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, part_room) : 0;
     run.growth = growing ? &growth : NULL;
-    valid = valid && run.parts != 0 && run.lane_states != 0 && (room == 1 || run.boundaries != 0) && (!growing || growth.rest != 0);
+    valid = valid && run.parts != 0 && run.lane_states != 0 && (room == 1 || run.boundaries != 0) && (!growing || (growth.rest != 0 && growth.lowered != 0));
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     CheckProgramAgain again = CHECK_PROGRAM_AGAIN_NONE;
     if (lanes != NULL)
