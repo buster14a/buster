@@ -269,16 +269,33 @@ static void tier1_masks_test_gather_model(const uint8_t* input, uint64_t count, 
 }
 
 // The complex multiplications' buffer: of the half-precision complex numbers a at 0 and b at 64, a times b at 128 and at
-// 192, as the host's vfmulcph computes them (its own rounding, NaNs and denormals), where the host has AVX512-FP16.
-__attribute__((target("avx512f,avx512fp16"))) static void tier1_masks_test_complex_model(const uint8_t* input, uint64_t count, uint8_t* output)
+// 192, as the host's vfmulcph computes them (its own rounding, NaNs and denormals), where the host has AVX512-FP16: the
+// encoder's records of a load of each, the product and its store, run from a page of their own, so that the test's own
+// code needs no AVX512-FP16 (this compiler's build of it, the self-host's, takes no intrinsics of it at x86-64).
+static void tier1_masks_test_complex_model(const uint8_t* input, uint64_t count, uint8_t* output)
 {
     (void)count;
     memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
-    const __m512h a = _mm512_loadu_ph(input);
-    const __m512h b = _mm512_loadu_ph(input + 64);
-    const __m512h product = _mm512_fmul_pch(a, b);
-    _mm512_storeu_ph(output + 128, product);
-    _mm512_storeu_ph(output + 192, product);
+    const X86Instruction records[] = {
+        { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 0, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE },
+        { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 },
+        { .form = X86_FORM_VFMULCPH_Z_Z_ZM512, .reg = 2, .vvvv = 0, .rm = 1, .mode = BUSTER_X86_REGISTER_DIRECT },
+        { .form = X86_FORM_VMOVDQU64_ZM512_Z, .reg = 2, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE },
+        { .form = X86_FORM_RET },
+    };
+    const uint32_t count_records = sizeof(records) / sizeof(records[0]);
+    uint8_t* code = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const int64_t size = code != MAP_FAILED ? x86_encode(records, count_records, code, 4096, 0, 0) : -1;
+    if (size > 0 && mprotect(code, 4096, PROT_READ | PROT_EXEC) == 0)
+    {
+        void (*product)(const uint8_t*, uint8_t*) = (void (*)(const uint8_t*, uint8_t*))(void*)code;
+        product(input, output + 128);
+        memcpy(output + 192, output + 128, 64);
+    }
+    if (code != MAP_FAILED)
+    {
+        munmap(code, 4096);
+    }
 }
 
 // The fixtures of AVX512-FP16's rows, the array's last, which run natively only where the host has it.
