@@ -344,39 +344,94 @@ static uint32_t check_literal_table_classify(const uint8_t* bytes, uint32_t leng
     {
         const uint64_t live = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
         const __m512i text = _mm512_maskz_loadu_epi8((__mmask64)live, bytes);
-        const __m512i lower = _mm512_or_si512(text, _mm512_set1_epi8(0x20));
-        const uint64_t backslash = _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('\\'));
-        const uint64_t question = trigraphs ? _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('?')) : 0;
-        const uint64_t spliced = splices ? live & (backslash | question) : 0;
-        const bool hexadecimal = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'x';
-        const bool binary = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'b';
-        const bool octal = !hexadecimal && !binary && length > 1 && bytes[0] == '0';
-        const uint32_t first = hexadecimal || binary ? 2 : octal ? 1 : 0;
-        const uint32_t limit = hexadecimal ? (width == 32 ? 6 : 13) : binary ? (width == 32 ? 24 : 53) : octal ? (width == 32 ? 8 : 17) : (width == 32 ? 7 : 15);
-        const uint64_t floating = live & (_mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('.')) |
-                                          _mm512_cmpeq_epi8_mask(lower, _mm512_set1_epi8(hexadecimal ? 'p' : 'e')));
-        const uint64_t decimal = _mm512_cmple_epu8_mask(_mm512_sub_epi8(text, _mm512_set1_epi8('0')), _mm512_set1_epi8(9));
-        const uint64_t letter = hexadecimal ? _mm512_cmple_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(5)) : 0;
-        const uint64_t digit = live & (decimal | letter);
-        const uint64_t separator = live & _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('\''));
-        const uint64_t from = live & (UINT64_MAX << first);
-        const uint64_t stops = from & ~(digit | separator);
-        const uint64_t before = stops != 0 ? (stops & (0 - stops)) - 1 : UINT64_MAX;
-        const uint32_t digits = (uint32_t)__builtin_popcountll(digit & from & before);
-        result = spliced != 0 ? BUSTER_CHECK_LITERAL_TABLE_SPLICED : round && floating == 0 && digits > limit ? BUSTER_CHECK_LITERAL_TABLE_ROUND : 0;
+        const uint64_t backslash = splices ? _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('\\')) : 0;
+        const uint64_t question = splices && trigraphs ? _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('?')) : 0;
+        const uint64_t spliced = live & (backslash | question);
+        result = spliced != 0 ? BUSTER_CHECK_LITERAL_TABLE_SPLICED : 0;
+        if (round && spliced == 0)
+        {
+            const __m512i lower = _mm512_or_si512(text, _mm512_set1_epi8(0x20));
+            const bool hexadecimal = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'x';
+            const bool binary = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'b';
+            const bool octal = !hexadecimal && !binary && length > 1 && bytes[0] == '0';
+            const uint32_t first = hexadecimal || binary ? 2 : octal ? 1 : 0;
+            const uint32_t limit = hexadecimal ? (width == 32 ? 6 : 13) : binary ? (width == 32 ? 24 : 53) : octal ? (width == 32 ? 8 : 17) : (width == 32 ? 7 : 15);
+            const uint64_t floating = live & (_mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('.')) |
+                                              _mm512_cmpeq_epi8_mask(lower, _mm512_set1_epi8(hexadecimal ? 'p' : 'e')));
+            const uint64_t decimal = _mm512_cmple_epu8_mask(_mm512_sub_epi8(text, _mm512_set1_epi8('0')), _mm512_set1_epi8(9));
+            const uint64_t letter = hexadecimal ? _mm512_cmple_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(5)) : 0;
+            const uint64_t digit = live & (decimal | letter);
+            const uint64_t separator = live & _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('\''));
+            const uint64_t from = live & (UINT64_MAX << first);
+            const uint64_t stops = from & ~(digit | separator);
+            const uint64_t before = stops != 0 ? (stops & (0 - stops)) - 1 : UINT64_MAX;
+            const uint32_t digits = (uint32_t)__builtin_popcountll(digit & from & before);
+            result = floating == 0 && digits > limit ? BUSTER_CHECK_LITERAL_TABLE_ROUND : 0;
+        }
     }
     return result;
 }
 
-// The source range a floating table's elements are read from, kept from element to element: a table's numbers written
-// in one file are in one range, which pp_find_range then searches for once rather than for each element.
+// Where a floating table's elements are read from: the source range of the last one read, kept from element to element
+// (a table's numbers written in one file are in one range, which pp_find_range then searches for once rather than for
+// each element); and the span of the location space from the table's first number to its last, where those are in one
+// range and its bytes hold no splice (check_literal_table_span), whose numbers' bytes are their spellings without a scan
+// of each. `clean_end` is 0 for no such span.
 typedef struct CheckLiteralTableSource CheckLiteralTableSource;
 struct CheckLiteralTableSource
 {
     const uint8_t* bytes;
     uint32_t base;
     uint32_t length;
+    const uint8_t* clean;
+    uint32_t clean_begin;
+    uint32_t clean_end;
 };
+
+// The source of the numbers of tokens [begin, end) (CheckLiteralTableSource), its clean span found by one scan of its
+// bytes for the splices pp_remove_splices reads ('\\', and with trigraphs '?'), or none where it has one. A final clean
+// scratch spelling needs no scan (pp_without_splices).
+static CheckLiteralTableSource check_literal_table_span(CheckInputReader* reader, uint32_t begin, uint32_t end)
+{
+    Preprocessor* pp = reader->pp;
+    const PPTokens* output = &pp->output;
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    const uint32_t* sources = reader->parser->tokens.sources;
+    CheckLiteralTableSource result = { 0 };
+    uint32_t first = begin;
+    uint32_t last = end;
+    while (first < end && kinds[first] != PARSE_KIND_NUMBER)
+    {
+        first += 1;
+    }
+    while (last > first && kinds[last - 1] != PARSE_KIND_NUMBER)
+    {
+        last -= 1;
+    }
+    const uint32_t location = first < last ? output->locations[sources[first]] : 0;
+    const uint32_t stop = first < last ? output->values[sources[last - 1]] : 0;
+    const uint32_t range = first < last ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    if (range != BUSTER_PP_NONE)
+    {
+        const PPRange* record = &pp->ranges[range];
+        result.bytes = record->bytes;
+        result.base = record->base;
+        result.length = record->length;
+        if (stop > location && stop - record->base <= record->length)
+        {
+            const uint8_t* bytes = record->bytes + (location - record->base);
+            const uint32_t length = stop - location;
+            const Arena* clean = &pp->scratch[1];
+            const bool final = (uintptr_t)bytes >= (uintptr_t)clean->base && (uintptr_t)bytes - (uintptr_t)clean->base < clean->capacity;
+            const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+            const bool spliced = !final && (memchr(bytes, '\\', length) != NULL || (trigraphs && memchr(bytes, '?', length) != NULL));
+            result.clean = spliced ? NULL : bytes;
+            result.clean_begin = spliced ? 0 : location;
+            result.clean_end = spliced ? 0 : stop;
+        }
+    }
+    return result;
+}
 
 // Element `token`'s spelling, as check_input_spelling makes it, and with `classify`, its category: whether it is an
 // integer that may round (check_literal_table_classify). Only a number of 8 bytes or more for float, 16 for double, may
@@ -396,15 +451,33 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
     const uint32_t shortest = width == 32 ? 8 : 16;
     // The bytes as written are at least as long as the spelling, which drops a splice's.
     const bool short_number = number && end - location < shortest;
+    const bool spanned = number && source->clean_end != 0 && location >= source->clean_begin && end <= source->clean_end;
+    const bool scalar = reader->parser->options.scalar;
     bool valid = true;
     *category = 0;
-    if (!(classify && short_number && spelling == NULL))
+    if (spanned && !(classify && short_number && spelling == NULL))
+    {
+        // In the clean span: its bytes are its spelling.
+        const uint8_t* bytes = source->clean + (location - source->clean_begin);
+        if (classify && !short_number)
+        {
+            *category = scalar ? check_literal_table_classify_scalar(bytes, end - location, width, false, false, true) :
+                                 check_literal_table_classify(bytes, end - location, width, false, false, true);
+        }
+        if (spelling != NULL)
+        {
+            *spelling = bytes;
+            *length = end - location;
+        }
+    }
+    else if (!(classify && short_number && spelling == NULL))
     {
         if (number && !(location - source->base < source->length && end - source->base <= source->length))
         {
             const uint32_t range = pp_find_range(pp, location);
-            *source = range != BUSTER_PP_NONE ? (CheckLiteralTableSource){ .bytes = pp->ranges[range].bytes, .base = pp->ranges[range].base, .length = pp->ranges[range].length } :
-                                                (CheckLiteralTableSource){ 0 };
+            source->bytes = range != BUSTER_PP_NONE ? pp->ranges[range].bytes : NULL;
+            source->base = range != BUSTER_PP_NONE ? pp->ranges[range].base : 0;
+            source->length = range != BUSTER_PP_NONE ? pp->ranges[range].length : 0;
         }
         const bool ranged = number && source->bytes != NULL && location - source->base < source->length && end - source->base <= source->length;
         const uint8_t* bytes = ranged ? source->bytes + (location - source->base) : NULL;
@@ -413,7 +486,6 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
         const uintptr_t address = (uintptr_t)bytes;
         const bool final = ranged && address >= (uintptr_t)clean->base && address - (uintptr_t)clean->base < clean->capacity;
         const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
-        const bool scalar = reader->parser->options.scalar;
         uint32_t kind = BUSTER_CHECK_LITERAL_TABLE_SPLICED;
         if (ranged)
         {
@@ -453,7 +525,7 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, uint
 {
     const uint8_t* kinds = reader->parser->tokens.kinds;
     const uint32_t unit = width / 8;
-    CheckLiteralTableSource source = { 0 };
+    CheckLiteralTableSource source = check_literal_table_span(reader, begin, end);
     uint32_t index = 0;
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
@@ -574,7 +646,7 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     }
     bool valid = converted != NULL && check_literal_table_floating_integers(reader, begin, end, element, width, payload, converted);
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    CheckLiteralTableSource source = { 0 };
+    CheckLiteralTableSource source = valid ? check_literal_table_span(reader, begin, end) : (CheckLiteralTableSource){ 0 };
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH];

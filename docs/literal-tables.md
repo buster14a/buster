@@ -54,7 +54,10 @@ token's length alone, without its bytes being read. A longer one is read in
 place (`check_literal_table_element`): a number token whose bytes are in one
 source range without a line splice is spelled by those bytes, as `pp_spelling`
 spells it, with the range searched for once and kept from element to element,
-and no scratch taken; any other token takes `check_input_spelling`. One masked
+and no scratch taken; any other token takes `check_input_spelling`. Where the
+table's first and last numbers are in one range, one scan of the bytes between
+them for splices (`check_literal_table_span`) clears every number in that span,
+so that each of them is spelled by its token's location alone. One masked
 64-byte load classifies the bytes (`check_literal_table_classify`): its splices,
 its '.' and exponent, and its digits up to the first character past its prefix
 that is neither a digit nor a separator; the scalar functions are its twin and
