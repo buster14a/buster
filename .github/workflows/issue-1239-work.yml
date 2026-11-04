@@ -10,33 +10,34 @@ permissions:
 jobs:
   validation:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ github.sha }}
-      - name: Apply and publish the session's implementation
+      - name: Publish regression integration and the oracle correction
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/fix/1239-fp-contract
-          if test -f .github/issue-1239.patch; then
-            awk '/^ #define BUSTER_CHECK_TEST_PROGRAM_FLAGS/ { print $0 sprintf("%c",92); next } {print}' .github/issue-1239.patch > "$RUNNER_TEMP/core.patch"
-            git apply --check "$RUNNER_TEMP/core.patch"
-            git apply "$RUNNER_TEMP/core.patch"
-            git rm .github/issue-1239.patch
+          if test -f .github/issue-1239-tests.patch; then
+            sed 's/^ diff --git/diff --git/' .github/issue-1239-tests.patch > "$RUNNER_TEMP/tests.patch"
+            git apply --check "$RUNNER_TEMP/tests.patch"
+            git apply "$RUNNER_TEMP/tests.patch"
+            git rm .github/issue-1239-tests.patch
             git add src docs tests
             git diff --cached --check
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             sh .githooks/enable-sign-off.sh --maintainer-session
-            git commit -m 'fix: contract scalar floating expressions within their source boundaries' -m 'Implementation authored by OpenAI / GPT-6 Astra Pro in the user-directed #1239 session; published by this isolated validation job.'
+            git commit -m 'test: integrate scalar contraction regression matrix and policy checks' -m 'Honor source ON under fast as observed with Clang 23.1.4 at -O0. Original changes authored by OpenAI / GPT-6 Astra Pro for the user-directed #1239 session.'
             git log -1 --format=full
             git push origin HEAD:refs/heads/fix/1239-fp-contract
           fi
       - name: Install the repository's official hosted toolchain
         run: bash tools/ci/setup-hosted.sh
-      - name: Build baseline host compiler
+      - name: Build compiler
+        shell: bash
         run: BUSTER_HOST_ARCH=x86-64 ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-1239-build.txt"
       - name: Compare contraction and barrier cases with Clang
         shell: bash
@@ -45,6 +46,7 @@ jobs:
           work="$RUNNER_TEMP/fp-check"
           mkdir "$work"
           lscpu > "$work/cpu.txt"
+          failures=0
           for target in x86-64 x86-64-v2 x86-64-v3 x86-64-v4 znver5; do
             native=yes
             if [[ "$target" = x86-64-v3 ]] && ! grep -qw fma /proc/cpuinfo; then native=no; fi
@@ -56,25 +58,34 @@ jobs:
               if [[ "$native" = yes ]]; then "$prefix-clang" > "$prefix-clang.txt"; fi
               for schedule in vector scalar; do
                 paths=(); if [[ "$schedule" = scalar ]]; then paths+=(--scalar); fi
-                ./build/compiler "${paths[@]}" "-march=$target" "${flags[@]}" -c tests/driver/fp-contract.c -o "$prefix-$schedule.o"
+                ./build/compiler --verify "${paths[@]}" "-march=$target" "${flags[@]}" -c tests/driver/fp-contract.c -o "$prefix-$schedule.o"
                 clang "$prefix-$schedule.o" -o "$prefix-$schedule-object"
-                ./build/compiler "${paths[@]}" "-march=$target" "${flags[@]}" tests/driver/fp-contract.c -o "$prefix-$schedule-direct"
+                ./build/compiler --verify "${paths[@]}" "-march=$target" "${flags[@]}" tests/driver/fp-contract.c -o "$prefix-$schedule-direct"
                 if [[ "$native" = yes ]]; then
                   "$prefix-$schedule-object" > "$prefix-$schedule-object.txt"
                   "$prefix-$schedule-direct" > "$prefix-$schedule-direct.txt"
-                  diff -u "$prefix-clang.txt" "$prefix-$schedule-object.txt"
-                  diff -u "$prefix-clang.txt" "$prefix-$schedule-direct.txt"
+                  diff -u "$prefix-clang.txt" "$prefix-$schedule-object.txt" || failures=$((failures+1))
+                  diff -u "$prefix-clang.txt" "$prefix-$schedule-direct.txt" || failures=$((failures+1))
                 fi
               done
-              echo "PASS target=$target mode=$mode native=$native" | tee -a "$work/results.txt"
+              echo "CHECKED target=$target mode=$mode native=$native failures=$failures" | tee -a "$work/results.txt"
             done
           done
+          test "$failures" = 0
+      - name: Focused driver regression
+        if: ${{ !cancelled() && steps.build.outcome != 'failure' }}
+        shell: bash
+        run: ./build/compiler test-checker-driver --part 3/64 --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-1239-driver.txt"
+      - name: Full checker regression
+        if: ${{ !cancelled() && steps.build.outcome != 'failure' }}
+        shell: bash
+        run: ./build/compiler test-checker 2>&1 | tee "$RUNNER_TEMP/issue-1239-checker.txt"
       - name: Retain validation diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: issue-1239-validation
           path: |
-            ${{ runner.temp }}/issue-1239-build.txt
+            ${{ runner.temp }}/issue-1239-*.txt
             ${{ runner.temp }}/fp-check/
           retention-days: 1
