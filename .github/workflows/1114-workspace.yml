@@ -30,22 +30,28 @@ jobs:
           git apply "$RUNNER_TEMP/1114.patch"
           for patch in .agent-1114/fix-*.patch; do test ! -f "$patch" || git apply "$patch"; done
           git diff --check
+          mkdir -p "$RUNNER_TEMP/1114-tests"
+          echo "TMPDIR=$RUNNER_TEMP/1114-tests" >> "$GITHUB_ENV"
       - name: Install hosted correctness tools
         run: bash tools/ci/setup-hosted.sh
       - name: Build
-        run: ./build.sh --jobs 4 2>&1 | tee "$RUNNER_TEMP/build.log"
+        run: ./build.sh --config Debug --jobs 4 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Focused debug regressions
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ./build/compiler cores
-          ./build/compiler test-debug --cross-check 2>&1 | tee "$RUNNER_TEMP/test-debug.log"
-          ./build/compiler test-check-debug --cross-check 2>&1 | tee "$RUNNER_TEMP/test-check-debug.log"
-          ./build/compiler test-object-writer 2>&1 | tee "$RUNNER_TEMP/test-object-writer.log"
+          status=0
+          ./build/compiler test-debug --cross-check 2>&1 | tee "$RUNNER_TEMP/test-debug.log" || status=1
+          ./build/compiler test-check-debug --cross-check --keep 2>&1 | tee "$RUNNER_TEMP/test-check-debug.log" || status=1
+          ./build/compiler test-object-writer 2>&1 | tee "$RUNNER_TEMP/test-object-writer.log" || status=1
+          exit "$status"
       - name: Retain evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: issue-1114-validation-${{ github.run_number }}
-          path: ${{ runner.temp }}/*.log
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/1114-tests
           retention-days: 3
           if-no-files-found: ignore
