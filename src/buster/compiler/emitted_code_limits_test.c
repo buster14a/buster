@@ -225,7 +225,7 @@ static void emitted_test_large_driver(EmittedTest* test)
             emitted_test_expect(test, compiled, "-c compiles the large frame with and without --verify on both paths", mode);
             const String8 bytes = compiled ? object_test_read_file(&test->arena, object) : (String8){ 0 };
             const Elf64_Shdr* header = 0;
-            const uint8_t* cfi = bytes.pointer != 0 ? x86_elf_section((const uint8_t*)bytes.pointer, bytes.length, SHT_PROGBITS, ".eh_frame", &header) : 0;
+            const uint8_t* cfi = bytes.pointer != 0 ? x86_elf_section((const uint8_t*)bytes.pointer, bytes.length, SHT_X86_64_UNWIND, ".eh_frame", &header) : 0;
             // The one FDE starts after the shared CIE. Its allocation event must have an exact ULEB128(2^31), not a
             // truncated offset or a smaller frame that would accidentally make a compile-only regression pass.
             const uint8_t wide_cfa[] = { 0x0e, 0x80, 0x80, 0x80, 0x80, 0x08 };
