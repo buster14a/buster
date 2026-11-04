@@ -747,6 +747,18 @@ Samples of the lowering's load misses and their latency by line on the 9700X
 would confirm it or rule it out. If it holds, a step that pays has to shorten
 the chain each node waits on, or overlap the chains of several nodes.
 
+## The helper report outside the compile (#1048)
+
+#1188 had every compile count its lowered code's direct atomic forms for
+`--helper-report` (`check_helper_report_add`), a pass over every entry of every
+lowered function, timed in the lowering's stage. It took `lower.rest` on
+`sqlite3.c` from 0.07 to 0.87 ms on the 9700X (#1235's diagnostic run on main at
+`747ab617`) and 1.25 ms on this session's Xeon, where bisecting main found it.
+The emission now makes the report only where the command asks for it
+(`CheckProgramLanes.helper_reporting`, set by `--helper-report`), and
+`lower.rest` is 0.07 ms again on the Xeon. The objects are the same, and
+`--helper-report`'s counts too.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

@@ -542,7 +542,10 @@ struct CheckProgramLanes
     bool tier1_no_lifetimes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
-    // Every emission's plan of its helpers' operations, summed (#1059, --helper-report).
+    // Every emission's plan of its helpers' operations, summed (#1059, --helper-report), where the command asks for it
+    // (`helper_reporting`): its direct forms are a pass over every lowered entry, which on sqlite3.c cost every compile
+    // about a millisecond of the lowering's stage (#1048).
+    bool helper_reporting;
     CheckHelperReport helper_report;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
@@ -2340,7 +2343,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         valid = false;
     }
-    if (lanes != NULL && lowering)
+    if (lanes != NULL && lanes->helper_reporting && lowering)
     {
         check_helper_report_add(&lanes->helper_report, program, &result->lowered, count, valid && result->lowered.status == CHECK_PROGRAM_OK);
     }
