@@ -8,17 +8,57 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
+  oracle:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Archive tracked source for inspection
-        run: git archive --format=tar.gz -o "$RUNNER_TEMP/issue-1239-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Install repository's official Clang oracle
+        run: bash tools/ci/setup-hosted.sh
+      - name: Observe contraction boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/fp-oracle"
+          cat > "$RUNNER_TEMP/fp-oracle/expressions.c" <<'EOF'
+          float basic(float a,float b,float c){return a*b+c;}
+          float reverse(float a,float b,float c){return c+a*b;}
+          float minus(float a,float b,float c){return a*b-c;}
+          float reverse_minus(float a,float b,float c){return c-a*b;}
+          float negative(float a,float b,float c){return -(a*b)+c;}
+          float twice_negative(float a,float b,float c){return -(-(a*b))+c;}
+          float cast(float a,float b,float c){return (float)(a*b)+c;}
+          float separate(float a,float b,float c){float t=a*b;return t+c;}
+          float assignment(float a,float b,float c){return (a=a*b)+c;}
+          float compound(float a,float b,float c){c+=a*b;return c;}
+          float comma(float a,float b,float c){return c+(a,b*c);}
+          float products(float a,float b,float c,float d){return a*b+c*d;}
+          float nested(float a,float b,float c){return (a*b+c)*b+c;}
+          #pragma STDC FP_CONTRACT OFF
+          float std_off(float a,float b,float c){return a*b+c;}
+          #pragma STDC FP_CONTRACT ON
+          float std_on(float a,float b,float c){return a*b+c;}
+          #pragma STDC FP_CONTRACT DEFAULT
+          float std_default(float a,float b,float c){return a*b+c;}
+          #pragma clang fp contract(fast)
+          float pragma_fast(float a,float b,float c){return a*b+c;}
+          #pragma clang fp contract(on)
+          #pragma STDC FENV_ACCESS ON
+          float fenv(float a,float b,float c){return a*b+c;}
+          EOF
+          clang --version > "$RUNNER_TEMP/fp-oracle/version.txt"
+          for mode in off on fast; do clang -O0 -march=x86-64-v3 -ffp-contract="$mode" -S -emit-llvm "$RUNNER_TEMP/fp-oracle/expressions.c" -o "$RUNNER_TEMP/fp-oracle/$mode.ll"; clang -O0 -march=x86-64-v3 -ffp-contract="$mode" -S "$RUNNER_TEMP/fp-oracle/expressions.c" -o "$RUNNER_TEMP/fp-oracle/$mode.s"; done
+          for flags in '-ffp-contract=off -ffast-math -fno-fast-math' '-ffast-math -ffp-contract=off -fno-fast-math' '-ffp-contract=on -ffast-math' '-ffp-model=fast' '-ffp-model=precise' '-ffp-model=strict'; do echo "FLAGS: $flags"; clang -### -O0 $flags -c -x c /dev/null 2>&1 | grep -- '-ffp-contract'; done > "$RUNNER_TEMP/fp-oracle/options.txt"
+      - name: Build baseline compiler
+        run: BUSTER_HOST_ARCH=x86-64 ./build.sh
+      - name: Retain baseline executable and observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-1239-source
-          path: ${{ runner.temp }}/issue-1239-source.tar.gz
+          name: issue-1239-oracle
+          path: |
+            ${{ runner.temp }}/fp-oracle/
+            build/compiler
           retention-days: 1
