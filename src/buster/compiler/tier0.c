@@ -652,6 +652,17 @@ typedef enum Tier0Error
     TIER0_ERROR_RETURNS_TWICE,
 } Tier0Error;
 
+// A local's final home, in the hole block's layout: a register, or a slot relative to its frame base.
+typedef struct Tier0Home Tier0Home;
+struct Tier0Home
+{
+    int32_t displacement;
+    uint8_t reg;
+    uint8_t mode;
+    uint8_t is_register;
+    uint8_t padding;
+};
+
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
 // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
 // end), and a LinkReference per symbolic field, its instruction a record index. With Tier0Function.entry_records,
@@ -689,6 +700,9 @@ struct Tier0Code
     uint32_t reference_count;
     uint32_t* entry_records;
     uint32_t entry_count;
+    // Stable body homes, retained only with source metadata. A zero mode and is_register mean unavailable.
+    const Tier0Home* local_homes;
+    uint32_t local_count;
     X86Instruction* choice_records;
     uint16_t* choice_rows;
     int64_t* choice_values;
@@ -3928,16 +3942,6 @@ static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0E
 // ---------------------------------------------------------------------------------------------------------------------
 // Homes and the frame
 
-// A local's home, in the hole block's layout: a register (mode 0) or a frame slot ([rsp + displacement]).
-typedef struct Tier0Home Tier0Home;
-struct Tier0Home
-{
-    int32_t displacement;
-    uint8_t reg;
-    uint8_t mode;
-    uint8_t is_register;
-    uint8_t padding;
-};
 _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 
 // The frame below the saved registers, from rsp up: the outgoing stack arguments, the call save area (the depths below
@@ -10022,6 +10026,20 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
             for (uint32_t q = 0; q < choices.count; q += 1)
             {
                 tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
+            }
+        }
+        if (function->entry_records)
+        {
+            Tier0Home* kept = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
+            if (kept != NULL)
+            {
+                memcpy(kept, homes, (uint64_t)locals * sizeof(Tier0Home));
+                code->local_homes = kept;
+                code->local_count = locals;
+            }
+            else
+            {
+                error = TIER0_ERROR_MEMORY;
             }
         }
         code->frame_saved = frame.saved;

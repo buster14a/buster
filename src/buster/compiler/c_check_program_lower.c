@@ -290,6 +290,14 @@ struct CheckLowerTable
 
 #include "c_check_program_initializers.c"
 
+// Source declaration attached to a local home, retained only by the source-aware lowering.
+typedef struct CheckDebugBinding CheckDebugBinding;
+struct CheckDebugBinding
+{
+    uint32_t token;
+    bool indirect;
+};
+
 typedef struct CheckProgramLowered CheckProgramLowered;
 struct CheckProgramLowered
 {
@@ -309,6 +317,7 @@ struct CheckProgramLowered
     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
     uint32_t** entry_tokens;
+    CheckDebugBinding** debug_bindings;
     uint32_t runtime_symbol_count;
     uint32_t count;
     CheckProgramStatus status;
@@ -13019,8 +13028,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
+    lowered->debug_bindings = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding*, program->body_count) : 0;
     valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
-            (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
+            (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || (lowered->entry_tokens != 0 && lowered->debug_bindings != 0));
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -13962,6 +13972,38 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 memcpy(tokens, writer->tokens, (uint64_t)writer->count * sizeof(uint32_t));
                 lowered->entry_tokens[b] = tokens;
+                CheckDebugBinding* bindings = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding, (uint64_t)writer->local_count + 1);
+                lowered->debug_bindings[b] = bindings;
+                if (bindings != NULL)
+                {
+                    for (uint32_t l = 0; l < writer->local_count; l += 1)
+                    {
+                        bindings[l] = (CheckDebugBinding){ .token = BUSTER_CHECK_NONE };
+                    }
+                    for (uint32_t slot = shared->local_start[b + 1]; slot < shared->local_start[b + 2]; slot += 1)
+                    {
+                        const uint32_t local = writer->local_map[shared->local_objects[slot]];
+                        if (local < writer->local_count)
+                        {
+                            bindings[local] = (CheckDebugBinding){
+                                .token = shared->local_tokens[slot],
+                                .indirect = writer->indirect[local] != 0,
+                            };
+                        }
+                    }
+                    for (uint32_t parameter = check_sparse_get(input->parameters, body.opening); parameter != BUSTER_CHECK_NONE; parameter = check_sparse_get(input->parameter_next, parameter))
+                    {
+                        const uint32_t local = writer->local_map[input->objects[parameter]];
+                        if (local < writer->local_count)
+                        {
+                            bindings[local] = (CheckDebugBinding){ .token = parameter };
+                        }
+                    }
+                }
+                else
+                {
+                    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+                }
             }
             else
             {

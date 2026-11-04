@@ -179,7 +179,8 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
     rows->counts = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-    return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
+    rows->values = fits ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBody, (uint64_t)count + 1) : 0;
+    return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0 && rows->values != 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -655,6 +656,8 @@ struct CheckEmitBody
 {
     uint8_t* bytes;
     uint64_t length;
+    CheckDebugValueSpan* debug_spans;
+    uint32_t debug_span_count;
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
     uint32_t* asm_offsets;
@@ -875,13 +878,14 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     // Its frame's rows (#1056, emitted_unwind), which the tables read once the lanes are done.
     EmissionFrameRow* frame_rows = run->unwind && code->frame_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionFrameRow, code->frame_count) : 0;
+    body->debug_spans = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugValueSpan, (uint64_t)code->source_count + 1) : NULL;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0)) &&
+                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0 && body->debug_spans != NULL)) &&
                  (!run->unwind || code->frame_count == 0 || frame_rows != 0);
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     // A failure past the encoding is the backend's, but where a frame's room ran out.
@@ -911,6 +915,24 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // The rows' own failure: no room (a lane's, which the emission retries on one lane) or the protocol's refusal.
             valid = check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar, scratch);
             failure = valid ? failure : body->status;
+            if (valid)
+            {
+                CheckDebugValueSpan* spans = body->debug_spans;
+                const Tier0Function* function = run->lowered->functions + b;
+                const uint32_t* tokens = run->lowered->entry_tokens[b];
+                for (uint32_t e = 0; valid && e < code->source_count; e += 1)
+                {
+                    // Tail-call entries include frame teardown. Omit that whole entry, rather than extend a home
+                    // over instructions which have restored its register or moved its stack base.
+                    const bool tail = code->local_homes != NULL && function->kinds[e] == BUSTER_TYPED_TAIL_CALL;
+                    const uint32_t begin = offsets[code->source_records[e]];
+                    const uint32_t end = offsets[code->source_records[e + 1]];
+                    if (!tail && begin < end)
+                    {
+                        spans[body->debug_span_count++] = (CheckDebugValueSpan){ .begin = begin, .end = end, .token = check_debug_origin_token(code->source_origins, tokens, e, program->bodies[b].declaration) };
+                    }
+                }
+            }
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
         if (valid && run->unwind)
@@ -2866,6 +2888,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && rows != NULL)
     {
         valid = check_program_emit_reserve_rows(rows, result->lowered.entries, count, output);
+        rows->link = &result->link;
         for (uint32_t b = 0; valid && b < encoded; b += 1)
         {
             const CheckEmitBody* body = run.bodies + b;
@@ -2873,6 +2896,36 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             rows->counts[b] = body->row_count;
             rows->sizes[b] = (uint32_t)body->length;
             rows->bodies[b] = body->body_offset;
+            const EmittedCode* code = run.codes + b;
+            CheckDebugBody* value = rows->values + b;
+            *value = (CheckDebugBody){ 0 };
+            const uint32_t locals = result->lowered.functions[b].local_count;
+            CheckDebugBinding* bindings = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding, (uint64_t)locals + 1);
+            Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
+            uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)locals + 1);
+            CheckDebugValueSpan* spans = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugValueSpan, (uint64_t)body->debug_span_count + 1);
+            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL;
+            if (valid)
+            {
+                if (locals != 0)
+                {
+                    memcpy(bindings, result->lowered.debug_bindings[b], (uint64_t)locals * sizeof(*bindings));
+                    if (code->local_homes != NULL && code->local_count == locals)
+                    {
+                        memcpy(homes, code->local_homes, (uint64_t)locals * sizeof(*homes));
+                    }
+                    else
+                    {
+                        memset(homes, 0, (uint64_t)locals * sizeof(*homes));
+                    }
+                    memcpy(classes, result->lowered.functions[b].local_classes, locals);
+                }
+                if (body->debug_span_count != 0)
+                {
+                    memcpy(spans, body->debug_spans, (uint64_t)body->debug_span_count * sizeof(*spans));
+                }
+                *value = (CheckDebugBody){ .bindings = bindings, .homes = homes, .classes = classes, .spans = spans, .local_count = locals, .span_count = body->debug_span_count };
+            }
             if (body->row_count != 0)
             {
                 memcpy(rows->offsets + rows->count, body->row_offsets, (uint64_t)body->row_count * sizeof(uint32_t));

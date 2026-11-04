@@ -104,7 +104,9 @@ typedef enum ObjectError
 
 // debug.c's sections, in its order (DebugSectionKind), and the fields of a unit's .debug_info that point into the other
 // four (debug.c's DebugOutput.fields, of .debug_abbrev, .debug_line, .debug_addr and .debug_rnglists).
-#define BUSTER_OBJECT_DEBUG_SECTIONS 5
+#include "native_debug.h"
+
+#define BUSTER_OBJECT_DEBUG_SECTIONS BUSTER_NATIVE_DEBUG_SECTIONS
 #define BUSTER_OBJECT_DEBUG_FIELDS 4
 #define BUSTER_OBJECT_DEBUG_INFO 0
 #define BUSTER_OBJECT_DEBUG_ABBREV 1
@@ -134,6 +136,7 @@ typedef struct ObjectDebug ObjectDebug;
 struct ObjectDebug
 {
     String8 sections[BUSTER_OBJECT_DEBUG_SECTIONS];
+    NativeDebugExtra extra;
     const SymbolId* functions;
     const uint32_t* line_addresses;
     uint32_t function_count;
@@ -436,6 +439,7 @@ static const char* const object_debug_sections[BUSTER_OBJECT_DEBUG_SECTIONS] = {
     ".debug_line",
     ".debug_addr",
     ".debug_rnglists",
+    ".debug_loclists",
 };
 // A function section's name: this, then its atom's name.
 #define BUSTER_OBJECT_FUNCTION_SECTION_PREFIX ".text."
@@ -1147,7 +1151,7 @@ static uint32_t object_debug_unit_functions(const ObjectDebug* debug, uint32_t u
 // Whether a unit's entry of ObjectOptions.debug gives it no DWARF: no sections and no functions.
 static bool object_debug_absent(const ObjectDebug* debug)
 {
-    bool absent = debug->function_count == 0 && debug->unit_count == 0;
+    bool absent = debug->extra.field_count == 0 && debug->extra.address_count == 0 && debug->function_count == 0 && debug->unit_count == 0;
     for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
     {
         absent = absent && debug->sections[section].length == 0;
@@ -1244,7 +1248,8 @@ static bool object_debug_valid(const ObjectBuilder* builder)
     bool valid = true;
     for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
     {
-        valid &= debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u;
+        valid &= (section >= BUSTER_NATIVE_DEBUG_CORE_SECTIONS && debug->sections[section].length == 0) ||
+                     (debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u);
     }
     const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
     valid &= (debug->function_count == 0 || (debug->functions != 0 && debug->line_addresses != 0)) && (debug->unit_count == 0 || debug->unit_functions != 0) &&
@@ -1322,6 +1327,15 @@ static bool object_debug_valid(const ObjectBuilder* builder)
     }
     valid &= functions == debug->function_count && info == infos.length && abbreviations == debug->sections[BUSTER_OBJECT_DEBUG_ABBREV].length &&
              lines == line.length && addr == addresses.length && ranges == debug->sections[BUSTER_OBJECT_DEBUG_RNGLISTS].length;
+    valid = valid && native_debug_extra_valid(debug->sections, &debug->extra);
+    for (uint32_t a = 0; valid && a < debug->extra.address_count; a += 1)
+    {
+        const NativeDebugAddress address = debug->extra.addresses[a];
+        valid = address.symbol < link->symbols.count && builder->units->symbol_info[address.symbol] >> 32 == builder->unit;
+        const AtomId atom = valid ? link->symbols.atom[address.symbol] : 0;
+        valid = valid && atom != 0 && atom < link->atoms.count && (link->symbols.flags[address.symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT &&
+                link->symbols.value[address.symbol] <= link->atoms.size[atom] && address.addend <= link->atoms.size[atom] - link->symbols.value[address.symbol];
+    }
     uint64_t previous_end = 0;
     for (uint32_t function = 0; valid && function < debug->function_count; function += 1)
     {
@@ -1351,16 +1365,24 @@ static bool object_count_debug(ObjectBuilder* builder)
     if (debug != 0 && result)
     {
         const uint64_t units = debug->unit_count != 0 ? debug->unit_count : 1;
-        builder->debug_relocations[BUSTER_OBJECT_DEBUG_INFO] = BUSTER_OBJECT_DEBUG_FIELDS * units;
+        builder->debug_relocations[BUSTER_OBJECT_DEBUG_INFO] = BUSTER_OBJECT_DEBUG_FIELDS * units + debug->extra.field_count + debug->extra.address_count;
         builder->debug_relocations[BUSTER_OBJECT_DEBUG_LINE] = debug->function_count;
         builder->debug_relocations[BUSTER_OBJECT_DEBUG_ADDR] = debug->function_count;
         for (uint32_t section = BUSTER_OBJECT_DEBUG_INFO + 1; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
         {
-            builder->debug_symbol[section] = 1;
+            builder->debug_symbol[section] = debug->sections[section].length != 0 ? 1 : 0;
         }
         for (uint32_t function = 0; function < debug->function_count; function += 1)
         {
             const AtomId atom = builder->link->symbols.atom[debug->functions[function]];
+            builder->sections[builder->units->atom_section[atom]].symbol = 1;
+        }
+    }
+    if (debug != NULL && result)
+    {
+        for (uint32_t a = 0; a < debug->extra.address_count; a += 1)
+        {
+            const AtomId atom = builder->link->symbols.atom[debug->extra.addresses[a].symbol];
             builder->sections[builder->units->atom_section[atom]].symbol = 1;
         }
     }
@@ -1413,15 +1435,18 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
     // The DWARF's sections, the same way, after them.
     for (uint32_t s = 0; builder->debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
     {
-        const bool relocated = builder->debug_relocations[s] != 0;
-        builder->debug_index[s] = (uint32_t)index;
-        builder->debug_relocation_index[s] = relocated ? (uint32_t)(index + 1) : 0;
-        builder->debug_name[s] = (uint32_t)(name + (relocated ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0));
-        index += relocated ? 2 : 1;
-        name += strlen(object_debug_sections[s]) + 1 + (relocated ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0);
-        builder->debug_symbol[s] = builder->debug_symbol[s] != 0 ? (uint32_t)symbol : 0;
-        symbol += builder->debug_symbol[s] != 0 ? 1 : 0;
-        result = result && index < UINT32_MAX && name < UINT32_MAX;
+        if (builder->debug->sections[s].length != 0)
+        {
+            const bool relocated = builder->debug_relocations[s] != 0;
+            builder->debug_index[s] = (uint32_t)index;
+            builder->debug_relocation_index[s] = relocated ? (uint32_t)(index + 1) : 0;
+            builder->debug_name[s] = (uint32_t)(name + (relocated ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0));
+            index += relocated ? 2 : 1;
+            name += strlen(object_debug_sections[s]) + 1 + (relocated ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0);
+            builder->debug_symbol[s] = builder->debug_symbol[s] != 0 ? (uint32_t)symbol : 0;
+            symbol += builder->debug_symbol[s] != 0 ? 1 : 0;
+            result = result && index < UINT32_MAX && name < UINT32_MAX;
+        }
     }
     // .symtab_shndx only when a section's index needs it.
     const bool extended = index - 1 >= SHN_LORESERVE;
@@ -1488,24 +1513,27 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
         }
         for (uint32_t s = 0; builder->debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
         {
-            headers[builder->debug_index[s]] = (Elf64_Shdr){
-                .sh_name = builder->debug_name[s],
-                .sh_type = SHT_PROGBITS,
-                .sh_size = builder->debug->sections[s].length,
-                .sh_addralign = 1,
-            };
-            if (builder->debug_relocation_index[s] != 0)
+            if (builder->debug->sections[s].length != 0)
             {
-                headers[builder->debug_relocation_index[s]] = (Elf64_Shdr){
-                    .sh_name = builder->debug_name[s] - (uint32_t)BUSTER_OBJECT_RELA_PREFIX_BYTES,
-                    .sh_type = SHT_RELA,
-                    .sh_flags = SHF_INFO_LINK,
-                    .sh_size = builder->debug_relocations[s] * sizeof(Elf64_Rela),
-                    .sh_link = builder->symbol_table_index,
-                    .sh_info = builder->debug_index[s],
-                    .sh_addralign = 8,
-                    .sh_entsize = sizeof(Elf64_Rela),
+                headers[builder->debug_index[s]] = (Elf64_Shdr){
+                    .sh_name = builder->debug_name[s],
+                    .sh_type = SHT_PROGBITS,
+                    .sh_size = builder->debug->sections[s].length,
+                    .sh_addralign = 1,
                 };
+                if (builder->debug_relocation_index[s] != 0)
+                {
+                    headers[builder->debug_relocation_index[s]] = (Elf64_Shdr){
+                        .sh_name = builder->debug_name[s] - (uint32_t)BUSTER_OBJECT_RELA_PREFIX_BYTES,
+                        .sh_type = SHT_RELA,
+                        .sh_flags = SHF_INFO_LINK,
+                        .sh_size = builder->debug_relocations[s] * sizeof(Elf64_Rela),
+                        .sh_link = builder->symbol_table_index,
+                        .sh_info = builder->debug_index[s],
+                        .sh_addralign = 8,
+                        .sh_entsize = sizeof(Elf64_Rela),
+                    };
+                }
             }
         }
         uint64_t trailing_name = builder->section_names_size - (extended ? sizeof(BUSTER_OBJECT_EXTENDED_SECTION) : 0);
@@ -1704,10 +1732,14 @@ static void object_fill_debug(const ObjectBuilder* builder, uint8_t* bytes)
     for (uint32_t s = 0; s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
     {
         contents[s] = bytes + headers[builder->debug_index[s]].sh_offset;
-        memcpy(contents[s], debug->sections[s].pointer, debug->sections[s].length);
+        if (debug->sections[s].length != 0)
+        {
+            memcpy(contents[s], debug->sections[s].pointer, debug->sections[s].length);
+        }
     }
     Elf64_Rela* fields = (Elf64_Rela*)(bytes + headers[builder->debug_relocation_index[BUSTER_OBJECT_DEBUG_INFO]].sh_offset);
-    for (uint64_t f = 0; f < builder->debug_relocations[BUSTER_OBJECT_DEBUG_INFO]; f += 1)
+    const uint64_t core_fields = (uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * (debug->unit_count != 0 ? debug->unit_count : 1);
+    for (uint64_t f = 0; f < core_fields; f += 1)
     {
         const uint32_t at = debug->fields[f];
         uint32_t value = 0;
@@ -1717,6 +1749,29 @@ static void object_fill_debug(const ObjectBuilder* builder, uint8_t* bytes)
             .r_offset = at,
             .r_info = ELF64_R_INFO(builder->debug_symbol[f % BUSTER_OBJECT_DEBUG_FIELDS + 1], R_X86_64_32),
             .r_addend = value,
+        };
+    }
+    for (uint32_t f = 0; f < debug->extra.field_count; f += 1)
+    {
+        const NativeDebugField field = debug->extra.fields[f];
+        uint32_t value = 0;
+        memcpy(&value, contents[0] + field.offset, 4);
+        memset(contents[0] + field.offset, 0, 4);
+        fields[core_fields + f] = (Elf64_Rela){
+            .r_offset = field.offset,
+            .r_info = ELF64_R_INFO(builder->debug_symbol[field.section], R_X86_64_32),
+            .r_addend = value,
+        };
+    }
+    for (uint32_t a = 0; a < debug->extra.address_count; a += 1)
+    {
+        const NativeDebugAddress address = debug->extra.addresses[a];
+        const AtomId atom = link->symbols.atom[address.symbol];
+        memset(contents[0] + address.offset, 0, 8);
+        fields[core_fields + debug->extra.field_count + a] = (Elf64_Rela){
+            .r_offset = address.offset,
+            .r_info = ELF64_R_INFO(builder->sections[units->atom_section[atom]].symbol, R_X86_64_64),
+            .r_addend = (int64_t)(units->atom_offset[atom] + link->symbols.value[address.symbol] + address.addend),
         };
     }
     const bool any = debug->function_count != 0;
@@ -1826,15 +1881,18 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
     }
     for (uint32_t s = 0; builder->debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
     {
-        if (builder->debug_symbol[s] != 0)
+        if (builder->debug->sections[s].length != 0)
         {
-            entries[builder->debug_symbol[s]] = (Elf64_Sym){
-                .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
-                .st_shndx = object_symbol_section_index(builder->debug_index[s]),
-            };
-            if (extended != 0 && builder->debug_index[s] >= SHN_LORESERVE)
+            if (builder->debug_symbol[s] != 0)
             {
-                extended[builder->debug_symbol[s]] = builder->debug_index[s];
+                entries[builder->debug_symbol[s]] = (Elf64_Sym){
+                    .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+                    .st_shndx = object_symbol_section_index(builder->debug_index[s]),
+                };
+                if (extended != 0 && builder->debug_index[s] >= SHN_LORESERVE)
+                {
+                    extended[builder->debug_symbol[s]] = builder->debug_index[s];
+                }
             }
         }
     }
@@ -1975,14 +2033,17 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
     }
     for (uint32_t s = 0; builder->debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
     {
-        if (builder->debug_relocation_index[s] != 0)
+        if (builder->debug->sections[s].length != 0)
         {
-            memcpy(names + name, BUSTER_OBJECT_RELA_PREFIX, BUSTER_OBJECT_RELA_PREFIX_BYTES);
-            name += BUSTER_OBJECT_RELA_PREFIX_BYTES;
+            if (builder->debug_relocation_index[s] != 0)
+            {
+                memcpy(names + name, BUSTER_OBJECT_RELA_PREFIX, BUSTER_OBJECT_RELA_PREFIX_BYTES);
+                name += BUSTER_OBJECT_RELA_PREFIX_BYTES;
+            }
+            const uint64_t bytes_with_nul = strlen(object_debug_sections[s]) + 1;
+            memcpy(names + name, object_debug_sections[s], bytes_with_nul);
+            name += bytes_with_nul;
         }
-        const uint64_t bytes_with_nul = strlen(object_debug_sections[s]) + 1;
-        memcpy(names + name, object_debug_sections[s], bytes_with_nul);
-        name += bytes_with_nul;
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(object_trailing_sections); i += 1)
     {
