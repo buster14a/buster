@@ -24,11 +24,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, re, urllib.request
+          import os, re, subprocess
           url = 'https://api.github.com/repos/buster14a/buster/actions/jobs/126670148991/logs'
-          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
-          text = urllib.request.urlopen(request, timeout=60).read().decode('utf-8', errors='replace')
-          lines = text.splitlines()
+          download = subprocess.run(['curl', '--fail', '--silent', '--show-error', '--location', '--max-time', '60', '-H', 'Authorization: Bearer ' + os.environ['GH_TOKEN'], url], capture_output=True, text=True)
+          if download.returncode:
+              raise RuntimeError(download.stderr)
+          lines = download.stdout.splitlines()
           selected = set()
           for i, line in enumerate(lines):
               if re.search(r'differ|mismatch|expected numeric|fixture|invalid octal|significand', line, re.I):
