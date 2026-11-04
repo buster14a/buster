@@ -1127,6 +1127,27 @@ it ([run at `6f5156dc`](https://github.com/buster14a/buster/actions/runs/4180587
 `lower.bodies` 1.184 ms against 1.232, `lower.prepare` 1.258 against 1.157,
 `lower` 10.592 against 10.555.
 
+## The expansion's token (#1048)
+
+The expansion and the wrappers' path set the writer's token to their node's
+(`writer->token = graph->tokens[node]`) for every node, a read of the tokens'
+column, but only a failure (`check_lower_fail`) and the part's end
+(`CheckLowerPart.final_token`) read the token. They now keep the node, marked
+by the top bit (`BUSTER_CHECK_LOWER_TOKEN_NODE`: no unit has 2^31 nodes, and
+`BUSTER_CHECK_NONE` is none), and those two readers take its token
+(`check_lower_writer_token`). The fragments' test compares the writers' tokens
+so read. #1235's run at `5849a291`
+([run](https://github.com/buster14a/buster/actions/runs/41808837919/job/126505321530)),
+five rounds in turn on `sqlite3.c`, both giving the base's object:
+
+| row | the base | the node kept |
+| --- | ---: | ---: |
+| `lower` | 10.440 [10.389 to 10.537] | 10.367 [10.304 to 10.385] |
+| `lower.statements` | 6.857 [6.776 to 6.890] | 6.773 [6.649 to 6.807] |
+
+Every round of `lower` was below every base round; one round of the
+statements overlapped the base's.
+
 ## Each node's class and facts by node (#1048)
 
 The expansion's head finds its node's class and facts through its value's

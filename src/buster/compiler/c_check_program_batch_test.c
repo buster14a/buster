@@ -81,7 +81,7 @@ static void check_test_program_task_stack(CheckTest* test)
                 }
                 check_test_expect(test, status[0].status == status[1].status && status[0].token == status[1].token &&
                                   writers[0].count == writers[1].count && writers[0].depth == writers[1].depth && labels[0][0] == labels[1][0] &&
-                                  writers[0].token == writers[1].token && writers[0].expression_nodes == writers[1].expression_nodes &&
+                                  check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[1]) && writers[0].expression_nodes == writers[1].expression_nodes &&
                                   memcmp(kinds[0], kinds[1], sizeof(kinds[0])) == 0 && memcmp(classes[0], classes[1], sizeof(classes[0])) == 0 &&
                                   memcmp(values[0], values[1], sizeof(values[0])) == 0,
                                   "guarded instruction batches preserve columns, untouched tails, labels and the first capacity/class failure");
@@ -348,7 +348,7 @@ static void check_test_program_batch(CheckTest* test)
                     check_lower_drain(writers + path);
                 }
                 const bool same = writers[0].count == writers[1].count && status[0].status == status[1].status && status[0].token == status[1].token &&
-                                  writers[0].token == writers[1].token && memcmp(kinds[0], kinds[1], writers[0].count) == 0 &&
+                                  check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[1]) && memcmp(kinds[0], kinds[1], writers[0].count) == 0 &&
                                   memcmp(classes[0], classes[1], writers[0].count) == 0 &&
                                   memcmp(values[0], values[1], (uint64_t)writers[0].count * sizeof(uint64_t)) == 0 && local_flags[0][0] == local_flags[1][0];
                 char description[200];
@@ -356,7 +356,7 @@ static void check_test_program_batch(CheckTest* test)
                          mode, writers[0].capacity);
                 check_test_expect(test, same, description);
                 const bool fallback = writers[0].count == writers[2].count && status[0].status == status[2].status && status[0].token == status[2].token &&
-                                      writers[0].token == writers[2].token && memcmp(kinds[0], kinds[2], writers[0].count) == 0 &&
+                                      check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[2]) && memcmp(kinds[0], kinds[2], writers[0].count) == 0 &&
                                       memcmp(classes[0], classes[2], writers[0].count) == 0 &&
                                       memcmp(values[0], values[2], (uint64_t)writers[0].count * sizeof(uint64_t)) == 0 && local_flags[0][0] == local_flags[2][0] && writers[2].classified_nodes == 0;
                 check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact entries and failures");

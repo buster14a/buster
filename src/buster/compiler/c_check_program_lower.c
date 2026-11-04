@@ -846,12 +846,24 @@ static inline uint32_t check_lower_initializer_of(const CheckLowerWriter* writer
 #define BUSTER_CHECK_LOWER_VLA_DECLARED 1
 #define BUSTER_CHECK_LOWER_VLA_ALLOCATED 2
 
+// A writer's token that is an expression node's (check_lower_expand's and check_lower_plain's), the node marked by the top
+// bit (no unit has 2^31 nodes, and BUSTER_CHECK_NONE is no node), which a failure (check_lower_fail) and the part's end
+// (CheckLowerPart.final_token) read as the node's token (check_lower_writer_token): nothing else reads the token, so each
+// node needn't read the tokens' column (#1048: 0.07 ms of sqlite3.c's lowering on the 9700X).
+#define BUSTER_CHECK_LOWER_TOKEN_NODE 0x80000000u
+
+static uint32_t check_lower_writer_token(const CheckLowerWriter* writer)
+{
+    const uint32_t token = writer->token;
+    return token != BUSTER_CHECK_NONE && (token & BUSTER_CHECK_LOWER_TOKEN_NODE) != 0 ? writer->program->input->graph.tokens[token & ~BUSTER_CHECK_LOWER_TOKEN_NODE] : token;
+}
+
 static void check_lower_fail(CheckLowerWriter* writer, CheckProgramStatus status)
 {
     if (writer->output->status == CHECK_PROGRAM_OK)
     {
         writer->output->status = status;
-        writer->output->token = writer->token;
+        writer->output->token = check_lower_writer_token(writer);
     }
 }
 
@@ -9739,7 +9751,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     const bool aggregate = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
     const bool address_value = (facts & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
     const uint8_t class = aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, value->type);
-    writer->token = graph->tokens[node];
+    writer->token = node | BUSTER_CHECK_LOWER_TOKEN_NODE;
     const bool constant = value->constant_kind != CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // An expression of a _BitInt goes to check_lower_bit_int_node first, out of line, which may push it again for what
@@ -13312,7 +13324,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     const uint64_t walked = timed ? __rdtsc() : 0;
     part->body_ticks = walked - walk_start - part->statement_ticks;
     part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_BODY : CHECK_LOWER_STAGE_NONE;
-    part->final_token = writer->token;
+    part->final_token = check_lower_writer_token(writer);
     AbiLocation* locations = part->stage == CHECK_LOWER_STAGE_NONE ? BUSTER_ARENA_PUSH_ARRAY(output, AbiLocation, (uint64_t)abi->argument_count + 1) : 0;
     AbiCall* calls = part->stage == CHECK_LOWER_STAGE_NONE ? BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, (uint64_t)abi->count + 1) : 0;
     part->stage = part->stage == CHECK_LOWER_STAGE_NONE && (locations == 0 || calls == 0) ? CHECK_LOWER_STAGE_ROOM : part->stage;
