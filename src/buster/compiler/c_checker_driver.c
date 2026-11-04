@@ -58,6 +58,11 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
         case CHECK_INPUT_REDECLARATION: result = "conflicting declaration"; break;
+        case CHECK_INPUT_BREAK: result = "'break' statement not in loop or switch statement"; break;
+        case CHECK_INPUT_CONTINUE: result = "'continue' statement not in loop statement"; break;
+        case CHECK_INPUT_INCOMPLETE_TENTATIVE: result = "tentative definition has incomplete type"; break;
+        case CHECK_INPUT_ENUMERATOR_REDEFINITION: result = "redefinition of enumerator"; break;
+        case CHECK_INPUT_CONFLICTING_TYPES: result = "conflicting types"; break;
         case CHECK_INPUT_RETURN: result = "return does not match the function result type"; break;
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
@@ -581,6 +586,7 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 }
 
 #include "c_check_warning_render.c"
+#include "c_check_semantic_diagnostic.c"
 #include "c_check_literal_diagnostic.c"
 #include "c_check_common_warnings.c"
 
@@ -1459,7 +1465,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const uint32_t phase = sequence < input->report_count ? 0 : sequence - input->report_count < stream_reports ? 1 : 2;
                     const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
                     const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                         check_driver_input_report_message(input, input->reports + index);
+                                                                                         check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                     const uint32_t located = phase == 2 ? extra[index].token : phase == 1 ? stream->reports[index].token : input->reports[index].token;
                     const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                     const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
@@ -1482,6 +1488,10 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_diagnostic_counted_ref(input, parser, stream->reports + index, &x86_location);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, scratch);
                     }
                     if (source != BUSTER_CHECK_NONE)
                     {
@@ -3962,7 +3972,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         if ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE)
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
-                                control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position,
+                                check_semantic_control(pp, &types, control.status, &control.failure, scratch), control.position,
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
@@ -4022,8 +4032,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
                     if (program_diagnostics && !program_checked)
                     {
-                        const char* message = program.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" :
-                                              program.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported C statement" : "invalid C statement or control flow";
+                        const char* message = check_semantic_control(pp, &types, program.status, &program.failure, scratch);
                         check_driver_diagnose(checking, pp, program.token, message);
                         result = 1;
                     }
