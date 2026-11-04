@@ -3454,7 +3454,7 @@ static bool executable_is_tls(const Link* link, SymbolId symbol)
 }
 
 // The names the linker defines (BUSTER_LINK_SOURCE_LINKER), each one's image offset in `values` (by its index here),
-// as GNU ld and lld define them: the init and fini arrays' bounds and the GOT's _GLOBAL_OFFSET_TABLE_ (step 4's
+// as GNU ld defines them: the init and fini arrays' bounds and the GOT's _GLOBAL_OFFSET_TABLE_ (step 4's
 // executables have them, and a dynamic PIE); .dynamic's address (_DYNAMIC), which binding gives the PIEs; and, which
 // binding gives every executable with the C runtime (runtime_linker_names), including a dynamic PIE, the ELF header's
 // address and the image's start, the preinit array's bounds (where .init_array starts: there is no .preinit_array), the

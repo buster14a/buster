@@ -44,9 +44,9 @@ static const char dynamic_bounds_source[] =
     "    return payload[0] != 1 || zeroes[72] != 0;\n"
     "}\n";
 
-// Empty preinit bounds coincide at .init_array's start. The direct writer has no preinit atoms; the fixture deliberately
-// leaves that array empty. A nonempty .data and aligned .bss distinguish the file-backed end, zero-fill start and image end.
-static bool dynamic_bounds_values(DynamicTestTally* tally, String8 file, uint64_t* values)
+// The direct writer follows GNU ld for empty preinit bounds: both coincide at .init_array's start. Lld uses offset
+// zero when .preinit_array is absent. A nonempty .data and aligned .bss distinguish the file and memory bounds.
+static bool dynamic_bounds_values(DynamicTestTally* tally, String8 file, uint64_t* values, bool gnu_empty_preinit)
 {
     const DynamicTestImage image = dynamic_test_image(file);
     const Elf64_Shdr* init = dynamic_test_section(&image, ".init_array");
@@ -80,7 +80,7 @@ static bool dynamic_bounds_values(DynamicTestTally* tally, String8 file, uint64_
     {
         values[0] = 0;
         values[1] = 0;
-        values[2] = (preinit != 0 ? preinit->sh_addr : init->sh_addr) - base;
+        values[2] = preinit != 0 ? preinit->sh_addr - base : gnu_empty_preinit ? init->sh_addr - base : 0;
         values[3] = values[2];
         values[4] = text_end - base;
         values[5] = values[4];
@@ -117,7 +117,7 @@ static void dynamic_bounds_check(DynamicTestTally* tally, const Link* link, cons
 {
     uint64_t values[BUSTER_ARRAY_LENGTH(dynamic_bounds_names)] = { 0 };
     uint8_t expected[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
-    const bool valid = dynamic_bounds_values(tally, file, values);
+    const bool valid = dynamic_bounds_values(tally, file, values, true);
     const uint64_t length = valid ? dynamic_bounds_output(values, expected, sizeof(expected), true) : 0;
     if (valid)
     {
@@ -241,7 +241,7 @@ static bool dynamic_test_image_bounds(const ExecutableTestDirectory* directory, 
         const bool referenced = object_test_run(l == 0 ? gnu : lld, out, err) == 0;
         dynamic_test_expect(&tally, referenced, linkers[l], l);
         const String8 reference_file = referenced ? object_test_read_file(scratch.arena, reference_path) : (String8){ 0 };
-        const bool reference_valid = referenced && dynamic_bounds_values(&tally, reference_file, values);
+        const bool reference_valid = referenced && dynamic_bounds_values(&tally, reference_file, values, l == 0);
         const uint64_t reference_length = reference_valid ? dynamic_bounds_output(values, expected, sizeof(expected), l == 0) : 0;
         const bool ran = reference_valid && reference_length != 0 && executable_test_runs(reference_path, expected, reference_length);
         dynamic_test_expect(&tally, ran, "the reference PIE runs with the same ELF-bound rules", l);

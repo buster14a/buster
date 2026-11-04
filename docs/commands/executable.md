@@ -528,7 +528,9 @@ can move the sections. With `--cross-check`, GNU ld links the same object and
 lld compiles the same fixture without `__etext`, which it does not define.
 GNU ld and every direct write check all twelve names; lld checks its eleven
 built-in names. Their running executables must satisfy the same ELF-bound
-rules for their own layouts.
+rules for their own layouts, except that lld places the absent preinit
+array's bounds at image offset zero. The direct writer retains GNU ld's
+choice of the init array's start.
 Kind-mask checks retain static-runtime selection, shared-library admission
 and the static executable's exclusive IPLT bounds.
 
