@@ -527,6 +527,15 @@ static const ParseTestSnippet parse_test_snippets[] =
       " char c : (1 + 2) __attribute__((unused)) };\n", "", 0 },
     { "struct S { int x : 3 __attribute__((packed)) + 1; };\n", "1:45: expected ';' at end of declaration list", 0 },
     { "struct S { int x : 3 __attribute__((packed)) : 4; };\n", "1:46: expected ';' at end of declaration list", 0 },
+    // clang's attributes of a type argument read it as a type name (#147, parse_scalar_type_argument_attribute), by their
+    // names in any syntax, unknown ones' too; another attribute's is an expression.
+    { "typedef int T; enum E { A }; struct S { unsigned a : 2 __attribute__((preferred_type(int), packed)), b : 1 __attribute__((__preferred_type__(T))); "
+      "unsigned c : 2 __attribute__((preferred_type(const enum E *[2]))); }; void f(void) __attribute__((Owner(int (*)(void)), "
+      "iboutletcollection(typeof(1.0)), vec_type_hint(struct { int x; } *)));\n", "", 0, true },
+    { "struct S { unsigned a : 2 __attribute__((preferred_type(int, int))); };\n", "1:60: expected ')'", 0 },
+    { "void f(void) __attribute__((vec_type_hint(int x)));\n", "1:47: expected ')'", 0 },
+    { "int x __attribute__((aligned(int)));\n", "1:30: expected expression", 0 },
+    { "void f(void) __attribute__((zzz(int)));\n", "1:33: expected expression", 0 },
     { "struct S { int x : 3 __attribute__((packed)) [4]; };\n", "1:45: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },

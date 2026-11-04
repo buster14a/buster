@@ -230,6 +230,9 @@ struct CheckInputAttribute
     // destructor's and assume_aligned's integers), which the attributes' reader made and moved here
     // (check_input_attribute_defer), for check_input_attribute_subjects to give; or NULL.
     struct CheckInputReport* deferred;
+    // A type argument's type (#147: vec_type_hint's and preferred_type's, check_input_type_argument), read where its
+    // attributes are read (check_input_read_attributes), or 0.
+    TypeId argument_type;
 };
 
 // An attribute's count of arguments against clang's (CheckInputAttribute.count_check): none wrong, another than exactly
@@ -592,6 +595,12 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_EMPTY_ONLY,
     CHECK_ARGUMENT_ASSUME_PARENTHESES,
     CHECK_ARGUMENT_NOT_BOOL,
+    // A type argument's (#147, CheckInputAttribute.argument_type): vec_type_hint's of no extended vector's, floating or
+    // integer type (bool's none), "a non-vector or non-vectorizable scalar type is an invalid argument to attribute
+    // 'X'", at the attribute; preferred_type's incomplete one, "incomplete type 'T' where a complete type is required"
+    // (CheckInputReport.type), at the type, with a tag's note at its declaration (CHECK_INPUT_NOTE_FORWARD_DECLARATION).
+    CHECK_ARGUMENT_VEC_TYPE_HINT,
+    CHECK_ARGUMENT_INCOMPLETE_TYPE,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2006,6 +2015,26 @@ static const CheckInputFactRow* check_input_fact_row(String8 scope, String8 name
 
 static bool check_constant_type_start(const Parser* parser, uint32_t token);
 
+// Whether a type argument starts at `token` (#147): a type's specifier or qualifier, or a typedef's name, as the parser
+// read it (a GNU attribute's argument, parse_scalar_type_argument_attribute) or in a C23 attribute's tokens, which it
+// leaves unread.
+static bool check_input_attribute_type_start(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t kind = parser->tokens.kinds[token];
+    const uint32_t handle = kind == PARSE_KIND_IDENTIFIER ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[token]) : 0;
+    return check_constant_type_start(parser, token) || kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER ||
+           (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF);
+}
+
+// Whether a generic attribute takes a type whose kind its handler checks (#147, CheckInputAttribute.argument_type):
+// vec_type_hint's and preferred_type's.
+static bool check_input_type_argument(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    return check_input_attribute_equal(name, "vec_type_hint") || check_input_attribute_equal(name, "preferred_type");
+}
+
 // clang's parser's reading of attributes it applies nothing of (#147): a free-standing declaration's specifiers' (clang's
 // ParsedFreeStandingDeclSpec), and a bare tag declaration's after its name. Of each GNU list's items and each alignment
 // specifier's argument from `first` to `end` (a tag's tokens skipped, CheckInputReader.tag_ends), only what clang's parser
@@ -2537,6 +2566,8 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // Other targets' vector types, aliases of their builtins, statements' hints (check_input_statement_attribute_kinds),
         // and Blocks' byref variables, whose checks in C on x86-64 are check_input_attribute_annotations'.
         "arm_sve_vector_bits", "riscv_rvv_vector_bits", "clang_builtin_alias", "atomic", "code_align", "opencl_unroll_hint", "blocks", "assume",
+        // A bit-field's preferred type, whose type check_input_attribute_annotations checks.
+        "preferred_type",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -2710,10 +2741,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             valid = false;
         }
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
-        // no type "expected a type" and "expected ')'" there; a type followed by a `,` is "expected ')'" at it.
+        // no type "expected a type" and, in a GNU list, "expected ')'" there; a type followed by a `,` is "expected ')'"
+        // at it, with its note at the `(` in a GNU list (a C23 list's arguments clang reads as a balanced run then).
         const uint32_t type_argument = valid && arguments != NULL && (arguments->flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 &&
                                        attribute.argument_first < attribute.argument_end ? attribute.argument_first : BUSTER_CHECK_NONE;
-        const bool typed_argument = type_argument != BUSTER_CHECK_NONE && check_constant_type_start(parser, type_argument);
+        const bool typed_argument = type_argument != BUSTER_CHECK_NONE && check_input_attribute_type_start(reader, type_argument);
         uint32_t comma = BUSTER_CHECK_NONE;
         for (uint32_t token = typed_argument ? type_argument : attribute.argument_end; comma == BUSTER_CHECK_NONE && token < attribute.argument_end;)
         {
@@ -2729,7 +2761,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, type_argument, CHECK_ARGUMENT_EXPECTED_TYPE, 0);
             const uint32_t before = reader->output->report_count;
-            check_input_report_argument(reader, type_argument, CHECK_INPUT_ATTRIBUTE_ARGUMENT, CHECK_ARGUMENT_EXPECTED_PAREN);
+            if (!standard)
+            {
+                check_input_report_argument(reader, type_argument, CHECK_INPUT_ATTRIBUTE_ARGUMENT, CHECK_ARGUMENT_EXPECTED_PAREN);
+            }
             // (A second error at the same token, which the driver keeps, with its note at the arguments' `(`.)
             if (reader->output->report_count > before)
             {
@@ -2744,7 +2779,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             const uint32_t before = reader->output->report_count;
             check_input_attribute_argument_error(reader, attributes, &attribute, comma, CHECK_ARGUMENT_EXPECTED_PAREN, 0);
-            if (reader->output->report_count > before)
+            if (reader->output->report_count > before && !standard)
             {
                 reader->output->reports[before].note_token = attribute.argument_first - 1;
                 reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
@@ -2890,11 +2925,17 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.kind = thread != NULL ? CHECK_ATTRIBUTE_THREAD_SAFETY : CHECK_ATTRIBUTE_UNKNOWN;
             attribute.argument_count = count;
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
-            // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs), and abi_tag's.
+            // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs), and abi_tag's;
+            // preferred_type's type, which its optional argument must give (handlePreferredTypeAttr), exactly one.
             if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && count == 0 &&
                 ((thread != NULL && (thread->flags & BUSTER_CHECK_THREAD_LEAST_ONE) != 0) || check_input_attribute_equal(name, "abi_tag")))
             {
                 attribute.count_check = BUSTER_CHECK_COUNT_LEAST;
+                attribute.count_bound = 1;
+            }
+            else if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && count == 0 && check_input_attribute_equal(name, "preferred_type"))
+            {
+                attribute.count_check = BUSTER_CHECK_COUNT_EXACT;
                 attribute.count_bound = 1;
             }
             // annotate's first argument is a string literal (handleAnnotateAttr), clang's error at it otherwise.
@@ -4343,6 +4384,59 @@ static bool check_input_attribute_integer_type(const TypeTable* types, TypeId ty
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM;
 }
 
+// Whether `type` is one vec_type_hint takes (#147, handleVecTypeHint): an extended vector's, a floating one (a complex
+// one's among them), or an integer one (a complete enumeration's, a bit-precise one's) but bool's.
+static bool check_input_vec_type_hint(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type_unqualified(type_strip_aligned(types, type));
+    const uint8_t kind = type_kind(types, bare);
+    const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX &&
+                         type_kind(types, type_strip_aligned(types, types->types.base[type_index(bare)])) == BUSTER_TYPE_KIND_FLOATING;
+    const bool integer = (kind == BUSTER_TYPE_KIND_INTEGER && bare != BUSTER_TYPE_BOOL) || kind == BUSTER_TYPE_KIND_BIT_INT ||
+                         (kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(types, bare));
+    return kind == BUSTER_TYPE_KIND_EXT_VECTOR || kind == BUSTER_TYPE_KIND_FLOATING || complex || integer;
+}
+
+// preferred_type's incomplete type (#147, handlePreferredTypeAttr's RequireCompleteType), at the type past its leading
+// qualifiers (its TypeLoc's start): the type as written (a typedef's name spells it, qualified or not), and a tag's note
+// at the declaration its name has where the type is read, when that declares this tag.
+static void check_input_attribute_incomplete(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t end = attribute->argument_end;
+    uint32_t first = attribute->argument_first;
+    while (first + 1 < end && parser->tokens.kinds[first] == PARSE_KIND_QUALIFIER)
+    {
+        first += 1;
+    }
+    bool lone = parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+    for (uint32_t token = first + 1; lone && token < end; token += 1)
+    {
+        lone = parser->tokens.kinds[token] == PARSE_KIND_QUALIFIER;
+    }
+    const TypeId type = attribute->argument_type;
+    const uint32_t handle = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[first]) : 0;
+    const bool typedef_name = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
+    const TypeId bare = type_unqualified(type_strip_aligned(types, type));
+    const uint8_t kind = type_kind(types, bare);
+    const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+    const uint32_t name = tag ? types->tags.name[types->types.index[type_index(bare)]] : 0;
+    const uint32_t binding = name != 0 ? c_bindings_lookup(&reader->bindings, C_BINDING_TAG, name) : 0;
+    const uint32_t declaration = binding != 0 ? reader->bindings.declaration[binding - 1] : BUSTER_CHECK_NONE;
+    const bool declared = declaration < parser->tokens.count && type_unqualified(reader->declared_types[declaration]) == bare;
+    const uint32_t before = reader->output->report_count;
+    check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_INCOMPLETE_TYPE, 0);
+    if (reader->output->report_count > before)
+    {
+        CheckInputReport* report = &reader->output->reports[before];
+        report->type = type;
+        report->type_spelling = typedef_name ? reader->bindings.declaration[handle - 1] : 0;
+        report->note_token = declared ? declaration : 0;
+        report->note_kind = declared ? CHECK_INPUT_NOTE_FORWARD_DECLARATION : CHECK_INPUT_NOTE_NONE;
+    }
+}
+
 // Static analyses' and Objective-C's attributes past their subjects (#147), as clang's handlers make them in C, changing
 // nothing here: acquire_handle's integer parameter; mig_server_routine's function whose result isn't kern_return_t, a
 // typedef of int (the last of its spelling's typedefs), its warning at the declaration's first token (`begin`);
@@ -4354,7 +4448,9 @@ static bool check_input_attribute_integer_type(const TypeTable* types, TypeId ty
 // warning of `global`, `unknown` and `this`, and its spellings' (_global, _unknown, _this) of no arguments; the ownerships'
 // identifier, counts, result and parameter indices (out of bounds, of another type, or another kind's); NSObject's and
 // objc_independent_class's warnings at the declaration's place (check_input_attribute_located), NSObject's typedef of no
-// pointer to void or a record an error; objc_precise_lifetime's error. Whether the declaration goes on.
+// pointer to void or a record an error; objc_precise_lifetime's error; vec_type_hint's type (check_input_vec_type_hint), a
+// second one of another type ignored with its warning; preferred_type's incomplete type (check_input_attribute_incomplete).
+// Whether the declaration goes on.
 static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration,
                                               TypeId type, uint32_t name, uint32_t begin)
 {
@@ -4412,6 +4508,34 @@ static bool check_input_attribute_annotations(CheckInputReader* reader, CheckInp
             check_input_attribute_noted_event(reader, attribute, CHECK_WARNING_EVENT_SPAN_ONLY, CHECK_WARNING_NOTE_SPAN_REASON, reason);
             attribute->ignored = true;
         }
+    }
+    else if (check_input_attribute_equal(spelled, "vec_type_hint") && attribute->argument_type != 0 && !check_input_vec_type_hint(types, attribute->argument_type))
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_VEC_TYPE_HINT, 0);
+        valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "vec_type_hint") && attribute->argument_type != 0)
+    {
+        // The first one applied wins; another of a different type is ignored.
+        const CheckInputAttribute* applied = NULL;
+        for (const CheckInputAttribute* other = attributes->records; applied == NULL && other < attribute; other += 1)
+        {
+            const bool hint = other->kind == CHECK_ATTRIBUTE_UNKNOWN && !other->keyword && !other->ignored && other->argument_type != 0 &&
+                              check_input_attribute_equal(check_input_attribute_name(reader, other->name), "vec_type_hint");
+            applied = hint ? other : NULL;
+        }
+        if (applied != NULL && applied->argument_type != attribute->argument_type)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS);
+            attribute->ignored = true;
+        }
+    }
+    else if (check_input_attribute_equal(spelled, "preferred_type") && attribute->argument_type != 0 &&
+             type_kind(types, type_strip_aligned(types, attribute->argument_type)) != BUSTER_TYPE_KIND_FUNCTION &&
+             !type_is_complete(types, attribute->argument_type))
+    {
+        check_input_attribute_incomplete(reader, attributes, attribute);
+        valid = false;
     }
     else if (check_input_attribute_equal(spelled, "iboutlet") || check_input_attribute_equal(spelled, "iboutletcollection"))
     {

@@ -370,6 +370,8 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_PREVIOUS_DECLARATION,
     // A statement's earlier attribute of the same kind (#147, code_align's): "previous attribute is here".
     CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE,
+    // An incomplete tag's declaration (#147, preferred_type's type): "forward declaration of 'struct S'", the report's type.
+    CHECK_INPUT_NOTE_FORWARD_DECLARATION,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -3985,6 +3987,33 @@ static bool check_input_ownership_indices(CheckInputReader* reader, const CheckI
            check_input_attribute_equal(name, "ownership_returns");
 }
 
+// A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
+// leave a plain operand the constant reader takes for an expression's, by its binding, used there; any other the
+// constant reader's.
+static TypeId check_input_attribute_argument_type(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t first = attribute->argument_first;
+    const bool lone = first + 1 == attribute->argument_end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER &&
+                      parser->tree.roles[first] != PARSE_ROLE_SPECIFIER;
+    const uint32_t name = parser->tokens.names[first];
+    const uint32_t handle = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+    TypeId result = 0;
+    if (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
+    {
+        const uint32_t declaration = reader->bindings.declaration[handle - 1];
+        reader->output->declarations[first] = declaration;
+        reader->declared_types[first] = reader->declared_types[declaration];
+        result = reader->declared_types[declaration];
+        reader->output->resource |= c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, first, check_input_use_point(reader, first)) == 0;
+    }
+    else
+    {
+        result = check_input_constant_type(reader, first, attribute->argument_end);
+    }
+    return result;
+}
+
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
 {
     if (!check_input_attribute_starts(reader->parser, *cursor, end))
@@ -4072,6 +4101,12 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 attribute->wide |= constant && wide ? (uint8_t)(1u << argument) : 0u;
                 first = stop + 1;
             }
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count == 1 &&
+                 check_input_type_argument(reader, attribute) && check_input_attribute_type_start(reader, attribute->argument_first))
+        {
+            // A type argument's type, which its handler checks (#147, CheckInputAttribute.argument_type).
+            attribute->argument_type = check_input_attribute_argument_type(reader, attribute);
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count == 1)
         {

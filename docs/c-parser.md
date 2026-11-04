@@ -174,7 +174,13 @@ every unary operator after `goto` that role, by one blend per block, and its
 checks send the others than `*` to the scalar parser's error. A C23 attribute list's items are a name,
 perhaps in a scope (`gnu::unused`) and with an argument clause, a balanced run
 of tokens, separated by commas; its items and a GNU attribute list's may be
-empty, the last one too.
+empty, the last one too. A GNU attribute's arguments are expressions, but those
+of clang's type-argument attributes (`attributeIsTypeArgAttr`: `preferred_type`,
+`vec_type_hint` and six others, by name, known or not) are a type name where a
+type starts them (`parse_scalar_type_argument_attribute`), an abstract
+declaration in the call's group, whose missing `)` clang's
+`ParseAttributeWithTypeArg` expects at the token; the vector path flags such a
+type and leaves the declaration to the scalar parser.
 
 GNU attributes at a block boundary now retain the choice between declaration
 and statement syntax until their following token is known. Attributes after a

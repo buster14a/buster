@@ -345,6 +345,8 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_EMPTY_ONLY: snprintf(text, capacity, "'%s' attribute only applies to empty statements", parsed); break;
         case CHECK_ARGUMENT_ASSUME_PARENTHESES: snprintf(text, capacity, "use of this expression in an 'assume' attribute requires parentheses"); break;
         case CHECK_ARGUMENT_NOT_BOOL: snprintf(text, capacity, "value of type %.*s is not contextually convertible to 'bool'", (int)literal.length, literal.pointer); break;
+        case CHECK_ARGUMENT_VEC_TYPE_HINT: snprintf(text, capacity, "a non-vector or non-vectorizable scalar type is an invalid argument to attribute '%s'", parsed); break;
+        case CHECK_ARGUMENT_INCOMPLETE_TYPE: snprintf(text, capacity, "incomplete type %.*s where a complete type is required", (int)literal.length, literal.pointer); break;
         case CHECK_ARGUMENT_TOO_LARGE:
             snprintf(text, capacity, "integer constant expression evaluates to value %" PRIu64 " that cannot be represented in a 32-bit unsigned integer type", value);
             break;
@@ -1874,7 +1876,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint64_t type_mark = scratch->length;
                             // (The type an underaligned _Alignas names, as clang prints it: check_driver_warning_type.)
                             const bool typed = ((report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNAS_UNDERALIGNED || (report->detail & 0xffu) == CHECK_ARGUMENT_PRECISE_LIFETIME ||
-                                                (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL) && report->type != 0;
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_NOT_BOOL || (report->detail & 0xffu) == CHECK_ARGUMENT_INCOMPLETE_TYPE) &&
+                                               report->type != 0;
                             CheckWarningSpelling spell = { .count = pp->table->count };
                             spell.bytes = typed ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count) : NULL;
                             spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
@@ -1898,11 +1901,17 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                     captured && parser->tokens.names[report->value] != 0 ? check_driver_attribute_spelling(parser, pp, report->value, false) :
                                                     captured ? (String8){ (char*)spelling_bytes, spelling_length } : (String8){ "", 0 };
                             check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
-                            const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE) &&
+                            // (An incomplete tag's declaration, named by its type alone: preferred_type's, #147.)
+                            const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && spelled;
+                            const String8 tag = forward ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, type_unqualified(report->type), 0) :
+                                                          (String8){ "", 0 };
+                            char declared[192];
+                            snprintf(declared, sizeof(declared), "forward declaration of %.*s", (int)tag.length, tag.pointer);
+                            const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE || forward) &&
                                                  report->note_token < count;
                             const PPOutputDiagnosticNote note = {
                                 .token = matched ? parser->tokens.sources[report->note_token] : 0,
-                                .message = report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" : "to match this '('",
+                                .message = forward ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" : "to match this '('",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, matched ? 1u : 0u, "%s", text);
                             arena_pop_to(scratch, type_mark);

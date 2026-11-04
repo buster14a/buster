@@ -5459,7 +5459,7 @@ arguments against the function. The checker now gives these as clang does.
   string literal that is none is "expected string literal as argument of 'X'
   attribute" at it, wherever the attribute is; a type argument that starts
   no type is "unknown type name" (an identifier) or "expected a type" and
-  "expected ')'"; and a generic attribute's expressions' names must name
+  "expected ')'" (see "Type arguments" below); and a generic attribute's expressions' names must name
   something where the attribute is (`check_input_thread_names`): an earlier
   declaration, a struct's earlier member, and a function declarator's
   parameters only for the attributes clang parses in the function's scope or
@@ -5647,9 +5647,31 @@ arguments against the function. The checker now gives these as clang does.
   The rest stay refused by name: `selectany` (a COMDAT),
   `no_caller_saved_registers` (a calling convention), and the attributes
   whose handlers clang has its own (`pass_object_size`, `ms_struct`,
-  `interrupt` and others). A type argument's type name (`preferred_type`'s,
-  `vec_type_hint`'s) is the parser's error here, which reads attributes'
-  arguments as expressions.
+  `interrupt` and others).
+- **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
+  (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
+  and C++'s `Owner`, `Pointer`, `contained_type` and
+  `sycl_kernel_entry_point`, known or not in that syntax) take a type name,
+  which the parser reads as one in a GNU list where a type starts the argument
+  (`parse_scalar_type_argument_attribute`; the vector path leaves such a
+  declaration to it), and a missing `)` is expected at the token; a C23 list's
+  argument stays a run of tokens. `preferred_type`'s and `vec_type_hint`'s type
+  is read where their attributes are (`CheckInputAttribute.argument_type`, a
+  C23 list's lone typedef name by its binding) and checked past the subject as
+  their handlers check it (`check_input_attribute_annotations`):
+  `preferred_type` without one is "'preferred_type' attribute takes one
+  argument", and its incomplete type (a function's is none) "incomplete type
+  'T' where a complete type is required" at the type past its leading
+  qualifiers, spelled as written, with a tag's "forward declaration of 'struct
+  S'" note at its declaration; `vec_type_hint`'s type must be an extended
+  vector's, a floating one (complex too) or an integer one (a complete
+  enumeration's, `_BitInt`'s, not `bool`'s), else "a non-vector or
+  non-vectorizable scalar type is an invalid argument to attribute 'X'" at the
+  attribute, and a second one of another type is ignored with
+  -Wignored-attributes' "attribute 'vec_type_hint' is already applied with
+  different arguments". In a C23 list, a type argument that starts no type is
+  "expected a type" alone, and a second argument "expected ')'" without its
+  note, as clang's balanced reading of it gives them.
 - **Argument counts.** An attribute's count of arguments other than clang's
   is clang's error, worded as clang's three messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at

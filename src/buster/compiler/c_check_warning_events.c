@@ -191,6 +191,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED,
     // An assume statement's expression of (potential) side effects (#147, check_input_statement_attribute_kinds).
     CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS,
+    // vec_type_hint's second one of another type (#147, -Wignored-attributes), at it.
+    CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

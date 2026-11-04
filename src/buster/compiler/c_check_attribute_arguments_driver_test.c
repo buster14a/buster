@@ -26,6 +26,8 @@
 // that begin one), and mode on an enum, with a fixed type's enumerator errors (BUSTER_CHECK_ENUM_MODED). Then static
 // analyses' and Objective-C's annotations (check_input_attribute_annotations, check_input_capture_names), and other
 // targets' vector types, builtins' aliases, the loops' and compound statements' hints, Blocks' byref, and GNU's assume.
+// Then type arguments (parse_scalar_type_argument_attribute, CheckInputAttribute.argument_type): preferred_type's
+// incomplete types with their tags' notes, vec_type_hint's types and its second one of another type, and the others'.
 
 static void check_test_driver_attribute_arguments(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -1253,6 +1255,48 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void f(volatile int *p) { __attribute__((assume(*p > 0))); }\n",
         "int g(int); void f(int x) { __attribute__((assume(sizeof(g(x)) == 4))); }\n",
         "void f(volatile int x) { __attribute__((assume(sizeof(x) == 4))); }\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(int))); };\n",
+        "typedef int T; struct S { unsigned a : 2 __attribute__((__preferred_type__(T))); };\n",
+        "enum E { A }; struct S { unsigned a : 2 __attribute__((preferred_type(enum E))); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(enum Z))); };\n",
+        "struct Q; struct S { unsigned a : 2 __attribute__((preferred_type(struct Q))); };\n",
+        "struct Q; typedef struct Q QT; struct S { unsigned a : 2 __attribute__((preferred_type(const QT))); };\n",
+        "struct Q; typedef struct Q QT; struct S { [[clang::preferred_type(QT)]] unsigned a : 2; };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(void))); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(int[]))); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(int(int)))); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(struct Q *))); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type)); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type())); };\n",
+        "struct S { [[clang::preferred_type]] unsigned a : 2; };\n",
+        "int v __attribute__((preferred_type(int)));\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(1))); };\n",
+        "struct S { unsigned a : 2 __attribute__((preferred_type(Q))); };\n",
+        "struct S { [[clang::preferred_type(1)]] unsigned a : 2; };\n",
+        "struct S { [[clang::preferred_type(Q)]] unsigned a : 2; };\n",
+        "struct S { [[_Clang::__preferred_type__(int *)]] unsigned a : 2; };\n",
+        "void f(void) { struct L; struct S { unsigned a : 2 __attribute__((preferred_type(struct L))); }; }\n",
+        "void f(void) __attribute__((vec_type_hint(int)));\n",
+        "void f(void) __attribute__((__vec_type_hint__(float)));\n",
+        "typedef float f4 __attribute__((ext_vector_type(4))); void f(void) __attribute__((vec_type_hint(f4)));\n",
+        "typedef int v4 __attribute__((vector_size(16))); void f(void) __attribute__((vec_type_hint(v4)));\n",
+        "struct S { int x; }; void f(void) __attribute__((vec_type_hint(struct S)));\n",
+        "void f(void) __attribute__((vec_type_hint(_Bool)));\n",
+        "void f(void) __attribute__((vec_type_hint(int *)));\n",
+        "void f(void) __attribute__((vec_type_hint(_Complex float)));\n",
+        "void f(void) __attribute__((vec_type_hint(_Complex int)));\n",
+        "void f(void) __attribute__((vec_type_hint(_BitInt(7))));\n",
+        "enum E { A }; void f(void) __attribute__((vec_type_hint(enum E)));\n",
+        "void f(void) __attribute__((vec_type_hint(int), vec_type_hint(float)));\n",
+        "typedef int I; void f(void) __attribute__((vec_type_hint(I), vec_type_hint(int)));\n",
+        "void f(void) __attribute__((vec_type_hint(const int), vec_type_hint(int)));\n",
+        "int v __attribute__((vec_type_hint(int)));\n",
+        "void f(void) __attribute__((vec_type_hint(void)));\n",
+        "void f(void) __attribute__((vec_type_hint(_Atomic(int))));\n",
+        "void f(void) __attribute__((iboutletcollection(int)));\n",
+        "void f(void) __attribute__((preferred_name(int)));\n",
+        "void f(void) __attribute__((Owner(int), Pointer(int *), contained_type(int), sycl_kernel_entry_point(int)));\n",
+        "void f(void) __attribute__((iboutletcollection(struct Q { int z; })));\n",
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

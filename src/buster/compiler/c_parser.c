@@ -2416,6 +2416,12 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
         // A _Generic association's type, which its `:` follows.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_COLON, BUSTER_PARSE_AFTER_PREVIOUS);
     }
+    else if (parse_scalar_gnu_attribute_group(parser, frame) && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) != 0)
+    {
+        // A type argument's group (parse_scalar_type_argument_attribute), whose `)` clang's ParseAttributeWithTypeArg
+        // expects at the token, as a group's.
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, BUSTER_PARSE_AT_TOKEN);
+    }
     else if (parse_scalar_gnu_attribute_group(parser, frame))
     {
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, BUSTER_PARSE_AFTER_PREVIOUS);
@@ -4084,6 +4090,22 @@ static bool parse_scalar_standard_statement_attribute(const ParseScalar* parser,
 }
 
 // In an expression, where an operand comes next.
+// clang's attributes whose argument is a type name (#147): its attributeIsTypeArgAttr, the attributes whose first argument
+// Attr.td makes a TypeArgument, by their normalized name in any syntax, unknown ones included, which its
+// ParseAttributeWithTypeArg reads with ParseTypeName, an expression and all.
+static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, IdentId name)
+{
+    static const char* const names[] = {
+        "Owner", "Pointer", "contained_type", "iboutletcollection", "preferred_name", "preferred_type", "sycl_kernel_entry_point", "vec_type_hint",
+    };
+    bool result = false;
+    for (uint32_t n = 0; !result && n < sizeof(names) / sizeof(names[0]); n += 1)
+    {
+        result = parse_scalar_attribute_spelled(parser, name, true, names[n]);
+    }
+    return result;
+}
+
 static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* frame, ParseStep* step)
 {
     const uint8_t kind = parser->kinds[i];
@@ -4092,7 +4114,14 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     const bool asm_operands = (flags & BUSTER_PARSE_FRAME_ASM) != 0;
     const bool empty = (flags & BUSTER_PARSE_FRAME_EMPTY_OK) != 0;
     const uint8_t previous = parser->kinds[(int64_t)i - 1];
-    if (asm_operands && i == frame->opener + 1 && kind != PARSE_KIND_STRING)
+    // A GNU attribute's type argument (parse_scalar_type_argument_attribute), where a type name starts it.
+    const bool type_argument = frame->role == PARSE_ROLE_OPEN_CALL && i == frame->opener + 1 && parse_scalar_gnu_attribute_group(parser, frame) &&
+                               parse_scalar_starts_type(parser, i) && parse_scalar_type_argument_attribute(parser, parser->names[(int64_t)frame->opener - 1]);
+    if (type_argument)
+    {
+        parse_scalar_begin_declaration(frame, BUSTER_PARSE_FRAME_ABSTRACT | BUSTER_PARSE_FRAME_NO_BIND, step);
+    }
+    else if (asm_operands && i == frame->opener + 1 && kind != PARSE_KIND_STRING)
     {
         // An asm statement's template comes first.
         parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_ASM_STRING, BUSTER_PARSE_AT_TOKEN);

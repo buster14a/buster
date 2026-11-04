@@ -632,6 +632,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
         case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
         case CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS:
+        case CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -723,6 +724,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ? "'%.*s%s%.*s' calling convention is not supported for this target" :
                                         event->kind == CHECK_WARNING_EVENT_IBOUTLET ? "'%.*s%s%.*s' attribute can only be applied to instance variables or properties" :
                                         event->kind == CHECK_WARNING_EVENT_SPAN_ONLY ? "'%.*s%s%.*s' attribute only applies to functions that return span-like structures" :
+                                        event->kind == CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS ? "attribute '%.*s%s%.*s' is already applied with different arguments" :
                                         "'%.*s%s%.*s' attribute ignored",
                                         (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
             break;
