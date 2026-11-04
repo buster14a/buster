@@ -5602,9 +5602,13 @@ arguments against the function. The checker now gives these as clang does.
   body in a declarator's bound, parameter list or initializer keeps its own
   context, as clang reads a member's or an enumerator's use through its tag to
   the tag's parent; in a function's body it takes the function's. A marked
-  tag's own definition is its body's context (and an enum's base's), nested
-  tags included: its mark is its declarations' up to the body, and an enum's
-  attributes after it, but not a struct's (`check_input_availability_tag`).
+  tag's own definition is its body's context, nested tags included: its mark
+  is its declarations' up to the body, and an enum's attributes after it, but
+  not a struct's (`check_input_availability_tag`). A fixed enum's base isn't
+  in it: a use in the base (`enum E : T { ... } x`) is diagnosed once, in the
+  declaration's first declarator's context, at any scope; in a declaration of
+  the enum alone (`enum E : T { ... };`, `enum E : T;`), in the enum's
+  (`check_input_enum_base_context`).
   A tag definition's name is a use of the tag only where declarators follow
   its body (`struct S { ... } x;`, its attributes after the body counting),
   as clang diagnoses the specifiers' type for them; a standalone definition's
@@ -5612,7 +5616,9 @@ arguments against the function. The checker now gives these as clang does.
   declarator, at any scope, each in its declarator's context
   (`check_input_tag_use_copies`): `struct S a, b;` warns twice, and
   `struct S a __attribute__((deprecated)), b;` once, where a typedef name's
-  use is diagnosed once, in the first declarator's context.
+  use is diagnosed once, in the first declarator's context. A declarator's
+  name is past the tag's body, a fixed enum's base (whose typedef name is
+  none) and attribute groups (whose names are none).
   A file-scope declaration's specifiers take its declarator's worst mark as
   their context too: a deprecated declaration's drop a deprecated typedef's or
   tag's use but keep an unavailable one's error, and an unavailable

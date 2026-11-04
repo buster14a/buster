@@ -1031,6 +1031,27 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "struct X { struct S r, u; struct S v __attribute__((deprecated)), w; };\nstruct S (*fp)(void), x, *y = 0;\n"
         "typedef struct S T1, T2;\nvoid z(struct S a, struct S b);\nint size = sizeof(struct S);\n",
         "struct __attribute__((unavailable(\"gone\"))) U;\nstruct U *u1, *u2;\n",
+        // A fixed enum's underlying type (a typedef name) is no declarator: its definition's uses are each declarator's,
+        // in that declarator's context. A use in the base is once, in the first declarator's context at any scope, not
+        // the enum's own mark; in a declaration of the enum alone, in the enum's. An attribute group before a declarator
+        // names none.
+        "typedef unsigned T;\nenum __attribute__((unavailable(\"gone\"))) E : T;\nenum E : T { A } x __attribute__((unavailable));\n",
+        "typedef unsigned T;\nenum __attribute__((unavailable(\"gone\"))) E : T;\nenum E : T { A } x __attribute__((unavailable)), y;\n",
+        "typedef unsigned T;\nenum __attribute__((deprecated(\"old\"))) E1 : T;\nenum E1 : T { A1 } x1 __attribute__((deprecated));\n"
+        "enum __attribute__((deprecated(\"old\"))) E2 : T;\nenum E2 : T { A2 } x2;\nenum __attribute__((deprecated(\"old\"))) E3 : T;\n"
+        "enum E3 : T { A3 } x3 __attribute__((deprecated)), y3;\n",
+        "typedef unsigned T __attribute__((deprecated(\"old\")));\ntypedef unsigned V __attribute__((unavailable(\"gone\")));\nvoid f(void)\n{\n"
+        "    enum E1 : T { A1 } a1 __attribute__((deprecated)), b1;\n    enum E2 : T { A2 } a2, b2 __attribute__((deprecated));\n"
+        "    enum E3 : T { A3 };\n}\nstruct S\n{\n    enum G1 : T { C1 } m1 __attribute__((deprecated)), n1;\n"
+        "    enum G2 : T { C2 } m2, n2 __attribute__((deprecated));\n};\nenum __attribute__((deprecated)) K : T { K1 } k;\n"
+        "enum L : T { L1 } __attribute__((deprecated)) l;\nenum : T { N } z __attribute__((deprecated)), w;\nenum M : V { M1 } v __attribute__((deprecated));\n",
+        "typedef int D __attribute__((deprecated(\"old\")));\nenum __attribute__((deprecated)) F1 : D { C1 };\nenum F2 : D { C2 } __attribute__((deprecated));\n"
+        "enum F3 : D { C3 };\nenum __attribute__((deprecated)) F4 : D;\nenum __attribute__((deprecated)) F5 : D;\nenum F5 : D { C5 };\n"
+        "void f(void) { enum __attribute__((deprecated)) F6 : D { C6 }; enum F7 : D { C7 }; }\n"
+        "struct S { enum __attribute__((deprecated)) F8 : D { C8 } m; };\n",
+        "struct __attribute__((deprecated)) S { int a; } __attribute__((unused)) s __attribute__((deprecated));\n"
+        "struct __attribute__((deprecated)) R { int a; } __attribute__((unused)) r;\n"
+        "struct __attribute__((unavailable)) Q { int a; } __attribute__((aligned(8))) q __attribute__((unavailable)), *q2 __attribute__((unavailable));\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

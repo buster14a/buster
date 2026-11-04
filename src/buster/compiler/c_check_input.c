@@ -2537,13 +2537,12 @@ static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token
     return token;
 }
 
-// An enum's fixed underlying type: the parser's specifier `:` after its name, then the type's specifiers and
-// qualifiers. Returns the token after them, or `colon` when it starts no base.
-static uint32_t check_input_enum_base_end(const Parser* parser, uint32_t tag, uint32_t colon, uint32_t end)
+// An enum's fixed underlying type from its `:` (the parser's specifier, which a bit-field's width's isn't): the type's
+// specifiers and qualifiers. Returns the token after them, or `colon` when it starts no base.
+static uint32_t check_input_enum_base_skip(const Parser* parser, uint32_t colon, uint32_t end)
 {
     uint32_t position = colon;
-    if (parser->tokens.kinds[tag] == PARSE_KIND_ENUM && colon < end && parser->tokens.kinds[colon] == PARSE_KIND_COLON &&
-        parser->tree.roles[colon] == PARSE_ROLE_SPECIFIER)
+    if (colon < end && parser->tokens.kinds[colon] == PARSE_KIND_COLON && parser->tree.roles[colon] == PARSE_ROLE_SPECIFIER)
     {
         // The base's specifiers, and GNU attributes among them (`enum E : int __attribute__((unused)) { ... }`), which clang
         // takes as the base type's.
@@ -2555,6 +2554,13 @@ static uint32_t check_input_enum_base_end(const Parser* parser, uint32_t tag, ui
         }
     }
     return position;
+}
+
+// An enum's fixed underlying type: the parser's specifier `:` after its name (check_input_enum_base_skip). Returns the
+// token after it, or `colon` when it starts no base.
+static uint32_t check_input_enum_base_end(const Parser* parser, uint32_t tag, uint32_t colon, uint32_t end)
+{
+    return parser->tokens.kinds[tag] == PARSE_KIND_ENUM ? check_input_enum_base_skip(parser, colon, end) : colon;
 }
 
 // The token after a tag's name and attributes, and an enum's fixed underlying type: its body's `{`, or what follows.
