@@ -676,7 +676,7 @@ static bool debug_test_profile(const char* output)
 
 // The consumers' checks of the fixture, as one unit or as two (`split`), its executable made `way`
 // (BUSTER_DEBUG_TEST_*): the object writer's object's links must hold GNU ld's link's of the fixture's debug sections.
-static bool debug_test_consumers(bool keep, uint32_t way, bool split)
+static bool debug_test_consumers(bool keep, uint32_t way, bool split, const TestTool* perf)
 {
     static const char* const made_by[] = { "GNU ld", "Buster", "Buster's object, GNU ld", "Buster's object, lld" };
     const bool native = way == BUSTER_DEBUG_TEST_NATIVE;
@@ -856,12 +856,21 @@ static bool debug_test_consumers(bool keep, uint32_t way, bool split)
         {
             printf("%s\n", backtrace.pointer);
         }
-        const bool recorded = object_test_run(record, out, err) == 0;
-        const bool scripted = recorded && object_test_run(script, out, err) == 0;
-        String8 profile = object_test_read_file(&arena, out);
-        const bool perf_ok = scripted && debug_test_profile(profile.pointer);
-        valid &= perf_ok;
-        printf("debug perf (%s output, %s): sampled DWARF call chains and source lines: %s\n", made_by[way], split ? "two units" : "one unit", perf_ok ? "pass" : "FAIL");
+        if (test_tool_available(perf))
+        {
+            const bool recorded = object_test_run(record, out, err) == 0;
+            const bool scripted = recorded && object_test_run(script, out, err) == 0;
+            String8 profile = object_test_read_file(&arena, out);
+            const bool perf_ok = scripted && debug_test_profile(profile.pointer);
+            valid &= perf_ok;
+            printf("debug perf (%s output, %s): sampled DWARF call chains and source lines: %s\n", made_by[way], split ? "two units" : "one unit", perf_ok ? "pass" : "FAIL");
+        }
+        else
+        {
+            char section[96];
+            snprintf(section, sizeof(section), "debug perf (%s output, %s)", made_by[way], split ? "two units" : "one unit");
+            test_tool_skip(perf, section);
+        }
     }
     arena_release(&arena);
     free(bytes);
@@ -909,11 +918,18 @@ static int run_debug_tests(int argc, char** argv)
         valid &= !debug_test_profile("debug_leaf\nleaf.c:5\n\ndebug_outer\n_start\n\n");
         valid &= !debug_test_profile("debug_leaf\nleaf.c:50\ndebug_outer\n_start\n\n");
         valid &= !debug_test_frame("#2 _start () at start.c:11\n", "#2 ", "_start", "start.c:1");
+        // perf's sampled consumer is the one cross-check section a machine may lack: probe it once, and let a present
+        // perf's wrong samples still fail.
+        TestTool perf = { 0 };
+        if (cross_check)
+        {
+            perf = test_tool_probe("perf", "perf", 0, 0);
+        }
         for (uint32_t split = 0; cross_check && split < 2; split += 1)
         {
             for (uint32_t way = BUSTER_DEBUG_TEST_GNU_LD; way <= BUSTER_DEBUG_TEST_OBJECT_LLD; way += 1)
             {
-                valid &= debug_test_consumers(keep, way, split == 1);
+                valid &= debug_test_consumers(keep, way, split == 1, &perf);
             }
         }
     }

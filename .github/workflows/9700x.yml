@@ -6,11 +6,9 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && (inputs.purpose == 'ba
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
+  # Every main update gets full hosted correctness, including documentation-only merges (#1271).
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
   # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
   # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
   # against its first parent, or comprehensively, inside 04:00-07:00 Europe/Madrid unless `override` gives a reason.
@@ -52,19 +50,17 @@ on:
 permissions:
   contents: read
 
-# Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
-# cancel another PR's qualification. Each group keeps one pending run, GitHub's default: a newer push replaces its
-# pending run, which would only qualify a commit already superseded. A newer push to a PR also cancels the PR's run in
-# progress, which is mostly a job waiting for the 9700X (the slot is held from then on, so a run waiting hours would
-# otherwise still run for its stale commit); a push to main lets main's run finish. The daily run has a group of its
-# own, so that a push to main doesn't replace it while it waits. The runner's job hooks serialize all jobs with the
-# shared host lock (AGENTS.md).
+# Keep each PR's replaceable queue separate: a newer push cancels only that PR's superseded qualification.
+# Every push to main gets its own run-id group. cancel-in-progress: false alone would still allow a later merge to
+# replace an earlier pending main run in GitHub's default single pending slot; all main revisions need the full
+# hosted matrix and fuzzing (#1271). The daily run and manual refs retain their own groups. The runner's job hooks
+# still serialize hardware jobs with the shared host lock (AGENTS.md), not the hosted correctness runs.
 concurrency:
-  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
+  # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, docs/performance aside), on a
   # GitHub-hosted runner so that it doesn't wait for the 9700X: the files the merge changes against its base. The selector must pass before tests or benchmarks run. And whether it changes the harnesses of the baselines, the linkers'
   # times and the floors (link_benchmark.c and floors_benchmark.c): they measure other programs and the machine, the same
   # for every pull request, so `benchmarks` measures them on the daily and dispatched runs and on pull requests that change

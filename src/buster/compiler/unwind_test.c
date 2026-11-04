@@ -634,7 +634,7 @@ static bool unwind_test_guards(void)
     return valid;
 }
 
-static bool unwind_test_consumers(bool keep);
+static bool unwind_test_consumers(bool keep, const TestTool* perf);
 static bool unwind_native_oracle_tests(void);
 
 static int run_unwind_tests(int argc, char** argv)
@@ -667,7 +667,10 @@ static int run_unwind_tests(int argc, char** argv)
         valid &= unwind_native_oracle_tests();
         if (cross)
         {
-            valid &= unwind_test_consumers(keep);
+            // One probe for the three fixtures: perf is their only sampled consumer whose absence is a skip, and a
+            // present perf that samples wrongly still fails.
+            const TestTool perf = test_tool_probe("perf", "perf", 0, 0);
+            valid &= unwind_test_consumers(keep, &perf);
         }
     }
     return valid ? 0 : 1;

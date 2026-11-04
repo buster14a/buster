@@ -4,6 +4,21 @@ Run commands and resolve source paths from the repository root. Follow the
 [shared agent rules](../../AGENTS.md), including the 9700X lock and `cores`
 requirements. [Command index](README.md).
 
+## Every main revision
+
+Every merge or direct push to `main`, including documentation/Markdown-only
+changes, starts the full hosted correctness matrix and fuzz campaigns against
+that push's `github.sha` (#1271). Main pushes use a separate run-id concurrency
+group each, so rapid merges do not replace pending main runs. PRs still cancel
+only their own superseded runs; the hardware lock still serializes the 9700X.
+
+Do not add main-push path filters, treat a successful PR run or Measurement
+storage as full main CI, or let native-evidence reuse or nightly mode suppress
+main's hosted suite. `changes --self-test` checks the trigger, concurrency and
+full hosted policy with counterexamples; `tests/ci/nightly.sh` checks that every
+push's evidence retains `scope=full`, `hosted=run` and no hosted reuse source,
+including documentation-only pushes with nightly mode on and off.
+
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable

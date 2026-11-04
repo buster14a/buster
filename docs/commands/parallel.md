@@ -11,6 +11,36 @@ requirements. [Command index](README.md).
   in the list's order. `parallel_test.c` holds its tests (`main.c` includes
   both; `./build/compiler test-parallel` runs them); [The parallel runner](#the-parallel-runner)
   below describes both.
+
+## Test tool probing
+
+`src/buster/compiler/test_tool.c` (included by `main.c`, with its declarations
+in `test_tool.h`) probes an external tool a cross-check spawns, once per
+command (#1129): `test_tool_probe` runs `NAME --version` in its own process
+group, keeps the version its banner's first digit-bearing line prints — the
+dotted run with the most components after the line's first `)`, or before its
+`(` where none follow it, so a target-prefixed or digit-bearing package name
+doesn't hide it — and compares it with a minimum; `test_tool_available`
+says whether the tool may be used; `test_tool_skip` prints
+`SECTION: skipped: needs NAME >= V, found W`, or `not found on PATH`, or
+`found version unreadable`, or `--version exited with status N` (a tool that
+starts but can't report its version is unavailable even without a minimum), or
+`didn't end within N s`, a deadline whose kill
+takes the whole group so a wrapper's subprocesses die with it. A skipped section is
+not a correctness failure, so the rest of the command still runs and its real
+failures still fail; a tool
+that is present and compatible and gives wrong output still fails. The callers
+probe before their sections: perf in `test-unwind --cross-check` and
+`test-debug --cross-check`, GCC 15 or later (16.2.1 is the qualified 9700X
+version) in `test-calling-convention --cross-check` and `test-x86-target`, and
+binutils 2.46 or later's `as` in `test-x86-target` and `as`/`objdump` in
+`test-x86-disassembler --objdump` and `--file` (2.47 is the qualified 9700X
+version), plus `objcopy` for `--objdump`'s reassembly, whose whole oracle is then unavailable and whose exit status is 77
+(the runner's skip code).
+`./build/compiler test-tool` checks the helper's parsing, comparison, missing
+tool, unreadable version, failing `--version`, hanging tool and skip text without the real tools;
+extra arguments are a usage error.
+
 ## The parallel runner
 
 `./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]`
