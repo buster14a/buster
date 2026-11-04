@@ -1096,6 +1096,29 @@ Three more didn't pay:
   from 401 to 474, the fields' registers spilling what the value's copy had
   held.
 
+## Plain scalar locals and parameters (#1048)
+
+Each body's setup gives each of its parameters and locals a temporary or a
+frame object by about ten queries of the type table: its kind (through
+`type_strip_aligned`), whether it is an aggregate, of a memory class or of a
+runtime size, its class, a compound literal's vector, its alignment. On the
+vector path a plain scalar's (`check_lower_plain_scalar` by its packed class
+and facts, and neither an array's nor a function's), of no attribute's
+alignment and none past 8 bytes, now takes its temporary of its class
+directly, as those rules give it, and a prototype's plain scalar parameter
+too, whose type `check_lower_passed` takes. #1235's run at `ccb12c14`
+([run](https://github.com/buster14a/buster/actions/runs/41799729636/job/126476270330)),
+five rounds in turn on `sqlite3.c`, every variant giving the base's object:
+
+| row | the base | the locals' | the locals' and the parameters' |
+| --- | ---: | ---: | ---: |
+| `lower.bodies` | 1.292 [1.284 to 1.304] | 1.210 [1.203 to 1.220] | 1.197 [1.194 to 1.207] |
+| `lower` | 10.535 [10.519 to 10.553] | 10.482 [10.445 to 10.545] | 10.473 [10.468 to 10.489] |
+
+Every round of both variants' bodies was below every base round, and so were
+the second's `lower` rounds. `test-checker` passed with them, whose fixtures
+compare the vector path, which takes them, with the scalar one, which doesn't.
+
 ## Each node's class and facts by node (#1048)
 
 The expansion's head finds its node's class and facts through its value's
