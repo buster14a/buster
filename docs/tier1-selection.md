@@ -846,7 +846,37 @@ reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
 the class's call-save rows and temporary slot take the widest vector's bytes,
 which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
 need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
-emission, as any record's. A vector C passes or returns by value is an aggregate
+emission, as any record's.
+
+### At targets without AVX-512 (#1281)
+
+A target without AVX512VL, such as x86-64-v3, has no EVEX form of a 16- or 32-byte
+vector, and no register past xmm15. There the CFG consumer
+(`Tier1EmitPrepared.vex`, from the target's allow-list: whether it allows
+`vmovdqa64` of an xmm register) takes VEX forms of AVX and AVX2 for them
+(`tier1_select_vector_forms` and `tier1_select_class_forms` with `vex`, and
+`Tier1SelectHoles.vex`), which name xmm0 to xmm15 alone, as the class's values
+are:
+
+| Kind | Records |
+| --- | --- |
+| `ZERO` | `vpxor x, x, x` of the xmm register, which zeroes a ymm one's upper half too |
+| `ONES` | `vpcmpeqd x, x, x` |
+| `SPLAT` | `mov r11d, imm32`, `vmovd x, r11d`, then `vpshufd x, x, 0` (16 bytes) or `vpbroadcastd y, x` (32 bytes) |
+| `CONSTANT`, loads, stores, spills, reloads, call saves | `vmovdqu` at the width |
+| `COPY`, edge moves | `vmovdqa` of a ymm register (`movaps` for 16 bytes) |
+| `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpand`, `vpor`, `vpxor` |
+
+VEX has no ternary logic, no compare into a mask and no blend under one: a target
+without AVX-512 has no masks (their types still refuse there), and the IR's
+`not`, `vcmp` and `vselect` come of EVEX rows alone, which it has none of. Its
+typed stream's rows are VEX's (`c_check_program_vectors_baseline.c` and the
+builtins'): the 32-bit integers' addition, subtraction, multiplication and
+bitwise operations decode into the IR's own operations by their VEX forms
+(`ir_simd_typed_operation`), and the others, a comparison or a complement among
+them, are machine rows. The lowering admits a 16- or 32-byte vector where the
+target has AVX512F and VL, or else AVX (`ir_typed_vector_moves`: the features of
+the moves Tier 1 then takes), and a 64-byte one with AVX512F. A vector C passes or returns by value is an aggregate
 to the lowering, a pointer to its bytes, in a vector register whole ("By-value
 aggregates"); an IR function whose own parameter or result is a vector value has
 no convention's place of Tier 1's and is refused at selection
@@ -858,7 +888,11 @@ locals) stays in its frame object, as a 128-bit integer's does.
 interpreter on both paths, with and without rematerialization: every operation
 and all ten predicates at each width; constants of every kind; a loop whose vector
 phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
-and reloaded; and vectors of each width live across two calls of the helper.
+and reloaded; and vectors of each width live across two calls of the helper. And
+four emitted for x86-64-v3 (#1281), every record one that target has: the
+operations and constants of every kind at 16 and 32 bytes; a loop whose 32-byte
+phis swap through xmm15; seventeen 32-byte vectors live at once, spilled and
+reloaded; and vectors of both widths live across two calls.
 
 ## Machine rows (#141)
 
@@ -868,18 +902,22 @@ effective uses, each in a register (the CFG problem's uses of it are required,
 as any operand's): a row call isn't a call of a function's
 (`tier1_select_function_call`), so nothing is saved around it, no argument moves,
 and it makes no frame a caller's. The selector takes a row Tier 0 places
-(`tier0_operation_valid`, which needs x86_semantics.c's tables) whose records
-name vector registers in EVEX forms alone, so that its vector roles can be zmm16
-and on, which no value takes, its floating roles past them below 32
-(`tier1_select_row_supported`). Its narrow integer result isn't canonical
+(`tier0_operation_valid`, which needs x86_semantics.c's tables), whose vector
+and floating roles fit: a row whose records name vector registers in EVEX forms
+alone has its vector roles in zmm16 and on, which no value takes, and its floating
+roles past them below 32; a row with a VEX or legacy form's vector register has
+its vector roles in a run of free registers below 16; and a row that names a
+floating role in a VEX or legacy form's field (F16C's conversions,
+`tier1_select_row_low_floating`, #1281) has its floating roles below 16 too, its
+vector roles and its floating ones at most 16 (`tier1_select_row_supported`). Its narrow integer result isn't canonical
 (`tier1_select_canonical`): its field's bits past the class are the row's. Only
 the CFG consumer takes it (`tier1_emit_cfg_row`), which places the row as Tier 0
 does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
 
 | Role | Register |
 | --- | --- |
-| `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
-| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
+| `VECTOR(j)` | zmm16 + j, or for a row with a VEX or legacy form's vector register, and every row at a target without AVX512VL, the lowest run of free xmm registers below 16 (xmm15 among them) from j; a vector operand moved there from its register at its width first (`vmovdqa64`, or `vmovdqa` at a target without AVX512VL), the result moved from VECTOR(0) into the destination last |
+| `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last. For a row that names a floating role in a VEX or legacy form's field, and every row at a target without AVX512VL (#1281), all below 16: a written operand's a free xmm register outside the vector roles' run, and the result's the destination itself where no other operand is there and no vector role is, else such a free register; each copy `movaps` |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
 | `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
@@ -896,7 +934,8 @@ which a refusal mid-block left owed). A move into place never
 overwrites another's source: its destination is free or a vector role's. Each row
 node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
 certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
-it doesn't decode the rows' records.
+it doesn't decode the rows' records. The free xmm registers are those below 16
+that hold no value live past the node and no operand.
 
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
@@ -909,8 +948,23 @@ extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
 edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
-refuses at selection, so that its function is Tier 0's, and the program runs as
-clang -O0's does.
+places below 16 (#1281), every function Tier 1's, and the program runs as clang
+-O0's does.
+
+Its VEX fixture (#1281) compiles a unit of x86-64-v3's AVX2 and F16C builtins and
+vector operators the same way, every function Tier 1's, by both paths and with and
+without rematerialization, against clang -O0's build: the 32-bit integers'
+operators (the IR's own operations by their VEX forms, and the comparisons,
+shifts and complements as machine rows) on 16- and 32-byte vectors; the operators
+on words, bytes, quadwords, floats and doubles; AVX2's shuffles, blends, permutes,
+shifts, unpacks, maxima, tests and movemasks, lane extracts and inserts, widening
+conversions, masked loads and stores and gathers; F16C's scalar and vector
+conversions and FMA's; constants of every kind; a loop whose vectors cross its
+back edge and live across a call; and more vectors live at once than xmm0 to
+xmm14. A floating expression clang would contract into an FMA (its
+`-ffp-contract=on`, even at -O0) is split into statements. `_mm256_set1_epi8`'s
+32 stack arguments and `_mm_cvtph_ps`'s 8-byte vector (#1280) are refused at
+every target, so the fixture takes other builtins in their place.
 
 `test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
 model of each (the interpreter has none of x86 records) by both paths, with and
@@ -918,10 +972,13 @@ without rematerialization: rows beside seven word masks live in k1 to k7, one
 naming k1 and k2 by number and one taking a mask scratch register, which borrow
 live masks' registers and reload them; rows that read their integer and mask
 results as their first operands, as Tier 0 places them; a row of no records, its
-result its operand; and an EVEX floating row, its result read as its first
-operand. Its refusals take a row with a floating role in a VEX form, refused at
-selection by both paths; and its random mask programs whose rows the decoders
-refuse run as machine rows against the generator's model.
+result its operand; an EVEX floating row, its result read as its first
+operand; and its VEX twin (#1281), for x86-64-v4 and for x86-64-v3, its floating
+roles below 16. For x86-64-v3 it takes a fixture of rows too: a VEX row of 32-byte
+vectors, one live past it; a floating row whose result is read as its first
+operand and one that writes its second floating operand first, both operands live
+past them; and a 16-byte vector's row. Its random mask programs whose rows the
+decoders refuse run as machine rows against the generator's model.
 
 ## Tests and benchmark
 

@@ -184,9 +184,10 @@ typedef enum Tier1SelectRule
     // The IR's vectors (#141), v4i32, v8i32 and v16i32, in the vector class's registers that the CFG consumer's
     // allocation gives them as it gives the floating values (xmm0 to xmm14, a node's register its location's low four
     // bits, xmm15 the class's scratch), by AVX-512's EVEX forms of `width` 16, 32 or 64 bytes, the xmm, ymm or zmm one
-    // (tier1_select_vector_forms): its kind in `scale` (BUSTER_TIER1_VECTOR_*). A vector's loads and stores are
-    // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32), and its phis
-    // TIER1_RULE_PHI's. Only the CFG consumer takes it.
+    // (tier1_select_vector_forms), or at a target without AVX512VL by AVX's and AVX2's VEX forms of the xmm or ymm one
+    // (#1281, Tier1SelectHoles.vex): its kind in `scale` (BUSTER_TIER1_VECTOR_*). A vector's loads and stores are
+    // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32, or vmovdqu), and its
+    // phis TIER1_RULE_PHI's. Only the CFG consumer takes it.
     TIER1_RULE_VECTOR,
     // An atomic read/modify/write (IR_ATOMIC_RMW, #1059) of the object at the address in values[0], of values[1], by
     // the operation `immediate` (BUSTER_IR_RMW_OPERATION's: an exchange, an addition or a compare-exchange): the operand
@@ -199,10 +200,12 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ATOMIC_RMW,
     // A machine row (#141), an IR row call's (IrCall.row): the typed stream's X86 row, x86 records whose registers are Tier
     // 0's roles, which the CFG consumer places (tier1_emit_cfg_row) as Tier 0 does (Tier0Placement): its vector roles in
-    // zmm16 and on, which no value takes, each vector operand moved there from its register and the result moved from
-    // there into the destination; its integer, mask and floating operands in their own registers where its records don't
-    // write them, else moved into free registers of their classes; its scratch roles and its integer or mask result in
-    // free registers, the result in its destination where no operand is. `immediate` is the row's index in
+    // zmm16 and on, which no value takes, or in a run of free registers below 16 for a row of VEX or legacy forms and at a
+    // target without AVX512VL (#1281), each vector operand moved there from its register and the result moved from there
+    // into the destination; its integer, mask and floating operands in their own registers where its records don't write
+    // them, else moved into free registers of their classes (below 16 for a floating role a VEX or legacy form names, and
+    // at a target without AVX512VL); its scratch roles and its integer or mask result in free registers, the result in its
+    // destination where no operand is. `immediate` is the row's index in
     // IrFunction.rows; its operands are the call's arguments, the node's effective uses, each in a register
     // (tier1_select_row_supported). Only the CFG consumer takes it.
     TIER1_RULE_ROW,
@@ -591,6 +594,9 @@ struct Tier1SelectHoles
     bool compare_immediate;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
+    // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
+    // (tier1_select_vector_forms, tier1_select_class_forms). The CFG consumer sets it (Tier1EmitPrepared.vex).
+    bool vex;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -730,7 +736,7 @@ struct Tier1SelectFloatForms
     uint16_t resize;
 };
 
-static const Tier1SelectFloatForms tier1_select_float_forms_table[6] =
+static const Tier1SelectFloatForms tier1_select_float_forms_table[8] =
 {
     {
         X86_FORM_MOVSS_X_XM32, X86_FORM_MOVSS_XM32_X, { X86_FORM_ADDSS_X_XM32, X86_FORM_SUBSS_X_XM32, X86_FORM_MULSS_X_XM32, X86_FORM_DIVSS_X_XM32 }, X86_FORM_UCOMISS_X_XM32,
@@ -759,6 +765,16 @@ static const Tier1SelectFloatForms tier1_select_float_forms_table[6] =
         X86_FORM_VMOVDQU32_Z_ZM512, X86_FORM_VMOVDQU32_ZM512_Z, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
         { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
     },
+    // A 16- and a 32-byte vector's at a target without AVX512VL (#1281): AVX's vmovdqu of its xmm or ymm register, which
+    // names registers below 16 alone, as the vector class's are.
+    {
+        X86_FORM_VMOVDQU_X_XM128, X86_FORM_VMOVDQU_XM128_X, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
+    {
+        X86_FORM_VMOVDQU_Y_YM256, X86_FORM_VMOVDQU_YM256_Y, { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE }, { X86_FORM_NONE, X86_FORM_NONE }, X86_FORM_NONE,
+    },
 };
 
 static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
@@ -766,8 +782,21 @@ static const Tier1SelectFloatForms* tier1_select_float_forms(uint32_t width)
     return &tier1_select_float_forms_table[width == 4 ? 0 : width == 8 ? 1 : width == 16 ? 3 : width == 32 ? 4 : width == 64 ? 5 : 2];
 }
 
+// The vector class's loads, stores, spills and reloads of a value of `width` bytes: a floating value's movss or movsd, and
+// a vector's vmovdqu32 at its width, or where `vex` (a target without AVX512VL, #1281) a 16- or 32-byte one's vmovdqu.
+static const Tier1SelectFloatForms* tier1_select_class_forms(uint32_t width, bool vex)
+{
+    return vex && (width == 16 || width == 32) ? &tier1_select_float_forms_table[width == 16 ? 6 : 7] : tier1_select_float_forms(width);
+}
+
 // A vector's EVEX forms at its width (#141, TIER1_RULE_VECTOR's): xmm's, ymm's and zmm's, each AVX512F's and the narrower
-// two AVX512VL's too, which a target without them refuses at emission as any record's.
+// two AVX512VL's too, which a target without them refuses at emission as any record's. At a target without AVX512VL
+// (#1281), a 16- or 32-byte vector's VEX forms, AVX's and AVX2's, which name registers below 16 alone, as the vector
+// class's are: vmovdqa, vpaddd, vpsubd, vpmulld, vpand, vpor and vpxor; its ones by vpcmpeqd of a register with itself
+// (`ones`, no immediate), and its broadcast from the low doubleword of an xmm register (vmovd into it first): vpshufd's
+// with 0 of an xmm's and vpbroadcastd's of a ymm's. VEX has no ternary logic, no compare into a mask and no blend under
+// one (X86_FORM_NONE): the IR's NOT, COMPARE and SELECT come of EVEX rows alone (ir_simd_typed_operation), which such a
+// target has none of.
 typedef struct Tier1SelectVectorForms Tier1SelectVectorForms;
 struct Tier1SelectVectorForms
 {
@@ -777,9 +806,10 @@ struct Tier1SelectVectorForms
     uint16_t compare[2];
     uint16_t blend;
     uint16_t broadcast;
+    uint16_t ones;
 };
 
-static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
+static const Tier1SelectVectorForms tier1_select_vector_forms_table[6] =
 {
     {
         X86_FORM_VMOVDQA64_X_XM128,
@@ -788,6 +818,7 @@ static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
         { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_X_XM128_IMM8 },
         X86_FORM_VPBLENDMD_X_X_XM128,
         X86_FORM_VPBROADCASTD_X_R32,
+        X86_FORM_NONE,
     },
     {
         X86_FORM_VMOVDQA64_Y_YM256,
@@ -796,6 +827,7 @@ static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
         { X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8 },
         X86_FORM_VPBLENDMD_Y_Y_YM256,
         X86_FORM_VPBROADCASTD_Y_R32,
+        X86_FORM_NONE,
     },
     {
         X86_FORM_VMOVDQA64_Z_ZM512,
@@ -804,6 +836,7 @@ static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
         { X86_FORM_VPCMPD_K_Z_ZM512_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 },
         X86_FORM_VPBLENDMD_Z_Z_ZM512,
         X86_FORM_VPBROADCASTD_Z_R32,
+        X86_FORM_NONE,
     },
     {
         X86_FORM_NONE,
@@ -812,13 +845,33 @@ static const Tier1SelectVectorForms tier1_select_vector_forms_table[4] =
         { X86_FORM_NONE, X86_FORM_NONE },
         X86_FORM_NONE,
         X86_FORM_NONE,
+        X86_FORM_NONE,
+    },
+    {
+        X86_FORM_VMOVDQA_X_XM128,
+        { X86_FORM_VPADDD_X_X_XM128, X86_FORM_VPSUBD_X_X_XM128, X86_FORM_VPMULLD_X_X_XM128, X86_FORM_VPAND_X_X_XM128, X86_FORM_VPOR_X_X_XM128, X86_FORM_VPXOR_X_X_XM128 },
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        X86_FORM_VPSHUFD_X_XM128_IMM8,
+        X86_FORM_VPCMPEQD_X_X_XM128,
+    },
+    {
+        X86_FORM_VMOVDQA_Y_YM256,
+        { X86_FORM_VPADDD_Y_Y_YM256, X86_FORM_VPSUBD_Y_Y_YM256, X86_FORM_VPMULLD_Y_Y_YM256, X86_FORM_VPAND_Y_Y_YM256, X86_FORM_VPOR_Y_Y_YM256, X86_FORM_VPXOR_Y_Y_YM256 },
+        X86_FORM_NONE,
+        { X86_FORM_NONE, X86_FORM_NONE },
+        X86_FORM_NONE,
+        X86_FORM_VPBROADCASTD_Y_XM32,
+        X86_FORM_VPCMPEQD_Y_Y_YM256,
     },
 };
 
-// A width no vector has gets no form (X86_FORM_NONE), which no target allows, rather than another width's.
-static const Tier1SelectVectorForms* tier1_select_vector_forms(uint32_t width)
+// A width no vector has gets no form (X86_FORM_NONE), which no target allows, rather than another width's; a 64-byte
+// vector's are EVEX's whatever `vex` is (only AVX512F has zmm registers).
+static const Tier1SelectVectorForms* tier1_select_vector_forms(uint32_t width, bool vex)
 {
-    return &tier1_select_vector_forms_table[width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3];
+    return &tier1_select_vector_forms_table[vex && width == 16 ? 4 : vex && width == 32 ? 5 : width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3];
 }
 
 // movaps between two xmm registers: a whole register's copy, which unlike movss's and movsd's doesn't merge into its
@@ -829,10 +882,11 @@ static X86Instruction tier1_select_float_move(uint8_t destination, uint8_t sourc
 }
 
 // A copy of the vector class's value of `width` bytes between two of its registers (#141): a floating value's and a
-// 16-byte vector's movaps, and a wider vector's vmovdqa64 of its ymm or zmm register.
-static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width)
+// 16-byte vector's movaps, and a wider vector's vmovdqa64 of its ymm or zmm register; where `vex` (a target without
+// AVX512VL, #1281) a 32-byte vector's vmovdqa of its ymm register.
+static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width, bool vex)
 {
-    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width)->move, destination, source);
+    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width, vex)->move, destination, source);
 }
 
 // TIER1_RULE_INTRINSIC's record: pdep and pext read their source from vvvv and their mask from rm, bzhi and bextr their
@@ -1224,34 +1278,43 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     // A floating value's registers are xmm registers (#141): a node's register is its location (class 1's), whose low
     // four bits are the xmm register; a memory operand's base and index, an integer's and the scratch register are
     // general registers.
-    // A vector's (#141): its EVEX forms at its width, three operands, the destination any of the class's registers.
+    // A vector's (#141): its EVEX forms at its width, three operands, the destination any of the class's registers; or at
+    // a target without AVX512VL (`vex`, #1281) its VEX forms, the same three operands.
     case TIER1_RULE_VECTOR:
     {
-        const Tier1SelectVectorForms* forms = tier1_select_vector_forms(width);
+        const bool vex = holes->vex && width < 64;
+        const Tier1SelectVectorForms* forms = tier1_select_vector_forms(width, vex);
         const uint8_t x = destination & 15;
         const uint8_t left = holes->left & 15;
         const uint8_t right = holes->right & 15;
         const uint32_t kind = holes->scale;
         if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
         {
+            // VEX's zero is vpxor of the xmm register, which zeroes the ymm one's upper half too; its ones vpcmpeqd.
+            const bool ones = kind == BUSTER_TIER1_VECTOR_ONES;
             const X86Instruction record = {
-                .form = kind == BUSTER_TIER1_VECTOR_ZERO ? forms->binary[5] : forms->ternary,
+                .form = !ones ? (vex ? X86_FORM_VPXOR_X_X_XM128 : forms->binary[5]) : vex ? forms->ones : forms->ternary,
                 .reg = x,
                 .vvvv = x,
                 .rm = x,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
-                .immediate = kind == BUSTER_TIER1_VECTOR_ZERO ? 0 : 0xff,
+                .immediate = ones && !vex ? 0xff : 0,
             };
             tier1_select_append(&result, record);
         }
         else if (kind == BUSTER_TIER1_VECTOR_SPLAT)
         {
+            // VEX broadcasts from an xmm register's low doubleword, which vmovd puts the lane in.
             tier1_select_request(&result, X86_OPERATION_MOV, 4, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(uint32_t)holes->immediate, 0);
-            tier1_select_append(&result, tier1_select_register_record(forms->broadcast, x, BUSTER_TIER1_SELECT_SCRATCH));
+            if (vex)
+            {
+                tier1_select_append(&result, tier1_select_register_record(X86_FORM_VMOVD_X_RM32, x, BUSTER_TIER1_SELECT_SCRATCH));
+            }
+            tier1_select_append(&result, tier1_select_register_record(forms->broadcast, x, vex ? x : BUSTER_TIER1_SELECT_SCRATCH));
         }
         else if (kind == BUSTER_TIER1_VECTOR_COPY && x != left)
         {
-            tier1_select_append(&result, tier1_select_class_move(x, left, width));
+            tier1_select_append(&result, tier1_select_class_move(x, left, width, vex));
         }
         else if (kind == BUSTER_TIER1_VECTOR_BINARY || kind == BUSTER_TIER1_VECTOR_NOT)
         {
@@ -1379,7 +1442,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = destination & 15;
-        record.form = tier1_select_float_forms(width)->load;
+        record.form = tier1_select_class_forms(width, holes->vex)->load;
         tier1_select_append(&result, record);
         break;
     }
@@ -1388,7 +1451,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         X86Instruction record = holes->memory;
         record.reg = holes->right & 15;
-        record.form = tier1_select_float_forms(width)->store;
+        record.form = tier1_select_class_forms(width, holes->vex)->store;
         tier1_select_append(&result, record);
         break;
     }
@@ -2502,11 +2565,33 @@ static X86Instruction tier1_select_row_rename(X86Instruction placed, X86Instruct
     return placed;
 }
 
+// Whether a machine row names a floating role (FLOATING(j) or FLOATING_RESULT) in a VEX or legacy form's vector field
+// (#1281: F16C's conversions), which only a register below 16 can be: the CFG consumer places such a row's floating roles
+// below 16 (tier1_emit_cfg_row), as it places every row's at a target without AVX512VL.
+static bool tier1_select_row_low_floating(const Tier0Operation* row)
+{
+    bool low = false;
+    for (uint32_t r = 0; r < row->record_count; r += 1)
+    {
+        X86Instruction record = row->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        const bool evex = x86_form_description(record.form)->family == BUSTER_X86_FAMILY_EVEX;
+        for (uint32_t k = 0; k < fields.count; k += 1)
+        {
+            low |= !evex && tier0_vector_register_class(fields.classes[k]) && *fields.bytes[k] >= BUSTER_TIER0_ROLE_FLOATING(0);
+        }
+    }
+    return low;
+}
+
 // Whether the CFG consumer places a row call's machine row (#141, TIER1_RULE_ROW): a row Tier 0 places (tier0_operation_valid,
 // which needs x86_semantics.c's tables). Its vector roles are zmm16 and on, which no value takes, and its floating ones
 // past them, below 32, where every record that names a vector register is an EVEX form's; a row with a VEX or legacy
 // form's vector register (tier0_operation_reach's vex_vectors) takes a run of free xmm registers below 16 for its
-// vector roles where it runs (tier1_emit_cfg_row), and names no floating role in such a form.
+// vector roles where it runs (tier1_emit_cfg_row). A row with a floating role in such a form (#1281,
+// tier1_select_row_low_floating) takes free xmm registers below 16 for its written floating operands and its result, and
+// so does every row at a target without AVX512VL: its vector roles and its floating ones fit in 16 registers. Whether as
+// many are free where it runs is the CFG consumer's to find (TIER1_EMIT_UNSUPPORTED where they aren't).
 static bool tier1_select_row_supported(const IrFunction* function, uint32_t node)
 {
     const IrCall* call = node < function->instruction_count && function->op[node] == IR_CALL ? &function->calls[function->b[node]] : 0;
@@ -2520,18 +2605,14 @@ static bool tier1_select_row_supported(const IrFunction* function, uint32_t node
     }
     const Tier0Reach reach = supported ? tier0_operation_reach(row) : (Tier0Reach){ 0, 0, 0 };
     supported = supported && (reach.vex_vectors != 0 ? reach.vectors <= 15 : 16 + reach.vectors + floating <= 32);
+    supported = supported && (!tier1_select_row_low_floating(row) || reach.vectors + floating <= 16);
     for (uint32_t r = 0; supported && r < row->record_count; r += 1)
     {
-        // A floating role in a VEX or legacy form's XMM field would need a register below 16 of its own.
+        // An /is4 operand's register is a vector role's, which a VEX form names below 16 alone.
         X86Instruction record = row->records[r];
         const Tier0Fields fields = tier0_operation_fields(&record);
         const bool evex = x86_form_description(record.form)->family == BUSTER_X86_FAMILY_EVEX;
-        for (uint32_t k = 0; supported && k < fields.count; k += 1)
-        {
-            const uint8_t role = *fields.bytes[k];
-            supported = evex || !tier0_vector_register_class(fields.classes[k]) || role < BUSTER_TIER0_ROLE_FLOATING(0);
-        }
-        supported = supported && (evex || !fields.is4 || reach.vex_vectors != 0);
+        supported = evex || !fields.is4 || reach.vex_vectors != 0;
     }
     return supported;
 }
