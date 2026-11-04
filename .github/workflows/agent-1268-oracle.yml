@@ -1,0 +1,28 @@
+name: Issue 1268 GNU group oracle
+on:
+  push:
+    branches: [agent/1268-comdat-oracle]
+    paths: [.github/workflows/agent-1268-oracle.yml]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Probe GNU assembler group signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          as --version | head -1
+          for binding in '' '.globl sig' '.weak sig' '.local sig'; do
+            printf '%s\n.section .debug_macro,"G",@progbits,sig,comdat\n.long sig\n.section .debug_macro,"G",@progbits,other,comdat\n.byte 2\n.section .debug_macro,"G",@progbits,sig,comdat\n.byte 3\n' "$binding" > /tmp/group.s
+            echo "=== binding: $binding ==="
+            as --64 /tmp/group.s -o /tmp/group.o
+            readelf -W -S -s -r -g /tmp/group.o
+          done
+          printf '.section .text.one,"axG",@progbits,defined,comdat\n.weak defined\n.type defined,@function\ndefined: ret\n.section .rodata.one,"aG",@progbits,defined,comdat\n.quad defined\n' > /tmp/defined.s
+          as --64 /tmp/defined.s -o /tmp/defined.o
+          readelf -W -S -s -r -g /tmp/defined.o
+          printf '.section .debug_macro,"G",@progbits,sig\n.byte 1\n.section .debug_macro,"G",@progbits,sig,comdat\n.byte 2\n' > /tmp/conflict.s
+          as --64 /tmp/conflict.s -o /tmp/conflict.o && readelf -W -g /tmp/conflict.o
