@@ -9,7 +9,8 @@
 //
 // Layout: the containers (Strings, Values, Table with a hash index), process runs
 // (run_process, perf_stat), the run commands (command_time, command_stat,
-// command_sweep, command_metrics, command_fanout), the line parsers (csv_split,
+// command_sweep, command_metrics, command_fanout) and command_check, which reads a
+// sweep's or a metrics run's records without running, the line parsers (csv_split,
 // symbols_parse_line, branches_parse_token, memory_parse_line, stages_parse_line),
 // the reducers (command_summarize, command_stages, command_symbols,
 // command_branches, command_memory, command_topdown), command_generate_generic and
@@ -936,6 +937,66 @@ static int command_metrics(int argc, char** argv)
                 }
             }
         }
+    }
+    return result;
+}
+
+// check OUT sweep|metrics FROM TO RUNS [--retry-failed]: the state of a sweep's or
+// a metrics run's entries [FROM, TO) without running anything. Prints each failed
+// run and returns 0 when every run of every entry has its record and none failed,
+// 1 when every run has its record and some failed, 3 when a run has no record.
+// --retry-failed first removes each failed run's record and outputs, so that they
+// count as missing (3) and the next sweep or metrics command runs them again.
+static int command_check(int argc, char** argv)
+{
+    int result = 0;
+    bool sweep = argc >= 7 && strcmp(argv[3], "sweep") == 0;
+    bool metrics = argc >= 7 && strcmp(argv[3], "metrics") == 0;
+    if (!sweep && !metrics)
+    {
+        fprintf(stderr, "usage: uarch check OUT sweep|metrics FROM TO RUNS [--retry-failed]\n");
+        result = 2;
+    }
+    else
+    {
+        size_t from = (size_t)atol(argv[4]);
+        size_t to = (size_t)atol(argv[5]);
+        int runs = atoi(argv[6]);
+        bool retry = argc > 7 && strcmp(argv[7], "--retry-failed") == 0;
+        bool missing = false;
+        bool failed = false;
+        for (size_t i = from; i < to; i += 1)
+        {
+            for (int run = 0; run < runs; run += 1)
+            {
+                char status[BUSTER_UARCH_PATH_BYTES];
+                format_into(status, sizeof(status), "%s/%s/%04zu.r%d.status", argv[2], argv[3], i, run);
+                if (!file_exists(status))
+                {
+                    missing = true;
+                }
+                else if (recorded_status(status, BUSTER_UARCH_STATUS_FAILED_FIELD) != 0)
+                {
+                    printf("%s: failed\n", status);
+                    if (retry)
+                    {
+                        const char* suffixes[] = { "status", "csv", "log", "f0.csv", "f1.csv" };
+                        for (size_t k = 0; k < sizeof(suffixes) / sizeof(suffixes[0]); k += 1)
+                        {
+                            char path[BUSTER_UARCH_PATH_BYTES];
+                            format_into(path, sizeof(path), "%s/%s/%04zu.r%d.%s", argv[2], argv[3], i, run, suffixes[k]);
+                            unlink(path);
+                        }
+                        missing = true;
+                    }
+                    else
+                    {
+                        failed = true;
+                    }
+                }
+            }
+        }
+        result = missing ? 3 : (failed ? 1 : 0);
     }
     return result;
 }
@@ -2218,6 +2279,25 @@ static void test_resume(void)
         format_into(csv, sizeof(csv), "%s/counted.csv", directory);
         write_text_atomic(csv, "1072229971,,ls_not_halted_cyc:u,246891943,100.00,,\n");
         expect(run_failed(refused, csv), "resume: a counted run with a nonzero status failed");
+        // check: two entries, two runs each; a missing record, then a failed one.
+        format_into(path, sizeof(path), "%s/sweep", directory);
+        make_directory(path);
+        RunResult good = { 0 };
+        const char* records[] = { "0000.r0", "0000.r1", "0001.r0" };
+        for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); i += 1)
+        {
+            format_into(path, sizeof(path), "%s/sweep/%s.status", directory, records[i]);
+            write_status(path, good, false);
+        }
+        char* check[] = { "uarch", "check", directory, "sweep", "0", "2", "2", NULL };
+        expect(command_check(7, check) == 3, "check: a run without its record is missing");
+        format_into(path, sizeof(path), "%s/sweep/0001.r1.status", directory);
+        write_status(path, refused, true);
+        expect(command_check(7, check) == 1, "check: a recorded failure fails the chunk, though every run has its record");
+        char* retry[] = { "uarch", "check", directory, "sweep", "0", "2", "2", "--retry-failed", NULL };
+        expect(command_check(8, retry) == 3 && !file_exists(path) && command_check(7, check) == 3, "check: --retry-failed removes the failed run's record");
+        write_status(path, good, false);
+        expect(command_check(7, check) == 0, "check: every run recorded, none failed");
         nftw(directory, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
     }
 }
@@ -2281,6 +2361,10 @@ int main(int argc, char** argv)
     {
         result = command_topdown(argc, argv);
     }
+    else if (strcmp(command, "check") == 0)
+    {
+        result = command_check(argc, argv);
+    }
     else if (strcmp(command, "generate-generic") == 0)
     {
         result = command_generate_generic(argc, argv);
@@ -2291,7 +2375,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        fprintf(stderr, "usage: uarch time|stat|sweep|metrics|fanout|summarize|stages|symbols|branches|memory|topdown|generate-generic|test ...\n");
+        fprintf(stderr, "usage: uarch time|stat|sweep|metrics|check|fanout|summarize|stages|symbols|branches|memory|topdown|generate-generic|test ...\n");
     }
     return result;
 }

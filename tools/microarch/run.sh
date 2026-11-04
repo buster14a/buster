@@ -39,12 +39,16 @@
 #                selections for AB_BUILDS (#1341)
 #   summarize    the tables of every step's raw files
 # SWEEP_WORKLOADS and METRIC_WORKLOADS (default "sq-c sq-syn") and the profile's
-# VARIANTS, SWEEP_VARIANTS and SELF_VARIANTS narrow a run. Each step, or each chunk
+# VARIANTS, SWEEP_VARIANTS and SELF_VARIANTS narrow a run. A sweep or metrics chunk
+# with a recorded failure fails the step again on every rerun; RETRY_FAILED=1 runs
+# its failed entries again. A build is reused only when its .commit file names the
+# commit asked for (build-commit) or the checkout's own (setup). REPOSITORY names
+# the checkout (this one by default). Each step, or each chunk
 # of one, takes the host's lock or core grant itself, for that chunk alone; no step
 # needs another's output except summarize.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repository=$(cd "$here/../.." && pwd)
+repository=${REPOSITORY:-$(cd "$here/../.." && pwd)}
 profile=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 shift
 # shellcheck source=/dev/null
@@ -105,6 +109,27 @@ group_spec()
     esac
 }
 COUNTER_GROUPS="basic td1 td2 br fe mem"
+
+# One perf stat measurement around a command, as a unit. OUTPUT (perf's CSV)
+# counts only once OUTPUT.done exists, written after perf and the measured command
+# both succeeded. A measurement without it runs again whole. When LABEL names the
+# command's fanout batches, their completion records are removed first, so that the
+# batches run inside the new measurement: otherwise uarch fanout would skip them
+# and perf would measure an empty wrapper over the old CSV.
+measure()
+{
+    local output=${1:?a measurement output} label=$2 record; shift 2
+    [[ -f $output.done ]] && return 0
+    if [[ -n $label ]]; then
+        for record in "$(dirname "$output")"/logs/"$label".r*.fanout; do
+            [[ -f $record ]] && rm -f -- "${record:?}" "${record%.fanout}.log"
+        done
+    fi
+    rm -f -- "${output:?}"
+    "$@" || return 1
+    [[ -s $output ]] || return 1
+    : > "$output.done.tmp" && mv -- "$output.done.tmp" "$output.done"
+}
 
 # ---------------------------------------------------------------------------
 # Steps inside a hold (pinned to one CPU).
@@ -392,16 +417,16 @@ inner_energy()
 {
     local cpu=$1 v loop dir="$OUT/energy" status=0
     mkdir -p "$dir"
-    perf stat -a -x, -o "$dir/idle.csv" -e power/energy-pkg/ -- sleep 3 2>/dev/null || status=1
+    measure "$dir/idle.csv" "" perf stat -a -x, -o "$dir/idle.csv" -e power/energy-pkg/ -- sleep 3 || status=1
     for v in $VARIANTS; do
         workload "$v" sq-c
         printf -v loop '%q ' "${WL[@]}"
         # Each loop stops at its first failed compile; perf passes that status on.
-        perf stat -a -x, -o "$dir/$v.pkg.csv" -e power/energy-pkg/ -- \
+        measure "$dir/$v.pkg.csv" "" perf stat -a -x, -o "$dir/$v.pkg.csv" -e power/energy-pkg/ -- \
             bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
-        perf stat -C "$cpu" -x, -o "$dir/$v.freq.csv" -e msr/aperf/,msr/mperf/,msr/tsc/,cycles,instructions -- \
+        measure "$dir/$v.freq.csv" "" perf stat -C "$cpu" -x, -o "$dir/$v.freq.csv" -e msr/aperf/,msr/mperf/,msr/tsc/,cycles,instructions -- \
             bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
-        perf stat -a --per-core -x, -o "$dir/$v.core.csv" -e power_core/energy-core/ -- \
+        measure "$dir/$v.core.csv" "" perf stat -a --per-core -x, -o "$dir/$v.core.csv" -e power_core/energy-core/ -- \
             bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
     done
     return $status
@@ -440,9 +465,8 @@ inner_scaling()
         local command=("${WL[@]}")
         command[${#command[@]}-3]="$SCRATCH/fan-{i}.o"
         for r in 0 1 2 3; do
-            # The batch's completion record, not its energy file, says it ran.
-            [[ -f $dir/logs/fanout$k-r$r.r0.fanout ]] && continue
-            perf stat -a -x, -o "$dir/fanout-energy-$k.r$r.csv" -e power/energy-pkg/ -- \
+            # The batch and its energy are one measurement.
+            measure "$dir/fanout-energy-$k.r$r.csv" "fanout$k-r$r" perf stat -a -x, -o "$dir/fanout-energy-$k.r$r.csv" -e power/energy-pkg/ -- \
                 "$UARCH" fanout "$dir" "fanout$k-r$r" 1 "$list" -- "${command[@]}" || status=1
         done
     done
@@ -454,14 +478,16 @@ inner_uncore()
     local cpus=$1 dir="$OUT/uncore" loop status=0
     mkdir -p "$dir"
     local events="amd_umc/umc_cas_cmd.rd/,amd_umc/umc_cas_cmd.wr/,amd_umc/umc_act_cmd.all/,amd_umc/umc_mem_clk/"
-    perf stat -a -x, -o "$dir/idle.csv" -e "$events" -- sleep 2 || status=1
+    measure "$dir/idle.csv" "" perf stat -a -x, -o "$dir/idle.csv" -e "$events" -- sleep 2 || status=1
     workload "$NATIVE" sq-c
     printf -v loop '%q ' "${WL[@]}"
-    perf stat -a -x, -o "$dir/single.csv" -e "$events" -- taskset -c "$(single_cpu)" \
+    measure "$dir/single.csv" "" perf stat -a -x, -o "$dir/single.csv" -e "$events" -- taskset -c "$(single_cpu)" \
         bash -c "for i in 1 2 3 4 5 6 7 8; do $loop > /dev/null 2>&1 || exit 1; done" || status=1
     local command=("${WL[@]}")
     command[${#command[@]}-3]="$SCRATCH/fan-{i}.o"
-    perf stat -a -x, -o "$dir/fanout8.csv" -e "$events" -- "$UARCH" fanout "$dir" fanout8 2 "$cpus" -- "${command[@]}" || status=1
+    # The two batches and their counters are one measurement: a rerun repeats both.
+    measure "$dir/fanout8.csv" fanout8 perf stat -a -x, -o "$dir/fanout8.csv" -e "$events" -- \
+        "$UARCH" fanout "$dir" fanout8 2 "$cpus" -- "${command[@]}" || status=1
     return $status
 }
 
@@ -518,6 +544,17 @@ inner_multi()
 # ---------------------------------------------------------------------------
 # Outer steps.
 
+# The checkout's commit, with "-dirty" when tracked files differ from it.
+checkout_identity()
+{
+    local head
+    head=$(git -C "$repository" rev-parse HEAD) || return 1
+    if [[ -n $(git -C "$repository" status --porcelain --untracked-files=no) ]]; then
+        head+=-dirty
+    fi
+    echo "$head"
+}
+
 # The run root from this checkout: the frozen corpus (CORPUS, the 9700X's copy, or
 # fetched into ROOT), each BUILD_ARCHES build of the checkout, the predefines and
 # the preprocessed main.c. Copy bin/ and self-main.i from one host to the others to
@@ -534,12 +571,21 @@ step_setup()
     fi
     ln -sfn "$corpus" corpus
     mkdir -p bin
+    local identity
+    identity=$(checkout_identity) || exit 2
     for arch in ${BUILD_ARCHES:-znver4 znver5 x86-64}; do
-        [[ -x bin/compiler-$arch ]] && continue
+        if [[ -x bin/compiler-$arch ]]; then
+            # A build of another commit (or of no recorded one) is never measured as this checkout's.
+            if [[ $(cat "bin/compiler-$arch.commit" 2>/dev/null) != "$identity" ]]; then
+                log "setup: bin/compiler-$arch was built from '$(cat "bin/compiler-$arch.commit" 2>/dev/null)', the checkout is $identity: remove it to rebuild"
+                exit 2
+            fi
+            continue
+        fi
         log "setup: build $arch"
         hold_build env BUSTER_HOST_ARCH="$arch" "$repository/build.sh" > "$SCRATCH/build-$arch.log" 2>&1 || { log "setup: build $arch failed"; exit 2; }
         cp "$repository/build/compiler" "bin/compiler-$arch"
-        git -C "$repository" rev-parse HEAD > "bin/compiler-$arch.commit"
+        echo "$identity" > "bin/compiler-$arch.commit"
     done
     [[ -s predefines-znver5.h ]] || clang -dM -E -march=znver5 -fwrapv -funsigned-char -x c /dev/null > predefines-znver5.h
     if [[ ! -s self-main.i ]]; then
@@ -549,18 +595,33 @@ step_setup()
     log "setup: $(ls bin | tr '\n' ' ')"
 }
 
-# bin/compiler-NAME-ARCH for each ARCH, built from `git archive COMMIT`.
+# bin/compiler-NAME-ARCH for each ARCH, built from `git archive COMMIT`. COMMIT is
+# resolved to its full id first; a tree or build already under NAME is reused only
+# when it holds that commit, and anything else fails the step instead of measuring
+# another commit under NAME.
 step_build_commit()
 {
-    local name=$1 commit=$2 arch tree; shift 2
+    local name=${1:?a build name} commit arch tree; shift
+    commit=$(git -C "$repository" rev-parse --verify "${1:?a commit}^{commit}") || { log "build-commit: no commit $1"; exit 2; }
+    shift
     tree=$ROOT/trees/$name
+    if [[ -f $tree/COMMIT && $(cat "$tree/COMMIT") != "$commit" ]]; then
+        log "build-commit: $name's tree holds $(cat "$tree/COMMIT"), not $commit: choose another name or remove $tree"
+        exit 2
+    fi
     if [[ ! -f $tree/COMMIT ]]; then
         mkdir -p "$tree"
         git -C "$repository" archive "$commit" | tar -x -C "$tree" || exit 2
-        git -C "$repository" rev-parse "$commit" > "$tree/COMMIT"
+        echo "$commit" > "$tree/COMMIT"
     fi
     for arch in "$@"; do
-        [[ -x bin/compiler-$name-$arch ]] && continue
+        if [[ -x bin/compiler-$name-$arch ]]; then
+            if [[ $(cat "bin/compiler-$name-$arch.commit" 2>/dev/null) != "$commit" ]]; then
+                log "build-commit: bin/compiler-$name-$arch was built from '$(cat "bin/compiler-$name-$arch.commit" 2>/dev/null)', not $commit: remove it to rebuild"
+                exit 2
+            fi
+            continue
+        fi
         log "build-commit: $name $arch ($(cat "$tree/COMMIT"))"
         hold_build env BUSTER_HOST_ARCH="$arch" "$tree/build.sh" > "$SCRATCH/build-$name-$arch.log" 2>&1 || { log "build-commit: $name $arch failed"; exit 2; }
         cp "$tree/build/compiler" "bin/compiler-$name-$arch"
@@ -610,39 +671,48 @@ step_env()
     log "env: $(wc -l < "$dir/core-events.txt") core events, $(wc -l < "$dir/metrics.txt") metrics"
 }
 
-# The chunk [FROM, FROM + CHUNK) is done when its last event's last run is.
-chunk_done()
+# Runs the chunks of a sweep or metrics step that aren't complete. uarch check reads
+# every run's record of the chunk: a complete chunk is skipped, a chunk with a
+# recorded failure fails the step (RETRY_FAILED=1 removes the failed runs' records
+# and runs them again), and an incomplete one is run under the hold.
+run_chunks()
 {
-    local dir=$1 from=$2 chunk=$3 count=$4 last
-    last=$((from + chunk < count ? from + chunk - 1 : count - 1))
-    [[ -f $dir/$(printf '%04d' "$last").r1.status ]]
+    local kind=$1 directory=$2 count=$3 chunk=$4 variant=$5 workload=$6 from to state retry=()
+    [[ ${RETRY_FAILED:-0} == 1 ]] && retry=(--retry-failed)
+    for ((from = 0; from < count; from += chunk)); do
+        to=$((from + chunk < count ? from + chunk : count))
+        "$UARCH" check "$directory" "$kind" "$from" "$to" 2 "${retry[@]}" > "$SCRATCH/check.txt"
+        state=$?
+        case $state in
+            0) continue ;;
+            1)
+                log "$kind $variant $workload $from: $(grep -c . "$SCRATCH/check.txt") runs failed before (RETRY_FAILED=1 runs them again)"
+                return 1 ;;
+            3)
+                log "$kind $variant $workload $from"
+                held "$kind" "$variant" "$workload" "$from" "$to" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
 }
 
 step_sweep()
 {
-    local v w n from
+    local v w n
     n=$(wc -l < "$OUT/env/core-events.txt")
     for v in $SWEEP_VARIANTS; do
         for w in ${SWEEP_WORKLOADS:-sq-c sq-syn}; do
-            for ((from = 0; from < n; from += SWEEP_CHUNK)); do
-                chunk_done "$OUT/sweep-$v-$w/sweep" "$from" "$SWEEP_CHUNK" "$n" && continue
-                log "sweep $v $w $from"
-                held sweep "$v" "$w" "$from" $((from + SWEEP_CHUNK)) || return 1
-            done
+            run_chunks sweep "$OUT/sweep-$v-$w" "$n" "$SWEEP_CHUNK" "$v" "$w" || return 1
         done
     done
 }
 
 step_metrics()
 {
-    local w n from
+    local w n
     n=$(wc -l < "$OUT/env/metrics.txt")
     for w in ${METRIC_WORKLOADS:-sq-c sq-syn}; do
-        for ((from = 0; from < n; from += METRIC_CHUNK)); do
-            chunk_done "$OUT/metrics-$NATIVE-$w/metrics" "$from" "$METRIC_CHUNK" "$n" && continue
-            log "metrics $w $from"
-            held metrics "$NATIVE" "$w" "$from" $((from + METRIC_CHUNK)) || return 1
-        done
+        run_chunks metrics "$OUT/metrics-$NATIVE-$w" "$n" "$METRIC_CHUNK" "$NATIVE" "$w" || return 1
     done
 }
 

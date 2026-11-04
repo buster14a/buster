@@ -10,7 +10,13 @@
 #   differs, fails a variant whose command fails without hashing its stale output,
 #   and fails differing diagnostics unless VALIDATE_DIAGNOSTICS=warn;
 # - a profile whose perf record fails (leaving a partial perf.data) or whose
-#   reducer fails leaves no .done marker and no table, and a rerun records it.
+#   reducer fails leaves no .done marker and no table, and a rerun records it;
+# - a sweep or metrics chunk with a recorded failure fails every rerun, and
+#   RETRY_FAILED=1 runs the failed entries again;
+# - a finished uncore measurement isn't measured again, and an interrupted one
+#   runs its fanout batches again inside the new measurement, one row per batch;
+# - build-commit refuses a name that holds another commit, and setup refuses a
+#   build of another commit than the checkout's.
 # uarch.c's own checks are `uarch test`.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -47,6 +53,7 @@ while [[ $# -gt 0 ]]; do
 done
 variant=$(basename "$0")
 variant=${variant#compiler-}
+echo "$variant" >> "$FAKE_BEHAVIOUR/../calls"
 behaviour=$(cat "$FAKE_BEHAVIOUR/$variant" 2>/dev/null)
 [[ $behaviour == fail ]] && exit 1
 case $mode in
@@ -71,7 +78,9 @@ chmod +x "$work/fake/tcc"
 
 # perf: `record` writes its -o file, then fails when behaviour/perf says "fail" (a
 # partial perf.data); `script` prints one sample of each kind the reducers read, or
-# fails when behaviour/perf says "script"; `report` prints one row.
+# fails when behaviour/perf says "script"; `report` prints one row. `stat` runs its
+# command and writes one counted line per event or metric; it exits 1, counted,
+# when its events name behaviour/stat-fail's word (a failed run, not a refusal).
 cat > "$work/fake/perf" <<'EOF'
 #!/usr/bin/env bash
 command=$1
@@ -94,6 +103,25 @@ case $command in
             *) echo "  100003 cycles:u:  d822e8 f" ;;
         esac ;;
     report) echo "    100.00%  compiler  [.] f" ;;
+    stat)
+        out=""
+        spec=""
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                -o) out=$2; shift ;;
+                -e | -M) spec+="${spec:+,}$2"; shift ;;
+                --) shift; break ;;
+            esac
+            shift
+        done
+        "$@" > /dev/null 2>&1
+        status=$?
+        : > "$out"
+        events=${spec//[\{\}]/}
+        for event in ${events//,/ }; do echo "100,,$event,1000,100.00,," >> "$out"; done
+        failing=$(cat "$FAKE_BEHAVIOUR/stat-fail" 2>/dev/null)
+        if [[ -n $failing && $spec == *"$failing"* ]]; then exit 1; fi
+        exit $status ;;
 esac
 exit 0
 EOF
@@ -113,7 +141,7 @@ FANOUT_WORKERS=1
 SWEEP_CHUNK=100
 METRIC_CHUNK=60
 PAUSE=0
-UNCORE=0
+UNCORE=${UNCORE:-0}
 hold() { "$@"; }
 hold_multi() { "$@"; }
 hold_build() { "$@"; }
@@ -177,6 +205,80 @@ run profiles
 expect '[[ $status -eq 0 ]]' "profiles: the rerun records every profile"
 expect '[[ $(ls "$results"/profiles/a/*.done | wc -l) -eq 10 ]]' "profiles: ten profiles done"
 expect '[[ $(grep -c . "$results/profiles/a/lbr.tsv") -gt 3 ]]' "profiles: the reduced tables have rows"
+
+# Sweep and metrics chunks: a recorded failure isn't skipped as done.
+reset
+mkdir -p "$results/env"
+printf 'e1\ne2\ne3\n' > "$results/env/core-events.txt"
+printf 'm1\nm2\n' > "$results/env/metrics.txt"
+echo e2 > "$work/behaviour/stat-fail"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -ne 0 ]]' "sweep: a failed event fails the step"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -ne 0 ]]' "sweep: the rerun fails again on the recorded failure, not skipped as done"
+expect 'grep -q "runs failed before" "$results/run.log"' "sweep: the recorded failure is logged"
+rm -f -- "$work/behaviour/stat-fail"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -ne 0 ]]' "sweep: without RETRY_FAILED the failed entry isn't retried"
+RETRY_FAILED=1 SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -eq 0 ]]' "sweep: RETRY_FAILED=1 runs the failed entry again"
+SWEEP_WORKLOADS=sq-c run sweep
+expect '[[ $status -eq 0 ]]' "sweep: a complete, successful chunk is skipped"
+echo m2 > "$work/behaviour/stat-fail"
+METRIC_WORKLOADS=sq-c run metrics
+METRIC_WORKLOADS=sq-c run metrics
+expect '[[ $status -ne 0 ]]' "metrics: the rerun fails again on the recorded failure"
+
+# uncore: one measurement with its batches.
+reset
+UNCORE=1 run uncore
+expect '[[ $status -eq 0 && -f $results/uncore/fanout8.csv.done ]]' "uncore: the measurement is done"
+expect '[[ $(grep -c . "$results/uncore/fanout.tsv") -eq 3 ]]' "uncore: two batches"
+calls=$(wc -l < "$work/calls")
+csv=$(sha256sum < "$results/uncore/fanout8.csv")
+UNCORE=1 run uncore
+expect '[[ $status -eq 0 && $(wc -l < "$work/calls") -eq $calls && $(sha256sum < "$results/uncore/fanout8.csv") == "$csv" ]]' "uncore: a finished measurement isn't measured again"
+rm -f -- "$results/uncore/fanout8.csv.done"
+UNCORE=1 run uncore
+expect '[[ $status -eq 0 && $(wc -l < "$work/calls") -gt $calls ]]' "uncore: an unfinished measurement runs its batches again"
+expect '[[ $(grep -c . "$results/uncore/fanout.tsv") -eq 3 ]]' "uncore: still one row per batch"
+
+# build-commit and setup on a checkout of two commits.
+reset
+repository=$work/repository
+mkdir -p "$repository"
+git -C "$repository" init -q
+cat > "$repository/build.sh" <<'EOF'
+#!/usr/bin/env bash
+cd "$(dirname "$0")" && mkdir -p build && printf '#!/bin/sh\necho %s\n' "$(cat VERSION)" > build/compiler && chmod +x build/compiler
+EOF
+chmod +x "$repository/build.sh"
+echo first > "$repository/VERSION"
+git -C "$repository" add -A && git -C "$repository" -c user.name=test -c user.email=test@test commit -q -m first
+first=$(git -C "$repository" rev-parse HEAD)
+echo second > "$repository/VERSION"
+git -C "$repository" -c user.name=test -c user.email=test@test commit -q -a -m second
+second=$(git -C "$repository" rev-parse HEAD)
+REPOSITORY=$repository run build-commit candidate "${first:0:8}" znver4
+expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-candidate-znver4") == first && $(cat "$ROOT/bin/compiler-candidate-znver4.commit") == "$first" ]]' "build-commit: builds the named commit, recorded by its full id"
+REPOSITORY=$repository run build-commit candidate "$second" znver4
+expect '[[ $status -ne 0 && $("$ROOT/bin/compiler-candidate-znver4") == first ]]' "build-commit: a name that holds another commit is refused"
+REPOSITORY=$repository run build-commit candidate "$first" znver4
+expect '[[ $status -eq 0 ]]' "build-commit: the same commit under the same name is reused"
+# Without its tree, the name's build still holds the first commit.
+rm -rf -- "${ROOT:?}/trees/candidate"
+REPOSITORY=$repository run build-commit candidate "$second" znver4
+expect '[[ $status -ne 0 && $("$ROOT/bin/compiler-candidate-znver4") == first ]]' "build-commit: a build of another commit under the name is refused"
+cp "$ROOT/bin/compiler-candidate-znver4" "$ROOT/bin/compiler-znver4"
+cp "$ROOT/bin/compiler-candidate-znver4.commit" "$ROOT/bin/compiler-znver4.commit"
+touch "$ROOT/self-main.i" "$ROOT/predefines-znver5.h"
+echo x > "$ROOT/self-main.i"
+echo x > "$ROOT/predefines-znver5.h"
+REPOSITORY=$repository CORPUS=$work BUILD_ARCHES=znver4 run setup
+expect '[[ $status -ne 0 ]]' "setup: a build of another commit than the checkout's is refused"
+rm -f -- "$ROOT/bin/compiler-znver4" "$ROOT/bin/compiler-znver4.commit"
+REPOSITORY=$repository CORPUS=$work BUILD_ARCHES=znver4 run setup
+expect '[[ $status -eq 0 && $("$ROOT/bin/compiler-znver4") == second && $(cat "$ROOT/bin/compiler-znver4.commit") == "$second" ]]' "setup: builds the checkout and records its commit"
 
 echo "microarch test.sh: $checks checks, $failures failed"
 [[ $failures -eq 0 ]]

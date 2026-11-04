@@ -20,7 +20,8 @@ traffic. It changes no host setting and needs no root. It needs
 - `uarch.c` is the runner and reducer, in C. `time`, `stat`, `sweep`, `metrics`
   and `fanout` run processes and write raw files. `summarize`, `stages`, `symbols`,
   `branches`, `memory` and `topdown` only read them, so every table can be rebuilt
-  from a record. `generate-generic N` writes #1341's `_Generic` unit, and `test`
+  from a record. `check` reads a sweep's or a metrics run's records for a range of
+  entries without running anything. `generate-generic N` writes #1341's `_Generic` unit, and `test`
   checks every parser against fixtures of perf's and the compiler's real output,
   and the resume and failure rules below.
   - **Resuming.** Every run writes its completion record after the run ends,
@@ -36,10 +37,19 @@ traffic. It changes no host setting and needs no root. It needs
     invocation. In `sweep` and `metrics`, perf's refusal of an event or metric it
     can't open (nonzero status, no counted line) is a result their tables record,
     not a failure; a counted run with a nonzero status is a failure.
+  - **Chunks.** `run.sh` asks `uarch check` about every run of a sweep or metrics
+    chunk before running it. A complete chunk is skipped. A chunk with a recorded
+    failure fails the step again on every rerun. `RETRY_FAILED=1` removes the
+    failed runs' records first, so that they run again.
 - `run.sh` holds the steps (listed in its header). Each step, or each chunk of a
   long one, takes the host's lock or core grant itself, for that chunk alone.
   Every step returns its real status; the first step that fails stops the run
   (`KEEP_GOING=1` runs the rest) and `run.sh` exits nonzero.
+  - **Measurements.** A system-wide perf measurement (package energy, APERF/MPERF,
+    UMC) is one unit with the command it measures: its CSV counts only once
+    `CSV.done` is written after both succeed. One that is unfinished runs again
+    whole. Any fanout batches it measured lose their completion records first, so
+    that they run inside the new measurement instead of being skipped under it.
 - `hosts/zen4-7940hs.sh` and `hosts/zen5-9700x.sh` hold each host's hold
   functions, CPUs, dispatch width, the event names that differ between
   generations, and chunk sizes. A new host needs a profile like these.
@@ -53,9 +63,15 @@ traffic. It changes no host setting and needs no root. It needs
   `pack.sh` copies a host's results into a buster-performance record.
 
 Check the tool and the driver before a campaign. `test.sh` runs `run.sh` on fake
-compilers, a fake perf and a fake tcc. It checks the driver's exit status and
-`KEEP_GOING`, and `validate`'s comparisons and fresh outputs. It also checks that
-a profile whose perf record or reducer fails is never marked done:
+compilers, a fake perf, a fake tcc and a two-commit fake checkout. It checks:
+
+- the driver's exit status and `KEEP_GOING`;
+- `validate`'s comparisons and fresh outputs;
+- that a profile whose perf record or reducer fails is never marked done;
+- that sweep and metrics chunks report recorded failures, and `RETRY_FAILED`;
+- that a finished `uncore` measurement is kept and an unfinished one is measured
+  again with its batches;
+- the commits `build-commit` and `setup` reuse.
 
 ```sh
 mkdir -p build/microarch
@@ -70,8 +86,11 @@ The run root is `build/microarch` unless `ROOT` names another directory. `setup`
 prepares it:
 
 - links the frozen corpus (`CORPUS`, the 9700X's copy, or `tools/ci/fetch-corpus.sh`);
-- builds this checkout for each of `BUILD_ARCHES` (default `znver4 znver5
-  x86-64`) through the host's build hold, into `bin/compiler-ARCH`;
+- builds this checkout (`REPOSITORY`, this one by default) for each of
+  `BUILD_ARCHES` (default `znver4 znver5 x86-64`) through the host's build hold,
+  into `bin/compiler-ARCH`. `bin/compiler-ARCH.commit` records the commit, with
+  `-dirty` when tracked files differ from it, and an existing build is reused only
+  when that file names the checkout's commit;
 - writes `predefines-znver5.h` and `self-main.i`, the compiler's `main.c`
   preprocessed by `bin/compiler-znver4`.
 
@@ -123,7 +142,11 @@ tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/
 | `generic-scaling` | `AB_BUILDS` on generated units of 250 to 4,000 `_Generic` selections | 3 per size |
 
 `build-commit NAME COMMIT ARCH[,ARCH...]` builds `bin/compiler-NAME-ARCH` from
-`git archive COMMIT` under the build hold, for the A/B steps:
+`git archive COMMIT` under the build hold, for the A/B steps. It resolves `COMMIT`
+to its full id first. It reuses a tree (`trees/NAME/COMMIT`) or a build
+(`bin/compiler-NAME-ARCH.commit`) only when it holds that commit; a name that
+holds another commit fails the step, so an A/B can't measure a stale build under a
+new commit's name:
 
 ```sh
 tools/microarch/run.sh tools/microarch/hosts/zen5-9700x.sh build-commit pre1049 aca9e53a znver5 build-commit m1049 e36740b8 znver5
