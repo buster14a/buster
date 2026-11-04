@@ -1,0 +1,167 @@
+diff --git a/docs/c-checker.md b/docs/c-checker.md
+index 713bc9a..5957b61 100644
+--- a/docs/c-checker.md
++++ b/docs/c-checker.md
+@@ -386,13 +386,31 @@ does, each rule checked against clang's answers on probes of it:
+   The ordinary control walk is specialized without the prefix checks.
+   Tier 0 has no loop transformation for the hints to steer.
+ - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
+-  or a compound statement's start. Its state changes nothing, since nothing
+-  here contracts `a * b + c` into a fused operation.
++  or a compound statement's start. `ON` and `OFF` override the command-line
++  contraction mode within their lexical scope; `DEFAULT` restores that mode.
++  Exiting a compound restores the enclosing setting. The optional source-token column
++  `CheckInput.fp_contracts` preserves this policy without changing constant
++  evaluation or the `FENV_ACCESS` column.
++  With the default `-ffp-contract=on`, shared object/direct lowering contracts
++  scalar `float`/`double` multiply-add/subtract expressions on FMA targets
++  (including per-function target attributes). It matches source edges, not
++  local definitions: stores, separate statements, narrowing conversions and
++  control-flow joins retain their intermediate rounding. Parentheses, no-op
++  casts, one product negation and comma prefixes preserve contraction;
++  prefixes still execute once. Compound assignments contract the right-hand
++  product. Templates defer these candidates to the ordinary worklist path.
++  Effective `off` never contracts; the `fast` modes permit broader optimization
++  but, like Clang at `-O0`, do not themselves introduce expression contractions.
++  A source `ON` still requests expression contraction under either fast default.
++  No-FMA targets retain the ordinary arithmetic. The driver regression
++  (`c_check_contract_driver_test.c`, `tests/driver/fp-contract.c`) compares
++  exact result bits with Clang at each target and mode, on both parser paths
++  and both emission paths; it reports unavailable native execution.
+ - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
+   `#pragma fenv_access(on|off)` at file scope or a compound's start updates
+   the same runtime `FENV_ACCESS` column as the STDC form, with the same
+   nested-scope restoration; `#pragma clang fp contract(on|off|fast)` retains
+-  its state (`fast` distinct) without contracting anything; and
++  the same scoped contraction policy (`fast` distinct); and
+   `#pragma float_control(precise, on)` records the precise policy already used.
+   The handler names are not macro-expanded, but their argument words are, so a
+   spelling that was a macro anywhere in the unit is refused conservatively
+ diff --git a/docs/c-preprocessor.md b/docs/c-preprocessor.md
+index 258aa9d..a8eaa50 100644
+--- a/docs/c-preprocessor.md
++++ b/docs/c-preprocessor.md
+@@ -1588,6 +1588,14 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
+ | `-mcmodel=`, `-mlong-double-64`/`80`/`128` | `__code_model_*__`, the `long double` macros |
+ | `-mfpmath=` | none, but it must agree with SSE |
+ 
++`-ffp-contract=off|on|fast|fast-honor-pragmas` is retained as ordered
++code-generation policy, without changing predefined macros. The default is
++`on`. Enabling fast/unsafe math selects `fast`; disabling it restores the
++last explicit contraction choice. Floating models reset the current mode,
++subject to the existing `-Ofast` model rule. The resolved mode is included
++in source request receipts; lexical contraction pragmas are applied by the
++checker.
++
+ The stack-protection default follows the compiler building Buster:
+ `__SSP_ALL__`, `__SSP_STRONG__` or `__SSP__` selects all, strong or ordinary
+ protection, and no such macro selects off. The supported build passes
+ diff --git a/src/buster/compiler/c_check_pragma_extensions_test.c b/src/buster/compiler/c_check_pragma_extensions_test.c
+index b8f49b3..def27cc 100644
+--- a/src/buster/compiler/c_check_pragma_extensions_test.c
++++ b/src/buster/compiler/c_check_pragma_extensions_test.c
+@@ -60,7 +60,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
+                 {
+                     required = arena.length;
+                     const bool published = valid && !input.resource && input.fp_pragma_count == BUSTER_ARRAY_LENGTH(kinds) &&
+-                                           input.fp_pragmas != 0 && input.fp_environments != 0 && input.cx_limited_ranges != 0 &&
++                                           input.fp_pragmas != 0 && input.fp_environments != 0 && input.cx_limited_ranges != 0 && input.fp_contracts != 0 &&
+                                            input.graph.fp_environments != 0;
+                     check_test_expect(test, published && scratch.length == 29, "FP extensions initialize poisoned policy storage and restore scratch");
+                     if (published)
+@@ -85,7 +85,8 @@ static void check_test_pragma_extension_history(CheckTest* test)
+                                 if (intern_length(&identifiers, name) == strlen(names[item]) && memcmp(intern_bytes(&identifiers, name), names[item], strlen(names[item])) == 0)
+                                 {
+                                     found += 1;
+-                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0,
++                                    check_test_expect(test, input.fp_environments[token] == expected[item] && input.cx_limited_ranges[token] == 0 &&
++                                                           input.fp_contracts[token] == (item == 0 ? 0 : BUSTER_PREDEFINES_CONTRACT_FAST + 1),
+                                                       "fenv_access and STDC settings share scope restoration without changing complex-range policy");
+                                 }
+                             }
+@@ -107,7 +108,7 @@ static void check_test_pragma_extension_history(CheckTest* test)
+                         untouched &= handled[pragma] == 0;
+                     }
+                     check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 &&
+-                                           input.fp_environments == 0 && input.cx_limited_ranges == 0 && input.graph.fp_environments == 0 &&
++                                           input.fp_environments == 0 && input.cx_limited_ranges == 0 && input.fp_contracts == 0 && input.graph.fp_environments == 0 &&
+                                            untouched && arena.length == 31 && scratch.length == 29,
+                                       "FP extension allocation failure publishes neither state nor handled marks");
+                 }
+ diff --git a/src/buster/compiler/c_check_request_test.c b/src/buster/compiler/c_check_request_test.c
+index e6f3dc2..4030ae2 100644
+--- a/src/buster/compiler/c_check_request_test.c
++++ b/src/buster/compiler/c_check_request_test.c
+@@ -423,6 +423,9 @@ static void check_test_request_receipts(CheckTest* test, const char* directory,
+         { "-nostdinc", "-funsigned-char", 0 },
+         { "-nostdinc", 0 },
+         { "-nostdinc", "--scalar", 0 },
++        { "-nostdinc", "-ffp-contract=off", 0 },
++        { "-nostdinc", "-ffp-contract=fast", 0 },
++        { "-nostdinc", "-ffp-contract=fast-honor-pragmas", 0 },
+     };
+     enum { SETS = BUSTER_ARRAY_LENGTH(sets) };
+     CheckRequestReceipt receipts[SETS + 2];
+@@ -461,7 +464,7 @@ static void check_test_request_receipts(CheckTest* test, const char* directory,
+             const bool same_target = target != 0 && language != 0 && zero_target != 0 && strncmp(target, zero_target, (size_t)(language - target)) == 0;
+             distinct &= s == 4 || (receipts[s].digest != receipts[0].digest && same_target);
+         }
+-        check_test_expect(test, distinct, "request: -D, -funsigned-char, --scalar, -I and the overrides each change the digest, not the target");
++        check_test_expect(test, distinct, "request: -D, -funsigned-char, --scalar, contraction modes, -I and overrides each change the digest, not the target");
+         check_test_expect(test, strstr(receipts[0].text, " overrides=path:vector,client:test") != 0 && strstr(receipts[0].text, " unwind=on debug=off ") != 0 &&
+                                 strstr(receipts[SETS + 1].text, " overrides=path:vector,client:other") != 0,
+                           "request: the receipt names -c's output requirements, the path and the client's overrides");
+ diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
+index cd11ee9..f1a37f4 100644
+--- a/src/buster/compiler/c_checker_driver_test.c
++++ b/src/buster/compiler/c_checker_driver_test.c
+@@ -6353,6 +6353,7 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
+ 
+ #include "c_check_hardening_driver_test.c"
+ #include "c_check_deep_driver_test.c"
++#include "c_check_contract_driver_test.c"
+ 
+ static int run_checker_driver_tests(int argc, char** argv)
+ {
+@@ -6879,6 +6880,10 @@ static int run_checker_driver_tests(int argc, char** argv)
+     {
+         check_test_driver_deep(&test, clang, executable, directory);
+     }
++    if (temporary && !lazy && check_test_driver_takes())
++    {
++        check_test_driver_contract(&test, clang, executable, directory);
++    }
+     for (uint32_t i = 0; temporary && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+     {
+         if (check_test_driver_takes())
+--- a/src/buster/compiler/c_check_program_contract.c
++++ b/src/buster/compiler/c_check_program_contract.c
+@@ -7,14 +7,15 @@
+ // existing X86 FMA row consumes three values in their original evaluation order. Both object and direct emission
+ // use this lowering. Included after the operand, instruction and operation-table helpers, before compound updates.
+ 
+-// A lexical override is mode + 1; zero restores the command-line default. Clang's fast ignores contraction pragmas.
++// A lexical override is mode + 1; zero restores the command-line default. Source ON requests expression contraction
++// even with a fast command-line default, as Clang's -O0 emission does.
+ // Tier 0 implements the expression contractions of on. The fast modes permit broader optimization but, like Clang
+ // -O0, do not introduce expression fmuladd operations themselves; they do not turn on unsafe cross-statement folding.
+ static uint8_t check_lower_contract_mode(const CheckLowerWriter* writer, uint32_t node)
+ {
+     const CheckInput* input = writer->program->input;
+     uint8_t mode = writer->program->fp_contract;
+-    if (mode != BUSTER_PREDEFINES_CONTRACT_FAST && input->fp_contracts != NULL)
++    if (input->fp_contracts != NULL)
+     {
+         const uint32_t token = input->graph.tokens[node];
+         const uint8_t override = token < input->token_count ? input->fp_contracts[token] : 0;
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -303,7 +303,7 @@
+     bool asm_helpers;
+     uint32_t helper_forms;
+     X86Target target;
+-    // Resolved once from the ordered floating options; source-token pragmas override it except in fast mode.
++    // Resolved once from the ordered floating options; source-token pragmas override its expression policy.
+     uint8_t fp_contract;
+     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
+     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
