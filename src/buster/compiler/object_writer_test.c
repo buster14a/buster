@@ -520,7 +520,9 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
         if (symbol_valid && !reserved)
         {
             const Elf64_Shdr* defining = &view->sections[section];
-            symbol_valid = symbol->st_value <= defining->sh_size && symbol->st_size <= defining->sh_size - symbol->st_value;
+            // Its value lies within its section; its size may reach past the end, as GNU as writes one (#1115: `.size`
+            // beyond it, or `.set tail, object+2`), and the assembler's objects do (ObjectOptions.symbol_sizes).
+            symbol_valid = symbol->st_value <= defining->sh_size;
             symbol_valid = symbol_valid && (type != STT_TLS || (defining->sh_flags & SHF_TLS) != 0);
             symbol_valid = symbol_valid && (type != STT_SECTION || (symbol->st_value == 0 && symbol->st_size == 0 && symbol->st_name == 0 && binding == STB_LOCAL));
         }
@@ -2857,7 +2859,8 @@ static ObjectTestTarget object_test_target(const ObjectView* view, const Elf64_R
     const uint64_t symbol = ELF64_R_SYM(relocation->r_info);
     const Elf64_Sym* entry = &view->symbols[symbol];
     const uint64_t section = object_view_symbol_section(view, symbol);
-    const bool defined = entry->st_shndx != SHN_UNDEF;
+    // A common or absolute symbol is in no section: like an undefined one, it is its name (#1115's .comm).
+    const bool defined = entry->st_shndx != SHN_UNDEF && entry->st_shndx != SHN_COMMON && entry->st_shndx != SHN_ABS;
     const bool section_symbol = ELF64_ST_TYPE(entry->st_info) == STT_SECTION;
     ObjectTestTarget result = {
         .section = defined ? object_view_section_name(view, section) : 0,
@@ -2939,6 +2942,12 @@ static uint64_t object_test_symbol(const ObjectView* view, const char* name, con
         result = match ? i : 0;
     }
     return result;
+}
+
+// Where a symbol is: SHN_UNDEF, SHN_COMMON or SHN_ABS, which are no section, or 1 for any section.
+static uint32_t object_test_symbol_place(const Elf64_Sym* symbol)
+{
+    return symbol->st_shndx == SHN_UNDEF || symbol->st_shndx == SHN_COMMON || symbol->st_shndx == SHN_ABS ? symbol->st_shndx : 1;
 }
 
 // Compares the writer's object of a unit, without function sections, with GNU as's; false, with the first difference
@@ -3026,12 +3035,14 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
         if (type != STT_SECTION && type != STT_FILE)
         {
             const bool unnamed = object_test_unnamed(theirs, s);
-            const bool defined = b->st_shndx != SHN_UNDEF;
+            // In a section, or undefined, common (value: its alignment) or absolute, which ours must be too.
+            const uint32_t place = object_test_symbol_place(b);
+            const bool defined = place == 1;
             const char* name = object_view_string(theirs->symbol_names, theirs->symbol_names_size, b->st_name);
             const char* section = defined ? object_view_section_name(theirs, object_view_symbol_section(theirs, s)) : 0;
             const uint64_t i = object_test_symbol(ours, unnamed ? 0 : name, section, b->st_value);
             const Elf64_Sym* a = i != 0 ? &ours->symbols[i] : 0;
-            result = a != 0 && ELF64_ST_BIND(a->st_info) == ELF64_ST_BIND(b->st_info) && (a->st_shndx == SHN_UNDEF) == !defined && a->st_value == b->st_value &&
+            result = a != 0 && ELF64_ST_BIND(a->st_info) == ELF64_ST_BIND(b->st_info) && object_test_symbol_place(a) == place && a->st_value == b->st_value &&
                      (!defined || strcmp(object_view_section_name(ours, object_view_symbol_section(ours, i)), section) == 0);
             result = result && (unnamed || (ELF64_ST_TYPE(a->st_info) == type && (a->st_other & 3) == (b->st_other & 3) && a->st_size == b->st_size));
             if (!result)

@@ -452,7 +452,7 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
         }
         else
         {
-            for (uint32_t token = 0; path->input.attributes != NULL && token < path->input.token_count; token += 1)
+            for (uint32_t token = 0; check_sparse_wide_present(path->input.attributes) && token < path->input.token_count; token += 1)
             {
                 first = check_corpus_repair_warning(path, repair, token, check_diagnostic_attribute_warnings(&path->input, token), 0, first);
             }
@@ -1184,7 +1184,7 @@ static String8 check_corpus_symbol_spelling(const CheckInput* input, const Parse
 {
     String8 spelling = { .pointer = (char*)intern_bytes(identifiers, parser->tokens.names[declaration]),
                          .length = intern_length(identifiers, parser->tokens.names[declaration]) };
-    const CheckInputAttributes* attributes = input->attributes[declaration];
+    const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
         if (attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored)
@@ -1447,7 +1447,7 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
         const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
         for (uint32_t i = bodies_first; local_function && reason == CHECK_CORPUS_SYMBOL_REASONS && i < bodies_end; i += 1)
         {
-            const CheckInputAttributes* attributes = input->attributes[index->selected->program.bodies[bodies->items[i].item].declaration];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, index->selected->program.bodies[bodies->items[i].item].declaration);
             bool always_inline = false;
             for (uint32_t j = 0; attributes != 0 && j < attributes->count; j += 1)
             {
@@ -2003,11 +2003,11 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         equal = left->declarations[token] == right->declarations[token] && left->declared_types[token] == right->declared_types[token] &&
                 left->declaration_kinds[token] == right->declaration_kinds[token] && left->function_flags[token] == right->function_flags[token] &&
                 left->objects[token] == right->objects[token] &&
-                left->static_objects[token] == right->static_objects[token] && left->registers[token] == right->registers[token] &&
-                left->thread_local[token] == right->thread_local[token] && left->compound_objects[token] == right->compound_objects[token] &&
-                check_corpus_attributes_equal(left->attributes[token], right->attributes[token]) &&
-                left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
-                left->tentative[token] == right->tentative[token] && check_sparse_get(left->initializer_nodes, token) == check_sparse_get(right->initializer_nodes, token) &&
+                check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) &&
+                check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) && check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) &&
+                check_corpus_attributes_equal(check_input_attributes_at(left, token), check_input_attributes_at(right, token)) &&
+                check_input_linkage(left->declaration_bits, token) == check_input_linkage(right->declaration_bits, token) && check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) &&
+                check_input_bit(left->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) == check_input_bit(right->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) && check_sparse_get(left->initializer_nodes, token) == check_sparse_get(right->initializer_nodes, token) &&
                 check_sparse_get(left->initializer_begins, token) == check_sparse_get(right->initializer_begins, token) && check_sparse_get(left->initializer_ends, token) == check_sparse_get(right->initializer_ends, token) &&
                 left->token_nodes[token] == right->token_nodes[token] && check_sparse_get(left->evaluation_nodes, token) == check_sparse_get(right->evaluation_nodes, token) &&
                 check_sparse_get(left->string_ids, token) == check_sparse_get(right->string_ids, token) &&
@@ -2243,10 +2243,10 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
     uint32_t index = 0;
     for (uint32_t token = 0; column == 0 && token < x->token_count; token += 1)
     {
-        column = x->function_flags[token] != y->function_flags[token] ? "function_flags" : x->static_objects[token] != y->static_objects[token] ? "static_objects" :
-                 x->registers[token] != y->registers[token] ? "registers" : x->thread_local[token] != y->thread_local[token] ? "thread_local" :
-                 x->compound_objects[token] != y->compound_objects[token] ? "compound_objects" :
-                 !check_corpus_attributes_equal(x->attributes[token], y->attributes[token]) ? "attributes" : x->tentative[token] != y->tentative[token] ? "tentative" :
+        column = x->function_flags[token] != y->function_flags[token] ? "function_flags" : check_input_bit(x->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != check_input_bit(y->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) ? "static_objects" :
+                 check_input_bit(x->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) != check_input_bit(y->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? "registers" : check_input_bit(x->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(y->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) ? "thread_local" :
+                 check_input_bit(x->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != check_input_bit(y->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) ? "compound_objects" :
+                 !check_corpus_attributes_equal(check_input_attributes_at(x, token), check_input_attributes_at(y, token)) ? "attributes" : check_input_bit(x->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) != check_input_bit(y->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) ? "tentative" :
                  check_sparse_get(x->initializer_nodes, token) != check_sparse_get(y->initializer_nodes, token) ? "initializer_nodes" :
                  check_sparse_get(x->initializer_begins, token) != check_sparse_get(y->initializer_begins, token) ? "initializer_begins" : check_sparse_get(x->initializer_ends, token) != check_sparse_get(y->initializer_ends, token) ? "initializer_ends" :
                  check_sparse_get(x->body_declarations, token) != check_sparse_get(y->body_declarations, token) ? "body_declarations" : check_sparse_get(x->parameters, token) != check_sparse_get(y->parameters, token) ? "parameters" :
@@ -2327,7 +2327,7 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     while (comparable && token < x->token_count && x->declarations[token] == y->declarations[token] && x->declared_types[token] == y->declared_types[token] &&
            x->objects[token] == y->objects[token] && check_sparse_get(x->declaration_bodies, token) == check_sparse_get(y->declaration_bodies, token) && x->token_nodes[token] == y->token_nodes[token] &&
            check_sparse_get(x->evaluation_nodes, token) == check_sparse_get(y->evaluation_nodes, token) &&
-           x->declaration_kinds[token] == y->declaration_kinds[token] && x->linkage[token] == y->linkage[token] && x->defined[token] == y->defined[token])
+           x->declaration_kinds[token] == y->declaration_kinds[token] && check_input_linkage(x->declaration_bits, token) == check_input_linkage(y->declaration_bits, token) && check_input_bit(x->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) == check_input_bit(y->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED))
     {
         token += 1;
     }

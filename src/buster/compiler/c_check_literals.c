@@ -115,9 +115,11 @@ static __attribute__((noinline, cold)) void check_literal_bit_precise(const uint
     uint32_t position = 0;
     if (length >= 2 && bytes[0] == '0')
     {
+        // C2y's `0o` prefix, which clang takes in every mode, before an octal digit.
         const uint8_t next = bytes[1] | 32u;
+        const bool octal = next == 'o' && length > 2 && bytes[2] >= '0' && bytes[2] <= '7';
         radix = next == 'x' ? 16 : next == 'b' ? 2 : 8;
-        position = next == 'x' || next == 'b' ? 2 : 0;
+        position = next == 'x' || next == 'b' || octal ? 2 : 0;
     }
     unsigned __int128 value = 0;
     uint32_t digits = 0;
@@ -184,9 +186,11 @@ static inline __attribute__((always_inline)) void check_literal_integer(const ui
     uint32_t position = 0;
     if (length >= 2 && bytes[0] == '0')
     {
+        // C2y's `0o` prefix, which clang takes in every mode, before an octal digit.
         const uint8_t next = bytes[1] | 32u;
+        const bool octal = next == 'o' && length > 2 && bytes[2] >= '0' && bytes[2] <= '7';
         radix = next == 'x' ? 16 : next == 'b' ? 2 : 8;
-        position = next == 'x' || next == 'b' ? 2 : 0;
+        position = next == 'x' || next == 'b' || octal ? 2 : 0;
     }
     uint64_t value = 0;
     uint32_t digits = 0;

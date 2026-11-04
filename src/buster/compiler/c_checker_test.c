@@ -1657,25 +1657,23 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     }
     arena_pop_to(scratch, scratch_mark);
     // Each batch size by each of the vector path's orders: its regions in postorder batches, its regions by level
-    // (CheckOptions.level_order), and its memoized transitions (#1050) in node order and in windows, every hit verified
-    // against its action.
-    for (uint32_t run = partitions ? 4 : 4 * BUSTER_CHECK_BATCH; scalar_valid && run < 4 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    // (CheckOptions.level_order), and its memoized transitions (#1050), every hit verified against its action.
+    for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
-        const uint32_t batch = run / 4;
-        const uint32_t order = run % 4;
+        const uint32_t batch = run / 3;
+        const uint32_t order = run % 3;
         const CheckOptions vector_options = {
             .batch_size = batch,
             .level_order = order == 1,
-            .transitions = order >= 2,
-            .transition_windows = order == 3,
+            .transitions = order == 2,
             .verify_transitions = true,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0,
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
+                                vector.statistics.transition_verified == vector.statistics.transition_hits,
                           order == 1 ? "graph paths or level-order batch partitions differ" :
-                          order == 2 ? "graph paths or the transitions differ" :
-                          order == 3 ? "graph paths or the transitions' windows differ" : "graph paths or batch partitions differ");
+                          order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {
@@ -2231,27 +2229,7 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
 // each class's counts, among them the tokens no class's action takes.
 static __attribute__((noinline)) void check_test_expression_coverage(CheckTest* test)
 {
-    static const char* const names[BUSTER_CHECK_EXPRESSION_CODES] = {
-        [CHECK_INPUT_CODE_SCALAR] = "scalar",
-        [CHECK_INPUT_CODE_LIST] = "list",
-        [CHECK_INPUT_CODE_DROP] = "drop",
-        [CHECK_INPUT_CODE_IDENTIFIER] = "identifier",
-        [CHECK_INPUT_CODE_LITERAL] = "literal",
-        [CHECK_INPUT_CODE_PREFIX] = "prefix",
-        [CHECK_INPUT_CODE_BINARY] = "binary",
-        [CHECK_INPUT_CODE_SEPARATOR] = "separator",
-        [CHECK_INPUT_CODE_GROUP] = "group",
-        [CHECK_INPUT_CODE_CAST] = "cast",
-        [CHECK_INPUT_CODE_TERNARY] = "ternary",
-        [CHECK_INPUT_CODE_SUBSCRIPT] = "subscript",
-        [CHECK_INPUT_CODE_MEMBER] = "member",
-        [CHECK_INPUT_CODE_POSTFIX] = "postfix",
-        [CHECK_INPUT_CODE_TERMINATOR] = "terminator",
-        [CHECK_INPUT_CODE_CONDITION] = "condition",
-        [CHECK_INPUT_CODE_CALL] = "call",
-        [CHECK_INPUT_CODE_STRING] = "string",
-        [CHECK_INPUT_CODE_RETURN] = "return",
-    };
+    const char* const* names = check_input_expression_code_names;
     printf("test-checker: the coded walk's classes over the fixtures, acted/left:");
     for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
     {
@@ -2323,6 +2301,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parsers[2];
+    // The oracle's -w (parse_test_clang's): clang then skips its analysis of each function's CFG, and so its misplaced
+    // fallthrough's error (check_input_fallthrough_analyzed), which test-checker-driver compares without -w.
     const PPOptions pp_options = {
         .language = {
             .standard = fixture->standard != 0 ? fixture->standard : 2017,
@@ -2330,6 +2310,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         },
         .no_standard_includes = true,
         .semantic_pragmas = true,
+        .suppress_warnings = true,
         .predefines.char_unsigned = fixture->char_unsigned,
     };
     const ParseOptions parser_options[2] = {
@@ -2512,6 +2493,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             CheckStream stream;
             const bool rechecked = check_graph_run(&types[1].table, &input[1].graph, &output_storage[1], &scratch[1], &memoized, &stream);
             check_test_expect(test, rechecked && stream.statistics.transition_mismatches == 0 &&
+                                   stream.statistics.transition_verified == stream.statistics.transition_hits &&
                                    check_test_stream_equal(&streams[0], &stream, input[0].graph.argument_count), "source paths' transitions produce another typed stream");
             arena_pop_to(&output_storage[1], mark);
         }
@@ -6002,6 +5984,22 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
     check_test_expect(test, !check_input_target_supported(&options), "assembly input is outside the C semantic adapter");
 }
 
+// A column of `count` tokens with `attributes`' entries, for tokens 0 to `count` - 1, in its own pool in `arena`: for the
+// tests that build a CheckInput's attributes from a pointer a token. Returns a null column where the arena has no room.
+static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttributes* const* attributes, uint32_t count)
+{
+    CheckSparsePool* pool = NULL;
+    CheckSparseWide column = { 0 };
+    if (attributes != NULL && check_sparse_reserve_wide(arena, &pool, NULL, 0, &column, 1, count, false, false))
+    {
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            check_sparse_wide_set(pool, column, token, ~(uint64_t)(uintptr_t)attributes[token]);
+        }
+    }
+    return column;
+}
+
 #include "c_check_graph_test.c"
 #include "c_check_stream_columns_test.c"
 #include "c_check_builtin_graph_test.c"
@@ -6574,6 +6572,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_identifier_leaves(&test);
+                check_test_literal_values(&test);
             }
             if (check_test_takes())
             {

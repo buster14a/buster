@@ -41,6 +41,13 @@ struct CheckBuiltinCall
     const uint8_t* nan_payload;
     uint32_t nan_payload_length;
     bool nan_payload_known;
+    // Whether an explicit cast was stripped before that literal: clang's literal-only arguments (allow_runtime_check's,
+    // allow_sanitize_check's, cpu_supports' and cpu_is') refuse one, as annotation's doesn't (#1126's review).
+    bool nan_payload_cast;
+    // The objects of the functions the first argument names (the first four): __builtin_function_start takes an address of
+    // one at offset 0, as clang's getAsBuiltinConstantDeclRef evaluates its operand to a function (#1126's review).
+    uint32_t function_objects[4];
+    uint32_t function_object_count;
     bool string_literal_start;
     bool absolute_address_constant;
     bool complex_constant;
@@ -297,14 +304,17 @@ struct CheckStatistics
     uint64_t output_bytes;
     uint64_t scratch_bytes;
     // The vector path's memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
-    // (hits), those probed and not found (misses), those whose operator memoizes but an operand or argument of which holds
-    // a payload, most often a constant to fold (folds), the entries inserted and the table's entries at the end, and with
-    // CheckOptions.verify_transitions, the hits whose action gave another answer.
+    // (hits, of which those found after the batch their operands waited in ran: flushed hits), those probed and not found
+    // (misses), those whose operator memoizes but an operand or argument of which has no class, a fault or an overload set
+    // (folds), the entries inserted and the table's entries at the end, and with CheckOptions.verify_transitions, the hits
+    // checked by their actions too (verified) and those whose action gave another answer (mismatches).
     uint32_t transition_hits;
+    uint32_t transition_flushed_hits;
     uint32_t transition_misses;
     uint32_t transition_folds;
     uint32_t transition_inserts;
     uint32_t transition_entries;
+    uint32_t transition_verified;
     uint32_t transition_mismatches;
 };
 
@@ -353,6 +363,8 @@ struct CheckBuiltinMiscEffect
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    // cpu_supports's word and bit, or cpu_is's field and value (CheckBuiltinMiscResult.cpu_test).
+    uint64_t cpu_test;
 };
 
 typedef struct CheckBuiltinFloatEffect CheckBuiltinFloatEffect;
@@ -586,13 +598,9 @@ struct CheckOptions
     // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
     bool level_order;
     // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than its regions in postorder
-    // batches: opt in (the driver's --check-transitions), since on the 9700X they saved 4% of sqlite3.c's graph run, about
-    // 0.5% of its compile, and the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes
-    // none.
+    // batches: opt in (the driver's --check-transitions), since they don't save a large fraction of check-expressions, and
+    // the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
     bool transitions;
-    // With transitions, their alternative path: the ready nodes of 64-node windows keyed 16 lanes at a time in AVX-512
-    // (check_graph_transition_windows), rather than node by node, which the benchmark compares.
-    bool transition_windows;
     // Each transition hit's action run as well, its result stored and compared with the transition's
     // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
     bool verify_transitions;
@@ -784,8 +792,12 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
     return result;
 }
 
-// Always inlined (#880), as profile-guided builds do; hot caller: check_input_add_node, once per node.
-static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1, uint32_t operand2)
+// A node of `op` at `token` with operands operand0 to operand2, each NONE or an earlier node, and its columns' defaults: a
+// VALUE node takes the next leaf, which `clear` clears for its maker to fill. Without `clear` its maker writes the whole
+// leaf itself (the reader's coded walk, #1038, whose leaves are written whole, so that each isn't written twice). Always
+// inlined (#880), as profile-guided builds do; hot callers: check_graph_add and check_input_add_columns, once per node.
+static inline __attribute__((always_inline)) uint32_t check_graph_add_node(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
+                                                                           uint32_t operand2, bool clear)
 {
     uint32_t result = BUSTER_CHECK_NONE;
     const uint32_t node = graph->count;
@@ -796,14 +808,13 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
         graph->operand0[node] = operand0;
         graph->operand1[node] = operand1;
         graph->operand2[node] = operand2;
-        // A VALUE node takes the next leaf, cleared for its maker to fill.
         const bool leaf = op == CHECK_OP_VALUE;
         graph->leaf_slots[node] = leaf ? graph->leaf_count : BUSTER_CHECK_NONE;
-        if (leaf)
+        if (leaf && clear)
         {
             graph->leaves[graph->leaf_count] = (CheckValue){ 0 };
-            graph->leaf_count += 1;
         }
+        graph->leaf_count += leaf;
         graph->types[node] = 0;
         graph->members[node] = 0;
         graph->contexts[node] = 0;
@@ -826,6 +837,13 @@ static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph
         result = node;
     }
     return result;
+}
+
+// Always inlined (#880), as profile-guided builds do; hot caller: check_input_add_node, once per node.
+static inline __attribute__((always_inline)) uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, uint32_t operand0, uint32_t operand1,
+                                                                      uint32_t operand2)
+{
+    return check_graph_add_node(graph, op, token, operand0, operand1, operand2, true);
 }
 
 static bool check_graph_has_arguments(CheckOp op)
@@ -877,7 +895,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     else if ((id >= CBUILTIN_EXPECT && id <= CBUILTIN_PREFETCH) || (id >= CBUILTIN_MEMCPY && id <= CBUILTIN_ALLOCA) ||
         id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS || id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR ||
-        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_LAUNDER))
+        cbuiltin_bits(id) || cbuiltin_align(id) || id == CBUILTIN_EXPECT_WITH_PROBABILITY || (id >= CBUILTIN_CLASSIFY_TYPE && id <= CBUILTIN_COMPLEX) || cbuiltin_misc_last(id))
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
@@ -1667,15 +1685,31 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     }
     const char* name = call->info->name;
     const uint32_t length = call->info->name_length;
-    // The library builtins (c_builtin_library.c) are calls of their prototypes too, those the lowering refuses by name
-    // among them, and a listed one folds where clang folds it.
+    // The library builtins (c_builtin_library.c) are calls of their prototypes too, and a listed one folds where clang
+    // folds it.
     const bool candidate = cbuiltin_library_candidate(name, length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
     const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
-                               (candidate && (cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC || cbuiltin_library_refusal(name, length) != NULL));
+                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC) ||
+                               (candidate && cbuiltin_library_alias(name, length) != CBUILTIN_LIBRARY_COUNT);
     if (library != CBUILTIN_LIBRARY_COUNT)
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
+    }
+    if (cbuiltin_library_half(library) && result->diagnostic == CHECK_DIAG_NONE)
+    {
+        // A builtin of __fp16 (#148, c_builtin_library.c): its function type's _Float16 stands for the prototype's __fp16,
+        // which the arguments convert to (binary16's rounding is the same) and the call's value has, a folded one too.
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, action->type, &count);
+        for (uint32_t i = 0; i < count && i < action->argument_count; i += 1)
+        {
+            if (parameters[i] == BUSTER_TYPE_FLOAT16 && action->argument_conversions[i].type == BUSTER_TYPE_FLOAT16)
+            {
+                action->argument_conversions[i].type = BUSTER_TYPE_HALF;
+            }
+        }
+        result->value.type = type_unqualified(result->value.type) == BUSTER_TYPE_FLOAT16 ? BUSTER_TYPE_HALF : result->value.type;
     }
     if (ordinary_call)
     {
@@ -1923,6 +1957,12 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
             .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
             .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
+            .string_known = witness != NULL && witness->nan_payload_known,
+            .string_cast = witness != NULL && witness->nan_payload_cast,
+            .function_objects = witness != NULL ? witness->function_objects : NULL,
+            .function_object_count = witness != NULL ? witness->function_object_count : 0,
+            .string_bytes = witness != NULL ? witness->nan_payload : NULL,
+            .string_length = witness != NULL ? witness->nan_payload_length : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
@@ -1953,6 +1993,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .allocates_stack = checked.allocates_stack,
             .alignment_offset_known = checked.alignment_offset_known,
+            .cpu_test = checked.cpu_test,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_FLOAT)
@@ -3105,9 +3146,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
         const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
-                                 (options->transition_windows ?
-                                  check_graph_transition_windows(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions) :
-                                  check_graph_transitions(types, graph, stream, pure, arguments, scratch, batch_size, options->verify_transitions));
+                                 check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
         if (transitions && stream->statistics.transition_mismatches != 0)
         {
