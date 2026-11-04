@@ -745,6 +745,10 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
+    // Whether the vector path tries #624's two- and three-node fragments (check_lower_batch_expression): only where its
+    // caller asks, as its test does (c_check_program_batch_test.c). No compile does: on the 9700X, sqlite3.c's statements
+    // took 0.32 ms less without them (#1048, docs/c-lowering.md's "The vector path's fast paths").
+    bool fragments;
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
@@ -10407,8 +10411,8 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
                                     check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
                 const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
-                                     check_lower_batch_expression(writer, node);
+                const bool batched = !value_node && !plain && !simple && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
+                                     writer->type_templates != NULL && (flags & 5) == 0 && check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
                     if (!simple && !plain)

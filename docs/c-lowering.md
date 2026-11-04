@@ -229,7 +229,11 @@ module), so that tools and the comparisons below read them alike.
 
 `c_check_program_batch.c` handles reached operation fragments before the general
 task loop expands them. The original
-scalar expression expansion remains the oracle (`--scalar`).
+scalar expression expansion remains the oracle (`--scalar`). Since #1048 no
+compile takes the fragments (`CheckLowerWriter.fragments`, which only their
+test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
+saved ("The vector path's fast paths" below). The wrappers' and truth tests'
+path and the leaf path described here still run.
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -276,8 +280,8 @@ to reached expressions, and counters belong to each writer's part and are
 merged in source order, without shared counters.
 
 With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
-evaluated expression occurrences, those handled by vector operation fragments,
-their percentage, and records classified; then the evaluated nodes and the
+evaluated expression occurrences, those handled by vector operation fragments
+(0 while no compile takes them), their percentage, and records classified; then the evaluated nodes and the
 entries #1048's node templates spliced (`templates` and `template-entries`)
 with their shares of the evaluated nodes and the entries (`template-share` and
 `entry-share`), which are 0 while no compile takes the templates. This counts
@@ -900,6 +904,35 @@ way (every variant's object was the base's):
 
 Every round of the two together was below every round of the base: `lower`
 0.136 ms lower.
+
+## The vector path's fast paths (#1048)
+
+On the vector path, an expression task of a node other than a `VALUE` tried
+#624's leaf path (`check_lower_value`), its wrappers' and truth tests' path
+(`check_lower_plain`) and its fragments' path (`check_lower_batch_expression`)
+before the expansion, each of them reading its node's value again. #1235's
+run at `cc624eef`
+([run](https://github.com/buster14a/buster/actions/runs/41767977102/job/126373552471))
+left each out in turn, all three, and ran 3828a06c's lean steps (which leave
+the three out) interleaved this time, on the base with the plain calls and
+compact locals (every variant's object was the base's):
+
+| row | the base | no leaf path | no wrappers' path | no fragments | none of the three | the lean steps |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lower` | 11.780 [11.762 to 11.832] | 11.660 | 12.275 | 11.510 [11.418 to 11.579] | 11.576 | 11.799 |
+| `lower.statements` | 7.938 | 7.784 | 8.389 | 7.616 | 7.730 | 7.926 |
+
+- **The fragments** cost more than they save: without them every round was
+  lower, `lower` by 0.27 ms. No compile takes them now
+  (`CheckLowerWriter.fragments`); their test (`c_check_program_batch_test.c`)
+  still compares them with the expansion.
+- **The wrappers' and truth tests' path** saves 0.45 ms, and stays.
+- **The leaf path** cost 0.12 ms, every round; its own run on the base without
+  the fragments decides it.
+- **The lean steps**, interleaved with the base, didn't pay either: 7.926 ms of
+  statements against 7.938, and against 7.730 with the three paths left out,
+  which they also leave out. The separate runs' reading in "Lean steps in the
+  tasks' loop" stands.
 
 ## Against clang -O0's objects
 

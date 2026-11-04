@@ -1454,7 +1454,8 @@ without the option, with it, and the reference compiler.
 - **Coverage.** After the runs, with the medians, it prints the first
   `--time-stages` report's `lowering-nodes` line (every run's is the same), as
   `lowering coverage:`: the evaluated nodes and the shares #624's fragments
-  and #1048's node templates took, on the host's path.
+  and #1048's node templates took, on the host's path (no compile takes
+  either since #1048, so both are 0).
 - **Report.** It prints every run, the medians and ranges, what the option
   costs, the default against the reference, and each stage's median and range,
   ranked by elapsed time. The preprocessor's phases and the expressions' walk
