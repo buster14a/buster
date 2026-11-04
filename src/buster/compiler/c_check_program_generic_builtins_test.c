@@ -336,7 +336,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         // parentheses and casts, data of less than 256 bytes each; the buffer's size a size_t integer constant expression of
         // the layout, whatever its data's types; __builtin_os_log_format's format checks refusing a struct or a complex
         // value a specifier takes and a mask of other than 1 to 8 bytes, one after a %P without its length too (the checks go
-        // on past it, as the layout doesn't); escaped percent signs, and specifiers past the format's NUL, of no items (#1329).
+        // on past it, as the layout doesn't); escaped percent signs, and specifiers past the format's NUL, of no items (#1329);
+        // and a %P without its length whose positional width has no argument, the pointer's item alone (#1335's review).
         { .name = "generic: os_log", .source =
           "struct S { int a; };\n_Static_assert(__builtin_os_log_format_buffer_size(\"%d %s\", 1, \"x\") == 18, \"\");\n"
           "enum { E = __builtin_os_log_format_buffer_size(\"%{mask.ab}d %m\", 1) };\n_Static_assert(E == 20, \"\");\n"
@@ -349,7 +350,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "(void)__builtin_os_log_format(b, \"%d\", 1, s);\n(void)__builtin_os_log_format(b, \"%P %{mask.ab}d\", n, 1);\n"
           "return __builtin_os_log_format(b, \"%{private}s %%\", \"x\");\n}\n"
           "_Static_assert(__builtin_os_log_format_buffer_size(\"%%%%%% %d\\0%d%s\", 1) == 8, \"\");\n"
-          "_Static_assert(__builtin_os_log_format_buffer_size(\"\\0%d%d%d%d\") == 2 && __builtin_os_log_format_buffer_size(\"%% %5% %{public}% %%%%\") == 2, \"\");\n" },
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"\\0%d%d%d%d\") == 2 && __builtin_os_log_format_buffer_size(\"%% %5% %{public}% %%%%\") == 2, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%1$*2$P\", (void*)0) == 12, \"\");\n" },
         { .name = "generic: os_log of an int buffer", .source = "void* f(int b)\n{\nreturn __builtin_os_log_format(b, \"%d\", 1);\n}\n", .rejected = true },
         { .name = "generic: os_log of a pointer format", .source = "void* f(void* b, const char* s)\n{\nreturn __builtin_os_log_format(b, s);\n}\n", .rejected = true },
         { .name = "generic: os_log of a wide format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size(L\"x\");\n}\n", .rejected = true },

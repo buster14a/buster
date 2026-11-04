@@ -207,8 +207,10 @@ static bool check_os_log_length(CheckOSLogCursor* cursor)
 // The layout's next item, pushed where its items so far end: nothing else pushes on the arena during the pass, so they
 // stay one array, exactly as long as the layout (#1329: no room reserved per `%`, which a %%, a byte past the format's
 // NUL or a specifier of fewer items would leave unused). A push that fails stops the pass, its layout unknown (`full`).
+// The checks' pass, which has no arena, never adds one.
 static void check_os_log_add(CheckOSLogCursor* cursor, CheckOSLogItem item)
 {
+    assert(!cursor->checking && cursor->arena != NULL);
     CheckOSLogItem* slot = cursor->full ? NULL : BUSTER_ARENA_PUSH_ARRAY(cursor->arena, CheckOSLogItem, 1);
     cursor->items = cursor->count == 0 ? slot : cursor->items;
     assert(slot == NULL || slot == cursor->items + cursor->count);
@@ -355,9 +357,10 @@ static void check_os_log_specifier(CheckOSLogCursor* cursor)
             check_os_log_take(cursor, width.how == BUSTER_CHECK_OS_LOG_AMOUNT_ARGUMENT ? width.value : UINT32_MAX);
             check_os_log_take(cursor, precision.how == BUSTER_CHECK_OS_LOG_AMOUNT_ARGUMENT ? precision.value : UINT32_MAX);
         }
-        else if (!missing && unlengthened)
+        else if (!cursor->checking && !missing && unlengthened)
         {
-            // The handler returns before it reads the width, the privacy and the mask: the value's item alone.
+            // The layout's alone (the checks' pass adds no items): the handler returns before it reads the width, the
+            // privacy and the mask, so the value's item alone, even where the width's argument is missing (#1335's review).
             check_os_log_add(cursor, (CheckOSLogItem){ .kind = kind, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = argument });
         }
         else if (!missing && amounts)

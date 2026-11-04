@@ -735,6 +735,10 @@ static void check_builtin_misc_test_os_log(CheckBuiltinMiscTest* test)
         { "%% %5% %{public}% %%%%", 22, 0, 0, { { 0 } } },
         { "\0%d%d%d%d", 9, 4, 0, { { 0 } } },
         { "%d\0%d%d", 7, 3, 1, { { .kind = BUSTER_CHECK_OS_LOG_SCALAR, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        // A %P without its length whose positional width has no argument: the layout's pointer item alone, and no item
+        // from the checks' pass, which has no arena (#1335's review: it pushed on a null arena).
+        { "%1$*2$P", 7, 1, 1, { { .kind = BUSTER_CHECK_OS_LOG_POINTER, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 0 } } },
+        { "%2$*3$P %1$d", 12, 2, 1, { { .kind = BUSTER_CHECK_OS_LOG_POINTER, .source = BUSTER_CHECK_OS_LOG_ARGUMENT, .argument = 1 } } },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
@@ -770,8 +774,8 @@ static void check_builtin_misc_test_os_log(CheckBuiltinMiscTest* test)
                                    "a %d among 32 KiB of escaped percent signs, with more past its NUL, takes one item's room");
     // Generated formats of the parse's pieces, arguments and all, against arenas of three sizes.
     static const char* const pieces[] = {
-        "%", "%%", "d", "s", "P", "m", "*", ".", ".*", "1$", "2$", "{public}", "{private, mask.ab}", "{mask.}", "{sensitive,public}",
-        "{", "}", ",", "h", "ll", "8", " ", "x", "\0", "[tt]", "@", "S",
+        "%", "%%", "d", "s", "P", "m", "*", ".", ".*", "1$", "2$", "*1$", "*2$", "*4$", ".*3$", "%1$*2$P", "%3$.*1$s", "{public}",
+        "{private, mask.ab}", "{mask.}", "{sensitive,public}", "{", "}", ",", "h", "ll", "8", " ", "x", "\0", "[tt]", "@", "S",
     };
     uint64_t state = 0x9e3779b97f4a7c15u;
     for (uint32_t i = 0; i < 4096; i += 1)
