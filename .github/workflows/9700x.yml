@@ -1740,6 +1740,27 @@ jobs:
           "$tcc" -v
           printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
           taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" -- "${options[@]}"
+          # #1048's experiment, temporary (#1235): the lowering's variants in this one build (BUSTER_LOWER_EXPERIMENT),
+          # alternating, 3 rounds of measure-compile's medians of 11 each: 0 this head's; 1 a body's controls as tasks of
+          # one tasks' loop; 2 no overload heads read in a unit without overload sets; 4 the common controls tested
+          # first; 7 the three; 64 the statement sweep; 71 all four. Each variant's object is compared with 0's first.
+          # Never fails the step.
+          (
+              set +e
+              echo "::group::#1048 experiment: the lowering's variants, alternating"
+              variants="0 1 2 4 7 64 71"
+              for experiment in $variants; do
+                  BUSTER_LOWER_EXPERIMENT=$((experiment | 16)) taskset -c 2 ./build/compiler "${options[@]}" -o "$RUNNER_TEMP/variant-$experiment.o" 2>&1 | grep '^sweep:'
+                  cmp -s "$RUNNER_TEMP/variant-0.o" "$RUNNER_TEMP/variant-$experiment.o" && echo "variant $experiment: the same object" || echo "variant $experiment: ANOTHER OBJECT"
+              done
+              for round in 1 2 3; do
+                  for experiment in $variants; do
+                      echo "== round $round, experiment $experiment"
+                      BUSTER_LOWER_EXPERIMENT=$experiment taskset -c 2 ./build/compiler measure-compile --runs 11 -- "${options[@]}" | grep -E '^  (lower|tier0) |^    lower\.'
+                  done
+              done
+              echo "::endgroup::"
+          ) || true
           # The counters of 11 compiles of each, user and kernel apart, and the functions the default's samples fall
           # in. They are the stage report's cross-check (#518), so the step fails when perf can't give them: when it
           # can't run, when a counter isn't counted, or when the profile is empty.
