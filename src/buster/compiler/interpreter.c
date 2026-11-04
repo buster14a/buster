@@ -985,10 +985,34 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     result = result && (function->local_count == 0 || function->local_classes != 0);
     result = result && (function->call_count == 0 || (function->call_targets != 0 && function->call_first != 0 && function->call_argument_counts != 0 && function->call_variadic != 0));
     result = result && (function->argument_count == 0 || function->argument_classes != 0);
+    // A local's optional object columns describe storage, not a value. Keep scalar cells in the fixed local array
+    // and allocate object representations in their invocation's arena region. No object may silently become an
+    // eight-byte cell. Address-only variadic anchors need their own incoming-frame model and remain refused here.
+    uint64_t object_bytes = 0;
     for (uint32_t l = 0; result && l < function->local_count; l += 1)
     {
-        result = function->local_classes[l] > BUSTER_TYPED_CLASS_VOID && function->local_classes[l] < BUSTER_TYPED_CLASS_F80;
+        const uint32_t class = function->local_classes[l];
+        const uint32_t flags = function->local_flags != 0 ? function->local_flags[l] : 0;
+        const uint32_t size = function->local_sizes != 0 ? function->local_sizes[l] : 0;
+        result = (flags & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0;
+        if (size != 0)
+        {
+            result = result && l >= function->parameter_count && class == BUSTER_TYPED_CLASS_VOID &&
+                     (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 && function->local_alignments != 0 &&
+                     function->local_alignments[l] <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+            if (result)
+            {
+                const uint64_t alignment = UINT64_C(1) << function->local_alignments[l];
+                object_bytes = ((object_bytes + alignment - 1) & ~(alignment - 1)) + size;
+                result = object_bytes <= BUSTER_TIER0_MAX_OBJECT_BYTES;
+            }
+        }
+        else
+        {
+            result = result && class > BUSTER_TYPED_CLASS_VOID && class < BUSTER_TYPED_CLASS_F80;
+        }
     }
+    result = result && function->incoming_variadic == 0;
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
         result = function->call_first[c] <= function->argument_count && function->call_argument_counts[c] <= function->argument_count - function->call_first[c] && function->call_argument_counts[c] <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
@@ -1007,19 +1031,55 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     return result;
 }
 
-static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, uint64_t* locals, uint8_t* defined, uint32_t local_base, const InterpreterValue* arguments, uint32_t count, InterpreterRuntime* runtime, uint32_t owner)
+// An object's local cell holds its storage address; a scalar's cell is the storage itself. The descriptor was
+// validated before execution, and this helper is called only after the local index has been checked.
+static uint64_t interpreter_typed_local_address(const Tier0Function* function, uint64_t* locals, uint32_t base, uint32_t local)
 {
+    const uint64_t result = tier0_is_object(function, local) ? locals[base + local] : (uint64_t)(uintptr_t)&locals[base + local];
+    return result;
+}
+
+static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, uint64_t* locals, uint8_t* defined, uint32_t local_base, const InterpreterValue* arguments, uint32_t count, InterpreterRuntime* runtime, uint32_t owner, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    const uint32_t local_count = function->local_count;
     InterpreterStatus result = count == function->parameter_count ? INTERPRETER_OK : INTERPRETER_INVALID;
-    for (uint32_t l = 0; result == INTERPRETER_OK && l < function->local_count; l += 1)
+    for (uint32_t l = 0; result == INTERPRETER_OK && l < local_count; l += 1)
     {
         const uint32_t index = local_base + l;
-        const uint32_t bytes = tier0_class_bytes(function->local_classes[l]);
-        locals[index] = l < count ? interpreter_typed_normalize(function->local_classes[l], arguments[l].low) : 0;
-        memset(defined + (uint64_t)index * 8, l < count ? 1 : 0, 8);
-        if (!interpreter_memory_add(runtime, (uint8_t*)&locals[index], bytes, defined + (uint64_t)index * 8, true, owner))
+        const bool object = tier0_is_object(function, l);
+        const uint32_t size = object ? function->local_sizes[l] : tier0_class_bytes(function->local_classes[l]);
+        uint8_t* bytes = object ? arena_push(arena, size, UINT64_C(1) << function->local_alignments[l]) : (uint8_t*)&locals[index];
+        uint8_t* initialized = object ? arena_push(arena, size, 1) : defined + (uint64_t)index * 8;
+        if (bytes == 0 || initialized == 0)
         {
             result = INTERPRETER_RESOURCE;
         }
+        else
+        {
+            // Zero bytes retain the unchecked oracle's deterministic convention; they are still undefined until a
+            // producer writes them. An object's exact extent, not its alignment padding, is accessible.
+            if (object)
+            {
+                memset(bytes, 0, size);
+                locals[index] = (uintptr_t)bytes;
+                memset(initialized, 0, size);
+            }
+            else
+            {
+                locals[index] = l < count ? interpreter_typed_normalize(function->local_classes[l], arguments[l].low) : 0;
+                memset(initialized, l < count ? 1 : 0, 8);
+            }
+            if (!interpreter_memory_add(runtime, bytes, size, initialized, true, owner))
+            {
+                result = INTERPRETER_RESOURCE;
+            }
+        }
+    }
+    if (result != INTERPRETER_OK)
+    {
+        interpreter_memory_remove_owner(runtime, owner);
+        arena_pop_to(arena, mark);
     }
     return result;
 }
@@ -1076,10 +1136,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
     if (result->status == INTERPRETER_OK)
     {
         const Tier0Function* function = &program->functions[initial];
-        result->status = function->local_count <= limits.max_locals ? interpreter_typed_enter(function, locals, defined, 0, arguments, argument_count, &runtime, 1) : INTERPRETER_RESOURCE;
+        const uint64_t mark = scratch->length;
+        result->status = function->local_count <= limits.max_locals ? interpreter_typed_enter(function, locals, defined, 0, arguments, argument_count, &runtime, 1, scratch) : INTERPRETER_RESOURCE;
         frames[0] = (InterpreterTypedFrame){
             .function = initial,
-            .arena_mark = scratch->length,
+            .arena_mark = mark,
         };
         depth = 1;
         local_top = function->local_count;
@@ -1241,12 +1302,12 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         bool write = false;
         if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
         {
-            if (value >= function->local_count || (kind != BUSTER_TYPED_LOCAL_ADDRESS && function->local_classes[value] != class))
+            if (value >= function->local_count || (kind != BUSTER_TYPED_LOCAL_ADDRESS && function->local_classes[value] != class && !tier0_value_object(function, value, class)))
             {
                 result->status = INTERPRETER_INVALID;
                 break;
             }
-            address = (uint64_t)(uintptr_t)&locals[frame->local_base + value];
+            address = interpreter_typed_local_address(function, locals, frame->local_base, (uint32_t)value);
             read = kind == BUSTER_TYPED_LOCAL;
             write = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
         }
@@ -1296,7 +1357,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         else if (kind == BUSTER_TYPED_ATOMIC_CAS)
         {
             // Its address read from its local as a LOCAL reads one, then its object checked as an ATOMIC_RMW's (#1059).
-            const uint64_t local = (uint64_t)(uintptr_t)&locals[frame->local_base + (value >> BUSTER_TYPED_CAS_LOCAL_SHIFT)];
+            const uint64_t local = interpreter_typed_local_address(function, locals, frame->local_base, (uint32_t)(value >> BUSTER_TYPED_CAS_LOCAL_SHIFT));
             const uint64_t bytes = tier0_class_bytes(class);
             result->status = interpreter_memory_access(&runtime, local, 8, false);
             if (result->status == INTERPRETER_OK)
@@ -1426,13 +1487,14 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 }
                 else
                 {
-                    result->status = interpreter_typed_enter(target, locals, defined, local_top, stack + top - count, count, &runtime, depth + 1);
+                    const uint64_t mark = scratch->length;
+                    result->status = interpreter_typed_enter(target, locals, defined, local_top, stack + top - count, count, &runtime, depth + 1, scratch);
                     frames[depth] = (InterpreterTypedFrame){
                         .function = callee,
                         .stack_base = top - count,
                         .local_base = local_top,
                         .return_class = (uint8_t)class,
-                        .arena_mark = scratch->length,
+                        .arena_mark = mark,
                     };
                     top -= count;
                     local_top += target->local_count;
