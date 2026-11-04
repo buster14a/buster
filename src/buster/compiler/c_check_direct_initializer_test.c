@@ -18,6 +18,7 @@ static void check_test_direct_initializers(CheckTest* test, const char* clang)
         "__auto_type direct_auto __attribute__((unused)) (11);\n";
     static const CheckInitExpected expected[] = {
         { .name = "direct_one", .bytes = { 3 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
+        // The standalone data harness uses source names; the program harness below applies asm labels.
         { .name = "renamed", .clang_name = "direct_asm", .bytes = { 4 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
         { .name = "direct_first", .bytes = { 5 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
         { .name = "direct_string", .bytes = { 'a', 'b', 'c', 0 }, .size = 4, .class = BUSTER_LINK_CLASS_DATA },
@@ -51,8 +52,9 @@ static void check_test_direct_initializers(CheckTest* test, const char* clang)
     check_init_test_source_language(test, "constexpr int y __attribute__((unused)) (4);", NULL, 0, true, false, clang, c23);
     check_init_test_source_language(test, "auto x __attribute__((unused)) =3;", NULL, 0, true, false, clang, c23);
     check_init_test_source_language(test, "auto x __attribute__((unused)) (3,4);", NULL, 0, false, false, clang, c23);
+    // Both objects share the differential executable; an explicit asm name must be local to each object.
     check_test_program_source(test,
-        "int absent(void);int g;int global __asm__(\"renamed_global\") (4);int tested(int n){g=0;int x __attribute__((unused)) (n+3,g++,absent());"
+        "int absent(void);int g;static int global __asm__(\"renamed_global\") (4);int tested(int n){g=0;int x __attribute__((unused)) (n+3,g++,absent());"
         "int y __asm__(\"local_y\") (x*2);return x+y+g*100+global;}", "direct-first-argument-only", clang);
     check_test_program_source(test,
         "int absent(void);int tested(int n){int a=0;int x __attribute__((unused)) ((a++,n+3),a++,absent());"
