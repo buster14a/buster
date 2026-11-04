@@ -892,6 +892,16 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
     uint8_t* native = malloc(X86_FORM_COUNT);
     const bool parsed = x86_target_parse("x86-64-v3", strlen("x86-64-v3"), &v3) && allowed != 0 && native != 0;
     tier1_select_test_expect(test, parsed, "x86-64-v3's forms");
+    // The manifest is x86-64 baseline's records, which measure-tier1-model takes: these, of x86-64-v3's forms, stay out
+    // of it and of its counts, but not out of the check that every emitted form is covered.
+    const bool manifest = test->manifest;
+    uint64_t emitted_records[3];
+    uint64_t unknown_costs[3];
+    uint64_t missing_columns[3][X86_COST_COLUMN_COUNT];
+    memcpy(emitted_records, test->emitted_records, sizeof(emitted_records));
+    memcpy(unknown_costs, test->unknown_costs, sizeof(unknown_costs));
+    memcpy(missing_columns, test->missing_columns, sizeof(missing_columns));
+    test->manifest = false;
     if (parsed)
     {
         x86_target_forms(&v3, allowed);
@@ -954,6 +964,10 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
             }
         }
     }
+    test->manifest = manifest;
+    memcpy(test->emitted_records, emitted_records, sizeof(emitted_records));
+    memcpy(test->unknown_costs, unknown_costs, sizeof(unknown_costs));
+    memcpy(test->missing_columns, missing_columns, sizeof(missing_columns));
     free(native);
     free(allowed);
     arena_release(&scratch);
