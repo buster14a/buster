@@ -2212,25 +2212,23 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             function.count = 3;
             break;
         case 7:
-            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
-            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2 + 1;
+            local_sizes[0] = (BUSTER_TIER0_MAX_OBJECT_BYTES / 2) & ~15u;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - local_sizes[0] + 1;
             break;
         case 8:
-            local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
-            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
+            local_sizes[0] = (BUSTER_TIER0_MAX_OBJECT_BYTES / 2) & ~15u;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - local_sizes[0];
             break;
         case 9:
-            // Its size rounded up to 16, and its alignment less 16: the limit, exactly. (Not compiled: its frame is 1 GB.)
+            // Its rounded size and alignment slack plus the second object reach the limit. Do not execute it.
             local_sizes[0] = 16;
             local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
-            local_sizes[1] = 0;
-            function.local_count = 1;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - (1u << BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2);
             break;
         case 10:
             local_sizes[0] = 17;
             local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
-            local_sizes[1] = 0;
-            function.local_count = 1;
+            local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES - (1u << BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2);
             break;
         default:
             break;

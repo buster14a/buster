@@ -2620,7 +2620,7 @@ static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint
     const uint32_t local = writer->local_count;
     if (size > BUSTER_TIER0_MAX_OBJECT_BYTES || alignment_log2 > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
     {
-        check_lower_unsupported(writer, "local objects aligned past 1 GB or larger than 1 GB");
+        check_lower_unsupported(writer, "local objects aligned past 1 GB or larger than INT32_MAX - 15 bytes");
     }
     else if (local < writer->local_capacity && local < BUSTER_TIER0_MAX_LOCALS)
     {

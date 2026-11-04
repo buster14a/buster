@@ -203,8 +203,8 @@ static void emitted_test_large_driver(EmittedTest* test)
         snprintf(source, sizeof(source), "%s/frame.c", directory);
         snprintf(object, sizeof(object), "%s/frame.o", directory);
         snprintf(errors, sizeof(errors), "%s/frame.err", directory);
-        // One escaping object, no values live across the call: the fixed allocation is 2^31 - 8, the CFA 2^31.
-        static const char text[] = "extern void sink(void *); void large_frame(void) { char bytes[2147483640]; sink(bytes); }\n";
+        // One escaping object within the rounded object budget; call alignment adds 8 bytes for a CFA of 2^31.
+        static const char text[] = "extern void sink(void *); void large_frame(void) { char bytes[2147483632]; sink(bytes); }\n";
         const bool written = debug_test_write_file(source, (const uint8_t*)text, sizeof(text) - 1);
         emitted_test_expect(test, written, "write the compile-only near-limit frame", 0);
         String8 first = { 0 };
