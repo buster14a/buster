@@ -25,7 +25,7 @@
 # alignment and init and fini arrays' sizes.
 "$BUSTER_COMPILER" test-static --cross-check
 == Test the functions' lanes [8 CPUs]
-# #151: generated programs and failing ones emitted on 1, 2, 3 and 8 lanes with and a slow lane, each one
+# #151: generated programs and failing ones emitted on 1, 2, 3 and 8 lanes and with a slow lane, each one
 # lane's object or failure, with -g's rows and unwind tables and without; and the driver's objects and
 # executables by --lanes and by default, by both paths, each one lane's. #153: each compiled again with its
 # identifiers' ids in another order (--id-order, 153 by default), in-process and by the driver, the same.
@@ -108,8 +108,7 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # all three forms must give clang -O0's output.
 "$BUSTER_COMPILER" test-ssa-source --generate 24 --seed 141 --lifetimes --clang clang
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
-# --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
-# tokens. -target and its triple (clang's default) go to both.
+# --clang also preprocesses each unit with clang -E and compares the tokens. -target and its triple (clang's default) go to both.
 "$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 == Promote c-testsuite's programs to SSA and run them in the IR's three forms [2 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
@@ -158,7 +157,7 @@ if "$BUSTER_COMPILER" test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 "$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 4/4
 == Test the per-file jobs on the frozen musl units
 # #262's corpora: musl's 1,355 units with its build's options, the cache filled on 1, 2, 3 and 8 lanes and with
-# the ids in another order, as test-files does for the repository's units.
+# the ids in another order (#153's --id-order, 153 by default), the same.
 unset CPATH C_INCLUDE_PATH
 corpus=$BUSTER_CORPUS
 musl="$corpus/libc/musl"
@@ -256,7 +255,7 @@ clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/different
 "$BUSTER_COMPILER" test-builtin-rounds-helper
 "$BUSTER_COMPILER" test-builtin-math-helpers
 == Test typed postorder checking and source fixtures (part 1 of 4)
-# --part deals the checks (sections, and the cases of its two long sweeps) in turn to 4 parts of one CPU each; part 1
+# --part deals the checks (sections, and check_test_programs' programs) in turn to 4 parts of one CPU each; part 1
 # also runs the sections that share the type table. Whole, the command took 141 s on a hosted runner with 2 CPUs,
 # of which it kept 1.03 busy.
 "$BUSTER_COMPILER" test-checker --seed 133 --part 1/4
@@ -469,7 +468,7 @@ awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && NR
 awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 5 && counts["skipped"] == 2 && NR == 8) }' build/oracle-libc.tsv
 "$BUSTER_COMPILER" test-preprocessor --compare-clang --clang clang -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
-  --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl" --report build/oracle-musl.tsv
+  --files-from tests/preprocessor-oracle/libc-subset.txt --root "$musl" --report build/oracle-musl.tsv
 awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR == 5) }' build/oracle-musl.tsv
 == Test DWARF source lines and late address finalization
 # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
@@ -499,7 +498,7 @@ corpus=$BUSTER_CORPUS
 == Test the corpus oracle's accounting and process failures
 "$BUSTER_COMPILER" test-preprocessor --compare-clang --clang clang -nostdinc --files-from tests/preprocessor-oracle/inputs.txt --root tests/preprocessor-oracle --report build/oracle-accounting.tsv
 awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 1 && counts["skipped"] == 1 && NR == 3) }' build/oracle-accounting.tsv
-# Another vendor by -target and its triple (clang's default) go to both.
+# Another vendor by -target and its triple, which both sides must get: accepted.input's other branch.
 "$BUSTER_COMPILER" test-preprocessor --compare-clang --clang clang -nostdinc -target x86_64-pc-linux-gnu tests/preprocessor-oracle/accepted.input
 if "$BUSTER_COMPILER" test-preprocessor --compare-clang --clang /no-such-buster-clang tests/preprocessor-oracle/accepted.input; then exit 1; fi
 if "$BUSTER_COMPILER" test-preprocessor --compare-clang --clang /usr/bin/false tests/preprocessor-oracle/accepted.input; then exit 1; fi
