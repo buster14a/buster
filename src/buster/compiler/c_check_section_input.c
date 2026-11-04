@@ -414,8 +414,8 @@ static void check_input_section_declaration(CheckInputReader* reader, uint32_t n
         }
         if (reader->section_event_count < reader->section_event_capacity)
         {
-            const bool tentative = !function && reader->output->tentative[name];
-            const bool defined = function ? body : reader->defined[name];
+            const bool tentative = !function && check_input_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_TENTATIVE);
+            const bool defined = function ? body : check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED);
             reader->section_events[reader->section_event_count++] = (CheckInputSectionEvent)
             {
                 .name = attribute != NULL ? attribute->text : (String8){ 0 },

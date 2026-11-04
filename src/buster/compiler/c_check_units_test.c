@@ -42,9 +42,12 @@
 //   symbols, by the same commands into the same bytes, a program in which the pointer holds its addend.
 // - A few large units (#777): big.c, of BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS functions, a table of them and their
 //   sum, beside small.c's main, which checks the sum against the test's own: with -c by --lanes 8 and --shared-parts
-//   (its emission pauses after each part it takes itself), each object its own alone, and the six lanes that take no
-//   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
-//   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
+//   (its emission pauses after each part it takes itself), each object its own alone, the six lanes that take no unit
+//   take parts of big.c's functions, and one lane alone, the last to stop taking units, leaves its memory to the exit,
+//   by the command's report; again without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed), where
+//   no lane takes parts and still one lane alone leaves its memory; linked by --lanes 1, by 8 and by the scalar path on
+//   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so and no lane's memory left
+//   to the exit.
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -52,13 +55,16 @@
 //   emission's columns, which take the caller's scratch then), write the same objects as without a limit; and either way
 //   leave the address space and the descriptors as they were. Among them a lane's setup fails at its reservations
 //   (which it says: can't reserve the lane's memory), its file cache's after its intern table and the cache's first
-//   arrays were reserved.
+//   arrays were reserved. The chain runs in a child of its own from the test's start, beside the sections before it
+//   (check_units_test_limits_start), and its output is printed in its place.
 // - The jobserver: four units by --lanes 4 under a GNU make jobserver of three tokens (MAKEFLAGS' fifo form), linked into
 //   an executable of more than a megabyte whose path is a FIFO, which the test reads: while the writer writes, the
 //   jobserver holds none of the tokens, which the command's lanes took; once the command ends, it holds every one
 //   again, and the executable the test read runs.
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the first program's objects and executable as by --lanes 1.
+// - The benchmark (benchmark-check-units, #1128) of three units by --lanes 1 and 2, a run each, which must report both
+//   counts; a lane count of 0, which it must refuse; and a command that fails each run, which it must fail.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
 //   --poison-arenas: each file's status and object as with the file alone, and its diagnostics in their place, in the
 //   files' order.
@@ -1083,13 +1089,13 @@ static void check_units_test_bounds(CheckUnitsTestTally* tally, const char* exec
     printf("  bounds: a section's members kept across units by %u commands\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
 }
 
-// A few large units (see the file's comment), in a directory of its own under `directory`: the shared parts' count from
-// the command's report, or 0 without one.
-static uint64_t check_units_test_shared_count(const char* errors)
+// A few large units (see the file's comment), in a directory of its own under `directory`: the count that the command's
+// --shared-parts report gives after `prefix` (the shared parts', or the lanes' that left their memory to the exit), or
+// `missing` without one.
+static uint64_t check_units_test_shared_count(const char* errors, const char* prefix, uint64_t missing)
 {
-    static const char prefix[] = "shared parts: ";
     const char* line = errors != NULL ? strstr(errors, prefix) : NULL;
-    return line != NULL ? strtoull(line + strlen(prefix), NULL, 10) : 0;
+    return line != NULL ? strtoull(line + strlen(prefix), NULL, 10) : missing;
 }
 
 static void check_units_test_shared(CheckUnitsTestTally* tally, const char* executable, const char* directory)
@@ -1142,23 +1148,44 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
     const bool alone = written && check_units_test_run(shared_directory, alone_big, "/dev/null", errors_path, false) == 0 &&
                        check_units_test_run(shared_directory, alone_small, "/dev/null", errors_path, false) == 0;
     check_units_test_expect(tally, alone, "each of the few large units writes its object alone", shared_directory);
-    // Both at once with -c by 8 lanes, six of which take no unit: their objects their own alone, and the large one's
-    // functions' parts taken by those lanes too.
-    char* together[] = { (char*)executable, "-c", "--lanes", "8", "--shared-parts", "big.c", "small.c", NULL };
-    const int status = alone ? check_units_test_run(shared_directory, together, "/dev/null", errors_path, false) : -1;
-    uint64_t length = 0;
-    char* text = check_units_test_read(errors_path, &length);
-    const uint64_t taken = check_units_test_shared_count(text);
-    free(text);
-    check_units_test_expect(tally, status == 0 && taken != 0, "-c of the few large units by 8 lanes: the lanes without units take the large one's parts",
-                            shared_directory);
+    // Both at once with -c by 8 lanes, six of which take no unit: their objects their own alone, the large one's
+    // functions' parts taken by those lanes too, and the lane that stops taking units last alone leaving its memory to
+    // the exit. Then without the board (BUSTER_TEST_NO_UNITS_BOARD, as if its allocation failed): no part shared, and
+    // still the last lane alone leaving its memory, the others releasing theirs.
+    static const char* const runs[] = { "with the board", "without the board" };
     const char* const objects[][2] = { { "big.o", "alone_big.o" }, { "small.o", "alone_small.o" } };
-    for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+    uint64_t length = 0;
+    char* text = NULL;
+    uint64_t taken = 0;
+    for (uint32_t b = 0; alone && b < BUSTER_ARRAY_LENGTH(runs); b += 1)
     {
-        char first[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
-        snprintf(first, sizeof(first), "%s/%s", shared_directory, objects[o][1]);
-        check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by 8 lanes: each object its own alone", objects[o][0]);
+        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+        {
+            snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
+            unlink(path);
+        }
+        const bool boardless = b == 1;
+        char* together[] = { (char*)executable, "-c", "--lanes", "8", "--shared-parts", "big.c", "small.c", NULL };
+        const bool hooked = !boardless || setenv("BUSTER_TEST_NO_UNITS_BOARD", "1", 1) == 0;
+        const int status = hooked ? check_units_test_run(shared_directory, together, "/dev/null", errors_path, false) : -1;
+        unsetenv("BUSTER_TEST_NO_UNITS_BOARD");
+        text = check_units_test_read(errors_path, &length);
+        const uint64_t shared = check_units_test_shared_count(text, "shared parts: ", 0);
+        const uint64_t kept = check_units_test_shared_count(text, "units' lanes: ", UINT64_MAX);
+        free(text);
+        taken = boardless ? taken : shared;
+        check_units_test_expect(tally, status == 0 && (boardless ? shared == 0 : shared != 0),
+                                "-c of the few large units by 8 lanes: the lanes without units take the large one's parts with the board, none without it", runs[b]);
+        check_units_test_expect(tally, status != 0 || kept == 1, "-c of the few large units by 8 lanes: the last lane alone leaves its memory to the exit", runs[b]);
+        for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+        {
+            char first[PATH_MAX];
+            char detail[64];
+            snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
+            snprintf(first, sizeof(first), "%s/%s", shared_directory, objects[o][1]);
+            snprintf(detail, sizeof(detail), "%s, %s", objects[o][0], runs[b]);
+            check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by 8 lanes: each object its own alone", detail);
+        }
     }
     // Linked by one lane (no board), by 8 and by the scalar path on 8: the same bytes, which run.
     static const char* const options[][5] = {
@@ -1184,7 +1211,8 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
         arguments[used] = NULL;
         const int linked = check_units_test_run(shared_directory, arguments, "/dev/null", errors_path, false);
         text = check_units_test_read(errors_path, &length);
-        const uint64_t link_taken = check_units_test_shared_count(text);
+        const uint64_t link_taken = check_units_test_shared_count(text, "shared parts: ", 0);
+        const uint64_t link_kept = check_units_test_shared_count(text, "units' lanes: ", UINT64_MAX);
         free(text);
         char run[48];
         snprintf(run, sizeof(run), "./%s", output);
@@ -1194,13 +1222,16 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
         snprintf(detail, sizeof(detail), "linked into %s", output);
         check_units_test_expect(tally, linked == 0 && ran == 0 && (o == 0 || link_taken != 0),
                                 "the few large units linked: the program's sum, and on 8 lanes the lanes without units take parts", detail);
+        check_units_test_expect(tally, linked != 0 || o == 0 || link_kept == 0, "the few large units linked: every lane releases its memory before the link", detail);
         char first[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", shared_directory, output);
         snprintf(first, sizeof(first), "%s/shared_0", shared_directory);
         check_units_test_expect(tally, o == 0 || check_test_driver_same_files(path, first), "the few large units linked: the same bytes by every lane count and path",
                                 detail);
     }
-    printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's\n", (unsigned long long)taken);
+    printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's; with -c the last lane alone "
+           "leaves its memory to the exit, with the board and without it, and none before a link\n",
+           (unsigned long long)taken);
 }
 
 // The most runs check_units_test_limits makes, past which its sweep has gone wrong.
@@ -1426,6 +1457,98 @@ static __attribute__((unused)) void check_units_test_limits(CheckUnitsTestTally*
     printf("  reservations: %u failed in turn (%u of them a lane's setup's, %u with a fallback), each reported or with the same objects, "
            "and released\n",
            runs, setups, fallbacks);
+}
+
+// The reservations' chain run beside the sections before it (check_units_test_limits_start): its child, the counts it
+// shares and the file its output goes to.
+typedef struct CheckUnitsTestBeside CheckUnitsTestBeside;
+struct CheckUnitsTestBeside
+{
+    pid_t child;
+    FILE* output;
+    // The child's checks and failures, and whether it ran to the end, in a MAP_SHARED mapping.
+    uint64_t* shared;
+};
+
+// Starts check_units_test_limits in a child of its own: its chain of runs is sequential by construction, each run's
+// limit the last one's peak less a page, and took 9.6 of test-check-units' 14 s on 4 CPUs, while the sections before it
+// in run_check_units_tests, about 4.6 s, don't depend on it. The child measures and limits its own address space, as
+// the test's process did, and keeps its rlimits, directory, standard error and MAKEFLAGS to itself; its output goes to
+// a file that check_units_test_limits_finish prints where the section's was. If it can't start, the finish runs the
+// section in this process instead.
+static __attribute__((unused)) CheckUnitsTestBeside check_units_test_limits_start(const CheckUnitsTestTally* tally, const char* directory)
+{
+    CheckUnitsTestBeside beside = { .child = -1 };
+    beside.output = tmpfile();
+    uint64_t* shared = mmap(NULL, 3 * sizeof(uint64_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    beside.shared = shared != MAP_FAILED ? shared : NULL;
+    if (beside.output != NULL && beside.shared != NULL)
+    {
+        fflush(stdout);
+        fflush(stderr);
+        beside.child = fork();
+        if (beside.child == 0)
+        {
+            const int output = fileno(beside.output);
+            bool ready = dup2(output, STDOUT_FILENO) == STDOUT_FILENO && dup2(output, STDERR_FILENO) == STDERR_FILENO;
+            CheckUnitsTestTally own = { .random = tally->random };
+            if (ready)
+            {
+                check_units_test_limits(&own, directory);
+            }
+            fflush(stdout);
+            fflush(stderr);
+            beside.shared[0] = own.checks;
+            beside.shared[1] = own.failures;
+            beside.shared[2] = ready;
+            _exit(0);
+        }
+    }
+    return beside;
+}
+
+// Waits for the reservations' child, adds its checks and failures to the tally and prints its output; or runs the
+// section here if the child didn't start.
+static __attribute__((unused)) void check_units_test_limits_finish(CheckUnitsTestTally* tally, CheckUnitsTestBeside* beside, const char* directory)
+{
+    if (beside->child > 0)
+    {
+        int status = 0;
+        pid_t waited = -1;
+        do
+        {
+            waited = waitpid(beside->child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        const bool ended = waited == beside->child && WIFEXITED(status) && WEXITSTATUS(status) == 0 && beside->shared[2] != 0;
+        fflush(stdout);
+        fflush(stderr);
+        char buffer[4096];
+        size_t length = 0;
+        rewind(beside->output);
+        while ((length = fread(buffer, 1, sizeof(buffer), beside->output)) != 0)
+        {
+            fwrite(buffer, 1, length, stdout);
+        }
+        if (ended)
+        {
+            tally->checks += beside->shared[0];
+            tally->failures += beside->shared[1];
+        }
+        check_units_test_expect(tally, ended, "the reservations' child runs to the end", directory);
+    }
+    else
+    {
+        check_units_test_limits(tally, directory);
+    }
+    if (beside->output != NULL)
+    {
+        fclose(beside->output);
+    }
+    if (beside->shared != NULL)
+    {
+        munmap(beside->shared, 3 * sizeof(uint64_t));
+    }
+    *beside = (CheckUnitsTestBeside){ .child = -1 };
 }
 
 // A broker on the actual release control/reply protocol observes the allocation-failure fallback's ordering. While
@@ -1880,6 +2003,61 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
     free(diagnostics);
 }
 
+// benchmark-check-units (#1128), at its smallest: three units by one lane and two, a run each, which must succeed and
+// report both counts against one lane's; and counts it can't take, which it must refuse before writing the program: no
+// lanes, a ninth lane count (which overran the counts' array, #1203's review), runs past time-runs' 1,000 and past 64
+// bits (whose sizes wrapped to nothing), a count with more than its digits, and forwarded options that would set each
+// command's lanes over the count it is reported as (--lanes and --worker-budget, in either spelling).
+static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    char output[PATH_MAX];
+    snprintf(output, sizeof(output), "%s/benchmark.txt", directory);
+    char* arguments[] = { (char*)executable, "benchmark-check-units", "--units", "3", "--functions", "4", "--lanes", "1,2", "--runs", "1", NULL };
+    const int status = BUSTER_HOST_VECTOR ? check_units_test_run(directory, arguments, output, "/dev/null", false) : 0;
+    uint64_t length = 0;
+    char* text = BUSTER_HOST_VECTOR ? check_units_test_read(output, &length) : NULL;
+    const bool reported = !BUSTER_HOST_VECTOR || (text != NULL && strstr(text, "check units, --lanes 1: ") != NULL && strstr(text, "check units, --lanes 2: ") != NULL &&
+                                                  strstr(text, "time-runs: done, 0 failed processes") != NULL);
+    check_units_test_expect(tally, status == 0 && reported, "the units' benchmark times each lane count", output);
+    free(text);
+    const char* const refusals[][3] = {
+        { "--lanes", "1,0" },
+        { "--lanes", "1,2,3,4,5,6,7,8,9" },
+        { "--lanes", "1," },
+        { "--runs", "1001" },
+        { "--runs", "18446744073709551615" },
+        { "--units", "4097" },
+        { "--functions", "4294967297" },
+        { "--units", "2x" },
+        { "--", "--lanes", "1" },
+        { "--", "--lanes=1" },
+        { "--", "--worker-budget", "1" },
+        { "--", "--worker-budget=1" },
+    };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
+    {
+        // After a command it would take, so that each refusal is the entry's own.
+        char* refused[] = { (char*)executable, "benchmark-check-units", "--units", "1", "--functions", "1", "--lanes", "1,2", "--runs", "1", NULL, NULL, NULL, NULL };
+        char detail[128] = "";
+        for (uint32_t a = 0; a < 3 && refusals[r][a] != NULL; a += 1)
+        {
+            refused[10 + a] = (char*)refusals[r][a];
+            snprintf(detail + strlen(detail), sizeof(detail) - strlen(detail), "%s%s", a == 0 ? "" : " ", refusals[r][a]);
+        }
+        const int refusal = BUSTER_HOST_VECTOR ? check_units_test_run(directory, refused, "/dev/null", "/dev/null", false) : 1;
+        check_units_test_expect(tally, refusal == 1, "the units' benchmark took a count or an option it can't", detail);
+    }
+    // A command that fails every time, as one with an option the driver doesn't take: the same status each run, which
+    // time-runs alone would pass.
+    char* failing[] = { (char*)executable, "benchmark-check-units", "--units", "2", "--functions", "2", "--lanes", "1", "--runs", "1", "--", "--no-such-option", NULL };
+    const int failed = BUSTER_HOST_VECTOR ? check_units_test_run(directory, failing, "/dev/null", "/dev/null", false) : 1;
+    check_units_test_expect(tally, failed == 1, "the units' benchmark passed a command that fails", directory);
+    if (BUSTER_HOST_VECTOR)
+    {
+        printf("  benchmark: benchmark-check-units by 1 and 2 lanes; %u counts or options it can't take, and a command that fails, refused\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
+    }
+}
+
 static int run_check_units_tests(int argc, char** argv)
 {
     CheckUnitsTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -1977,6 +2155,10 @@ static int run_check_units_tests(int argc, char** argv)
     }
     else if (made)
     {
+#if !BUSTER_SANITIZER_RESOURCES
+        // The reservations' chain, beside the sections before its place (check_units_test_limits_start).
+        CheckUnitsTestBeside limits = check_units_test_limits_start(&tally, directory);
+#endif
         check_units_test_programs(&tally, executable, clang, directory, programs != 0 ? programs : 1);
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
@@ -1990,10 +2172,11 @@ static int run_check_units_tests(int argc, char** argv)
         // the detector at its start. The plain builds, whose peak is the run's own, check every reservation's failure.
         printf("  reservations: not failed in turn under a sanitizer, whose shadow grows the address space\n");
 #else
-        check_units_test_limits(&tally, directory);
+        check_units_test_limits_finish(&tally, &limits, directory);
 #endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
+        check_units_test_benchmark(&tally, executable, directory);
     }
     if (made && !keep && tally.failures == 0)
     {

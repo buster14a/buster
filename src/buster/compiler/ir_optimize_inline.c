@@ -600,9 +600,9 @@ static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* d
     {
         destination->a[node] = values[source->a[old]];
     }
-    else if ((op == IR_CALL || op == IR_CALL_INDIRECT) && source->c[old] != BUSTER_IR_NONE)
+    else if ((op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ATOMIC_RMW) && source->c[old] != BUSTER_IR_NONE)
     {
-        // An aggregate result's destination (IrAbiCall.result_size).
+        // An aggregate result's destination (IrAbiCall.result_size), or a compare-exchange's desired value (#1059).
         destination->c[node] = values[source->c[old]];
     }
 }

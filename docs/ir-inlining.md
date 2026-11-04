@@ -39,7 +39,7 @@ The metadata producer is responsible for marking a definition
 External-linkage definitions, unknown symbols, indirect calls, noinline
 definitions and variadic definitions remain calls, and so do calls with ABI
 records (#131's `IrCall.abi`: a call that passes or returns an aggregate by
-value). Unknown flag bits are errors. Every known direct call's variadic
+value, or passes one the convention ignores). Unknown flag bits are errors. Every known direct call's variadic
 status, and every other one's result type and fixed parameter types/count, must
 agree with its table entry, even when expansion is disabled. A call with ABI
 records has the convention's shape instead, which only its records give: its
@@ -199,16 +199,35 @@ and vector outputs must match in every retained body and audit column.
 ## Reach in `--tier1`
 
 `--tier1` compiles each function alone, so it doesn't run this pass. In #1189's
-measurement, clang -O2 makes 25.62 M of the 76.25 M calls that `--tier1`'s
-speedtest1 makes into its own functions, and 54.2 M of Lua 5.4.8's 106.0 M.
-The callees it inlines run 1,126 M and 975 M of Tier 1's instructions.
+measurement, clang -O2 makes 25.62 M of the 70.29 M calls that `--tier1`'s
+speedtest1 makes into its own code, and 54.20 M of Lua 5.4.8's 91.79 M. The
+calls into Tier 1's PLT stubs, the C library's, are left out (7.33 M and
+14.21 M): clang's executables make them without stubs. speedtest1's include
+1.37 M calls into the unit's atomic load and store helpers, which clang expands
+in place; the other 68.92 M go to its functions.
 
-The callees this scope takes (single-block leaves without stack objects)
-receive 9.56 M of speedtest1's calls (13.9%) and 1.86 M of Lua's (2.0%), at 2 to
-13 instructions a call. The hot inlined callees have several blocks:
-`index2value`, `luaV_mod`, `prepCallInfo`, `yy_find_shift_action`,
-`sqlite3BtreeCursorHasMoved`. A unit-level stage before the lanes pays
-only once the scope takes callees with control flow and stack objects.
+The calls clang doesn't make, a callee's calls by Tier 1 less its calls by
+clang, are 44.67 M and 37.60 M. Their callees' instructions in Tier 1 are
+estimated at 1,121 M and 960 M: each callee's instructions times the share of
+its calls clang doesn't make. A count difference alone doesn't show inlining.
+Clang's inlining remarks (`-Rpass=inline`) do, from a rebuild that is byte for
+byte the measured executable (the record's `scripts/inlining.sh`):
+- **speedtest1:** 43.29 M of the 44.67 M calls go to callees it inlined at one
+  call site or more, 1.37 M to the atomic helpers and 0.01 M to callees without
+  a remark.
+- **Lua:** all but 974 of the 37.60 M go to callees it inlined (`singlestep`,
+  `luaS_newlstr` and the start-up code take the 974).
+
+The match is by callee, not by call site.
+
+The callees this scope takes (single-block leaves without stack objects) receive
+9.56 M of the 68.92 M calls into speedtest1's functions (13.9%), and 1.86 M of
+the 91.79 M into Lua's (2.0%), at 2 to 13 instructions a call. The atomic
+helpers are left out of these, as no function of the IR. The hottest callees
+clang inlines have several blocks: `index2value`, `luaV_mod`, `prepCallInfo`,
+`yy_find_shift_action`, `sqlite3BtreeCursorHasMoved`. A unit-level stage before
+the lanes pays only once the scope takes callees with control flow and stack
+objects.
 
 These are local correctness diagnostics. Full source-corpus coverage,
 independent native before/after comparisons, translation-unit driver

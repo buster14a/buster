@@ -102,7 +102,7 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
 {
     const CheckInput* input = program->input;
     const uint8_t definition = input->function_flags != 0 ? input->function_flags[body->declaration] : 0;
-    const bool external = input->linkage[body->declaration] == 2;
+    const bool external = check_input_linkage(input->declaration_bits, body->declaration) == 2;
     bool eager = external && (definition & CHECK_INPUT_FUNCTION_INLINE) == 0;
     if (!eager)
     {
@@ -129,14 +129,14 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
             {
                 const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
                 const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
-                gnu_inline |= check_program_attribute_gnu_inline(input->attributes[token]);
+                gnu_inline |= check_program_attribute_gnu_inline(check_input_attributes_at(input, token));
                 plain_inline |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE;
                 c99_inline_only &= !(function && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE &&
                                      ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0));
             }
             else
             {
-                attribute |= check_program_attribute_eager(input->attributes[token]);
+                attribute |= check_program_attribute_eager(check_input_attributes_at(input, token));
             }
         }
         // The language mode's rules of inline functions matter to an external definition alone.
@@ -442,9 +442,9 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             bool gnu_inline = false;
             // A block-scope static that no emitted code declares is no root, `used` as it may be: clang emits it only
             // where it emits its declaration's statement (#1108).
-            const bool dropped = !function && input->linkage[token] == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
+            const bool dropped = !function && check_input_linkage(input->declaration_bits, token) == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
                                  !check_program_token_emitted(full, token);
-            const uint32_t attribute_roots = check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
+            const uint32_t attribute_roots = check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
             roots[group] |= dropped ? 0 : attribute_roots;
             inline_rules[group] |= gnu_inline ? 2 : 0;
             const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
@@ -481,7 +481,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 const uint32_t declared = check_data_declared_index(data, object);
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
                 const uint32_t declaration = full->object_declarations[object];
-                if (declaration != BUSTER_CHECK_NONE && input->linkage[declaration] == 2)
+                if (declaration != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2)
                 {
                     bool inline_only = false;
                     if (function)
@@ -585,7 +585,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t object = function ? 0 : data->objects[raw - full->body_count].object;
             const uint32_t declaration = object != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
             const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
-                                  input->linkage[declaration] == 0 && !input->compound_objects[declaration] && check_program_token_emitted(full, declaration) ?
+                                  check_input_linkage(input->declaration_bits, declaration) == 0 &&
+                                  !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && check_program_token_emitted(full, declaration) ?
                                   check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {

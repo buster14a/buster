@@ -508,9 +508,13 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 "$BUSTER_COMPILER" test-tier1-liveness
 "$BUSTER_COMPILER" test-tier1-emit
 "$BUSTER_COMPILER" test-tier1-pipeline --cross-check
-# #179: hand-written IR of AVX-512's masks through Tier 1's selection and CFG consumer, natively against the IR's
-# interpreter where the host has AVX512F, BW and DQ (compiled and checked only elsewhere).
+# #179: hand-written IR of AVX-512's masks (and #141's vectors) through Tier 1's selection and CFG consumer, natively
+# against the IR's interpreter where the host has every feature of x86-64-v4 (compiled and checked only elsewhere).
 "$BUSTER_COMPILER" test-tier1-masks
+# #141: the 128-bit integers split into 64-bit halves (ir_wide.c): hand-written and random 128-bit IR and Tier 0's random
+# 128-bit programs through the split, the optimizer and Tier 1 natively, against the IR's interpreter and the programs'
+# stack machine.
+"$BUSTER_COMPILER" test-tier1-wide
 # #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
 "$BUSTER_COMPILER" test-mask-spills
 "$BUSTER_COMPILER" test-tier1-model
@@ -591,14 +595,39 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-u
 ./build/test-sanitizer-resources
 == Test the profiling tools
 "$BUSTER_COMPILER" test-profile
+== Dispatch Tier 1's program measurement and refuse its incomplete commands
+# #1189's measure-tier1-programs runs on the 9700X only where `tier1_programs` changes (Tier 1's input and pipeline, and
+# the measurement), so its dispatch in main.c is checked here, on every run, without timing anything: a command without
+# its inputs must print the command's usage and fail, and one whose inputs aren't there must fail its first build.
+errors=$(mktemp)
+directory=$(mktemp -d)
+if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$directory/none" --speedtest "$directory/none" --lua "$directory/none" \
+    --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
+rm -rf "$errors" "$directory"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
-== Test fences through the IR's lowerings, promotion, text and interpreter against clang
+== Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
 # #1059: each fence of a constant order is the typed stream's FENCE and the IR's fence, which both lowerings, both
 # promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/fences.c
 "$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/fences.c
+# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET (and a seq_cst
+# store's FENCE) and the IR's atomic access, which promotion leaves in memory and the run passes through alike.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomics.c
+"$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/atomics.c
+# The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
+# print their natural alignment.
+test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
+# Each compare-exchange of the fixture's (GNU's, __sync's, C11's and the generic one, twice each, and three implicit
+# objects' loops) is the typed stream's ATOMIC_CAS and the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atomics.c | grep -c ' cas ')" -eq 26
+# Each bitwise, minimum and maximum read/modify/write of the fixture's (twelve, GNU's, __sync's and C11's) is a loop of
+# compare-exchanges, the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomics.c | grep -c ' cas ')" -eq 24
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution
