@@ -2743,6 +2743,268 @@ static void check_test_constraint_preprocess(CheckTest* test, const char* name, 
     }
 }
 
+// C90 6.5.2's implicit int, which C99 removed (#1121): each of these is a declaration whose type specifier the C89
+// modes take for int, at file scope, in a block, in a parameter list, and for a typedef; clang refuses them in the C99
+// modes with its missing-type diagnostic (or, for an undeclared identifier-list parameter, the parameter's).
+typedef struct CheckImplicitIntFixture CheckImplicitIntFixture;
+struct CheckImplicitIntFixture
+{
+    const char* rule;
+    const char* source;
+    // An old-style definition whose missing return type and undeclared parameters leave clang's first error at a
+    // parameter while the parser's missing-type diagnostic stays first (both on line 1): its C99 message is the
+    // parser's, not clang's.
+    bool old_style;
+};
+
+static const CheckImplicitIntFixture check_implicit_int_fixtures[] =
+{
+    { "a static object at file scope", "static x = 3;\n" },
+    { "a const object at file scope", "const y = 4;\n" },
+    { "a tentative definition without a specifier", "x;\n" },
+    { "a declaration after a GNU __extension__ marker", "__extension__ x;\n" },
+    { "a parenthesized declarator without a specifier", "(x);\n" },
+    { "a pointer declarator without a specifier", "*p;\n" },
+    { "a function definition without a return type", "main() { return 0; }\n" },
+    { "an old-style definition with no declared parameter types", "f(a, b) { return a + b; }\n", true },
+    { "an old-style definition with a register parameter", "f(a) register a; { return a; }\n", true },
+    { "a prototype parameter without a type specifier", "int f(int a, x);\n" },
+    { "a const member without a type specifier", "struct S { const x; };\n" },
+    { "a register object in a block", "int g(void) { register i = 2; return i; }\n" },
+    { "an auto object in a block", "int h(void) { auto j = 3; return j; }\n" },
+    { "a static object in a block", "int p(void) { static q; return q; }\n" },
+    { "a typedef without a type specifier", "typedef t;\n" },
+    { "a typedef without a type specifier and its use", "typedef t;\nt x = 1;\n" },
+    { "a pointer declarator with a qualified pointer", "int q;\n*const p = &q;\n" },
+    { "a parenthesized qualified pointer declarator", "(*const p);\n" },
+    { "a pointer to a const pointer without a type specifier", "**const p;\n" },
+    { "a qualified pointer declarator and its initializer", "*const p = 0;\n" },
+    { "a GNU restricted pointer declarator", "int q;\n*__restrict p = &q;\n" },
+    { "a pointer declarator with a GNU attribute", "*__attribute__((unused)) p;\n" },
+    { "a pointer declarator with a GNU attribute and its initializer", "*__attribute__((unused)) p = 0;\n" },
+    { "a function declarator with a GNU attribute", "*__attribute__((unused)) p(void);\n" },
+    { "a prototype parameter that is a pointer declarator", "int f(*p) { return 0; }\n" },
+    { "a const prototype parameter without a type specifier", "int g(const x) { return x; }\n" },
+    { "a register prototype parameter without a type specifier", "int h(register r) { return r; }\n" },
+    { "a pointer prototype parameter after a typed one", "int k(int a, *p);\n" },
+    { "qualified pointer and object prototype parameters", "int m(const *p, volatile v) { return *p + v; }\n" },
+    {
+        "an old-style program with file-scope, block-scope and parameter implicit int",
+        "static x = 3;\n"
+        "int printf(const char *, ...);\n"
+        "main() { register i; i = helper(x); return printf(\"%d\\n\", i) < 0; }\n"
+        "helper(a) int a; { return a + 1; }\n",
+    },
+};
+
+typedef struct CheckImplicitIntMode CheckImplicitIntMode;
+struct CheckImplicitIntMode
+{
+    uint32_t standard;
+    bool gnu;
+    const char* name;
+    // C94 (iso9899:199409) is C89 with digraphs, as the preprocessor's mode table makes it.
+    uint8_t digraphs;
+};
+
+// Every fixture in the C89 modes (where clang and the checker accept it) and the C99 boundary (where both refuse it
+// with clang's diagnostic).
+static void check_test_implicit_int(CheckTest* test, const char* clang, const char* directory, bool made)
+{
+    static const CheckImplicitIntMode modes[] =
+    {
+        { 1989, false, "c89", 0 },
+        { 1989, false, "iso9899:199409", C_DIGRAPHS_ON },
+        { 1989, true, "gnu89", 0 },
+        { 1999, false, "c99", 0 },
+        { 1999, true, "gnu99", 0 },
+    };
+    uint32_t checks = 0;
+    bool ready = made;
+    for (uint32_t m = 0; ready && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        char standard[24];
+        snprintf(standard, sizeof(standard), "-std=%s", modes[m].name);
+        const PPOptions options =
+        {
+            .language =
+            {
+                .standard = modes[m].standard,
+                .gnu = modes[m].gnu,
+                .digraphs = modes[m].digraphs,
+            },
+            .no_standard_includes = true,
+            .quiet = true,
+            .clang_features = true,
+            .semantic_pragmas = true,
+        };
+        const char* arguments[] =
+        {
+            "--no-default-config",
+            "--target=x86_64-linux-gnu",
+            standard,
+            "-nostdinc",
+        };
+        const bool rejected = modes[m].standard >= 1999;
+        for (uint32_t f = 0; ready && f < BUSTER_ARRAY_LENGTH(check_implicit_int_fixtures); f += 1)
+        {
+            const CheckImplicitIntFixture* fixture = &check_implicit_int_fixtures[f];
+            char path[4300];
+            snprintf(path, sizeof(path), "%s/implicit_int_%u_%u.c", directory, m, f);
+            CheckCorpusOracle oracle;
+            const bool written = check_corpus_write(path, fixture->source, strlen(fixture->source));
+            bool row = written && check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
+            char description[512];
+            snprintf(description, sizeof(description), "implicit int %s (%s): clang %s, the fixture records %s", fixture->rule, standard,
+                     row && oracle.rejected ? "rejects" : "accepts", rejected ? "rejection" : "acceptance");
+            check_test_expect(test, row && oracle.rejected == rejected, description);
+            if (row)
+            {
+                CheckCorpusTally tally = { 0 };
+                CheckCorpusOutcome outcome;
+                const bool different = check_corpus_file_outcome(&tally, path, fixture->rule, "implicit-int", &options, &oracle, NULL, 64, &outcome);
+                snprintf(description, sizeof(description), "implicit int %s (%s): the checker gives clang's acceptance and line, on both paths", fixture->rule,
+                         standard);
+                check_test_expect(test, !different, description);
+                if (rejected)
+                {
+                    // An old-style definition's parser keeps its missing return type first, before clang's first
+                    // undeclared parameter (both on line 1): its message is the parser's missing-type one. Every other
+                    // row's is clang's, with clang's warning option, as the parser gives it (#1227).
+                    const char* const missing = "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]";
+                    const bool same = strcmp(outcome.message, fixture->old_style ? missing : oracle.message) == 0;
+                    snprintf(description, sizeof(description), "implicit int %s (%s): the diagnostic is the existing implicit-int one", fixture->rule, standard);
+                    check_test_expect(test, same, description);
+                }
+                checks += 1;
+            }
+            // The writer's file goes even where the oracle failed: one failure must not leave the directory behind.
+            const bool removed = !written || unlink(path) == 0;
+            snprintf(description, sizeof(description), "implicit int %s (%s): the fixture's file is removed", fixture->rule, standard);
+            check_test_expect(test, removed, description);
+        }
+    }
+    printf("test-checker: implicit int: %u fixtures, %u checks\n", (uint32_t)(BUSTER_ARRAY_LENGTH(check_implicit_int_fixtures) * BUSTER_ARRAY_LENGTH(modes)), checks);
+}
+
+// One generated declaration-scaling source in one mode: clang's acceptance, then the checker's on both paths
+// (check_corpus_file_outcome).
+static void check_test_declaration_scale_row(CheckTest* test, const char* clang, const char* directory, bool* ready,
+                                             const char* source, size_t length, const CheckImplicitIntMode* mode, const char* rule)
+{
+    char standard[24];
+    snprintf(standard, sizeof(standard), "-std=%s", mode->name);
+    const PPOptions options =
+    {
+        .language =
+        {
+            .standard = mode->standard,
+            .gnu = mode->gnu,
+            .digraphs = mode->digraphs,
+        },
+        .no_standard_includes = true,
+        .quiet = true,
+        .clang_features = true,
+        .semantic_pragmas = true,
+    };
+    const char* arguments[] =
+    {
+        "--no-default-config",
+        "--target=x86_64-linux-gnu",
+        standard,
+        "-nostdinc",
+    };
+    char path[4300];
+    snprintf(path, sizeof(path), "%s/declaration_scale_%s.c", directory, mode->name);
+    CheckCorpusOracle oracle;
+    const bool written = *ready && check_corpus_write(path, source, length);
+    const bool row = written && check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), path, &oracle);
+    char description[512];
+    snprintf(description, sizeof(description), "%s (%s): clang %s, the fixture records acceptance", rule, standard,
+             row && oracle.rejected ? "rejects" : "accepts");
+    check_test_expect(test, row && !oracle.rejected, description);
+    if (row)
+    {
+        CheckCorpusTally tally = { 0 };
+        CheckCorpusOutcome outcome;
+        const bool different = check_corpus_file_outcome(&tally, path, rule, "declaration-scale", &options, &oracle, NULL, 64, &outcome);
+        snprintf(description, sizeof(description), "%s (%s): the checker gives clang's acceptance, on both paths", rule, standard);
+        check_test_expect(test, !different, description);
+    }
+    snprintf(description, sizeof(description), "%s (%s): the fixture's file is removed", rule, standard);
+    check_test_expect(test, !written || unlink(path) == 0, description);
+    *ready = written;
+}
+
+// The declaration-start lookup's scaling shapes (#1121), generated: a file-scope declaration of many independently
+// named pointers, each with its own GNU attribute, whose every attribute the walk resolves a first token for, in the
+// C99 modes; and a C89 initializer of `&vN` operands, each a candidate's name. A backward walk per attribute or
+// candidate across the one declaration was quadratic in its length.
+static void check_test_declaration_scales(CheckTest* test, const char* clang, const char* directory, bool made)
+{
+    enum { DECLARATORS = 4000 };
+    static const CheckImplicitIntMode attribute_modes[] =
+    {
+        { 1999, false, "c99", 0 },
+        { 1999, true, "gnu99", 0 },
+    };
+    uint32_t checks = 0;
+    bool ready = made;
+    char* source = NULL;
+    size_t length = 0;
+    FILE* stream = open_memstream(&source, &length);
+    if (stream != NULL)
+    {
+        fputs("int *__attribute__((unused)) p0", stream);
+        for (uint32_t d = 1; ready && d < DECLARATORS; d += 1)
+        {
+            ready = fprintf(stream, ", *__attribute__((unused)) p%u", d) > 0;
+        }
+        ready = ready && fputs(";\n", stream) > 0 && fclose(stream) == 0;
+    }
+    else
+    {
+        ready = false;
+    }
+    for (uint32_t m = 0; ready && m < BUSTER_ARRAY_LENGTH(attribute_modes); m += 1)
+    {
+        check_test_declaration_scale_row(test, clang, directory, &ready, source, length, &attribute_modes[m],
+                                         "a declaration's pointer declarators, each with a GNU attribute");
+        checks += 1;
+    }
+    free(source);
+    source = NULL;
+    length = 0;
+    stream = open_memstream(&source, &length);
+    if (ready && stream != NULL)
+    {
+        fputs("static int v0", stream);
+        for (uint32_t d = 1; ready && d < DECLARATORS; d += 1)
+        {
+            ready = fprintf(stream, ", v%u", d) > 0;
+        }
+        ready = ready && fputs(";\nstatic void *table[] = { &v0", stream) > 0;
+        for (uint32_t d = 1; ready && d < DECLARATORS; d += 1)
+        {
+            ready = fprintf(stream, ", &v%u", d) > 0;
+        }
+        ready = ready && fputs(" };\n", stream) > 0 && fclose(stream) == 0;
+        if (ready)
+        {
+            static const CheckImplicitIntMode c89 = { 1989, false, "c89", 0 };
+            check_test_declaration_scale_row(test, clang, directory, &ready, source, length, &c89,
+                                             "a file-scope initializer's address operands");
+            checks += 1;
+        }
+    }
+    else if (stream != NULL)
+    {
+        fclose(stream);
+    }
+    free(source);
+    printf("test-checker: declaration-start scaling shapes: %u checks\n", checks);
+}
+
 static void check_test_constraints(CheckTest* test, const char* clang)
 {
     char directory[4096];
@@ -2820,6 +3082,8 @@ static void check_test_constraints(CheckTest* test, const char* clang)
         }
         check_test_expect(test, ready, "the constraint fixture's file is removed");
     }
+    check_test_implicit_int(test, clang, directory, made);
+    check_test_declaration_scales(test, clang, directory, made);
     printf("test-checker: constraint catalogue: %u fixtures, %u sources, %u of them errors\n", (uint32_t)BUSTER_ARRAY_LENGTH(check_constraint_fixtures),
            (uint32_t)(2 * BUSTER_ARRAY_LENGTH(check_constraint_fixtures)), errors);
     check_test_expect(test, !made || rmdir(directory) == 0, "the constraint catalogue's directory is removed");
