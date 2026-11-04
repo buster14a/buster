@@ -19,21 +19,31 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Apply the checked patch to the pinned main revision
         run: |
           set -euo pipefail
           base64 --decode .github/issue-1271.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/1271.patch"
+          cp .github/issue-1271-guide.patch "$RUNNER_TEMP/guide.patch"
           printf '%s  %s\n' 7c2cc038184bc4df8f5dd8899b5b4b3671918243ddefee88ae67582e56bbc4e3 "$RUNNER_TEMP/1271.patch" | sha256sum -c -
           git checkout --detach "$BASE"
           git apply --check "$RUNNER_TEMP/1271.patch"
           git apply "$RUNNER_TEMP/1271.patch"
+          git apply --check "$RUNNER_TEMP/guide.patch"
+          git apply "$RUNNER_TEMP/guide.patch"
           git diff --check
           git diff --stat
           printf '%s\n' .github/workflows/9700x.yml AGENTS.md docs/ci.md docs/commands/ci.md tests/ci/nightly.sh tools/ci/changes.c > "$RUNNER_TEMP/expected-paths"
           git diff --name-only > "$RUNNER_TEMP/actual-paths"
           cmp "$RUNNER_TEMP/expected-paths" "$RUNNER_TEMP/actual-paths"
+      - name: Parse workflow YAML and verify guide size
+        run: |
+          set -euo pipefail
+          ruby -r yaml -e 'YAML.load_file(ARGV[0]); puts "workflow YAML parses"' .github/workflows/9700x.yml
+          wc -c AGENTS.md
+          test "$(wc -c < AGENTS.md)" -le 30000
+          git diff --check
       - name: Validate selector and qualification against the complete checkout
         run: |
           set -euo pipefail
@@ -50,12 +60,6 @@ jobs:
           bash -n tests/ci/nightly.sh tools/ci/nightly.sh
           bash tests/ci/nightly.sh
           bash tests/ci/caches.sh
-      - name: Parse workflow YAML and verify guide size
-        run: |
-          set -euo pipefail
-          ruby -r yaml -e 'YAML.load_file(ARGV[0]); puts "workflow YAML parses"' .github/workflows/9700x.yml
-          test "$(wc -c < AGENTS.md)" -le 30000
-          git diff --check
       - name: Upload validated Git objects without changing any branch
         env:
           GH_TOKEN: ${{ github.token }}
