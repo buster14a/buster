@@ -816,6 +816,9 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 4096: the statements' plain loop is
+    // its cold copy (check_lower_drain_cold).
+    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -9659,8 +9662,46 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
 // (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
+// #1048's experiment, temporary (#1235, bit 4096): the expansion's cold paths out of line in the loop's cold copy
+// (check_lower_drain_cold): an unsupported feature's report, and a compound literal's first evaluation.
+static __attribute__((noinline, cold)) void check_lower_unsupported_cold(CheckLowerWriter* writer, const char* feature)
+{
+    check_lower_unsupported(writer, feature);
+}
+
+static inline __attribute__((always_inline)) void check_lower_unsupported_at(bool cold, CheckLowerWriter* writer, const char* feature)
+{
+    if (cold)
+    {
+        check_lower_unsupported_cold(writer, feature);
+    }
+    else
+    {
+        check_lower_unsupported(writer, feature);
+    }
+}
+
+static __attribute__((noinline, cold)) void check_lower_compound_value(CheckLowerWriter* writer, uint32_t node, bool address, bool discard, const CheckValue* value)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
+    if (check_lower_local_of(writer, value->object) == BUSTER_CHECK_NONE && check_lower_classless_vector(writer, value->type))
+    {
+        check_lower_unsupported(writer, check_lower_type_feature(program->types, value->type));
+    }
+    else if (selected == 0)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else
+    {
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .initialized = true, .discard = discard });
+        check_lower_initializer(writer, (CheckControl){ .token = value->object - 1, .target = selected - 1 });
+    }
+}
+
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
-                                                                     bool bit_int)
+                                                                     bool bit_int, bool cold)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -9691,11 +9732,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
              check_input_bit(program->input->declaration_bits, value->object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, value->object - 1, BUSTER_CHECK_BITS_STATIC))
     {
-        const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
-        if (check_lower_local_of(writer, value->object) == BUSTER_CHECK_NONE && check_lower_classless_vector(writer, value->type))
+        const uint32_t selected = cold || program->initializers == 0 ? 0 : check_initializers_plan_index(program->initializers, value->object - 1);
+        if (cold)
+        {
+            check_lower_compound_value(writer, node, address, discard, value);
+        }
+        else if (check_lower_local_of(writer, value->object) == BUSTER_CHECK_NONE && check_lower_classless_vector(writer, value->type))
         {
             // One the locals left without an object (a narrowing shuffle's constant is never evaluated).
-            check_lower_unsupported(writer, check_lower_type_feature(types, value->type));
+            check_lower_unsupported_at(cold, writer, check_lower_type_feature(types, value->type));
         }
         else if (selected == 0)
         {
@@ -9762,7 +9807,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
-            check_lower_unsupported(writer, "this value");
+            check_lower_unsupported_at(cold, writer, "this value");
         }
     }
     else if (op == CHECK_OP_SELECT)
@@ -9809,7 +9854,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
-            check_lower_unsupported(writer, "_Complex values that are not lvalues");
+            check_lower_unsupported_at(cold, writer, "_Complex values that are not lvalues");
         }
     }
     else if (op == CHECK_OP_VLA_BOUND || op == CHECK_OP_VLA_EXTENT)
@@ -9944,7 +9989,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (!check_program_query_known(program, node, stream->queries + selected))
         {
-            check_lower_unsupported(writer, "this constant query at run time");
+            check_lower_unsupported_at(cold, writer, "this constant query at run time");
         }
         else
         {
@@ -9992,11 +10037,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         if (stream->diagnostics[node] != CHECK_DIAG_NONE || (record_kind != BUSTER_TYPE_KIND_STRUCT && record_kind != BUSTER_TYPE_KIND_UNION) ||
             (!bit_field && offset % 8 != 0))
         {
-            check_lower_unsupported(writer, "this member access");
+            check_lower_unsupported_at(cold, writer, "this member access");
         }
         else if (bit_field && !check_lower_bit_member(program, node, &field))
         {
-            check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
+            check_lower_unsupported_at(cold, writer, "bit-fields of this type or spread over more than 8 bytes");
         }
         else
         {
@@ -10032,7 +10077,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         // A transport vector gains value transport, not the ordinary VECTOR rows' arithmetic. In particular its address
         // must never reach a scalar arithmetic row or the complex-number path merely because it is an aggregate.
-        check_lower_unsupported(writer, check_lower_transport_refusal(types, check_lower_transport_type(types, value->type) ? value->type : type_a,
+        check_lower_unsupported_at(cold, writer, check_lower_transport_refusal(types, check_lower_transport_type(types, value->type) ? value->type : type_a,
                                                                       CHECK_LOWER_TRANSPORT_ARITHMETIC));
     }
     else if (check_lower_complex_operation(writer, op, value->type, type_a))
@@ -10101,7 +10146,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         if (op != CHECK_OP_ASSIGN && check_lower_vector_of(writer, check_stream_type(stream, a)) != 0)
         {
-            check_lower_unsupported(writer, "updates of atomic vector values");
+            check_lower_unsupported_at(cold, writer, "updates of atomic vector values");
         }
         else
         {
@@ -10190,12 +10235,12 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             // Clang reads the whole volatile vector, and writes an element through a whole-vector read/insert/store.
             // A scalar access at the element's address cannot preserve that access width. Rvalues already captured
             // their volatile vector before extraction, so their owned temporary remains supported.
-            check_lower_unsupported(writer, "element access through volatile vectors");
+            check_lower_unsupported_at(cold, writer, "element access through volatile vectors");
         }
         else if (check_lower_bool_vector(types, vector))
         {
             // An element of a vector of bool is a bit of its bytes, which no address reaches.
-            check_lower_unsupported(writer, check_lower_transport_refusal(types, vector, CHECK_LOWER_TRANSPORT_ELEMENT));
+            check_lower_unsupported_at(cold, writer, check_lower_transport_refusal(types, vector, CHECK_LOWER_TRANSPORT_ELEMENT));
         }
         else if (!address && !address_value)
         {
@@ -10287,7 +10332,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else
     {
-        check_lower_unsupported(writer, "this operation");
+        check_lower_unsupported_at(cold, writer, "this operation");
     }
 }
 
@@ -10299,11 +10344,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 static __attribute__((noinline)) void check_lower_expand_rare(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
                                                               bool bit_int)
 {
-    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+    check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int, false);
 }
 
 static inline __attribute__((always_inline)) void check_lower_expand_split(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard,
-                                                                           bool bit_ints, bool bit_int)
+                                                                           bool bit_ints, bool bit_int, bool cold)
 {
     const CheckOp op = writer->program->input->graph.ops[node];
     if (op > CHECK_OP_SELECT)
@@ -10314,7 +10359,7 @@ static inline __attribute__((always_inline)) void check_lower_expand_split(Check
     {
         // What lets clang leave those ops' cases out of the copy inlined here.
         __builtin_assume(op <= CHECK_OP_SELECT);
-        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int);
+        check_lower_expand(writer, node, address, initialized, discard, bit_ints, bit_int, cold);
     }
 }
 
@@ -10405,7 +10450,94 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // subtrees it splices. Constants in each but the sources' `bit_ints`, so that the plain loop does none of it: the tests
 // for a _BitInt took 3.9 million of sqlite3.c's instructions there (#137), and the templates' test would run on every
 // expression of every compile, which takes none of them.
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates)
+// The tasks' kinds past CONTROL, the loop's rarer ones, from `packed` (the task, copied) and its fields: in line in the
+// loop's copies, and in #1048's experiment's cold copy (check_lower_drain_cold, bit 4096) out of line
+// (check_lower_task_cold).
+static inline __attribute__((always_inline)) void check_lower_task_other(CheckLowerWriter* writer, CheckLowerTaskPacked packed, CheckLowerTaskKind kind, uint32_t node,
+                                                                         TypeId type, uint64_t value, uint8_t flags)
+{
+    if (kind == CHECK_LOWER_BUILTIN)
+    {
+        check_lower_builtin_emit(writer, check_lower_task_unpack(packed));
+    }
+    else if (kind == CHECK_LOWER_BUILTIN_MISC)
+    {
+        check_lower_miscellaneous_emit(writer, check_lower_task_unpack(packed));
+    }
+    else if (kind == CHECK_LOWER_BUILTIN_FLOAT || kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
+    {
+        check_lower_floating_emit(writer, check_lower_task_unpack(packed));
+    }
+    else if (kind == CHECK_LOWER_CONSTANT)
+    {
+        const CheckValue value = check_stream_value(writer->program->stream, node);
+        check_lower_constant(writer, &value);
+    }
+    else if (kind == CHECK_LOWER_ADDRESS)
+    {
+        check_lower_address(writer, node, (int64_t)value);
+    }
+    else if (kind == CHECK_LOWER_QUERY)
+    {
+        check_lower_constant(writer, &writer->program->stream->queries[node].runtime_value);
+    }
+    else if (kind == CHECK_LOWER_TERMINATE)
+    {
+        check_lower_terminate(writer);
+    }
+    else if (kind == CHECK_LOWER_COPY)
+    {
+        check_lower_copy(writer, value, (flags & 1) != 0, ((flags >> 3) & 1) != 0);
+    }
+    else if (kind == CHECK_LOWER_FILL)
+    {
+        check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32),
+                         check_lower_init_pool(&writer->output->initializers, node, type));
+    }
+    else if (kind == CHECK_LOWER_CLEAR)
+    {
+        const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .bit_offset = (uint64_t)node * 8, .byte_count = type };
+        check_lower_fill(writer, &clear, (uint32_t)(value >> 32), BUSTER_CHECK_NONE);
+    }
+    else if (kind == CHECK_LOWER_INITIALIZER_COPY)
+    {
+        check_lower_initializer_copy(writer, node, (uint32_t)(value >> 32), 0);
+    }
+    else if (kind == CHECK_LOWER_BIT_READ)
+    {
+        check_lower_bit_read(writer, type);
+    }
+    else if (kind == CHECK_LOWER_BIT_STORE)
+    {
+        check_lower_bit_store(writer, type, (uint32_t)(value >> 32), ((flags >> 2) & 1) != 0);
+    }
+    else if (kind == CHECK_LOWER_VARARGS)
+    {
+        check_lower_varargs_emit(writer, check_lower_task_unpack(packed));
+    }
+    else if (kind == CHECK_LOWER_SIZE)
+    {
+        check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_I64);
+    }
+    else if (kind == CHECK_LOWER_ATOMIC)
+    {
+        check_lower_atomic_emit(writer, node);
+    }
+    else if (kind >= CHECK_LOWER_COMPLEX)
+    {
+        // The complex values' tasks and the half-precision values' (check_lower_complex_task), the kinds' last, behind one
+        // compare: few functions have them.
+        check_lower_complex_task(writer, check_lower_task_unpack(packed));
+    }
+}
+
+static __attribute__((noinline)) void check_lower_task_cold(CheckLowerWriter* writer, CheckLowerTaskPacked packed, CheckLowerTaskKind kind, uint32_t node, TypeId type,
+                                                            uint64_t value, uint8_t flags)
+{
+    check_lower_task_other(writer, packed, kind, node, type, value, flags);
+}
+
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints, bool templates, bool cold)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -10445,7 +10577,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 {
                     if (!plain)
                     {
-                        check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
+                        check_lower_expand_split(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0, cold);
                     }
                     expression_nodes += 1;
                 }
@@ -10467,78 +10599,13 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             check_lower_control(writer, node);
         }
-        else if (kind == CHECK_LOWER_BUILTIN)
+        else if (cold)
         {
-            check_lower_builtin_emit(writer, check_lower_task_unpack(*task));
+            check_lower_task_cold(writer, *task, kind, node, type, value, flags);
         }
-        else if (kind == CHECK_LOWER_BUILTIN_MISC)
+        else
         {
-            check_lower_miscellaneous_emit(writer, check_lower_task_unpack(*task));
-        }
-        else if (kind == CHECK_LOWER_BUILTIN_FLOAT || kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
-        {
-            check_lower_floating_emit(writer, check_lower_task_unpack(*task));
-        }
-        else if (kind == CHECK_LOWER_CONSTANT)
-        {
-            const CheckValue value = check_stream_value(writer->program->stream, node);
-            check_lower_constant(writer, &value);
-        }
-        else if (kind == CHECK_LOWER_ADDRESS)
-        {
-            check_lower_address(writer, node, (int64_t)value);
-        }
-        else if (kind == CHECK_LOWER_QUERY)
-        {
-            check_lower_constant(writer, &writer->program->stream->queries[node].runtime_value);
-        }
-        else if (kind == CHECK_LOWER_TERMINATE)
-        {
-            check_lower_terminate(writer);
-        }
-        else if (kind == CHECK_LOWER_COPY)
-        {
-            check_lower_copy(writer, value, (flags & 1) != 0, ((flags >> 3) & 1) != 0);
-        }
-        else if (kind == CHECK_LOWER_FILL)
-        {
-            check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32),
-                             check_lower_init_pool(&writer->output->initializers, node, type));
-        }
-        else if (kind == CHECK_LOWER_CLEAR)
-        {
-            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .bit_offset = (uint64_t)node * 8, .byte_count = type };
-            check_lower_fill(writer, &clear, (uint32_t)(value >> 32), BUSTER_CHECK_NONE);
-        }
-        else if (kind == CHECK_LOWER_INITIALIZER_COPY)
-        {
-            check_lower_initializer_copy(writer, node, (uint32_t)(value >> 32), 0);
-        }
-        else if (kind == CHECK_LOWER_BIT_READ)
-        {
-            check_lower_bit_read(writer, type);
-        }
-        else if (kind == CHECK_LOWER_BIT_STORE)
-        {
-            check_lower_bit_store(writer, type, (uint32_t)(value >> 32), ((flags >> 2) & 1) != 0);
-        }
-        else if (kind == CHECK_LOWER_VARARGS)
-        {
-            check_lower_varargs_emit(writer, check_lower_task_unpack(*task));
-        }
-        else if (kind == CHECK_LOWER_SIZE)
-        {
-            check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_I64);
-        }
-        else if (kind == CHECK_LOWER_ATOMIC)
-        {
-            check_lower_atomic_emit(writer, node);
-        }
-        else if (kind >= CHECK_LOWER_COMPLEX)
-        {
-            // The complex values' tasks and the half-precision values' (check_lower_complex_task), the kinds' last, behind one
-            // compare: few functions have them.
-            check_lower_complex_task(writer, check_lower_task_unpack(*task));
+            check_lower_task_other(writer, *task, kind, node, type, value, flags);
         }
     }
     writer->expression_nodes += expression_nodes;
@@ -10546,14 +10613,20 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, false);
+    check_lower_drain_body(writer, false, false, false, false);
+}
+
+// #1048's experiment (bit 4096): the plain loop with its cold paths out of line.
+static __attribute__((noinline)) void check_lower_drain_cold(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false, false, false, true);
 }
 
 // The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
 // (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, true, false);
+    check_lower_drain_body(writer, false, true, false, false);
 }
 
 // The tasks' loop for a body whose node templates are ready (CheckLowerWriter.template_ready, #1048): a copy of its own
@@ -10561,7 +10634,7 @@ static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWrite
 // nor a _BitInt type (CheckLowerShared.templates_allowed).
 static __attribute__((noinline)) void check_lower_drain_templates(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false, false, true);
+    check_lower_drain_body(writer, false, false, true, false);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
@@ -10571,7 +10644,7 @@ static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter
     {
         writer->owners->draining = true;
     }
-    check_lower_drain_body(writer, true, writer->bit_ints, false);
+    check_lower_drain_body(writer, true, writer->bit_ints, false, false);
     if (writer->owners != NULL)
     {
         writer->owners->draining = false;
@@ -12576,6 +12649,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
+    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -12997,6 +13072,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             else if (writer->template_ready)
             {
                 check_lower_drain_templates(writer);
+            }
+            else if ((writer->experiment & 4096) != 0)
+            {
+                check_lower_drain_cold(writer);
             }
             else
             {
