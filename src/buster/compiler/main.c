@@ -362,7 +362,16 @@ int run_type_benchmark(int argc, char** argv);
 // the driver's time depends on where its hot loops fall in the instruction caches, and code compiled before them, in
 // their unit or in another, moved them by any number of bytes. In their section, only the checker's own code moves
 // them. Its tests and the builtins' actions, which the driver seldom runs, stay in .text.
-__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text");
+// BUSTER_CHECKER_OFFSET (0 unless BUSTER_BUILD_DEFINES sets it: a multiple of 16 below a page) starts the checker's
+// code that many bytes into its page, after int3 padding. Builds of one tree at several offsets sample where its hot
+// loops fall, which ./build.sh shifts can't: it moves units' .text, never this section (#1233, docs/profiling.md).
+#ifndef BUSTER_CHECKER_OFFSET
+#define BUSTER_CHECKER_OFFSET 0
+#endif
+_Static_assert(BUSTER_CHECKER_OFFSET >= 0 && BUSTER_CHECKER_OFFSET < 4096 && BUSTER_CHECKER_OFFSET % 16 == 0, "BUSTER_CHECKER_OFFSET must be a multiple of 16 below 4096");
+#define BUSTER_CHECKER_OFFSET_TEXT_(offset) #offset
+#define BUSTER_CHECKER_OFFSET_TEXT(offset) BUSTER_CHECKER_OFFSET_TEXT_(offset)
+__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip " BUSTER_CHECKER_OFFSET_TEXT(BUSTER_CHECKER_OFFSET) ", 0xcc\n\t.text");
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_environment.c"
 #include "buster/compiler/c_check_body_bindings.c"
