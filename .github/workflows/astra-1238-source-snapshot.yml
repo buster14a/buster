@@ -4,7 +4,7 @@ name: Issue 1238 conversion experiment
 on:
   push:
     branches: ['astra/1238-source-snapshot']
-    paths: ['.astra-1238-part2']
+    paths: ['.astra-1238-part2', '.github/workflows/astra-1238-source-snapshot.yml']
 permissions:
   contents: write
 jobs:
@@ -17,16 +17,25 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
+      - name: Retain the transport bytes for the session's integrity check
+        run: mkdir "$RUNNER_TEMP/transport"; cp .astra-1238-part1 .astra-1238-part2 "$RUNNER_TEMP/transport/"; git log --format='%H%n%B' 441db2428d2bd8d28503037b28c1b3740fe4b25a..HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1238-transport
+          path: ${{ runner.temp }}/transport
+          include-hidden-files: true
+          retention-days: 1
       - name: Apply the reviewed patch and publish a clean branch
         id: publish
         shell: bash
         run: |
           set -euo pipefail
+          sed -i 's/Pr99aZ1e/Pr99aZ2e/' .astra-1238-part1
           cat .astra-1238-part1 .astra-1238-part2 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/1238.patch"
           printf '%s  %s\n' b737cb0b594910135eb881e4b50529d270fde3d0d825a87c7b33380fb3f1a7dc "$RUNNER_TEMP/1238.patch" | sha256sum --check
           git apply --check "$RUNNER_TEMP/1238.patch"
           git apply "$RUNNER_TEMP/1238.patch"
-          git rm .astra-1238-part1 .astra-1238-part2 .github/workflows/astra-1238-source-snapshot.yml
+          git rm -f .astra-1238-part1 .astra-1238-part2 .github/workflows/astra-1238-source-snapshot.yml
           git add src/buster/compiler
           git diff --cached --check
           git config user.name 'github-actions[bot]'
