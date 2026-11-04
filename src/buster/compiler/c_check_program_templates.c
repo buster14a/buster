@@ -238,7 +238,11 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     const bool pointers = left_pointer || right_pointer;
     const uint64_t stride = left_pointer ? check_action_pointer_stride(types, type_a) : 0;
     CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
-    if (value->overload_head != 0 || (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) != 0)
+    if (check_lower_contract_plan(writer, node, value->type, false).product != BUSTER_CHECK_NONE)
+    {
+        // The task path owns the three-operand contraction and its source evaluation order (#1239).
+    }
+    else if (value->overload_head != 0 || (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) != 0)
     {
         // An overload's placeholder, a _BitInt's and a complex value's are the tasks'.
     }
@@ -866,7 +870,8 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     const bool folds = constant != CHECK_CONSTANT_NONE && fault == CHECK_FAULT_NONE && (flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
                        op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE &&
                        ((category == CHECK_RVALUE && !address) || (!reads && constant == CHECK_CONSTANT_ADDRESS));
-    const bool usable = ordinary && payloaded && !overloaded && !compound;
+    const bool usable = ordinary && payloaded && !overloaded && !compound &&
+                        check_lower_contract_plan(writer, node, type, false).product == BUSTER_CHECK_NONE;
     CheckLowerTemplateFast fast = { .handled = false };
     if (!usable)
     {

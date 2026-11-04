@@ -4,9 +4,10 @@
 // Retain source-ordered floating environment and complex range settings. A setting at the beginning of a
 // compound statement ends with that compound; file settings persist. The optional graph column carries runtime
 // floating policy. Complex range is a permission to relax evaluation, so retaining full-range actions is valid.
-// FP_CONTRACT is one too, to contract a * b + c into one fused operation, which nothing here does: its records keep
-// its state (environment, 1 for ON and 2 for clang's fast) and change no column. float_control(precise, on) retains
-// the already precise evaluation policy. Other float_control options need semantics this reader does not supply.
+// FP_CONTRACT keeps a source-token column for expression-scoped lowering (#1239), separate from constant evaluation:
+// zero inherits the command-line mode, and mode + 1 is a pragma override. Records retain their existing 0/1/2 states.
+// float_control(precise, on) retains the already precise evaluation policy. Other float_control options need semantics
+// this reader does not supply.
 
 #define CHECK_FP_PRAGMA_FENV_ACCESS 0
 #define CHECK_FP_PRAGMA_CX_LIMITED_RANGE 1
@@ -130,26 +131,30 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
         uint32_t closing;
         uint8_t environment;
         uint8_t complex_range;
+        uint8_t contraction;
         bool compound;
     };
     CheckFpScope* scopes = count != 0 ? arena_push_array(reader->scratch, (uint64_t)parser->tokens.count + 1, sizeof(CheckFpScope), _Alignof(CheckFpScope)) : 0;
     CheckInputFpPragma* records = count != 0 ? arena_push_array(reader->arena, count, sizeof(CheckInputFpPragma), _Alignof(CheckInputFpPragma)) : 0;
     uint8_t* environments = count != 0 ? arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint8_t), 1) : 0;
     uint8_t* complex_ranges = count != 0 ? arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint8_t), 1) : 0;
+    uint8_t* contractions = count != 0 ? arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint8_t), 1) : 0;
     uint8_t* nodes = count != 0 ? arena_push_array(reader->arena, input->graph.capacity, sizeof(uint8_t), 1) : 0;
-    const bool valid = !input->resource && (count == 0 || (scopes != 0 && records != 0 && environments != 0 && complex_ranges != 0 && nodes != 0));
+    const bool valid = !input->resource && (count == 0 || (scopes != 0 && records != 0 && environments != 0 && complex_ranges != 0 && contractions != 0 && nodes != 0));
     reader->output->resource |= !valid;
     if (valid && count != 0)
     {
         input->fp_pragmas = records;
         input->fp_environments = environments;
         input->cx_limited_ranges = complex_ranges;
+        input->fp_contracts = contractions;
         input->graph.fp_environments = nodes;
         memset(input->graph.fp_environments, 0, input->graph.capacity);
         uint32_t depth = 0;
         uint32_t pragma = 0;
         uint8_t environment = 0;
         uint8_t complex_range = 0;
+        uint8_t contraction = 0;
         for (uint32_t token = 0; token <= parser->tokens.count; token += 1)
         {
             while (pragma < parser->tokens.pragma_count && parser->tokens.pragma_positions[pragma] == token)
@@ -172,7 +177,12 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     {
                         complex_range = on;
                     }
-                    else if (accepted && recognized && !contract)
+                    else if (accepted && recognized && contract)
+                    {
+                        contraction = check_input_fp_name(reader, source + 4, "DEFAULT") ? 0 :
+                                      (uint8_t)(1 + (on ? BUSTER_PREDEFINES_CONTRACT_ON : BUSTER_PREDEFINES_CONTRACT_OFF));
+                    }
+                    else if (accepted && recognized)
                     {
                         environment = on ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
                     }
@@ -202,6 +212,10 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         {
                             environment = state != 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
                         }
+                        else if (kind == CHECK_FP_PRAGMA_FP_CONTRACT)
+                        {
+                            contraction = (uint8_t)(state + 1);
+                        }
                         input->fp_pragmas[input->fp_pragma_count++] = (CheckInputFpPragma)
                         {
                             .pragma = pragma,
@@ -221,6 +235,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
             }
             input->fp_environments[token] = environment;
             input->cx_limited_ranges[token] = complex_range;
+            input->fp_contracts[token] = contraction;
             if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
             {
                 const uint8_t role = parser->tree.roles[token];
@@ -230,6 +245,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     .closing = parser->tree.parents[token],
                     .environment = environment,
                     .complex_range = complex_range,
+                    .contraction = contraction,
                     .compound = role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_BLOCK,
                 };
             }
@@ -238,6 +254,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                 depth -= 1;
                 environment = scopes[depth].environment;
                 complex_range = scopes[depth].complex_range;
+                contraction = scopes[depth].contraction;
             }
         }
     }

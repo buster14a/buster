@@ -592,6 +592,9 @@ struct CheckInput
     uint32_t fp_pragma_count;
     uint8_t* fp_environments;
     uint8_t* cx_limited_ranges;
+    // Source-token contraction policy: zero inherits the command line, otherwise BUSTER_PREDEFINES_CONTRACT_* + 1.
+    // Optional, like the other floating pragma columns; lexical block exit restores the enclosing value.
+    uint8_t* fp_contracts;
     const uint8_t* deferred_tokens;
     CheckInputIntrinsicDeclaration* intrinsic_declarations;
     uint32_t intrinsic_declaration_count;

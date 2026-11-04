@@ -523,7 +523,7 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
     // The predefines' fields the checker and the backend read beside their macros, then the macros' text itself.
     const uint64_t semantic = (uint64_t)predefines->char_unsigned | (uint64_t)predefines->short_wchar << 1 | (uint64_t)predefines->long_double << 8 |
                               (uint64_t)predefines->fp_eval_method << 16 | (uint64_t)predefines->pic << 24 | (uint64_t)predefines->optimization << 32 |
-                              (uint64_t)predefines->wrapv << 40 | (uint64_t)unwind << 48 | (uint64_t)debug << 49;
+                              (uint64_t)predefines->wrapv << 40 | (uint64_t)unwind << 48 | (uint64_t)debug << 49 | (uint64_t)predefines_fp_contract(predefines) << 50;
     digest = check_request_mix_word(digest, 6, semantic);
     const bool predefined = pp->predefines_data != BUSTER_PP_NONE;
     digest = predefined ? check_request_mix(digest, 7, pp->datas[pp->predefines_data].bytes, pp->datas[pp->predefines_data].length) : check_request_mix_word(digest, 7, 0);

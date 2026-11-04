@@ -303,6 +303,8 @@ struct CheckProgram
     bool asm_helpers;
     uint32_t helper_forms;
     X86Target target;
+    // Resolved once from the ordered floating options; source-token pragmas override it except in fast mode.
+    uint8_t fp_contract;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
     // it runs, without the condition, when no label or case of an outer switch enters the other, as clang -O0's code
@@ -3415,7 +3417,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .helper_forms = options.helper_forms, .target = options.target, .token = BUSTER_CHECK_NONE,
-                               .diagnostic_position = BUSTER_CHECK_NONE };
+                               .diagnostic_position = BUSTER_CHECK_NONE, .fp_contract = predefines_fp_contract(options.predefines) };
     if (options.return_flow_work != NULL)
     {
         *options.return_flow_work = 0;

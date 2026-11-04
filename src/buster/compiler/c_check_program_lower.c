@@ -380,6 +380,8 @@ typedef enum CheckLowerTaskKind
     // The size of `type`, a variable-length array's, computed from its extents (an I64: a pointer's runtime stride).
     CHECK_LOWER_SIZE,
     CHECK_LOWER_ATOMIC,
+    // An expression-scoped FMA product: its factors, without the intermediate rounding; value negates the first.
+    CHECK_LOWER_FP_PRODUCT,
     // Expression `node`'s operation on complex values (check_lower_complex_emit), its operands in the temporaries `value`
     // holds (the first's in its low 32 bits), or with `address` its compound assignment's (check_lower_complex_update_emit),
     // the value's and the destination's address's.
@@ -6604,6 +6606,8 @@ static __attribute__((noinline)) TypeId check_lower_update_through(const CheckLo
     return half != CHECK_HALF_NONE && other && check_lower_half_excess(writer, half) ? BUSTER_TYPE_FLOAT : calculated;
 }
 
+#include "c_check_program_contract.c"
+
 static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -6692,6 +6696,10 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);
         }
+    }
+    else if (check_lower_contract(writer, node, calculated, true))
+    {
+        // The contracted right product consumes the old value the code below schedules before it.
     }
     else
     {
@@ -10953,7 +10961,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                 check_lower_operand(writer, node, left_pointer ? 0 : 1, false, pointer_type);
             }
         }
-        else
+        else if (!check_lower_contract(writer, node, value->type, false))
         {
             check_lower_instruction(writer, check_lower_binary(op), class, 0);
             check_lower_operand(writer, node, 1, false, type_b);
@@ -11225,6 +11233,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind == CHECK_LOWER_ATOMIC)
         {
             check_lower_atomic_emit(writer, node);
+        }
+        else if (kind == CHECK_LOWER_FP_PRODUCT)
+        {
+            check_lower_contract_operands(writer, node, (value >> 32) != 0);
         }
         else if (kind >= CHECK_LOWER_COMPLEX)
         {

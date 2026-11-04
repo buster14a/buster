@@ -768,6 +768,13 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
 #define BUSTER_PREDEFINES_FPMATH_SSE 1
 #define BUSTER_PREDEFINES_FPMATH_387 2
 
+// Contraction modes are code-generation policy, not predefined macros. Zeroed options resolve to ON; a retained
+// pragma stores mode + 1, leaving zero for the command-line default (STDC FP_CONTRACT DEFAULT).
+#define BUSTER_PREDEFINES_CONTRACT_OFF 0
+#define BUSTER_PREDEFINES_CONTRACT_ON 1
+#define BUSTER_PREDEFINES_CONTRACT_FAST 2
+#define BUSTER_PREDEFINES_CONTRACT_FAST_HONOR_PRAGMAS 3
+
 // The floating-point options clang's driver steps through in order (RenderFloatingPointOptions).
 typedef enum PredefinesFloat
 {
@@ -802,6 +809,10 @@ typedef enum PredefinesFloat
     PREDEFINES_FLOAT_OFAST, // -Ofast, which counts only when it is the last -O.
     PREDEFINES_FLOAT_FAST,
     PREDEFINES_FLOAT_NO_FAST,
+    PREDEFINES_FLOAT_CONTRACT_OFF,
+    PREDEFINES_FLOAT_CONTRACT_ON,
+    PREDEFINES_FLOAT_CONTRACT_FAST,
+    PREDEFINES_FLOAT_CONTRACT_FAST_HONOR_PRAGMAS,
 } PredefinesFloat;
 
 // The hardening flags clang's driver weighs against each other (predefines_finish_neutral), each with its -mno- form.
@@ -1963,6 +1974,19 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
                                                                                                   : 2;
         options->profile_generate[family] = on ? BUSTER_PREDEFINES_ON : BUSTER_PREDEFINES_OFF;
         options->profile_generate[2] = !on && family == 0 ? BUSTER_PREDEFINES_OFF : options->profile_generate[2];
+    }
+    else if (predefines_starts(argument, "-ffp-contract="))
+    {
+        const char* value = argument + strlen("-ffp-contract=");
+        const int event = strcmp(value, "off") == 0 ? PREDEFINES_FLOAT_CONTRACT_OFF :
+                          strcmp(value, "on") == 0 ? PREDEFINES_FLOAT_CONTRACT_ON :
+                          strcmp(value, "fast") == 0 ? PREDEFINES_FLOAT_CONTRACT_FAST :
+                          strcmp(value, "fast-honor-pragmas") == 0 ? PREDEFINES_FLOAT_CONTRACT_FAST_HONOR_PRAGMAS : -1;
+        if (event < 0)
+        {
+            fprintf(stderr, "error: unsupported argument '%s' to option '-ffp-contract='\n", value);
+        }
+        result = event >= 0 && predefines_push_float(options, (PredefinesFloat)event) ? result : PREDEFINES_PARSE_ERROR;
     }
     else if (predefines_starts(argument, "-ffp-model="))
     {
@@ -3545,6 +3569,40 @@ static void predefines_floating_point(const PredefinesOptions* options, bool* fa
     *fast = !honor_infinities && !honor_nans && !math_errno && associative && approx_func && reciprocal && !signed_zeros && !trapping && !rounding;
     *finite = *fast || (!honor_infinities && !honor_nans);
     *no_errno = !math_errno;
+}
+
+// Replay the options once for source code generation and for the request receipt. Explicit -ffp-contract values
+// survive -fno-fast-math and -fno-unsafe-math-optimizations; enabling either fast family selects fast, and a floating
+// model resets the current mode. An inactive -Ofast has no effect, as in predefines_float.
+static uint8_t predefines_fp_contract(const PredefinesOptions* options)
+{
+    uint8_t mode = BUSTER_PREDEFINES_CONTRACT_ON;
+    uint8_t explicit_mode = BUSTER_PREDEFINES_CONTRACT_ON;
+    const uint32_t count = options != NULL ? options->float_count : 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const PredefinesFloat event = (PredefinesFloat)options->floats[i];
+        if (event >= PREDEFINES_FLOAT_CONTRACT_OFF && event <= PREDEFINES_FLOAT_CONTRACT_FAST_HONOR_PRAGMAS)
+        {
+            mode = (uint8_t)(event - PREDEFINES_FLOAT_CONTRACT_OFF);
+            explicit_mode = mode;
+        }
+        else if (event == PREDEFINES_FLOAT_FAST || event == PREDEFINES_FLOAT_UNSAFE || (event == PREDEFINES_FLOAT_OFAST && options->ofast))
+        {
+            mode = BUSTER_PREDEFINES_CONTRACT_FAST;
+        }
+        else if (event == PREDEFINES_FLOAT_NO_FAST || event == PREDEFINES_FLOAT_NO_UNSAFE)
+        {
+            mode = explicit_mode;
+        }
+        else if (event >= PREDEFINES_FLOAT_MODEL_FAST && event <= PREDEFINES_FLOAT_MODEL_STRICT &&
+                 (!options->ofast || event == PREDEFINES_FLOAT_MODEL_AGGRESSIVE))
+        {
+            mode = event == PREDEFINES_FLOAT_MODEL_PRECISE ? BUSTER_PREDEFINES_CONTRACT_ON :
+                   event == PREDEFINES_FLOAT_MODEL_STRICT ? BUSTER_PREDEFINES_CONTRACT_OFF : BUSTER_PREDEFINES_CONTRACT_FAST;
+        }
+    }
+    return mode;
 }
 
 // __FLT_EVAL_METHOD__'s value where predefines_text doesn't run (--predefines): -ffp-eval-method's, else 0 with SSE
