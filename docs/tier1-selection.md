@@ -927,7 +927,7 @@ does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
 
 | Role | Register |
 | --- | --- |
-| `VECTOR(j)` | zmm16 + j, or for a row with a VEX or legacy form's vector register, and every row at a target without AVX512VL, the lowest run of free xmm registers below 16 (xmm15 among them) from j; a vector operand moved there from its register at its width first (`vmovdqa64`, or `vmovdqa` at a target without AVX512VL), the result moved from VECTOR(0) into the destination last |
+| `VECTOR(j)` | zmm16 + j, or for a row with a VEX or legacy form's vector register, and every row at a target without AVX512VL, the lowest run of free xmm registers below 16 (xmm15 among them) from j; a vector operand moved there from its register at its width first (`vmovdqa64`, or `vmovdqa` at a target without AVX512VL; an SSE carrier's zero-extended: `tier1_select_carrier_move`, by VEX's `vmovq` or `vinsertps` at a target without AVX512VL), the result moved from VECTOR(0) into the destination last (an SSE carrier's zero-extended too) |
 | `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last. For a row that names a floating role in a VEX or legacy form's field, and every row at a target without AVX512VL (#1281), all below 16: a written operand's a free xmm register outside the vector roles' run, and the result's the destination itself where no other operand is there and no vector role is, else such a free register; each copy `movaps` |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
 | `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
@@ -948,6 +948,29 @@ certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`
 it doesn't decode the rows' records. The free xmm registers are those below 16
 that hold no value live past the node and no operand.
 
+An SSE carrier (#1280), a vector of 4 or 8 bytes, is an f32 or f64 in the IR
+([the IR guide](ir.md)'s "Machine rows"), so it is the vector class's value as
+those are: their loads and stores (`movss`, `movsd`), constants (`xorps`, or the
+bits through the scratch register and `vmovd` or `vmovq`), copies, phis and
+spills move its bits alone, and no floating operation reads it, since only a row
+does. A row sees zeros past its bytes in its role's register, as Tier 0's row
+does (Tier 0 reloads every operand by `vmovd` or `vmovq`). Rows rely on those
+zeros: a row of no records, the intrinsics' narrowing shuffle, has its wider
+operand's register as its result, and a narrow vector's floating operation at a
+16-byte form computes its other lanes too, which must raise no exception (an
+sNaN there raises invalid). A carrier's own register needn't have the zeros: a
+`param.f64` or a call's `f64` result is the convention's, whose bytes past the
+double are undefined, and Tier 1 copies it by `movaps`. So each carrier operand
+moves into its role by `tier1_select_carrier_move`, which zero-extends it:
+`vmovq` for 8 bytes, and for 4 bytes `vinsertps` of element 0 with elements 1
+to 3 zeroed (immediate 0x0e), a shuffle that raises no exception. That move
+replaces the whole register's copy that staging takes anyway, so it costs
+nothing. A row's carrier result moves into its destination the same way, also
+at no cost. So a carrier that a row, a load or a constant makes has the zeros
+in its own register too, but one from a parameter or a call doesn't. A
+placement that leaves a carrier operand in place must zero-extend it unless its
+producer is one of the former.
+
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
 every function Tier 1's, by both paths and with and without rematerialization,
@@ -957,7 +980,29 @@ permutes and shuffles, shifts by immediates, by counts in general registers and 
 vectors, masked loads and stores, a store of no result and a compress, inserts,
 extracts and widening conversions of every width, broadcasts, reductions and
 extractions into general registers, and a loop whose row results cross its back
-edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
+edge. Its SSE carriers' fixture (#1280) does the same for vectors of 4 and 8
+bytes:
+- the intrinsics' widening conversions of each width (`cvtepu8`, `cvtepi8`,
+  `cvtepu16`, `cvtepi16`);
+- `loadl` and `storel`, `loadu` and `storeu` of 4 and 8 bytes, `move_epi64`, and
+  `loadl_pi` and `storel_pi`;
+- the `movq` forms;
+- MMX's `__m64` operations, by value to and from clang's unit;
+- GNU C's operators on vectors of 4 and 8 bytes;
+- a signaling NaN's and -0's bits as constants;
+- a loop whose carriers cross its back edge;
+- under `FENV_ACCESS`, a product of two-float shuffles whose vectors' other
+  lanes would overflow. It raises no exception only where the zeros hold
+  (without `tier1_select_carrier_move`'s zeroing it raised overflow and inexact).
+
+`test-tier1-masks`' "SSE carriers with dirty upper lanes" fixture takes the
+carriers no row makes. A `param.f64`, a `param.f32` and a call's `f64` result,
+whose registers hold signaling NaNs past their bytes (the native entry's xmm0
+and xmm1, the helper's `vpbroadcastq` of its result), are each read whole by a
+row of no records. Each must read zeros past its bytes; with a whole register's
+staging copy it read the NaNs.
+
+Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
 places below 16 (#1281), every function Tier 1's, and the program runs as clang
 -O0's does.
@@ -974,8 +1019,9 @@ conversions and FMA's; constants of every kind; a loop whose vectors cross its
 back edge and live across a call; and more vectors live at once than xmm0 to
 xmm14. A floating expression clang would contract into an FMA (its
 `-ffp-contract=on`, even at -O0) is split into statements. `_mm256_set1_epi8`'s
-32 stack arguments and `_mm_cvtph_ps`'s 8-byte vector (#1280) are refused at
-every target, so the fixture takes other builtins in their place. Its AVX fixture
+32 stack arguments are refused at every target, so the fixture takes other
+builtins in its place; its SSE carriers (#1280, `_mm_cvtph_ps`'s and
+`_mm256_cvtepu8_epi32`'s operands) move by VEX's `vmovq` and `vinsertps`. Its AVX fixture
 does the same at `-march=sandybridge` (AVX without AVX2): 32-byte bitwise
 operators and constants, 16-byte arithmetic and AVX's float builtins.
 

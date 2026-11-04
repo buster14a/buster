@@ -139,7 +139,7 @@ masks through 64 bits, unused high mask bits, undefined selection alternatives,
 step/value budgets. The original straight-line executor remains an independent
 consumer; the shared interpreter is not routed through it.
 
-`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c`
+`test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c`
 drives real C through the checker, typed producer, both adapters and both text
 parsers. This explicit mode also requires a function with vectors to promote by
 both SSA promoters (#141), counting them, as a function whose only SIMD values
@@ -149,7 +149,10 @@ scalar BMI builtins of both widths, one of them in a loop, and an elementwise
 deposit of a vector to the IR's `intrinsic` (#141). `vector-rows.c`'s seven functions lower
 vector operators on bytes, words and quadwords and vector builtins to row calls (#141's
 machine rows): a compare into a mask, a masked store of no result, a shift by a count
-from a general register, a permute and a loop whose row results are phis. `test-ir-simd` runs a function of each
+from a general register, a permute and a loop whose row results are phis. `carrier-rows.c`'s five
+functions lower #1280's SSE carriers, vectors of 4 and 8 bytes, as `f32` and `f64` values in and out of row calls:
+narrowing shuffles, widening conversions, loads, stores, constants, operators and a loop whose carriers are phis
+([the IR guide](ir.md)'s "SSE carriers"). `test-ir-simd` runs a function of each
 vector width through a vector slot, an addition, compares and a selection,
 lowered, promoted and optimized by both paths, on the shared interpreter. Without `--simd`, source-corpus acceptance continues to
 require promotion. Source preparation retains each function's selected

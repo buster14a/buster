@@ -305,13 +305,15 @@ Vectors of elements other than 32-bit integers (floats, doubles, 8-, 16- and
 64-bit integers, which `__m512i`'s intrinsics are) and the x86 builtins' rows of
 vectors are the IR's machine rows (#141, [the IR guide](ir.md)'s "Machine rows"),
 which Tier 1 places as Tier 0 does ([the selection guide](tier1-selection.md)'s
-"Machine rows"). Functions with what the IR doesn't represent stop before Tier 1,
-at the lowering to the IR: any vector at a target without AVX (#775), a 64-byte
-one without AVX512F, and a row of a vector of 4 or 8 bytes (an SSE carrier's,
-`_mm256_cvtepu8_epi32`'s operand). At a target with AVX but without AVX512VL, such
-as x86-64-v3, Tier 1 takes 16- and 32-byte vectors by VEX forms in xmm0 to xmm15,
-and places machine rows' roles below 16 (#1281, [the selection
-guide](tier1-selection.md)'s "At targets without AVX-512"). The scalar ones, BMI2's
+"Machine rows"); a vector of 4 or 8 bytes (an SSE carrier, #1280: the operand of
+`_mm256_cvtepu8_epi32`, MMX's `__m64`) is an f32 or f64 there. Functions with
+what the IR doesn't represent stop before Tier 1, at the lowering to the IR: any
+vector at a target without AVX (#775), and a 64-byte one without AVX512F. At a
+target with AVX but without AVX512VL, such as x86-64-v3, Tier 1 takes 16- and
+32-byte vectors by VEX forms in xmm0 to xmm15, and places machine rows' roles
+below 16 (#1281, [the selection guide](tier1-selection.md)'s "At targets without
+AVX-512"). By `--tier1 -march=native`, main.c compiles every function by Tier 1
+but its naked one. The scalar ones, BMI2's
 `pdep`, `pext` and `bzhi` and BMI1's `bextr`, are the IR's `intrinsic` (#141,
 [the SIMD IR guide](ir-simd.md)'s "Scalar x86 builtins"), each one VEX
 instruction of selection's `TIER1_RULE_INTRINSIC`.

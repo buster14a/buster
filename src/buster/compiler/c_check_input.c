@@ -2114,7 +2114,7 @@ static void check_input_report_multiversion(CheckInputReader* reader, uint32_t t
     if (input->multiversion_report_count == input->multiversion_report_capacity)
     {
         const uint64_t capacity = input->multiversion_report_capacity != 0 ? (uint64_t)input->multiversion_report_capacity * 2 : 4;
-        CheckInputReport* records = capacity <= UINT32_MAX ? arena_push_array(reader->arena, capacity, sizeof(CheckInputReport), 4) : 0;
+        CheckInputReport* records = capacity <= UINT32_MAX ? arena_push_array(reader->arena, capacity, sizeof(CheckInputReport), _Alignof(CheckInputReport)) : 0;
         if (records == NULL)
         {
             input->resource = true;
@@ -10184,7 +10184,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         reader.predefined_names[i] = intern_find(pp->table, (const uint8_t*)parse_predeclared_typedefs[i], (uint32_t)strlen(parse_predeclared_typedefs[i]));
     }
     input->report_capacity = count + 1;
-    input->reports = valid ? arena_push_array(arena, input->report_capacity, sizeof(CheckInputReport), 4) : 0;
+    input->reports = valid ? arena_push_array(arena, input->report_capacity, sizeof(CheckInputReport), _Alignof(CheckInputReport)) : 0;
     input->declarations = input->reports != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
     input->declared_types = input->declarations != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(TypeId), 4) : 0;
     input->declaration_kinds = input->declared_types != 0 ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1) : 0;

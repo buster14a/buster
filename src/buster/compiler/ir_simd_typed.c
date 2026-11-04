@@ -473,11 +473,11 @@ static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, u
 
 // A row's decoding: a mask result's by ir_simd_typed_mask_row, an int's of mask operands by ir_simd_typed_mask_test, an
 // unsigned int's or long's of integers by ir_simd_typed_intrinsic, any other's by ir_simd_typed_operation.
-// Any other X86 row (#141): one whose operands and result are of classes a row call takes (ir_row_type: integers of 1 to
-// 8 bytes, floats and doubles, vectors of 16, 32 or 64 bytes whatever their elements, masks and, for its result, void),
-// IR_SIMD_TYPED_UNSUPPORTED otherwise, and whose records' forms the target has, IR_SIMD_TYPED_TARGET otherwise. It becomes
-// the IR's machine row, which a row call runs as Tier 0 runs it: the vector builtins' rows and the vector operators' on
-// elements other than 32-bit integers, which Tier 0 makes rows of, as x86 records.
+// Any other X86 row (#141): one whose operands and result are of classes a row call takes (ir_row_type: integers of 1
+// to 8 bytes, floats and doubles, vectors of 4, 8, 16, 32 or 64 bytes whatever their elements, masks and, for its
+// result, void), IR_SIMD_TYPED_UNSUPPORTED otherwise, and whose records' forms the target has, IR_SIMD_TYPED_TARGET
+// otherwise. It becomes the IR's machine row, which a row call runs as Tier 0 runs it: the vector builtins' rows and
+// the vector operators' on elements other than 32-bit integers, which Tier 0 makes rows of, as x86 records.
 static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     IrSimdTypedStatus status = source != NULL && result != NULL ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_INVALID;
@@ -493,7 +493,8 @@ static IrSimdTypedStatus ir_simd_typed_machine_row(const Tier0Operation* source,
         const uint32_t bytes = j < source->operand_count ? source->operand_bytes[j] : source->result_bytes;
         const uint32_t type = ir_row_type(class, bytes);
         admitted = type != IR_TYPE_COUNT && (type != IR_VOID || j == source->operand_count);
-        required |= ir_vector_type(type) ? ir_typed_vector_moves(bytes, target_features) : 0;
+        // By its class: an SSE carrier's f32 or f64 (#1280) is a vector's too, staged as one (tier1_select_carrier_move).
+        required |= class == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_moves(bytes, target_features) : 0;
         required |= ir_mask_type(type) ? BUSTER_X86_FEATURE(AVX512F) | (bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0) : 0;
     }
     // Each form's features, x86_target_requirement's, whose classified rows carry BUSTER_X86_TARGET_KNOWN, which every
