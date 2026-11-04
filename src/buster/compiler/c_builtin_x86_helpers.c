@@ -154,6 +154,9 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_SET_FLT_ROUNDS,
     CBUILTIN_X86_HELPER_EXTEND_POINTER,
     CBUILTIN_X86_HELPER_VERBOSE_TRAP,
+    CBUILTIN_X86_HELPER_MM_PREFETCH,
+    CBUILTIN_X86_HELPER_SETJMP,
+    CBUILTIN_X86_HELPER_LONGJMP,
     CBUILTIN_X86_HELPER_TILEZERO,
     CBUILTIN_X86_HELPER_TILELOADD,
     CBUILTIN_X86_HELPER_TILELOADDT1,
@@ -250,6 +253,32 @@ static const X86Instruction cbuiltin_x86_helper_prefetch[] = {
 static const X86Instruction cbuiltin_x86_helper_prefetchw[] = {
     { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_PREFETCHW_M8 },
     { .form = X86_FORM_RET },
+};
+
+// __builtin_setjmp's and __builtin_longjmp's (#148), LLVM's SjLj lowering (X86's emitEHSjLjSetJmp and
+// emitEHSjLjLongJmp) as leaves: setjmp stores, in its buffer's words 0 to 2, the caller's frame pointer (rbp, its
+// frame's address where it has one, as clang's llvm.frameaddress), the resume address (the leaf's own return address,
+// in the caller after its call) and the caller's stack pointer after the call (clang's llvm.stacksave), and returns 0;
+// longjmp loads rbp and rsp back, sets eax to 1 and jumps to the resume address, where the caller's call of setjmp
+// returns again, with 1. The calling function saves every callee-saved register and keeps nothing in one
+// (Tier0Function.returns_twice), as LLVM's setjmp clobbers them all.
+static const X86Instruction cbuiltin_x86_helper_setjmp[] = {
+    { .reg = X86_REGISTER_RBP, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_RM64_R64 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8, .form = X86_FORM_MOV_RM64_R64 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8, .form = X86_FORM_LEA_R64_M },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOV_RM64_R64 },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .form = X86_FORM_XOR_R32_RM32 },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_longjmp[] = {
+    { .reg = X86_REGISTER_RBP, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 },
+    { .reg = X86_REGISTER_RSP, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOV_R64_RM64 },
+    { .immediate = 1, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
+    { .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8, .form = X86_FORM_JMP_RM64 },
+    // Never reached: a frameless leaf ends in a ret or a ud2 (unwind_tier0_end), and this one never returns.
+    { .form = X86_FORM_UD2 },
 };
 
 // The generic builtins whose code is an instruction or two of clang -O0's (#148), each a leaf, as the system leaves are:

@@ -16889,8 +16889,10 @@ static const PPFeature pp_implemented_builtin[] = {
     // The keywords of builtins the checker works out where it reads them (#148, c_check_input.c's
     // check_input_source_builtin), in the table's byte order.
     { "__builtin_COLUMN", 1 }, { "__builtin_FILE", 1 }, { "__builtin_FILE_NAME", 1 }, { "__builtin_FUNCTION", 1 }, { "__builtin_LINE", 1 },
-    { "__builtin_omp_required_simd_align", 1 }, { "__builtin_vectorelements", 1 },
-    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
+    { "__builtin_omp_required_simd_align", 1 }, { "__builtin_ptrauth_type_discriminator", 1 }, { "__builtin_vectorelements", 1 },
+    { "__is_bitwise_cloneable", 1 }, { "__is_destructible", 1 }, { "__is_nothrow_destructible", 1 },
+    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_variant_environment", 1 },
+    { "__is_target_variant_os", 1 }, { "__is_target_vendor", 1 },
 };
 
 static int pp_compare_feature(const uint8_t* name, uint32_t length, const char* entry)
@@ -16996,12 +16998,14 @@ static bool pp_builtin_features(const PPOptions* options, const char* features)
 
 // Whether clang makes a plain library name that buster implements (c_builtin_library.c's plain list: sin, strlen,
 // printf) a builtin of the unit (#148): unless -fno-builtin or -ffreestanding says otherwise (Builtin::Context's
-// builtinIsSupported) or -fno-builtin-NAME names it (its NoBuiltinFuncs), and one of ALL_GNU_LANGUAGES in GNU's modes
-// alone. The checker's implicit library declarations decide the same from the catalog (check_input_library_enabled).
+// builtinIsSupported) or -fno-builtin-NAME names it (its NoBuiltinFuncs), one of ALL_GNU_LANGUAGES in GNU's modes alone,
+// and one of C23_LANG (<stdbit.h>'s) in C23 and later. The checker's implicit library declarations decide the same from
+// the catalog (check_input_library_enabled).
 static bool pp_library_builtin(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     const CBuiltinLibraryPlain* plain = cbuiltin_library_plain((const char*)name, length);
-    bool result = plain != NULL && !options->no_builtin && !options->freestanding && (!plain->gnu || options->language.gnu);
+    bool result = plain != NULL && !options->no_builtin && !options->freestanding && (plain->modes != BUSTER_CBUILTIN_LIBRARY_GNU || options->language.gnu) &&
+                  (plain->modes != BUSTER_CBUILTIN_LIBRARY_C23 || options->language.standard >= 2023);
     for (uint32_t i = 0; result && i < options->no_builtin_function_count; i += 1)
     {
         const char* excluded = options->no_builtin_functions[i];
@@ -17030,15 +17034,17 @@ static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uin
 
 // buster's __has_constexpr_builtin of a name: 1 for a builtin it folds as clang's constant evaluator does, where it is a
 // builtin of the unit (pp_implemented_builtin_query's conditions): the catalog's constant capability, and the library
-// builtins' folds (#148, c_builtin_library.c: cbuiltin_library_fold's and the plain ones', where pp_library_builtin says
-// the name is a builtin).
+// builtins' folds (#148, c_builtin_library.c: cbuiltin_library_fold's, the plain ones' and C23's <stdbit.h> functions',
+// where pp_library_builtin says the name is a builtin).
 static uint32_t pp_implemented_constexpr_query(const PPOptions* options, const uint8_t* name, uint32_t length)
 {
     bool wide = false;
     const CBuiltinLibraryId library = cbuiltin_library_id((const char*)name, length);
     const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) && pp_builtin_language(options, cbuiltin_languages(name, length));
     const bool folded = library != CBUILTIN_LIBRARY_COUNT && cbuiltin_library_fold(library, &wide) != CBUILTIN_LIBRARY_FOLD_NONE;
-    const bool plain = cbuiltin_library_plain_fold((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && pp_library_builtin(options, name, length);
+    const bool plain = (cbuiltin_library_plain_fold((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS ||
+                        cbuiltin_stdc_library_resolve((const char*)name, length) != CBUILTIN_NONE) &&
+                       pp_library_builtin(options, name, length);
     const uint32_t result = catalog | folded | plain;
     return result;
 }

@@ -1018,7 +1018,7 @@ static void check_input_asm_finish(CheckInputReader* reader)
             {
                 if (parser->tree.roles[token] == PARSE_ROLE_LABEL)
                 {
-                    const uint32_t name = reader->first_child[token];
+                    const uint32_t name = check_input_label_name(reader, token);
                     if (name < input->token_count && parser->tokens.names[name] == target->name)
                     {
                         target->target = token;

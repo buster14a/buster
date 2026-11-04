@@ -558,6 +558,12 @@ struct Tier0Function
     // Whether the function saves every callee-saved register and restores it, as LLVM's llvm.eh.unwind.init makes a
     // function that calls __builtin_unwind_init (#148): its frame then holds their values, which an unwinder reads.
     bool unwind_init;
+    // Whether the function calls __builtin_setjmp (#148), which returns again when a deeper frame's __builtin_longjmp
+    // restores rbp and rsp, leaving every other register as that frame left it, as LLVM's setjmp, which clobbers every
+    // register, has it: the function saves every callee-saved register and restores it (as unwind_init's), keeps no
+    // local in one (tier0_assign_homes) and no value of its stacks either (its integer depths are the caller-saved
+    // registers' alone), and a realigned frame whose base is r15 is refused.
+    bool returns_twice;
     const uint64_t* vector_constants;
     const uint8_t* vector_constant_bytes;
     uint32_t vector_constant_count;
@@ -813,6 +819,14 @@ static int32_t tier0_integer_depth_count(bool realigned, bool moves)
 {
     _Static_assert(BUSTER_TIER0_INTEGER_DEPTHS == 15, "rbp is the depth table's last register, and r15 the one before it");
     return BUSTER_TIER0_INTEGER_DEPTHS - (realigned ? 1 : 0) - (moves ? 1 : 0);
+}
+
+// The integer depths a function that calls __builtin_setjmp may reach (Tier0Function.returns_twice): the caller-saved
+// registers' alone, whose values its calls save in the frame and reload after, a return of setjmp's second time
+// included; any other function's `count`.
+static int32_t tier0_returns_twice_depths(const Tier0Function* function, int32_t count)
+{
+    return function->returns_twice && count > BUSTER_TIER0_CALLER_SAVED_DEPTHS ? BUSTER_TIER0_CALLER_SAVED_DEPTHS : count;
 }
 
 // The callee-saved registers, in the order the prologue pushes them and homes take them. r15, a realigned frame's base
@@ -4408,8 +4422,13 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             arrivals |= reg != BUSTER_ABI_REGISTER_NONE ? 1u << tier0_abi_register(reg) : 0;
         }
     }
-    // A frame pointer's rbp is no home either, nor a realigned frame's base, r15.
+    // A frame pointer's rbp is no home either, nor a realigned frame's base, r15, nor in a function that calls
+    // __builtin_setjmp (Tier0Function.returns_twice) any callee-saved register, which its longjmp doesn't restore.
     uint32_t taken = frame->clobbers | arrivals | 1u << X86_REGISTER_RSP | (frame->pointer ? 1u << X86_REGISTER_RBP : 0) | (frame->based ? 1u << X86_REGISTER_R15 : 0);
+    for (uint32_t c = 0; function->returns_twice && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    {
+        taken |= 1u << tier0_callee_saved[c];
+    }
     for (uint32_t l = 0; l < locals; l += 1)
     {
         homes[l] = (Tier0Home){ 0, 0, 0, 0, 0 };
@@ -4496,8 +4515,10 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
         frame->saved |= (frame->clobbers & 1u << tier0_callee_saved[c]) != 0 ? 1u << c : 0;
     }
     frame->saved |= frame->based ? 1u << BUSTER_TIER0_SAVED_R15 : 0;
-    // __builtin_unwind_init's function saves them all (Tier0Function.unwind_init), rbp as the frame pointer where it is one.
-    for (uint32_t c = 0; function->unwind_init && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    // __builtin_unwind_init's function saves them all (Tier0Function.unwind_init), rbp as the frame pointer where it is one,
+    // and so does __builtin_setjmp's (Tier0Function.returns_twice), so that its return restores its caller's registers
+    // whatever a longjmp left in them.
+    for (uint32_t c = 0; (function->unwind_init || function->returns_twice) && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
     {
         frame->saved |= tier0_callee_saved[c] != X86_REGISTER_RBP || !frame->pointer ? 1u << c : 0;
     }
@@ -8982,7 +9003,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
         integer_top = tops.integer;
         floating_top = tops.floating;
     }
-    const int32_t depth_count = tier0_integer_depth_count(realigned, moves);
+    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, moves));
     *error = integer_top >= depth_count || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_top;
     frame->floating_top = floating_top;
@@ -8991,6 +9012,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
     tier0_frame_registers(frame, moves, depth_count);
+    *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
     return unsupported;
 }
 
@@ -12285,7 +12307,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     const int32_t integer_reached = vector_integer_top > deferred_integer_top ? (int32_t)vector_integer_top : deferred_integer_top;
     const int32_t floating_reached = vector_floating_top > deferred_floating_top ? (int32_t)vector_floating_top : deferred_floating_top;
     clobbers |= rdx ? 1u << X86_REGISTER_RDX : 0;
-    const int32_t depth_count = tier0_integer_depth_count(realigned, moves);
+    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, moves));
     *error = integer_reached >= depth_count || floating_reached >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
     frame->integer_top = integer_reached;
     frame->floating_top = floating_reached;
@@ -12294,6 +12316,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     frame->fixed_slots = fixed ? 2 : 0;
     frame->calls = calls;
     tier0_frame_registers(frame, moves, depth_count);
+    *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
     return unsupported;
 }
 
