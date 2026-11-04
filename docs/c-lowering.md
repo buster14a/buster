@@ -1119,6 +1119,14 @@ Every round of both variants' bodies was below every base round, and so were
 the second's `lower` rounds. `test-checker` passed with them, whose fixtures
 compare the vector path, which takes them, with the scalar one, which doesn't.
 
+The locals' walk still reads each local's declared type by its token, a word
+a few tokens apart for each local, which the statements before it have
+evicted. Writing the types in the preparation's slice of the bodies' locals
+instead, in its pass over their tokens, moved the miss rather than removing
+it ([run at `6f5156dc`](https://github.com/buster14a/buster/actions/runs/41805877539/job/126497206766)):
+`lower.bodies` 1.184 ms against 1.232, `lower.prepare` 1.258 against 1.157,
+`lower` 10.592 against 10.555.
+
 ## Each node's class and facts by node (#1048)
 
 The expansion's head finds its node's class and facts through its value's
