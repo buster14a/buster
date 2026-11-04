@@ -881,7 +881,7 @@ does (`Tier0Placement`, `tier0_operation_place`) at the node's definition phase:
 | `VECTOR(j)` | zmm16 + j; a vector operand moved there from its register at its width first (`vmovdqa64`), the result moved from zmm16 into the destination last |
 | `FLOATING(j)`, `FLOATING_RESULT` | its operand's own xmm register where no record writes it, else the zmm registers past the vector roles' (moved there first); the result's past those, the first floating operand's too (copied there first), moved into the destination last |
 | `INTEGER(j)`, `MASK(j)` | its operand's own register where no record writes it (`tier1_select_row_written`, by x86_semantics.c's effects of each field, and a gather's or scatter's decoration mask), else a free register of its class, moved into first |
-| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written |
+| `INTEGER_RESULT`, `MASK_RESULT` | the destination, where no other operand is; else a free register, moved into the destination last. As Tier 0 places them, it is also its class's first operand's register (that operand copied into it first), so that a row may read the result as that operand, or the operand as the result once written: `MASK_RESULT` the first mask operand's, `INTEGER_RESULT` the first operand's of Tier 0's integer stack where that is an integer (a vector's place on that stack is no general register: after one, `INTEGER_RESULT` shares no operand's register, #1284) |
 | `SCRATCH(k)`, `MASK_SCRATCH(k)` | free registers |
 
 The free registers are the caller-saved general registers (rax, rcx, rdx, rsi,
@@ -894,9 +894,20 @@ k and k + 1), which must be free where it is. Short of them, the row is refused 
 node's own error rather than the block's owed call saves' (`TIER1_EMIT_INVALID`,
 which a refusal mid-block left owed). A move into place never
 overwrites another's source: its destination is free or a vector role's. Each row
-node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share, and the code's
-certificate leaves a function with rows uncertified (`TIER1_CERT_EMITTED_VECTOR`):
-it doesn't decode the rows' records.
+node takes `BUSTER_TIER1_EMIT_ROW_RECORDS` records past its share.
+
+The emitter publishes each row's placement under `Tier1EmitOptions.certify`
+(`Tier1RowPlacement`, `Tier1EmitResult.row_placements`, by node): each role's
+register as the records name it, and the renamed opmask registers. The code's
+certificate takes it as a claim (#1284, [the certificate
+guide](tier1-certificate.md)'s "Machine rows"): it places the template by it
+itself and compares, refuses roles in one register that Tier 0's placement keeps
+apart, and proves each operand is at its role's register when the row reads it;
+the staging copies and the borrowed masks' saves are moves at the node's
+definition phase (`TIER1_ORIGIN_MOVE`), the row's records, its result's move and
+the reloads its node's (`TIER1_ORIGIN_NODE`). A row whose records read or write a
+role's register implicitly, or of a form x86_semantics.c's effects don't cover,
+leaves its function uncertified (`TIER1_CERT_EMITTED_VECTOR`).
 
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
@@ -910,7 +921,8 @@ extractions into general registers, and a loop whose row results cross its back
 edge. Its half-precision check builds F16C's conversions at x86-64-v3 by both
 paths: `_cvtsh_ss`'s row names a float in a VEX form's XMM field, which Tier 1
 refuses at selection, so that its function is Tier 0's, and the program runs as
-clang -O0's does.
+clang -O0's does. With `--verify`, the fixture's every function's code is
+certified (#1284).
 
 `test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
 model of each (the interpreter has none of x86 records) by both paths, with and
@@ -921,7 +933,11 @@ results as their first operands, as Tier 0 places them; a row of no records, its
 result its operand; and an EVEX floating row, its result read as its first
 operand. Its refusals take a row with a floating role in a VEX form, refused at
 selection by both paths; and its random mask programs whose rows the decoders
-refuse run as machine rows against the generator's model.
+refuse run as machine rows against the generator's model. Every row's code is
+certified, and its corruptions refused (#1284, [the certificate
+guide](tier1-certificate.md)'s tests): a borrowed mask's reload left out, a
+staging copy onto a live register, a claimed placement whose roles share a
+register Tier 0 keeps apart or whose opmask register named by number is k0.
 
 ## Tests and benchmark
 

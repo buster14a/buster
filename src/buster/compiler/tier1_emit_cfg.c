@@ -172,6 +172,56 @@ static uint32_t tier1_emit_cfg_temporary_row(const Tier1EmitResult* emitted, uin
            (uint32_t)__builtin_popcount(prepared->vector_save_mask) + before;
 }
 
+// Storage row `row`'s bytes, below the frame objects' rows, as tier1_emit_cfg_frame sizes their columns: a spilled
+// value's its own, a general register's call save 8, an opmask register's and an xmm register's (#141) theirs, a temporary
+// slot its class's. Past them, 0. The code's certificate (#1284) takes the rows' bytes as frame storage.
+static uint32_t tier1_emit_cfg_row_bytes(const Tier1EmitResult* emitted, uint32_t row)
+{
+    const Tier1EmitPrepared* prepared = &emitted->prepared;
+    const uint32_t count = prepared->function->instruction_count;
+    const uint32_t spills = emitted->cfg.allocation.spill_count;
+    const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_mask);
+    const uint32_t mask_slots = (uint32_t)__builtin_popcount(prepared->mask_save_mask);
+    const uint32_t vector_slots = (uint32_t)__builtin_popcount(prepared->vector_save_mask);
+    const uint32_t temporaries = emitted->cfg.temp_slots & ((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1);
+    const uint32_t temporary_columns = call_slots + prepared->mask_columns + prepared->vector_columns;
+    // The n-th set bit of a register mask.
+    uint32_t column = UINT32_MAX;
+    uint32_t index = row;
+    uint32_t mask = 0;
+    uint32_t base = 0;
+    if (index < spills)
+    {
+        column = emitted->value_nodes[emitted->cfg.allocation.spill_values[index]];
+    }
+    else if ((index -= spills) < call_slots)
+    {
+        column = count + index;
+    }
+    else if ((index -= call_slots) < mask_slots)
+    {
+        mask = prepared->mask_save_mask;
+        base = count + call_slots;
+    }
+    else if ((index -= mask_slots) < vector_slots)
+    {
+        mask = prepared->vector_save_mask;
+        base = count + call_slots + prepared->mask_columns;
+    }
+    else if ((index -= vector_slots) < (uint32_t)__builtin_popcount(temporaries))
+    {
+        mask = temporaries;
+        base = count + temporary_columns;
+    }
+    for (uint32_t k = 0; column == UINT32_MAX && mask != 0; k += 1)
+    {
+        const uint32_t bit = (uint32_t)__builtin_ctz(mask);
+        column = k == index ? base + bit : UINT32_MAX;
+        mask &= mask - 1;
+    }
+    return column < prepared->slot_columns ? prepared->sizes[column] : 0;
+}
+
 static uint32_t tier1_emit_cfg_object_row(const Tier1EmitResult* emitted, uint32_t object)
 {
     const uint32_t temporaries = (uint32_t)__builtin_popcount(emitted->cfg.temp_slots & ((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1));
@@ -2268,20 +2318,23 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         error = renamed[k] != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
     }
     // The result's role, which Tier 0 places in its class's first operand's register (tier0_operation_placement and
-    // tier0_operation_mask_place: INTEGER_RESULT at the first integer operand's, FLOATING_RESULT at the first floating
-    // one's, MASK_RESULT at the first mask one's), so that a row may read it as that operand, or that operand as its
-    // result once written: here both are one register, that operand copied into it first. An integer's or a mask's is
-    // its destination where no other operand is there (the allocation gave the destination to the node: it holds nothing
-    // live past it), else a free register moved from last; a floating one's past the floating operands', moved into the
-    // destination last; a vector's VECTOR(0).
+    // tier0_operation_mask_place: INTEGER_RESULT at the first integer stack operand's, where that is an integer, since a
+    // vector's place on that stack is no general register of its own (#1284); FLOATING_RESULT at the first floating one's,
+    // MASK_RESULT at the first mask one's), so that a row may read it as that operand, or that operand as its result once
+    // written: here both are one register, that operand copied into it first. An integer's or a mask's is its destination
+    // where no other operand is there (the allocation gave the destination to the node: it holds nothing live past it),
+    // else a free register moved from last; a floating one's past the floating operands', moved into the destination last;
+    // a vector's VECTOR(0).
     uint32_t aliased = UINT32_MAX;
-    for (uint32_t j = 0; error == TIER1_EMIT_OK && aliased == UINT32_MAX && j < row->operand_count; j += 1)
+    bool searching = true;
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && searching && j < row->operand_count; j += 1)
     {
         const uint32_t class = row->operand_classes[j];
-        aliased = (tier0_class_integer(result_class) && tier0_class_integer(class)) || (tier0_class_floating(result_class) && tier0_class_floating(class)) ||
-                          (tier0_class_mask(result_class) && tier0_class_mask(class))
-                      ? j
-                      : aliased;
+        const bool integer = tier0_class_integer(result_class) && tier0_stack(class) == 1;
+        const bool floating = tier0_class_floating(result_class) && tier0_class_floating(class);
+        const bool mask = tier0_class_mask(result_class) && tier0_class_mask(class);
+        searching = !integer && !floating && !mask;
+        aliased = (integer && tier0_class_integer(class)) || floating || mask ? j : aliased;
     }
     // A destination another operand is in can't be the result's: the row may write the result before it reads that one.
     bool shared = false;
@@ -2366,9 +2419,29 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         placement.mask_scratch[k] = tier1_emit_cfg_take(&free_masks);
         error = placement.mask_scratch[k] != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
     }
+    // The row's own records, after the borrowed masks' saves and the operands' moves into place.
+    const uint32_t row_first = count;
     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < row->record_count; r += 1)
     {
         records[count++] = masks.named != 0 ? tier1_select_row_rename(tier0_operation_place(row->records[r], &placement), row->records[r], renamed) : tier0_operation_place(row->records[r], &placement);
+    }
+    // The placement, for the code's certificate (#1284): each role's register as the records name it.
+    if (error == TIER1_EMIT_OK && emitted->row_placements != 0)
+    {
+        Tier1RowPlacement* claimed = &emitted->row_placements[node];
+        memset(claimed, 0, sizeof(*claimed));
+        for (uint32_t j = 0; j < BUSTER_TIER0_OPERATION_VECTORS; j += 1)
+        {
+            claimed->vectors[j] = (uint8_t)(placement.vector + j);
+        }
+        memcpy(claimed->operands, placement.operands, sizeof(claimed->operands));
+        memcpy(claimed->masks, placement.masks, sizeof(claimed->masks));
+        memcpy(claimed->scratch, placement.scratch, sizeof(claimed->scratch));
+        memcpy(claimed->mask_scratch, placement.mask_scratch, sizeof(claimed->mask_scratch));
+        memcpy(claimed->renamed, renamed, sizeof(claimed->renamed));
+        claimed->integer_result = placement.integer_result;
+        claimed->floating_result = placement.floating_result;
+        claimed->mask_result = placement.mask_result;
     }
     if (error == TIER1_EMIT_OK && result_moves)
     {
@@ -2386,10 +2459,17 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         records[count++] = (X86Instruction){ .displacement = emitted->frame.offset[save_row], .reg = (uint8_t)k, .rm = (uint8_t)emitted->frame.base_register, .mode = BUSTER_X86_MEMORY_BASE,
                                              .form = tier1_select_mask_forms(emitted->prepared.sizes[owner])->load };
     }
+    // The borrowed masks' saves and the operands' moves are moves of values at the node's definition phase; the row's own
+    // records, its result's move and the borrowed masks' reloads are its node's (#1284).
     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < count; r += 1)
     {
+        if (r == row_first)
+        {
+            tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, use + 1), BUSTER_IR_NONE);
+        }
         error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
     }
+    tier1_emit_mark(buffer, tier1_origin(error == TIER1_EMIT_OK && count == row_first ? TIER1_ORIGIN_MOVE : TIER1_ORIGIN_NODE, error == TIER1_EMIT_OK && count == row_first ? use + 1 : node), BUSTER_IR_NONE);
     // The borrowed masks' saves and reloads count as a call's do.
     emitted->call_stores += error == TIER1_EMIT_OK ? (uint32_t)__builtin_popcount(borrowed) : 0;
     emitted->call_loads += error == TIER1_EMIT_OK ? (uint32_t)__builtin_popcount(borrowed) : 0;
@@ -2658,6 +2738,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     emitted->block_records = ok && certify ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     emitted->stub_records = ok && certify ? ir_allocate(output, (uint64_t)input->edge_count + 1, 4, &ok) : 0;
     emitted->dropped = ok && certify ? ir_allocate(output, (uint64_t)count + 1, 1, &ok) : 0;
+    emitted->row_placements = ok && certify && function->row_count != 0 ? ir_allocate(output, (uint64_t)count + 1, sizeof(Tier1RowPlacement), &ok) : 0;
     transitions.offsets = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 2, 4, &ok) : 0;
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.values = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
@@ -3115,6 +3196,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_VECTOR && plan->patterns[node].scale == BUSTER_TIER1_VECTOR_CONSTANT)
             {
                 error = tier1_emit_cfg_vector_constant(function, &holes, &buffer);
+                // Its records are its node's, which the code's certificate regenerates (#1284).
+                tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
             }
             else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
             {
