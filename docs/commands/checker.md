@@ -52,12 +52,13 @@ requirements. [Command index](README.md).
   semantic mutants with `--semantic-mutations` ([Checker corpus and semantic
   mutations](checker-corpus.md#checker-corpus-and-semantic-mutations)), and
   `benchmark-checker-source` measures checking of real
-  source bodies by the scalar schedule, the vector path's postorder batches (`vector`), its level order
-  (`levels`, `CheckOptions.level_order`) and its memoized transitions in node order (`transitions`,
-  `CheckOptions.transitions`, #1050, `c_check_transitions.c`, keyed by interned value classes): #133's question
-  of which order wins, which the postorder batches did on the 9700X (`docs/c-checker.md`, "Level order or
-  postorder"), and #1050's ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they don't
-  save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
+  source bodies by the scalar schedule, the vector path in node order (`vector`, its default), its regions in
+  postorder batches (`regions`, `CheckOptions.regions`) and by level (`levels`, `CheckOptions.level_order`), and its
+  memoized transitions in node order (`transitions`, `CheckOptions.transitions`, #1050, `c_check_transitions.c`,
+  keyed by interned value classes): #133's question of which order the regions take, which the postorder batches
+  won on the 9700X (`docs/c-checker.md`, "Level order or postorder"), #1050's of what the regions do ("Node order or
+  regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
+  don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
   `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue

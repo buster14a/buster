@@ -583,8 +583,8 @@ static void check_vector_conditional(TypeTable* table, const CheckAction* action
 // Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute, once per action.
 static inline __attribute__((always_inline)) bool check_vector_action(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
-    const bool left = check_vector_type(table, action->operands[0].type);
-    const bool right = check_vector_type(table, action->operands[1].type);
+    // Each operator's case asks which of its operands are vectors, so that the operators it doesn't take (a call, a member
+    // through a pointer, an assignment and the rest, most of the checker's nodes) look no type up (#1050).
     bool handled = false;
     switch (action->op)
     {
@@ -593,7 +593,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         case CHECK_OP_NOT:
         case CHECK_OP_BIT_NOT:
         {
-            handled = left;
+            handled = check_vector_type(table, action->operands[0].type);
             if (handled)
             {
                 check_vector_unary(table, action, result);
@@ -618,7 +618,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         case CHECK_OP_LOGICAL_AND:
         case CHECK_OP_LOGICAL_OR:
         {
-            handled = left || right;
+            handled = check_vector_type(table, action->operands[0].type) || check_vector_type(table, action->operands[1].type);
             if (handled)
             {
                 check_vector_binary(table, action, result);
@@ -626,7 +626,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         } break;
         case CHECK_OP_CAST:
         {
-            handled = left || check_vector_type(table, action->type);
+            handled = check_vector_type(table, action->operands[0].type) || check_vector_type(table, action->type);
             if (handled)
             {
                 check_vector_cast(table, action, result);
@@ -634,7 +634,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         } break;
         case CHECK_OP_SUBSCRIPT:
         {
-            handled = left || right;
+            handled = check_vector_type(table, action->operands[0].type) || check_vector_type(table, action->operands[1].type);
             if (handled)
             {
                 check_vector_subscript(table, action, result);
@@ -642,7 +642,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         } break;
         case CHECK_OP_MEMBER:
         {
-            handled = left;
+            handled = check_vector_type(table, action->operands[0].type);
             if (handled)
             {
                 check_vector_member(table, action, result);
@@ -650,7 +650,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         } break;
         case CHECK_OP_CONDITIONAL:
         {
-            handled = left || right || check_vector_type(table, action->operands[2].type);
+            handled = check_vector_type(table, action->operands[0].type) || check_vector_type(table, action->operands[1].type) || check_vector_type(table, action->operands[2].type);
             if (handled)
             {
                 check_vector_conditional(table, action, result);
@@ -661,7 +661,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         case CHECK_OP_POST_INCREMENT:
         case CHECK_OP_POST_DECREMENT:
         {
-            handled = left;
+            handled = check_vector_type(table, action->operands[0].type);
             if (handled)
             {
                 check_action_diagnose(result, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
@@ -678,7 +678,7 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         case CHECK_OP_BIT_OR_ASSIGN:
         case CHECK_OP_BIT_XOR_ASSIGN:
         {
-            handled = left || right;
+            handled = check_vector_type(table, action->operands[0].type) || check_vector_type(table, action->operands[1].type);
             if (handled && check_action_modifiable(table, &action->operands[0], action, result))
             {
                 static const CheckOp operations[] = {

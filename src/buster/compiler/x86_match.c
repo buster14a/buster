@@ -36,6 +36,9 @@ struct X86Operand
     uint8_t index;
     uint8_t mode;
     uint8_t segment;
+    // A vector-indexed (VSIB) memory operand's index class, a gather's or scatter's (BUSTER_X86_CLASS_XMM, YMM or ZMM;
+    // index its vector register), or 0 for any other memory (#1115).
+    uint8_t vsib;
     bool symbolic;
 };
 
@@ -332,15 +335,15 @@ static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
 }
 
 // Whether the parser has a grammar for an operand descriptor (#1134): no operand, memory addressed by general registers,
-// or a register of a class it names (general registers, XMM, YMM and ZMM registers, opmasks, and the x87's stack: %st
-// and %st(i), Intel's st and st(i), #147). MMX, bound, control, debug, segment and tile registers, vector-indexed
-// (VSIB) memory, register pairs and blocks and a default flags value aren't the parser's, and neither are the forms that
-// take them.
+// or by a vector index (VSIB, a gather's or scatter's, #1115), or a register of a class it names (general registers,
+// XMM, YMM and ZMM registers, opmasks, and the x87's stack: %st and %st(i), Intel's st and st(i), #147). MMX, bound,
+// control, debug, segment and tile registers, register pairs and blocks and a default flags value aren't the parser's,
+// and neither are the forms that take them.
 static bool x86_match_descriptor_parsed(uint16_t descriptor)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
     const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST;
-    const uint16_t unparsed = BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK | BUSTER_X86_OPERAND_DFV | BUSTER_X86_OPERAND_TEST;
+    const uint16_t unparsed = BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK | BUSTER_X86_OPERAND_DFV | BUSTER_X86_OPERAND_TEST;
     return named && (descriptor & unparsed) == 0;
 }
 
@@ -521,7 +524,10 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 const uint16_t descriptor = role == X86_MATCH_RM ? form->rm : role == X86_MATCH_REG || role == X86_MATCH_IS4 ? form->reg
                                                                           : role == X86_MATCH_VVVV                          ? form->vvvv
                                                                                                                             : 0;
-                uint32_t kinds = ((descriptor & BUSTER_X86_OPERAND_REGISTER) ? 1u << X86_OPERAND_REGISTER : 0) | ((descriptor & BUSTER_X86_OPERAND_MEMORY) ? 1u << X86_OPERAND_MEMORY : 0);
+                // A VSIB operand's kind is a bit of its own, X86_OPERAND_NONE's, which only a vector-indexed memory
+                // operand tests (x86_match_candidates_vector), its class the index's.
+                uint32_t kinds = ((descriptor & BUSTER_X86_OPERAND_REGISTER) ? 1u << X86_OPERAND_REGISTER : 0) |
+                                 ((descriptor & BUSTER_X86_OPERAND_MEMORY) ? 1u << ((descriptor & BUSTER_X86_OPERAND_VSIB) ? X86_OPERAND_NONE : X86_OPERAND_MEMORY) : 0);
                 uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
                 uint32_t fixed = 0;
                 if (role == X86_MATCH_IS4)
@@ -623,6 +629,8 @@ static bool x86_match_operand(const X86Operand* operand, uint16_t descriptor, ui
     else if (role == X86_MATCH_RM && operand->kind == X86_OPERAND_MEMORY)
     {
         result = (descriptor & BUSTER_X86_OPERAND_MEMORY) != 0 && (operand->width == 0 || operand->width == width);
+        // A VSIB operand's index is a vector register of the descriptor's class; any other memory's, a general one.
+        result &= (descriptor & BUSTER_X86_OPERAND_VSIB) != 0 ? operand->vsib == (descriptor & BUSTER_X86_OPERAND_CLASS) : operand->vsib == 0;
         result &= operand->symbolic || (operand->value >= INT32_MIN && operand->value <= INT32_MAX);
         instruction->rm = operand->base;
         instruction->index = operand->index;
@@ -730,7 +738,8 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
     {
         const X86Operand* value = &request->operands[operand];
         const __m512i templates = _mm512_maskz_loadu_epi32(valid, index->operands[operand] + first);
-        mask &= _mm512_test_epi32_mask(templates, _mm512_set1_epi32(1u << value->kind));
+        const bool vsib = value->kind == X86_OPERAND_MEMORY && value->vsib != 0;
+        mask &= _mm512_test_epi32_mask(templates, _mm512_set1_epi32(1u << (vsib ? X86_OPERAND_NONE : value->kind)));
         const __m512i roles = _mm512_and_epi32(_mm512_srli_epi32(templates, 16), _mm512_set1_epi32(255));
         if (value->kind == X86_OPERAND_REGISTER)
         {
@@ -747,6 +756,11 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
         }
         else if (value->kind == X86_OPERAND_MEMORY)
         {
+            if (vsib)
+            {
+                const __m512i classes = _mm512_and_epi32(_mm512_srli_epi32(templates, 4), _mm512_set1_epi32(15));
+                mask &= _mm512_cmpeq_epi32_mask(classes, _mm512_set1_epi32(value->vsib));
+            }
             if (value->width != 0)
             {
                 const __m512i widths = _mm512_and_epi32(_mm512_srli_epi32(templates, 8), _mm512_set1_epi32(255));
@@ -887,10 +901,13 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 // repeat that validation merely to get this length; no record changes between the two boundaries.
                 const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
                 // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
-                // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too.
+                // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too;
+                // and so AVX's vmovq where both need VEX's three bytes (#1115: clang's `vmovq %xmm1, (%r14,%rcx)` is
+                // C4 C1 79 D6, not C4 C1 F9 7E). AVX-512's EVEX vmovq takes the general register's, as GNU as does.
                 const uint32_t chosen = (uint32_t)(x86_form_description(result.instruction.form) - x86_form_descriptions);
                 const uint32_t number = (uint32_t)(x86_form_description(instruction.form) - x86_form_descriptions);
-                const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
+                const bool movq = ((chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X)) ||
+                                  ((chosen == X86_FORM_VMOVQ_X_RM64 || chosen == X86_FORM_VMOVQ_RM64_X) && (number == X86_FORM_VMOVQ_X_XM64 || number == X86_FORM_VMOVQ_XM64_X));
                 // And an immediate that fits a sign-extended byte in its imm8 form, not the accumulator's (#1115:
                 // `cmpw $120, %ax` is 66 83 F8 78, not 66 3D 78 00), where the two are as long: AX's 16-bit forms.
                 const bool accumulator = result.found && x86_form_descriptions[chosen].syntax == X86_SYNTAX_ACC_IMM && x86_form_descriptions[number].syntax != X86_SYNTAX_ACC_IMM;

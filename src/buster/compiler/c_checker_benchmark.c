@@ -257,7 +257,10 @@ int run_checker_benchmark(int argc, char** argv)
     const CheckOptions scalar = {
         .scalar = true
     };
-    const CheckOptions vector = { 0 };
+    // The vector path's batches, the integer folds 8 lanes at a time, which these graphs' independent operators fill.
+    const CheckOptions vector = {
+        .regions = true
+    };
     valid = valid && type_initialize(&types, &type_storage, &type_index, capacity) && check_graph_initialize(&graph, &storage, nodes, 0) &&
             check_benchmark_generate(&graph, chain) && check_graph_run(&types, &graph, &output, &scratch, &scalar, &expected);
     const uint64_t expected_end = output.length;

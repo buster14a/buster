@@ -177,10 +177,10 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
                                    scalar.floating[3].may_set_errno && scalar.floating[3].errno_pointer_type == type_pointer(table, BUSTER_TYPE_INT),
                               "math descriptors retain source conversions, runtime environment requirements and a real errno pointer type");
             const uint64_t mark = output.length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 CheckStream vector;
-                const CheckOptions partition = { .batch_size = batch };
+                const CheckOptions partition = { .batch_size = batch, .regions = batch != 0 };
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &vector) &&
                                        check_test_stream_equal(&scalar, &vector, graph.argument_count),
                                   "all graph partitions preserve FENV proofs, runtime masks and complete math descriptors");
