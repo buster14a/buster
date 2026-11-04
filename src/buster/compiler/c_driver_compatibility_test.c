@@ -4,6 +4,7 @@
 // Real CC invocations for #1113, shared by test-checker-driver and a standalone developer harness. No production
 // helpers are reused as the oracle: Clang supplies dependency rules, GNU make consumes escaping, and ELF headers
 // plus execution check the requested link modes. Each process has a private fixture directory and bounded captures.
+// #891's included target-feature fixtures compare complete Clang diagnostics for nested emission entry points.
 #ifdef BUSTER_DRIVER_COMPAT_STANDALONE
 #define _GNU_SOURCE
 #endif
@@ -136,6 +137,8 @@ static void cc_compat_release(CCCompatibilityRun* run)
     free(run->errors);
     *run = (CCCompatibilityRun){ .status = -1 };
 }
+
+#include "c_check_target_feature_emission_test.c"
 
 // GCC inserts empty lines before -MP rules while Clang does not. Ignore only empty physical lines at line starts;
 // preserve every other byte, notably escaped filename spaces/tabs and raw -MT expressions. These bounded oracle
@@ -274,6 +277,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
     cc_compat_expect(&test, ready, "prepare private CC fixtures");
     if (ready)
     {
+        cc_compat_target_feature_emission(&test);
         const char* directories[] = { "sys", "inc", "out" };
         bool files = true;
         for (uint32_t d = 0; d < 3; d += 1)
