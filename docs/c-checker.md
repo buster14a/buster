@@ -5506,6 +5506,24 @@ arguments against the function. The checker now gives these as clang does.
   argument an index of its function's parameters, with clang's "out of
   bounds" error and its extra information.
 
+  Other targets' calling conventions (`aarch64_sve_pcs`,
+  `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
+  `stdcall` is: clang's "calling convention is not supported for this target"
+  warning where they meet a function, which ignores them, and "only applies to
+  function types" off one; `pcs`'s argument is checked first where it meets a
+  function or a tag ("'pcs' attribute takes one argument", "invalid PCS
+  type"). The GPU kernels' (`amdgpu_kernel`, `device_kernel`,
+  `nvptx_kernel`) are a function declaration's: the same warning on one, and
+  "'X' attribute only applies to functions" (an error) on any other
+  declaration. A convention on a tag's declaration, or GNU's `noreturn`, is
+  "'X' attribute only applies to functions and methods" (after an unsupported
+  convention's warning), as clang's handlers give it to a declaration without a
+  declarator; a bit-field's after its width meets its type
+  ("only applies to function types"). A variadic function's `vectorcall` or
+  `regcall` is clang's "variadic function cannot use vectorcall calling
+  convention". A definition's `-Wgcc-compat` warning comes before Sema's
+  diagnostics of the same attribute.
+
   The rest stay refused by name: `selectany` (a COMDAT),
   `no_caller_saved_registers` (a calling convention), and the attributes
   whose handlers clang has its own (`pass_object_size`, `ms_struct`,
@@ -5629,6 +5647,10 @@ arguments against the function. The checker now gives these as clang does.
     of the wrong type is one error, where clang goes on to "unsupported
     machine mode" where both apply. A string argument with escapes names the
     piece of target's string from its spelling.
+  - A function definition's attribute whose argument count is wrong
+    (`regparm`, `pcs`) is the count's error alone: clang's parser's
+    `-Wgcc-compat` warning before it is missing. `-Winvalid-noreturn` isn't
+    made (nor `-Wreturn-type` but for a function returning an aggregate).
   - `annotate`'s arguments after its string must be constant expressions,
     clang's error with its evaluator's notes otherwise; they are taken here.
   - `int x _Alignas(3);` stops at clang's "expected ';' after top level

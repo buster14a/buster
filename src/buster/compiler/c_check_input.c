@@ -2346,8 +2346,9 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
     for (uint32_t i = 0; kind != BUSTER_TYPE_KIND_FUNCTION && attributes != NULL && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        const bool function_type = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION || attribute->kind == CHECK_ATTRIBUTE_REGPARM ||
-                                   (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword);
+        // (A GPU kernel's convention is a declaration's attribute, whose subject's error comes instead.)
+        const bool function_type = (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute)) ||
+                                   attribute->kind == CHECK_ATTRIBUTE_REGPARM || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword);
         if (function_type)
         {
             const CheckWarningEvent event =
@@ -5188,7 +5189,16 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         int64_t bits = 0;
                         valid &= check_input_constant(reader, begin, i, &bits) && bits >= 0 && bits <= UINT32_MAX;
                         width = (uint32_t)bits;
+                        const uint32_t before = attributes != 0 ? attributes->count : 0;
                         valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
+                        // Their function types' attributes, which meet the member's type (#147).
+                        if (valid && attributed && attributes != 0 && attributes->count > before)
+                        {
+                            CheckInputAttributes after = *attributes;
+                            after.records += before;
+                            after.count -= before;
+                            check_input_attribute_function_types(reader, &after, type, name);
+                        }
                         for (uint32_t ignored = colon; ignored < i; ignored += 1)
                         {
                             reader->ignored[ignored] = true;

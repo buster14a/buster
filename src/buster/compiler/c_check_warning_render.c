@@ -609,6 +609,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TARGET_UNSUPPORTED:
         case CHECK_WARNING_EVENT_UNKNOWN_SANITIZER:
         case CHECK_WARNING_EVENT_SANITIZER_GLOBAL:
+        case CHECK_WARNING_EVENT_FUNCTIONS_METHODS:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -655,6 +656,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         event->kind == CHECK_WARNING_EVENT_TYPE_POSITION ? "attribute '%.*s%s%.*s' ignored, because it cannot be applied to a type" :
                                         event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS ? "'%.*s%s%.*s' attribute only applies to return values that are pointers" :
                                         event->kind == CHECK_WARNING_EVENT_GCC_VARIADIC ? "GCC requires a function with the '%.*s%s%.*s' attribute to be variadic" :
+                                        event->kind == CHECK_WARNING_EVENT_FUNCTIONS_METHODS ? "'%.*s%s%.*s' attribute only applies to functions and methods" :
                                         event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES ?
                                             "'%.*s%s%.*s' attribute only applies to return values that are pointers or references" :
                                         event->kind == CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE ? "GCC does not allow the '%.*s%s%.*s' attribute to be written on a type" :

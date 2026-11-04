@@ -151,6 +151,9 @@ typedef enum CheckWarningEventKind
     // named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
     CHECK_WARNING_EVENT_UNKNOWN_SANITIZER,
     CHECK_WARNING_EVENT_SANITIZER_GLOBAL,
+    // A function type's attribute on a tag's declaration (#147, check_input_attribute_subjects): "'X' attribute only applies
+    // to functions and methods", named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
+    CHECK_WARNING_EVENT_FUNCTIONS_METHODS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

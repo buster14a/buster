@@ -290,6 +290,16 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "preserve_most", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "preserve_all", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "preserve_none", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // Other targets' conventions (#147), which x86-64's checkCallingConvention warns of and ignores; pcs's count and string
+    // are checked where it meets a function or a tag, as clang's CheckCallingConvAttr checks them
+    // (check_input_attribute_pcs); the kernels' are declarations' attributes, of functions alone.
+    { "aarch64_sve_pcs", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "aarch64_vector_pcs", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "m68k_rtd", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "pcs", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
+    { "amdgpu_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "device_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "nvptx_kernel", CHECK_ATTRIBUTE_CALLING_CONVENTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "regparm", CHECK_ATTRIBUTE_REGPARM, CHECK_ATTRIBUTE_INTEGER, 1, 1 },
     { "noreturn", CHECK_ATTRIBUTE_NORETURN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "_Noreturn", CHECK_ATTRIBUTE_NORETURN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -378,9 +388,10 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 
 static String8 check_input_attribute_name(CheckInputReader* reader, uint32_t name)
 {
-    const InternTable* table = reader->pp->table;
+    // (A reader of no preprocessor, a unit test's, has no names.)
+    const InternTable* table = reader->pp != NULL ? reader->pp->table : NULL;
     String8 result = { 0 };
-    if (name != 0 && name < table->count)
+    if (table != NULL && name != 0 && name < table->count)
     {
         const InternSpan span = table->spans[name];
         result = (String8) { (char*)table->records + span.offset, span.length };
@@ -477,6 +488,12 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_UNKNOWN_TYPE,
     CHECK_ARGUMENT_EXPECTED_TYPE,
     CHECK_ARGUMENT_EXPECTED_PAREN,
+    // pcs's "invalid PCS type", at the attribute; a variadic function's convention that takes none, "variadic function
+    // cannot use C calling convention" (the convention, CheckInputCallingConvention, the number).
+    CHECK_ARGUMENT_PCS_TYPE,
+    CHECK_ARGUMENT_VARIADIC_CONVENTION,
+    // A GPU kernel's convention off a function: "'X' attribute only applies to functions", at the attribute.
+    CHECK_ARGUMENT_KERNEL_FUNCTIONS,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -1780,9 +1797,9 @@ static void check_input_attribute_gcc_position(CheckInputReader* reader, const C
                 .kind = CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION,
                 .token = attribute->name_token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                // The parser's, before Sema's diagnostics of the same attribute.
+                // The parser's, before Sema's diagnostics of the same attribute (published at the token before it).
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = attribute->name_token,
+                .completion = attribute->name_token != 0 ? attribute->name_token - 1 : 0,
                 .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
             };
             check_input_warning_event(reader, &event, NULL, 0);
@@ -1989,7 +2006,54 @@ static void check_input_attribute_named_once(CheckInputReader* reader, const Che
 // function type: at its first token, named as written (a C23 one's normalized).
 static void check_input_attribute_unsupported(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    check_input_attribute_named_once(reader, attribute, CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED);
+    const uint32_t count = reader->parser->tokens.count;
+    if (reader->attribute_warned == NULL)
+    {
+        reader->attribute_warned = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, (uint64_t)count / 64 + 1);
+        if (reader->attribute_warned != NULL)
+        {
+            memset(reader->attribute_warned, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
+        }
+    }
+    const uint32_t token = attribute->first;
+    const bool warned = reader->attribute_warned == NULL || token >= count || ((reader->attribute_warned[token >> 6] >> (token & 63)) & 1) != 0;
+    if (!warned)
+    {
+        reader->attribute_warned[token >> 6] |= (uint64_t)1 << (token & 63);
+        check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED);
+    }
+}
+
+// Whether a convention attribute is a GPU kernel's (#147): a declaration's attribute of functions alone, whose subject
+// check comes first, never a type's.
+static bool check_input_attribute_kernel(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    return attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
+           (check_input_attribute_equal(name, "amdgpu_kernel") || check_input_attribute_equal(name, "device_kernel") ||
+            check_input_attribute_equal(name, "nvptx_kernel"));
+}
+
+// pcs's arguments where it meets a function or a tag (#147, clang's CheckCallingConvAttr): exactly one, "aapcs" or
+// "aapcs-vfp", else clang's errors at the attribute ("'pcs' attribute takes one argument", "invalid PCS type"). Whether
+// they are.
+static bool check_input_attribute_pcs(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
+{
+    const bool pcs = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "pcs");
+    const bool counted = !pcs || attribute->argument_count == 1;
+    const bool known = !pcs || !counted || check_input_attribute_equal(attribute->text, "aapcs") || check_input_attribute_equal(attribute->text, "aapcs-vfp");
+    if (!counted && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT | 1u << 8);
+    }
+    else if (!known)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_PCS_TYPE, 0);
+    }
+    return counted && known;
 }
 
 // The count of an attribute's arguments, its commas outside nested brackets (#147).
@@ -2972,10 +3036,13 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     for (uint32_t i = 0; is_function && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION)
+        if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_pcs(reader, attributes, attribute))
         {
             const uint32_t call = attribute->value == CHECK_CALL_IGNORED_X86_32 ? CHECK_CALL_SYSV : (uint32_t)attribute->value;
-            if (attribute->value == CHECK_CALL_IGNORED_X86_32)
+            // (A GPU kernel's convention is a function's declaration's alone, not a pointer's to one.)
+            const bool wrapped_kernel = check_input_attribute_kernel(reader, attribute) &&
+                                        type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_FUNCTION;
+            if (attribute->value == CHECK_CALL_IGNORED_X86_32 && !wrapped_kernel)
             {
                 check_input_attribute_unsupported(reader, attribute);
             }
@@ -3071,6 +3138,12 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi(Ch
                 if (result == 0 && reader->output->resource)
                 {
                     check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_RESOURCE);
+                }
+                else if (result == 0 && (attribute->value == CHECK_CALL_VECTOR || attribute->value == CHECK_CALL_REG) &&
+                         (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0)
+                {
+                    // vectorcall and regcall take no variadic function (#147, clang's supportsVariadicCall): its error.
+                    check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_VARIADIC_CONVENTION, (uint32_t)attribute->value);
                 }
                 else if (result == 0 && attribute->value != CHECK_CALL_IGNORED_X86_32)
                 {
@@ -3554,7 +3627,9 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         const String8 scope = scoped ? check_input_attribute_name(reader, scope_name) : (String8){ "", 0 };
         // transparent_union's handler ignores it off a union earlier (check_input_attribute_type), which still warns here.
         const bool transparent = attribute->kind == CHECK_ATTRIBUTE_TRANSPARENT_UNION;
-        const CheckInputSubjectRow* row = attribute->keyword || (attribute->ignored && !attribute->subject_ignored && !transparent) ? NULL :
+        // (A GPU kernel's convention, which a type off a function ignored, is a declaration's attribute: its subject's error.)
+        const bool kernel = check_input_attribute_kernel(reader, attribute);
+        const CheckInputSubjectRow* row = attribute->keyword || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
                                           check_input_subject_row(scope, check_input_attribute_name(reader, attribute->name), scoped, attribute->standard);
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
@@ -3638,6 +3713,33 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         else if (internal && (declaration & BUSTER_CHECK_SUBJECT_LOCAL) != 0 && name < parser->tokens.count)
         {
             check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL, name, CHECK_WARNING_COMPLETE_AT_TOKEN, name + 1);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
+        if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_KERNEL_FUNCTIONS, 0);
+            valid = false;
+        }
+        // A function type's attribute on a tag's declaration (#147, clang's handleCallConvAttr and handleNoReturnAttr of a
+        // declaration without a declarator): a convention's arguments (pcs's) first, then x86-64's warning of one it
+        // hasn't; then "'X' attribute only applies to functions and methods", which ignores it. regparm has none there.
+        const bool tag = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
+        const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute);
+        const bool function_type = convention || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword);
+        if (valid && tag && function_type && !attribute->ignored && !attribute->subject_ignored)
+        {
+            valid = check_input_attribute_pcs(reader, attributes, attribute);
+            if (valid && convention && attribute->value == CHECK_CALL_IGNORED_X86_32)
+            {
+                check_input_attribute_unsupported(reader, attribute);
+            }
+            if (valid)
+            {
+                check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_FUNCTIONS_METHODS, attribute->first,
+                                                     attribute->first + 1);
+            }
             attribute->ignored = true;
             attribute->subject_ignored = true;
         }

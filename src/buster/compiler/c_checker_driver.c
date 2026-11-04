@@ -268,6 +268,9 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
         case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
+        case CHECK_ARGUMENT_PCS_TYPE: snprintf(text, capacity, "invalid PCS type"); break;
+        case CHECK_ARGUMENT_KERNEL_FUNCTIONS: snprintf(text, capacity, "'%s' attribute only applies to functions", parsed); break;
+        case CHECK_ARGUMENT_VARIADIC_CONVENTION: snprintf(text, capacity, "variadic function cannot use %s calling convention", check_input_convention_name(number)); break;
         default: snprintf(text, capacity, "invalid attribute argument"); break;
     }
 }
