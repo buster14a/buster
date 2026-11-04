@@ -3747,7 +3747,7 @@ typedef enum ParseTestPlace
 // the hard limit allows that, for the unbounded run; for the limited one, 1 TiB past its address space, or the hard
 // limit where that is lower but leaves BUSTER_PARSE_TEST_PLACE_BYTES. Where the hard limit allows neither, the run isn't
 // checked.
-static ParseTestPlace parse_test_diagnostic_place(uint32_t declarations, bool limited)
+static __attribute__((unused)) ParseTestPlace parse_test_diagnostic_place(uint32_t declarations, bool limited)
 {
     // Zero where /proc or getrlimit fails, so that what follows reads defined values and the run reports a wrong place.
     struct rlimit space = {
