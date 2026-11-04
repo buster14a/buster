@@ -1,24 +1,84 @@
-name: Issue 176 isolated working snapshot
+name: Issue 176 focused hosted validation
 on:
   push:
     branches: [chatgpt/176-typed-oracle-continuation]
-    paths: [.github/workflows/issue-176-work.yml]
+    paths: [.github/workflows/issue-176-work.yml, .github/issue-176.patch.b64]
 permissions:
   contents: read
 jobs:
-  snapshot:
-    if: github.repository == 'buster14a/buster'
+  patch:
+    if: github.repository_id == '1421805693' && github.ref == 'refs/heads/chatgpt/176-typed-oracle-continuation'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.apply.outputs.revision }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          persist-credentials: false
-      - name: Archive tracked source for the isolated coding session
-        run: git archive --format=tar.gz -o "$RUNNER_TEMP/issue-176-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          ref: ${{ github.sha }}
+      - name: Apply the session's reviewed original patch on its own branch
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f .github/issue-176.patch.b64; then
+              base64 --decode .github/issue-176.patch.b64 | gzip --decompress > "$RUNNER_TEMP/issue-176.patch"
+              printf '%s  %s\n' b97df78d6c3c7f0e36460916cc830b85e3a4ae15b0915d4c20d6c4a8219cbea1 "$RUNNER_TEMP/issue-176.patch" | sha256sum --check
+              git apply --check "$RUNNER_TEMP/issue-176.patch"
+              git apply "$RUNNER_TEMP/issue-176.patch"
+              git diff --check
+              git add src/buster/compiler/interpreter.c src/buster/compiler/interpreter_test.c src/buster/compiler/interpreter_copy_test.c src/buster/compiler/interpreter_object_test.c
+              git rm .github/issue-176.patch.b64
+              git config user.name 'David Gonzalez Martin'
+              git config user.email 'davidgmbb@gmail.com'
+              git -c core.hooksPath=/dev/null commit -m 'fix(interpreter): allocate and reclaim typed local objects' -m 'Give each invocation aligned object representations with byte-definedness and exact memory extents. Preserve scalar cells, validate object metadata, and reclaim static storage on return and failed entry. Add object COPY/native, alignment, lifetime, resource and repeated-call regressions.' -m 'Agent-authored for the maintainer by OpenAI / GPT-6 Astra Pro. No private session URL or identifier is exposed by this ChatGPT environment.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+              test "$(git ls-remote origin refs/heads/chatgpt/176-typed-oracle-continuation | cut -f1)" = "$GITHUB_SHA"
+              git push origin HEAD:refs/heads/chatgpt/176-typed-oracle-continuation
+          fi
+          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  test:
+    needs: patch
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, address]
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_SANITIZER: ${{ matrix.sanitizer }}
+      BUSTER_SANITIZER_OPTIMIZATION: '1'
+      BUSTER_LINKER: lld
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          name: issue-176-source
-          path: ${{ runner.temp }}/issue-176-source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+          ref: ${{ needs.patch.outputs.revision }}
+          persist-credentials: false
+      - name: Install the project's pinned hosted toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Configure fatal sanitizer checks
+        if: matrix.sanitizer != 'none'
+        run: bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
+      - name: Build Release compiler
+        run: ./build.sh --config Release
+      - name: Exercise typed objects and existing interpreter boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          ./build/compiler test-interpreter --count 256 --seed 176
+          ./build/compiler test-interpreter-native
+          ./build/compiler test-interpreter-link
+          ./build/compiler test-ir-interpreter
+          ./build/compiler test-ir-lowering
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-176-diagnostics-${{ matrix.sanitizer }}
+          path: ${{ runner.temp }}/sanitizer-reports
+          if-no-files-found: ignore
+          retention-days: 3
