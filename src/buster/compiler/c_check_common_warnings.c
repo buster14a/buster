@@ -587,6 +587,7 @@ static bool check_common_void_pointer_cast(const CheckStream* stream, const Type
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, Arena* scratch);
+static void check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value);
 static void check_common_conversion_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, Arena* scratch);
@@ -1631,10 +1632,37 @@ static void check_common_dangling_else(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+// Whether the separator `separator` is a comma operator, as the reader's expression_commas decides it: a separator
+// takes what the first other token above it is, and a group, a sizeof, a condition, a subscript, a conditional or a
+// for makes a comma operator; a call's, an initializer's or a selection's list does not.
+static bool check_common_comma_operator(const Parser* parser, uint32_t separator)
+{
+    uint32_t at = separator;
+    for (uint32_t steps = 0; at < parser->tokens.count && parser->tree.roles[at] == PARSE_ROLE_SEPARATOR && steps < parser->tokens.count; steps += 1)
+    {
+        at = parser->tree.parents[at];
+    }
+    const bool result = at < parser->tokens.count && check_input_expression_comma_seed(parser, at);
+    return result;
+}
+
+// Whether the child `at` of the conditional whose `:` is `colon` is its condition: the conditional's `?`, a leaf child of
+// its `:`, comes after it. The arms come after the `?`, a GNU `?:` included, whose condition is its true value too.
+static bool check_common_ternary_condition(const Parser* parser, uint32_t at, uint32_t colon)
+{
+    bool result = false;
+    for (uint32_t question = at + 1; at < colon && !result && question < colon; question += 1)
+    {
+        result = parser->tree.parents[question] == colon && parser->tree.roles[question] == PARSE_ROLE_OPEN_TERNARY;
+    }
+    return result;
+}
+
 // Whether the address at `token` (an `&`, or an array that decays) is what a return returns: up the tree to the `return`,
-// through what keeps the address (casts, groups, pointer arithmetic, a conditional's arms), as clang's checkExprLifetime
-// follows a returned value. A dereference (`*`, `->`, a subscript), a comparison, a logical operator, a call, an
-// assignment or an initializer consumes it.
+// through what keeps the address (casts, groups, pointer arithmetic, a conditional's arms, a comma's right operand), as
+// clang's checkExprLifetime follows a returned value. A dereference (`*`, `->`, a subscript), a comparison, a logical
+// operator, a call, an assignment or an initializer consumes it, and a comma's left operand and a conditional's
+// condition are not the value.
 static bool check_common_in_return(const Parser* parser, uint32_t token)
 {
     bool result = false;
@@ -1643,6 +1671,8 @@ static bool check_common_in_return(const Parser* parser, uint32_t token)
     {
         const uint8_t role = parser->tree.roles[at];
         const uint8_t kind = parser->tokens.kinds[at];
+        const uint32_t parent = parser->tree.parents[at];
+        const uint8_t parent_role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
         if (role == PARSE_ROLE_RETURN)
         {
             result = true;
@@ -1656,7 +1686,69 @@ static bool check_common_in_return(const Parser* parser, uint32_t token)
         {
             break;
         }
-        at = parser->tree.parents[at];
+        const bool comma = parent_role == PARSE_ROLE_COMMA || (parent_role == PARSE_ROLE_SEPARATOR && check_common_comma_operator(parser, parent));
+        if ((comma && at < parent) || (parent_role == PARSE_ROLE_CLOSE_TERNARY && check_common_ternary_condition(parser, at, parent)))
+        {
+            break;
+        }
+        at = parent;
+    }
+    return result;
+}
+
+// The graph nodes no static selection selects: a selection's controlling expression and its other arms, and what they
+// read. clang's checkExprLifetime sees through a selection to the arm it selects alone.
+static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* parser, Arena* scratch)
+{
+    uint8_t* roots = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* marks = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    uint8_t* result = roots != NULL && marks != NULL ? marks : NULL;
+    if (result != NULL)
+    {
+        memset(roots, 1, graph->count);
+        memset(marks, 0, graph->count);
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+            {
+                if (operands[i] < graph->count)
+                {
+                    roots[operands[i]] = 0;
+                }
+            }
+            for (uint32_t i = 0; check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL && graph->argument_counts != NULL &&
+                                 i < graph->argument_counts[node]; i += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+                if (argument < graph->count)
+                {
+                    roots[argument] = 0;
+                }
+            }
+        }
+        check_common_unselected_roots(graph, parser, roots, marks, 1);
+        // Operands come before what reads them, as check_common_evaluated's reverse pass has it.
+        for (uint32_t node = graph->count; node-- > 0;)
+        {
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; marks[node] != 0 && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+            {
+                if (operands[i] < graph->count)
+                {
+                    marks[operands[i]] = 1;
+                }
+            }
+            for (uint32_t i = 0; marks[node] != 0 && check_graph_has_arguments(graph->ops[node]) && graph->argument_offsets != NULL &&
+                                 graph->argument_counts != NULL && i < graph->argument_counts[node]; i += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+                if (argument < graph->count)
+                {
+                    marks[argument] = 1;
+                }
+            }
+        }
     }
     return result;
 }
@@ -1681,6 +1773,8 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
                                       TypeTable* types, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
+    // Made at the first returned local address: what no static selection selects.
+    uint8_t* unselected = NULL;
     for (uint32_t node = 0; node < graph->count; node += 1)
     {
         const CheckOp op = graph->ops[node];
@@ -1698,7 +1792,16 @@ static void check_common_return_stack(const Parser* parser, Preprocessor* pp, co
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
             // From the address itself (its `&`, or the array that decays), so that what is done to it counts.
-            if (local && check_common_in_return(parser, graph->tokens[node]))
+            const bool returned = local && check_common_in_return(parser, graph->tokens[node]);
+            if (returned && unselected == NULL)
+            {
+                unselected = check_common_unselected(graph, parser, scratch);
+                if (unselected == NULL)
+                {
+                    check_common_exhausted(pp);
+                }
+            }
+            if (returned && unselected != NULL && unselected[node] == 0)
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 const char* subject = check_common_parameter_token(input, parser, declaration) ? "parameter" : "local variable";
@@ -3559,6 +3662,35 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
     return valid;
 }
 
+// A static selection (_Generic, __builtin_choose_expr) checks every arm but evaluates only the chosen one; its other
+// arms are otherwise unreferenced roots, and so is its controlling expression. Sets `marks` to `value` at each such
+// root, the nodes `roots` has set inside a selection's parentheses that are not the one it selects.
+static void check_common_unselected_roots(const CheckGraph* graph, const Parser* parser, const uint8_t* roots, uint8_t* marks, uint8_t value)
+{
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        const uint32_t close = graph->ops[node] == CHECK_OP_SELECT ? graph->tokens[node] : BUSTER_CHECK_NONE;
+        uint32_t token = close;
+        for (uint32_t at = close < parser->tokens.count ? close : 0; at-- > 0;)
+        {
+            if (parser->tree.parents[at] == close && (parser->tokens.kinds[at] == PARSE_KIND_GENERIC ||
+                                                      parser->tokens.kinds[at] == PARSE_KIND_TYPE_ARGUMENT))
+            {
+                token = at;
+                break;
+            }
+        }
+        const uint32_t selected = graph->operand0[node];
+        for (uint32_t candidate = 0; close < parser->tokens.count && candidate < graph->count; candidate += 1)
+        {
+            if (roots[candidate] != 0 && candidate != selected && graph->tokens[candidate] > token && graph->tokens[candidate] < close)
+            {
+                marks[candidate] = value;
+            }
+        }
+    }
+}
+
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, Arena* scratch)
 {
@@ -3599,38 +3731,7 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
         {
             result = NULL;
         }
-        // A static selection checks every arm but evaluates only the chosen one; its other arms are otherwise
-        // unreferenced roots. The controlling expression is not evaluated either.
-        for (uint32_t node = 0; node < graph->count; node += 1)
-        {
-            if (graph->ops[node] != CHECK_OP_SELECT)
-            {
-                continue;
-            }
-            const uint32_t close = graph->tokens[node];
-            uint32_t token = close;
-            for (uint32_t at = close; at-- > 0;)
-            {
-                if (parser->tree.parents[at] == close && (parser->tokens.kinds[at] == PARSE_KIND_GENERIC ||
-                                                          parser->tokens.kinds[at] == PARSE_KIND_TYPE_ARGUMENT))
-                {
-                    token = at;
-                    break;
-                }
-            }
-            const uint32_t selected = graph->operand0[node];
-            if (close < parser->tokens.count)
-            {
-                for (uint32_t candidate = 0; candidate < graph->count; candidate += 1)
-                {
-                    if (evaluated[candidate] != 0 && candidate != selected && graph->tokens[candidate] > token &&
-                        graph->tokens[candidate] < close)
-                    {
-                        evaluated[candidate] = 0;
-                    }
-                }
-            }
-        }
+        check_common_unselected_roots(graph, parser, evaluated, evaluated, 0);
         for (uint32_t node = graph->count; node-- > 0;)
         {
             if (evaluated[node] == 0)

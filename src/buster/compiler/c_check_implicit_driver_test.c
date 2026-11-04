@@ -467,7 +467,27 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int *h(void) { int x = 0; return &x + 1; }\n"
         "long i(void) { int x = 0; return (long)&x; }\n"
         "int *j(void) { int a[2]; return a; }\n"
-        "int *k(int c) { int x = 0, y = 0; return c ? &x : &y; }\n";
+        "int *k(int c) { int x = 0, y = 0; return c ? &x : &y; }\n"
+        // A comma's left operand and a conditional's condition are not what is returned; its right operand and an arm are.
+        "int *l(int *p) { int x; return (&x, p); }\n"
+        "int *m(int *p) { int x; return &x ? p : p; }\n"
+        "int *n(int *p) { int x; return (p, &x); }\n"
+        "int *o(int c, int *p) { int x; return c ? &x : p; }\n"
+        "int *q(int *p) { int x; return &x ?: p; }\n"
+        "int *r(int c, int *p) { int x; return (c ? &x : p) ? p : p; }\n"
+        "int *s(int *p) { int x; return (p, (&x, p)); }\n"
+        "int *t(int c, int *p) { int x; return c ? p : (p, &x); }\n"
+        "int *u(int *p) { int x; return (p, p, &x); }\n"
+        "int *v(int *p) { int x; return (p, &x, p); }\n"
+        "int *w(int *p) { int x; return &x, p; }\n"
+        // A selection returns the arm it selects alone: not its controlling expression, nor an arm it does not select.
+        "int *y(int *p) { int x; return _Generic(0, int: &x, default: p); }\n"
+        "int *z(int *p) { int x; return _Generic(0, int: p, default: &x); }\n"
+        "int *aa(int *p) { int x; return _Generic(&x, int *: p); }\n"
+        "int *ab(int *p) { int x; return _Generic(0, int: (p, &x)); }\n"
+        "int *ac(int *p) { int x; return __builtin_choose_expr(1, &x, p); }\n"
+        "int *ad(int *p) { int x; return __builtin_choose_expr(0, &x, p); }\n"
+        "int *ae(int *p) { int x; return _Generic(0, int: p, default: _Generic(0, int: &x)); }\n";
     static const char generic_selection[] =
         "int a(void) { int x; return _Generic(1, int: x, default: 0); }\n"
         "int b(void) { int x; return _Generic(1, int: 0, default: x); }\n"
@@ -801,7 +821,8 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_chains, { "-Wall", NULL, NULL, NULL } },
         { unused_values, { "-Wall", NULL, NULL, NULL } },
         { statement_expressions, { "-Wall", NULL, NULL, NULL } },
-        { return_stack, { "-Wall", NULL, NULL, NULL } },
+        // buster gives no -Wpointer-bool-conversion, which clang gives for `&x ? p : p`.
+        { return_stack, { "-Wall", "-Wno-pointer-bool-conversion", NULL, NULL } },
         { generic_selection, { "-Wall", NULL, NULL, NULL } },
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },

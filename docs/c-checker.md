@@ -3788,7 +3788,13 @@ struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
 declaration chain once, at its definition when it has one and otherwise at its
 first declaration; a shadowing local use does not keep a file-scope variable
 used. `-Wreturn-stack-address` traces `&x[0]` and `&s.m` to their local object
-but not `&p->m` through a pointer. `-Wempty-body` leaves an `if` that has an
+but not `&p->m` through a pointer. As clang's `checkExprLifetime`, it warns
+only for an address the return returns: through casts, pointer arithmetic, a
+comma's right operand, either arm of `?:` (a constant condition's too) and the
+arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
+comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
+selection's controlling expression and its other arms consume it or don't
+return it. `-Wempty-body` leaves an `if` that has an
 `else` alone, and `-Wparentheses` covers a `for` condition as well as an `if`,
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
