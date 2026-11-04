@@ -6062,6 +6062,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_direct_initializer_test.c"
 #include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
@@ -6156,6 +6157,7 @@ static int run_checker_tests(int argc, char** argv)
         .random = 133
     };
     const char* clang = "clang";
+    bool direct_initializers = false;
     bool program_initializers = false;
     bool program_selection = false;
     bool const_values = false;
@@ -6181,6 +6183,10 @@ static int run_checker_tests(int argc, char** argv)
             const char* value = argv[++i];
             test.random = strtoull(value, &end, 10);
             options = errno == 0 && value != end && *end == 0 && *value != '-';
+        }
+        else if (strcmp(argv[i], "--direct-initializers") == 0)
+        {
+            direct_initializers = true;
         }
         else if (strcmp(argv[i], "--program-initializers") == 0)
         {
@@ -6265,18 +6271,22 @@ static int run_checker_tests(int argc, char** argv)
     check_test_part.seed = test.random;
     check_test_part.test = &test;
     // The selections run their own checks whole: --part deals the default run's.
-    options = options && (check_test_part.count == 1 || !(program_initializers || const_values || program_vectors || program_amx || program_asm ||
+    options = options && (check_test_part.count == 1 || !(direct_initializers || program_initializers || const_values || program_vectors || program_amx || program_asm ||
                                                            program_bits || program_align || program_float_constants || program_overloads ||
                                                            program_library || embed_initializers || requests || sizeof_only || transitions_only || program_selection));
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--part K/N] [--direct-initializers|--program-initializers|--program-selection|--program-vectors|--program-amx|--program-asm|--program-bits|--program-align|--program-float-constants|--program-overloads|--program-library|--embed-initializers|--requests|--const-values|--sizeof|--transitions]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && transitions_only)
+        if (initialized && direct_initializers)
+        {
+            check_test_direct_initializers(&test, clang);
+        }
+        else if (initialized && transitions_only)
         {
             check_test_transitions(&test);
         }
@@ -6723,6 +6733,7 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_initializers(&test, clang);
+                check_test_direct_initializers(&test, clang);
             }
             if (check_test_takes())
             {

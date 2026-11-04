@@ -3808,7 +3808,7 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
     {
         // After its attributes or its asm label, a declaration's `(` is no function's parameters: clang reads it as
         // C++'s direct initializer, `( expression-list )`, in C too (its InitKind::CXXDirect), with the name in scope.
-        // The checker refuses it as a construct it doesn't support (#1127).
+        // The checker initializes from the first expression and still checks the remaining arguments (#1252).
         parse_scalar_complete_declarator(parser, declaration, false);
         parse_scalar_open(parser, i, PARSE_ROLE_OPEN_GROUP, PARSE_MODE_OPERAND, PARSE_MODE_OPERATOR, false, step);
         frame->statement = PARSE_ITEM_DIRECT_INITIALIZER;

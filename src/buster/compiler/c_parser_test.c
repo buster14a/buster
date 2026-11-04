@@ -937,7 +937,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "int x = (const)1;\n", "1:15: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     { "struct S { const : 3; };\n", "1:18: type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]", 0, true },
     // A declarator ends at its attributes and asm label: no suffix after them, nor attributes after its name in its
-    // parentheses; a declaration's `(` there is clang's C++-style direct initializer, which the checker refuses.
+    // parentheses; a declaration's `(` there is clang's C++-style direct initializer (#1252).
     { "int x __attribute__((unused)) [3];\n", "1:30: expected ';' after top level declarator", 0 },
     { "struct S { int x __attribute__((unused)) [3]; };\n", "1:41: expected ';' at end of declaration list", 0 },
     { "void g(int x __attribute__((unused)) [3]);\n", "1:38: expected ')'", 0 },
