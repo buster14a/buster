@@ -726,13 +726,14 @@ static int32_t check_builtin_misc_type_class(const TypeTable* table, TypeId type
 
 // An int constant expression of `value`, as the generic builtins below fold: no operand runs.
 // An os_log data argument's bytes (#148): its type's after the default argument promotions (DefaultVariadicArgumentPromotion),
-// an array's or a function's as a pointer's, a float's and a half's as a double's, an integer's as its promotion's.
+// an array's or a function's as a pointer's, a float's and an __fp16's as a double's, an integer's as its promotion's.
+// _Float16 and __bf16 aren't promoted: 2 bytes each, as clang's.
 static uint64_t check_builtin_misc_os_log_size(const TypeTable* table, TypeId type)
 {
     const TypeId bare = type_is_valid(table, type) ? type_unqualified(type_strip_aligned(table, type)) : BUSTER_TYPE_INT;
     const uint8_t kind = type_kind(table, bare);
     const bool pointer = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_POINTER;
-    const bool narrow_floating = bare == BUSTER_TYPE_FLOAT || bare == BUSTER_TYPE_FLOAT16 || bare == BUSTER_TYPE_HALF || bare == BUSTER_TYPE_BF16;
+    const bool narrow_floating = bare == BUSTER_TYPE_FLOAT || bare == BUSTER_TYPE_HALF;
     const bool integer = check_action_is_integer(table, bare);
     const uint64_t result = pointer || narrow_floating ? 8 : integer ? type_size(table, type_promote(table, bare)) : type_size(table, bare);
     return result;

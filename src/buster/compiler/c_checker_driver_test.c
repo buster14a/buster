@@ -485,8 +485,9 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding past its limits; and eh_return's
 // unwinding and the constant strings' objects, which clang makes and this compiler doesn't; z/OS's va_start and
-// va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; and
-// os_log formats whose items take their data out of order, or data past 8 bytes; dump_struct's generated calls; and
+// va_copy, which clang's x86-64 code makes over a char *; a call with a static chain, which clang passes in r10; os_log's
+// data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
+// vector); dump_struct's generated calls; and
 // __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
@@ -512,10 +513,21 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
         { "int g(int);\nint f(void* p) { return __builtin_call_with_static_chain(g(1), p); }\n",
           "unsupported: __builtin_call_with_static_chain, whose chain this compiler's calls don't pass in r10" },
-        { "void* f(void* b) { return __builtin_os_log_format(b, \"%2$d %1$d\", 1, 2); }\n",
-          "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
-        { "void* f(void* b) { return __builtin_os_log_format(b, \"%Lf\", 1.0L); }\n",
-          "unsupported: __builtin_os_log_format of data its items don't take each once in order, or of more than 8 bytes" },
+        { "int g(void);\nvoid* f(void* b) { return __builtin_os_log_format(b, \"%1$d %1$d\", g()); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "int g(void);\nvoid* f(void* b, int n) { return __builtin_os_log_format(b, \"%1$d %2$d %1$d\", n, g()); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "void* f(void* b, __float128 q) { return __builtin_os_log_format(b, \"%f\", q); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "typedef char V __attribute__((vector_size(2)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
+        { "typedef float V __attribute__((vector_size(32)));\nvoid* f(void* b, V v) { return __builtin_os_log_format(b, \"%d\", v); }\n",
+          "unsupported: __builtin_os_log_format of data its items take again across side effects, or of data clang's code doesn't make "
+          "or this compiler doesn't store (past 16 bytes, a vector of 2 bytes, a __float128)" },
         { "int printf(const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s) { __builtin_dump_struct(s, printf); }\n",
           "unsupported: __builtin_dump_struct, whose calls of its printing function this compiler doesn't make" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",

@@ -1706,8 +1706,8 @@ compile, and this compiler doesn't yet:
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns;
 - `__builtin_call_with_static_chain`, whose chain register (`r10`);
-- `__builtin_os_log_format` of data its items take out of order, or of
-  more than 8 bytes;
+- `__builtin_os_log_format` of data its items take again across side
+  effects, or of a `__float128` or a 2-byte vector;
 - `__builtin_dump_struct`, whose generated calls.
 
 `__builtin_available` with an empty version (`0.0.0`) is refused too, as
@@ -1796,8 +1796,8 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   name), its field width and precision when they are arguments, a string's
   or pointer's count (from the precision's argument, or its constant as 4
   bytes), and its value (none for `%m`). A data argument's size is its
-  promoted type's: arrays and functions as pointers, float and half as
-  double.
+  promoted type's: arrays and functions as pointers, float and `__fp16` as
+  double. `_Float16` and `__bf16` aren't promoted, and take 2 bytes.
 - **The checks.** The checking pass goes on past a `%P` without its length,
   as clang's `CheckFormatArguments` does. Each data argument is under 256
   bytes, promoted ("argument N is too big"). For `__builtin_os_log_format`,
@@ -1813,10 +1813,22 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
   - It writes the summary byte (0x1 for private items, 0x2 for items other
     than scalars), the items' count, then each item's descriptor
     (`kind << 4 | privacy`), its size and its data.
-  - clang evaluates the data in its items' order, once each. A format whose
-    items take the data other than once each in order (positions, a repeat,
-    an unused argument) is refused by name, and so is data of other than 1,
-    2, 4 or 8 bytes (a `long double`, an `__int128`).
+  - clang evaluates each item's data when it stores it, in the items' order,
+    so positions reorder the data's side effects, and data no item takes
+    isn't evaluated. Here each argument is evaluated once, at its first
+    item, into a temporary. That is clang's result where an argument taken
+    again has no side effects and none ran since its first item (a field
+    width's argument that a precision takes too). Other data taken again is
+    refused by name.
+  - Each item's data is an unsigned integer of its size, as clang's helper
+    takes it. A signed `_BitInt` narrower than its class is zero-extended
+    from its width, and a `long double`'s 10 bytes are followed by 6 zeros.
+    Data of 16 bytes (a `long double`, an `__int128`, a `_BitInt(65)` to
+    `_BitInt(128)`, a 16-byte vector) and of 2 (`_Float16`, `__bf16`) is
+    stored.
+  - A `__float128` and a 2-byte vector are refused by name, and so are a
+    32- or 64-byte vector and a `_BitInt` past 128 bits, on which clang's
+    code generation crashes.
 - **Limits.** At most 31 arguments are taken, and clang takes up to the
   format's plus 255.
 
