@@ -563,8 +563,6 @@ struct CheckLowerOwners
 };
 
 typedef struct CheckLowerWriter CheckLowerWriter;
-#define BUSTER_CHECK_LOWER_SWEEP_NODES 256u
-
 struct CheckLowerWriter
 {
     const CheckProgram* program;
@@ -811,21 +809,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 1: a body's controls as tasks of one
-    // tasks' loop; bit 2: no overload heads or addresses read in a unit without overload sets (`no_overloads`); bit 4: the
-    // common controls' kinds tested first; bit 64: the statement sweep (c_check_program_sweep.c), with its scratch and
-    // counts; bit 16: the sweep's counts reported.
-    uint32_t experiment;
-    bool no_overloads;
-    uint8_t sweep_state[BUSTER_CHECK_LOWER_SWEEP_NODES];
-    uint8_t sweep_count[BUSTER_CHECK_LOWER_SWEEP_NODES];
-    uint8_t sweep_kinds[BUSTER_CHECK_LOWER_SWEEP_NODES][3];
-    uint8_t sweep_classes[BUSTER_CHECK_LOWER_SWEEP_NODES][3];
-    uint64_t sweep_values[BUSTER_CHECK_LOWER_SWEEP_NODES][3];
-    TypeId sweep_targets[BUSTER_CHECK_LOWER_SWEEP_NODES];
-    TypeId sweep_types[BUSTER_CHECK_LOWER_SWEEP_NODES];
-    uint64_t sweep_nodes;
-    uint64_t sweep_statements;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -2151,7 +2134,7 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
 static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool address, TypeId target)
 {
     const CheckProgram* program = writer->program;
-    if (node < program->stream->count && (writer->no_overloads || check_stream_overload_head(program->stream, node) == 0))
+    if (node < program->stream->count && check_stream_overload_head(program->stream, node) == 0)
     {
         // A statement's assignment of an aggregate copies the bytes and leaves no address to discard, and one into a
         // bit-field (an update's too) leaves no value. A discarded comma discards its right operand in its place.
@@ -2179,7 +2162,7 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckOverloadResult* selected = writer->no_overloads ? NULL : check_program_overload_address(program, node, operand);
+    const CheckOverloadResult* selected = check_program_overload_address(program, node, operand);
     if (selected != NULL)
     {
         if (!check_program_overload_valid(program, selected))
@@ -10257,7 +10240,6 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
 
 #include "c_check_program_batch.c"
 #include "c_check_program_templates.c"
-#include "c_check_program_sweep.c"
 
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
@@ -11454,21 +11436,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
-    if ((writer->experiment & 4) != 0 && (control.kind == CHECK_CONTROL_EVALUATE || control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE))
-    {
-        // The chain's last case for these kinds, tested first.
-        if (control.kind != CHECK_CONTROL_EVALUATE)
-        {
-            check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32,
-                                    control.target);
-        }
-        const TypeId target = control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0;
-        if (control.node != BUSTER_CHECK_NONE && !((writer->experiment & 64) != 0 && check_lower_sweep(writer, control.node, target)))
-        {
-            check_lower_expression(writer, control.node, false, target);
-        }
-    }
-    else if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
+    if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
     }
@@ -11593,10 +11561,9 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
             check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE,
                                     BUSTER_TYPED_CLASS_I32, control.target);
         }
-        const TypeId target = control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0;
-        if (control.node != BUSTER_CHECK_NONE && !((writer->experiment & 64) != 0 && check_lower_sweep(writer, control.node, target)))
+        if (control.node != BUSTER_CHECK_NONE)
         {
-            check_lower_expression(writer, control.node, false, target);
+            check_lower_expression(writer, control.node, false, control.kind == CHECK_CONTROL_EVALUATE ? BUSTER_TYPE_VOID : 0);
         }
     }
 }
@@ -12471,12 +12438,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
-    writer->no_overloads = (writer->experiment & 2) != 0 && shared->program->input->overload_heads == NULL && shared->program->stream->dense_values == NULL &&
-                           shared->program->stream->overload_address_count == 0;
-    writer->sweep_nodes = 0;
-    writer->sweep_statements = 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -12877,24 +12838,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // paid while the values were 96-byte records, and once they were columns (#628) its own work cost the 9700X more
         // than its misses did (#1048: docs/c-lowering.md, "The statements' prefetch").
         const uint64_t statements_start = timed ? __rdtsc() : 0;
-        const bool tasked = (writer->experiment & 1) != 0 && !sources && !bare && writer->depth == 0;
-        for (uint32_t i = body.entry_count; tasked && i-- > 0;)
-        {
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONTROL, .node = i });
-        }
-        if (tasked && writer->bit_ints)
-        {
-            check_lower_drain_bit_ints(writer);
-        }
-        else if (tasked && writer->template_ready)
-        {
-            check_lower_drain_templates(writer);
-        }
-        else if (tasked)
-        {
-            check_lower_drain(writer);
-        }
-        for (uint32_t i = 0; !tasked && !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
+        for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
             if (sources)
             {
@@ -12920,10 +12864,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
         }
         part->statement_ticks += timed ? __rdtsc() - statements_start : 0;
-        if ((writer->experiment & 16) != 0 && b + 1 == part->end)
-        {
-            fprintf(stderr, "sweep: nodes=%llu statements=%llu\n", (unsigned long long)writer->sweep_nodes, (unsigned long long)writer->sweep_statements);
-        }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
                                                                             writer->count == 0 || (writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN &&
