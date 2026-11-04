@@ -19,7 +19,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Apply only the verified fix to pinned main
+      - name: Apply and verify the exact source bytes
         shell: bash
         run: |
           set -euo pipefail
@@ -31,10 +31,44 @@ jobs:
           python3 -c 'from pathlib import Path; p=Path("src/buster/compiler/c_check_program_test.c"); s=p.read_text(); a="struct P p={x:++calls,.x:n,y:5,6};"; assert s.count(a)==1; p.write_text(s.replace(a,"struct P p={x:++calls,.x=n,y:5,6};"))'
           python3 -c 'from pathlib import Path; p=Path("src/buster/compiler/c_check_input.c"); s=p.read_text(); a="    CHECK_INPUT_INITIALIZER_MEMBER,\n"; assert s.count(a)==1; s=s.replace(a,""); a="    CHECK_INPUT_CONSTANT_INITIALIZER,\n"; assert s.count(a)==1; p.write_text(s.replace(a,a+"    // A field designator that names no member of the record in CheckInputReport.type.\n    CHECK_INPUT_INITIALIZER_MEMBER,\n"))'
           git add src/buster/compiler/c_check_program_test.c src/buster/compiler/c_check_input.c
-          git diff --cached --binary --unified=0 > "$RUNNER_TEMP/issue1251-corrected.patch"
-          printf 'e63bdcc3e175f4c2bae29dedb31007738171c00e4a8e16527f75649ed2803301  %s\n' "$RUNNER_TEMP/issue1251-corrected.patch" | sha256sum --check
+          sha256sum --check <<'SHA256'
+          3321c9ce4e37acab43cb6440ec3bb5443ce57ba0cafaa7776babee24042d98f1  docs/c-parser.md
+          3fc97a4a090784d65b815c1c8cf845f96ad7c340f5ba6aa45efc531a4e858b8c  src/buster/compiler/c_check_init_history.c
+          075e6f2fcd81ea7b91589eb9937b6ab91da04669278d018f3f8191c958bcaa51  src/buster/compiler/c_check_init_old_style_test.c
+          847748f8b67d1a0f9659337b20c9c41f331740c49556427b869d9c4722f3278d  src/buster/compiler/c_check_initializer.c
+          0a6d25623cf4a06444d47136dc495e5407a0af3d14eadbca2084e29325d5c8cd  src/buster/compiler/c_check_initializer_input.c
+          42986551572b8f74a2b0f654aa4792752ae86722be99cca07e55620bf1f4f8f2  src/buster/compiler/c_check_initializer_test.c
+          c4be330c9ed7833ee84c7298778e9fb59d5399a08f6c26f4267e011376105cff  src/buster/compiler/c_check_initializer_warning_test.c
+          afe4a8e43710cd1e23939a2af721153afaa4d0475030c7fa96e5ecddbbb33bf6  src/buster/compiler/c_check_input.c
+          e8971f187b397d028cd1175f5b7ff982cd5b9ffe242d0be8826fe9fe7e07aa63  src/buster/compiler/c_check_input_const_values.c
+          846e4e79c5255075aae03df2277d3726e890a5a4be40bfb9f58bfd8624904584  src/buster/compiler/c_check_input_initializer.c
+          882e9268357c075b772949d4e395dc708a6f01da0b872178f5b24bfe1699783b  src/buster/compiler/c_check_program_test.c
+          f2286f3d79ed50c28a4e0654264179bd799fa8af4d4d5728cd0dbfc1daaf7041  src/buster/compiler/c_checker_driver.c
+          b92871a493de40fbaa22b432712e585dd2042873f72eb97a028e2613b34948a7  src/buster/compiler/c_checker_driver_test.c
+          SHA256
           git diff --cached --check
           git diff --cached --stat
+          git diff --cached --binary --full-index > "$RUNNER_TEMP/issue1251-corrected.patch"
+          test "$(git diff --cached --name-only | wc -l)" -eq 13
+          test -z "$(git diff --cached --name-only -- .github)"
+      - name: Publish the audited source-only draft without claiming test success
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 441db2428d2bd8d28503037b28c1b3740fe4b25a
+          git diff --exit-code
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          sh .githooks/enable-sign-off.sh --maintainer-session
+          printf '%s\n' 'checker: support GNU old-style field designators (#1251)' '' 'Share member selection, continuation, constant evaluation, range replay and override history with modern field designators. Preserve the failed record and member for diagnostics, including inferred arrays. Add scalar/vector guarded-tail, independent ELF, runtime and Clang diagnostic regressions.' '' 'Fixes #1251' '' 'Agent session: Current ChatGPT session for #1251 (no session identifier or private permalink is exposed).' 'Model: OpenAI / GPT-6 Astra Pro' '' 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>' > "$RUNNER_TEMP/issue1251-message"
+          git commit -F "$RUNNER_TEMP/issue1251-message"
+          test "$(git rev-parse HEAD^)" = 441db2428d2bd8d28503037b28c1b3740fe4b25a
+          mkdir -p build
+          cc -O2 -o build/dco tools/dco/dco.c
+          build/dco audit --base 441db2428d2bd8d28503037b28c1b3740fe4b25a --head HEAD 2>&1 | tee "$RUNNER_TEMP/issue1251-dco.log"
+          git show --stat --format=fuller HEAD | tee "$RUNNER_TEMP/issue1251-commit.log"
+          git push origin HEAD:refs/heads/fix/1251-gnu-field-designators
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
       - name: Install the repository's pinned hosted toolchain
         run: bash tools/ci/setup-hosted.sh
       - name: Build the patched compiler
@@ -57,29 +91,11 @@ jobs:
         run: |
           set -euo pipefail
           ./build/compiler test-checker-driver --executable ./build/compiler 2>&1 | tee "$RUNNER_TEMP/issue1251-driver.log"
-      - name: Publish and audit the clean fix after every test passes
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 441db2428d2bd8d28503037b28c1b3740fe4b25a
-          git diff --exit-code
-          git diff --cached --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          sh .githooks/enable-sign-off.sh --maintainer-session
-          printf '%s\n' 'checker: support GNU old-style field designators (#1251)' '' 'Share member selection, continuation, constant evaluation, range replay and override history with modern field designators. Preserve the failed record and member for diagnostics, including inferred arrays. Add scalar/vector guarded-tail, independent ELF, runtime and Clang diagnostic regressions.' '' 'Fixes #1251' '' 'Agent session: Current ChatGPT session for #1251 (no session identifier or private permalink is exposed).' 'Model: OpenAI / GPT-6 Astra Pro' '' 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>' > "$RUNNER_TEMP/issue1251-message"
-          git commit -F "$RUNNER_TEMP/issue1251-message"
-          git show --no-patch --format=fuller HEAD
-          test "$(git rev-parse HEAD^)" = 441db2428d2bd8d28503037b28c1b3740fe4b25a
-          cc -O2 -o build/dco tools/dco/dco.c
-          build/dco audit --base 441db2428d2bd8d28503037b28c1b3740fe4b25a --head HEAD 2>&1 | tee "$RUNNER_TEMP/issue1251-dco.log"
-          git push origin HEAD:refs/heads/fix/checker-old-style-field-designator-1251
-          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain validation output
+      - name: Retain validation output and exact patch
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: issue-1251-validation-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/issue1251-*.log
+          path: ${{ runner.temp }}/issue1251-*
           retention-days: 1
           if-no-files-found: warn
