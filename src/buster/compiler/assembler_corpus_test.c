@@ -104,7 +104,7 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
                     asm_test_check(test, okay, name, "generate compiler assembly");
                     if (okay)
                     {
-                        char* gas[] = {"as", "--64", "-o", reference_path, assembly, 0};
+                        char* gas[] = {"as", "--64", "--nocompress-debug-sections", "-o", reference_path, assembly, 0};
                         char* vector[] = {"/proc/self/exe", "assemble", "-o", object_path, assembly, 0};
                         char* scalar[] = {"/proc/self/exe", "assemble", "--scalar", "-o", scalar_path, assembly, 0};
                         // Validate the fixture's expected results independently even when Buster rejects the source.

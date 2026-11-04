@@ -809,7 +809,9 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                     if (okay)
                     {
                         const char* target = targets[chosen->architecture <= X86_ARCH_V4 ? chosen->architecture : 0];
-                        char* gas[] = { "as", "--64", "-o", reference_path, assembly, 0 };
+                        // GNU as compresses debug sections where its build makes that the default (Arch's binutils
+                        // does, Ubuntu's doesn't); the assembler's are uncompressed, as the comparison needs (#1115).
+                        char* gas[] = { "as", "--64", "--nocompress-debug-sections", "-o", reference_path, assembly, 0 };
                         char* vector[] = { "/proc/self/exe", "assemble", (char*)target, "-o", vector_path, assembly, 0 };
                         char* scalar[] = { "/proc/self/exe", "assemble", "--scalar", (char*)target, "-o", scalar_path, assembly, 0 };
                         const bool runs = chosen->architecture != X86_ARCH_V4 || runs_v4;
