@@ -23,7 +23,9 @@ requirements. [Command index](README.md).
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
-  unwind tables alike, #177's `check_tier1_frame`; without `-g`;
+  code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
+  Tier 1's rows at the function's granularity, the Tier 1 guide's "Debug
+  information";
   `--tier1-strict` fails qualification on an unsupported body rather than
   falling back, while resource and internal failures fail either mode;
   `--tier1-report` and `--tier1-refusals` say which step refused the others

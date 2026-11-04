@@ -11,7 +11,9 @@
 //
 // emission_metadata_check checks the bounded protocol, NOT the truth of unwind rules about machine instructions or
 // control flow. A backend must independently prove those facts before publication. In particular, balanced CFI state
-// operations are not a CFG proof. The current driver and fixed-frame writer are not migrated by this module.
+// operations are not a CFG proof: emitted_code.c's emitted_verify_frames is the driver's proof of frame events (with
+// --verify and in the tests). The C driver's emission resolves its functions' events through this module after branch
+// sizing (emitted_unwind) and validates its -g source rows against it (c_check_debug.c).
 //
 // Count/place/fill: emission_metadata_plan validates and publishes required counts; the caller reserves disjoint
 // destination slices; emission_metadata_resolve validates again before any store, fills and publishes the result last.
@@ -31,6 +33,16 @@
 #define BUSTER_EMISSION_NO_ORIGIN UINT32_MAX
 #define BUSTER_EMISSION_MAX_REGISTERS 65536u
 #define BUSTER_EMISSION_LAYOUT_LANES 16u
+
+// The x86-64 target's unwind-register namespace: the System V psABI's DWARF numbers (rax 0, rdx 1, rcx 2, rbx 3, rsi 4,
+// rdi 5, rbp 6, rsp 7, r8 to r15 8 to 15, and the return address 16), which its frame events name and its CIE's rules
+// start from. emission_x86_registers maps the encoder's numbering (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8 to r15)
+// to it. The other targets' namespaces would be theirs; this is the only one the compiler has.
+#define BUSTER_EMISSION_X86_REGISTERS 17u
+#define BUSTER_EMISSION_X86_RBP 6u
+#define BUSTER_EMISSION_X86_RSP 7u
+#define BUSTER_EMISSION_X86_RETURN 16u
+static const uint8_t emission_x86_registers[16] __attribute__((unused)) = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
 
 typedef enum EmissionError
 {
@@ -178,6 +190,13 @@ struct EmissionResolved
     uint32_t frame_count;
     uint32_t size;
 };
+
+static __attribute__((unused)) EmissionCheck emission_metadata_check(const EmissionMetadata* metadata, const EmissionLayout* layout, bool scalar);
+static __attribute__((unused)) EmissionCheck emission_metadata_plan(const EmissionMetadata* metadata, const EmissionLayout* layout, bool scalar,
+                                                                    EmissionMetadataPlan* result);
+static __attribute__((unused)) EmissionCheck emission_metadata_resolve(const EmissionMetadata* metadata, const EmissionLayout* layout,
+                                                                       const EmissionStorage* storage, bool scalar, EmissionResolved* result);
+static __attribute__((unused)) uint32_t emission_anchor_offset(const EmissionLayout* layout, EmissionAnchor at);
 
 static EmissionCheck emission_layout_check_scalar(const EmissionLayout* layout)
 {

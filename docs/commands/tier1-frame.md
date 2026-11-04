@@ -9,11 +9,12 @@ requirements. [Command index](README.md).
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
   #177, whose steps are Tier 0's frame protocol (callee-saved registers pushed,
   one subtraction, with a frame pointer `push rbp; mov rbp, rsp` first and a
-  realignment and its R15 base after the subtraction), which the C driver's
-  unwind tables describe from Tier 1's published frame (`check_tier1_frame`,
-  early returns as tails, an open frame where the code doesn't end in its last
-  epilogue: the frame guide's "Unwind tables"; `test-check-debug --cross-check`
-  unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every instruction).
+  realignment and its R15 base after the subtraction), whose native emitter
+  (`tier1_frame_emit`) writes the frame's events with its records (#1056: each
+  epilogue bracketed, a probe loop's CFA in r11), which the C driver's unwind
+  tables resolve (the frame guide's "Unwind tables"; `test-check-debug
+  --cross-check` unwinds a `--tier1` fixture, by `backtrace()` and by gdb at every
+  instruction, and with `-g`).
   Its frame objects share slots by their blocks' lifetimes, which `--tier1` asks
   the checked program for (`c_check_program_lifetime.c`: a block a jump enters
   past its opening keeps its objects' whole-function lifetimes) and the IR
