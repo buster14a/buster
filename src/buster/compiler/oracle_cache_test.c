@@ -66,8 +66,9 @@
 //     those whose second is a restoration's failing the run without its tool; and another process's file made, put
 //     over one of the take's, written in place or removed, between its preparation and its replay
 //     (oracle_replay_between) and as it puts back what it changed (oracle_replay_restoring), which the take neither
-//     writes over nor removes, nor moves back as the file it moved aside; and a large one (16 MiB), taken with its peak
-//     memory under 2.7 times one read of its file, no copy of it made for the check;
+//     writes over nor removes, nor moves back as the file it moved aside; a file the take made write-only (umask 0444),
+//     removed as its replay fails; and large ones (16 MiB), taken with peak memory under 2.7 times one read of the file
+//     for one rewritten (no copy of it made for the check) and under half for one removed (its bytes not kept);
 //   - listings (the test's program's getdents64, as ls -i lists): a file made anew with the same name and bytes, its
 //     inode another, run again;
 //   - changes (the test's program's mkdir and traced sh's rmdir): mkdir's path, which the run made, there the next
@@ -2392,6 +2393,16 @@ static void oracle_test_replays(OracleTest* test)
     oracle_replay_restoring = 0;
     oracle_test_replay_change = 0;
     oracle_test_expect(test, other, "replays: another process's file made, put over the take's, written in place or removed, neither written over nor removed by the take");
+    // The file the take makes made write-only (umask 0444, mode 0222), the replay failing as it writes it: the
+    // restoration tells it by lstat and checks it through the descriptor it was made with, then removes it, so that the
+    // tool doesn't find it (a process that isn't root can't open it to read; as root this passes either way). Last, as
+    // the cache's own files made under that mask can't be read.
+    const bool masked_ready = oracle_test_replay_reset(directory, true);
+    const mode_t mask = umask(0444);
+    const bool masked = masked_ready && oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && replay.ran && replay.contract &&
+                        strstr(replay.output, "replay-made ") == 0;
+    umask(mask);
+    oracle_test_expect(test, masked, "replays: a file the take made write-only, removed as its replay fails, the tool not finding it");
     oracle_test_replay_kept(directory, true);
     oracle_test_unlink(directory, "replay-counter");
     oracle_test_unlink(directory, "replay-made");
@@ -2401,18 +2412,20 @@ static void oracle_test_replays(OracleTest* test)
     oracle_cache_close(&cache);
 }
 
-// A run of `cat replay-big-source > replay-big` in `directory`, replay-big declared, through `cache` (the large replay's,
-// oracle_test_replay_large): whether it ran or took its entry, and whether it took it.
-static bool oracle_test_replay_big(OracleCache* cache, const char* directory, bool* taken)
+// A run in `directory` through `cache` (the large replays', oracle_test_replay_large): `cat replay-big-source >
+// replay-big`, replay-big declared, or if `removal`, `rm -f replay-big-gone`, replay-big-gone declared. Whether it ran or
+// took its entry, and whether it took it.
+static bool oracle_test_replay_big(OracleCache* cache, const char* directory, bool removal, bool* taken)
 {
     char big[BUSTER_ORACLE_PATH_BYTES + 32];
-    snprintf(big, sizeof(big), "%s/replay-big", directory);
-    char* arguments[] = { "sh", "-c", "cat replay-big-source > replay-big", 0 };
+    snprintf(big, sizeof(big), "%s/%s", directory, removal ? "replay-big-gone" : "replay-big");
+    char* written[] = { "sh", "-c", "cat replay-big-source > replay-big", 0 };
+    char* removed[] = { "sh", "-c", "rm -f replay-big-gone", 0 };
     const char* files[] = { big };
     OracleRun run = {
         .cache = cache,
         .purpose = "oracle test: a large replay",
-        .arguments = arguments,
+        .arguments = removal ? removed : written,
         .directory = directory,
         .files = files,
         .file_count = 1,
@@ -2423,11 +2436,14 @@ static bool oracle_test_replay_big(OracleCache* cache, const char* directory, bo
     return result;
 }
 
-// How much a child process's peak resident memory grows, in KiB, as it takes the large replay's entry (if `take`, with
-// whether it took it into `taken`) or reads its file once: -1 if it can't be told. Mappings stand for large allocations
-// (M_MMAP_THRESHOLD fixed, so that a growing buffer is remapped rather than copied), so that a copy of the file is its
-// size again.
-static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory, bool take, bool* taken)
+// How much a child process's peak resident memory grows, in KiB, as it reads the large replay's file once (`what` 0), or
+// takes the entry of the large replay that writes it (1) or of the one that removes its other file (2), with whether it
+// took it into `taken`: -1 if it can't be told. The child gives back the free memory it shares with its parent
+// (malloc_trim), whose pages a buffer grown into them wouldn't add to what it has resident, then starts its peak at what
+// it has resident (writing 5 to /proc/self/clear_refs), as a fork's is its parent's, which hides growth below the
+// parent's own peak. Mappings stand for large allocations (M_MMAP_THRESHOLD fixed, so that a growing buffer is remapped
+// rather than copied), so that a copy of the file is its size again.
+static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory, uint32_t what, bool* taken)
 {
     int ends[2] = { -1, -1 };
     const pid_t child = pipe(ends) == 0 ? fork() : -1;
@@ -2435,17 +2451,24 @@ static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory
     {
         close(ends[0]);
         mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+        malloc_trim(0);
         char big[BUSTER_ORACLE_PATH_BYTES + 32];
         snprintf(big, sizeof(big), "%s/replay-big", directory);
+        const int refs = open("/proc/self/clear_refs", O_WRONLY | O_CLOEXEC);
+        const bool reset = refs >= 0 && write(refs, "5", 1) == 1;
+        if (refs >= 0)
+        {
+            close(refs);
+        }
         struct rusage before;
         struct rusage after;
         getrusage(RUSAGE_SELF, &before);
         bool took = false;
         OracleBuffer buffer = { 0 };
-        const bool done = take ? oracle_test_replay_big(cache, directory, &took) : oracle_buffer_file(&buffer, big);
+        const bool done = what != 0 ? oracle_test_replay_big(cache, directory, what == 2, &took) : oracle_buffer_file(&buffer, big);
         getrusage(RUSAGE_SELF, &after);
         free(buffer.bytes);
-        const int64_t report[2] = { done ? (int64_t)(after.ru_maxrss - before.ru_maxrss) : -1, took };
+        const int64_t report[2] = { reset && done ? (int64_t)(after.ru_maxrss - before.ru_maxrss) : -1, took };
         const bool written = write(ends[1], report, sizeof(report)) == (ssize_t)sizeof(report);
         _exit(written ? 0 : 1);
     }
@@ -2465,11 +2488,13 @@ static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory
     return read_whole && waited ? report[0] : -1;
 }
 
-// A large replay (#1342's third review): a run that writes 16 MiB, taken where its output already is, with those bytes
-// compared through a buffer of the check's own (oracle_replay_unchanged) rather than a copy of the file. The take's peak
-// memory, in a child process, is under 2.7 times one read of the file (the entry's bytes and the take's own of the file
-// it rewrites are two, 2.2 times one read on the owner's machine; a copy of it for the check was a third, 3.2 times), in
-// a build without a sanitizer, whose shadow memory and quarantine count too.
+// Large replays (#1342's third and fourth reviews), 16 MiB, each taken in a child process whose peak memory is measured
+// against one read of the file, in a build without a sanitizer (whose shadow memory and quarantine count too). A run
+// that writes it, taken where its output already is, its bytes compared through a buffer of the check's own
+// (oracle_replay_unchanged) rather than a copy: under 2.7 times one read (the entry's bytes and the take's own of the file
+// it rewrites are two, 2.2 times on the owner's machine; a copy for the check was a third, 3.2 times). And a run that
+// removes it, taken where it is again: under half of one read, as the take keeps only SHA-256 of a file it removes,
+// hashed a chunk at a time (its bytes kept were one read).
 static void oracle_test_replay_large(OracleTest* test)
 {
     OracleCache cache;
@@ -2477,8 +2502,10 @@ static void oracle_test_replay_large(OracleTest* test)
     const char* directory = test->runs[0];
     char source[BUSTER_ORACLE_PATH_BYTES + 32];
     char big[BUSTER_ORACLE_PATH_BYTES + 32];
+    char gone[BUSTER_ORACLE_PATH_BYTES + 32];
     snprintf(source, sizeof(source), "%s/replay-big-source", directory);
     snprintf(big, sizeof(big), "%s/replay-big", directory);
+    snprintf(gone, sizeof(gone), "%s/replay-big-gone", directory);
     const uint64_t size = 16u << 20;
     uint8_t* bytes = malloc(size);
     for (uint64_t i = 0; bytes != 0 && i < size; i += 1)
@@ -2487,23 +2514,34 @@ static void oracle_test_replay_large(OracleTest* test)
     }
     unlink(big);
     bool taken = false;
-    const bool first = bytes != 0 && oracle_test_write(source, bytes, size) && oracle_test_replay_big(&cache, directory, &taken) && !taken;
-    const int64_t once = first ? oracle_test_replay_peak(&cache, directory, false, &taken) : -1;
-    const int64_t took = once > 0 ? oracle_test_replay_peak(&cache, directory, true, &taken) : -1;
+    const bool first = bytes != 0 && oracle_test_write(source, bytes, size) && oracle_test_replay_big(&cache, directory, false, &taken) && !taken;
+    const int64_t once = first ? oracle_test_replay_peak(&cache, directory, 0, &taken) : -1;
+    const int64_t took = once > 0 ? oracle_test_replay_peak(&cache, directory, 1, &taken) : -1;
     uint64_t length = 0;
     char* left = taken ? oracle_test_read(big, &length) : 0;
     const bool right = left != 0 && length == size && memcmp(left, bytes, size) == 0;
     free(left);
+    bool kept_first = false;
+    const bool removal = bytes != 0 && oracle_test_write(gone, bytes, size) && oracle_test_replay_big(&cache, directory, true, &kept_first) && !kept_first;
+    bool removed = false;
+    const int64_t removing = removal && oracle_test_write(gone, bytes, size) ? oracle_test_replay_peak(&cache, directory, 2, &removed) : -1;
+    struct stat status;
+    const bool gone_right = removed && lstat(gone, &status) != 0 && errno == ENOENT && oracle_test_replay_kept(directory, false) == 0;
     free(bytes);
 #if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer)
     const bool bounded = true;
+    const bool removal_bounded = true;
 #else
     const bool bounded = took >= 0 && took * 10 < once * 27;
+    const bool removal_bounded = removing >= 0 && removing * 2 < once;
 #endif
-    printf("oracle cache: a large take's peak grew by %lld KiB, one read of its file by %lld KiB\n", (long long)took, (long long)once);
+    printf("oracle cache: a large take's peak grew by %lld KiB, a large removal's by %lld KiB, one read of its file by %lld KiB\n", (long long)took,
+           (long long)removing, (long long)once);
     oracle_test_expect(test, first && taken && right && bounded, "replays: a large output taken without a copy of it for its check");
+    oracle_test_expect(test, removal && removed && gone_right && removal_bounded, "replays: a large output the entry removes taken without its bytes kept");
     unlink(source);
     unlink(big);
+    unlink(gone);
     oracle_cache_close(&cache);
 }
 

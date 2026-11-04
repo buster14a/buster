@@ -218,8 +218,10 @@ to, and a test prints them at its end (`oracle_cache_report`).
 A take (`oracle_run_take`) does what can fail first, changing nothing, not
 even a file's status-change time or its directory's times (#1317): it copies
 the entry's output and errors, and takes each file the run writes as it is,
-through one descriptor: what `fstat` gives of it, its bytes and its extended
-attributes. A file there that isn't a regular one (a directory, a symbolic link
+through one descriptor: what `fstat` gives of it, its extended attributes, and
+its bytes if the entry rewrites it (a restoration writes them back) or only
+SHA-256 of them, hashed a chunk at a time, if the entry removes it (a
+restoration moves it back whole). A file there that isn't a regular one (a directory, a symbolic link
 the replay would write through) isn't taken. Only then does it replay, each
 file only if it is as the take found it (`oracle_replay_unchanged`: the same
 inode, mode, owner, size, modification and status-change times, bytes and
@@ -246,9 +248,13 @@ found, with its bytes and attributes, or another process's), moved back where
 nothing has come since, and checked again where it is (another process's file
 put under that name between the check and the move goes back under it, and the
 run fails); and a made one moved aside the same way, where no other process's
-file can then be in its place, checked, and removed, or moved back if it is
-another process's (and after the removal checked through its descriptor to
-have been that file, so that a removal of another one fails the run). The tool
+file can then be in its place, told by `lstat` (which needs no permission to
+read it) and checked through the descriptor the replay made it with (`O_RDWR`,
+which reads a file made with a mode that forbids reading, kept to the take's
+end), and removed, or moved back if it is another process's; one it can't tell
+is never taken for another process's, and fails the run (and after the removal
+it is checked through that descriptor to have been that file, so that a
+removal of another one fails the run). The tool
 then runs on its files as they were, but for what no call gives back and a
 tool's result mustn't depend on here: their status-change times, link counts
 and access times and their directory's times. If putting back fails, the run
@@ -434,12 +440,16 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   left, the tool writing into each; and the file the take moved aside for the
   entry to remove, replaced or written in place under the name it is kept under
   before its restoration, or replaced there between the check of it and the
-  move back, never moved back as it, the run failing without its tool;
-- a large replay (#1342's third review): a run writing 16 MiB, taken where its
-  output already is; its peak memory, in a child process, under 2.7 times one
-  read of the file (the entry's bytes and the take's own of the file are two,
-  2.2 times; a copy for the check was a third, 3.2 times), in a build without a
-  sanitizer;
+  move back, never moved back as it, the run failing without its tool; and,
+  under umask 0444, the file the take makes made write-only (0222), the replay
+  failing as it writes it: removed, the tool not finding it;
+- large replays (#1342's third and fourth reviews), 16 MiB, each taken in a
+  child process whose peak memory is measured against one read of the file, in
+  a build without a sanitizer: a run writing it, taken where its output already
+  is, under 2.7 times (the entry's bytes and the take's own of the file are
+  two, 2.2 times; a copy for the check was a third, 3.2 times); and a run
+  removing it, taken where it is again, under half (a quarter; its bytes kept
+  were one read);
 - listings (the test's program's `getdents64`, as `ls -i` lists): a file made
   anew with the same name and bytes, its inode another, run again;
 - changes (the test's program's `mkdir`, and traced sh's `rmdir`): `mkdir`'s
