@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Temporary workbench, excluded from the implementation branch.
+name: Issue 1107 November 4 workbench
+on:
+  push:
+    branches: [agent/1107-diagnostics-nov4-workbench]
+    paths: [.github/workflows/issue-1107-nov4.yml, .issue-1107/**]
+permissions:
+  contents: read
+concurrency:
+  group: issue-1107-nov4
+  cancel-in-progress: true
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 441db2428d2bd8d28503037b28c1b3740fe4b25a
+      - name: Snapshot tracked source
+        run: git archive --format=tar HEAD -o "$RUNNER_TEMP/buster-source.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-1107-source
+          path: ${{ runner.temp }}/buster-source.tar
+          retention-days: 1
