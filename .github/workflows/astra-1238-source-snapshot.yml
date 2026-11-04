@@ -1,24 +1,72 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-name: Issue 1238 source snapshot
+name: Issue 1238 conversion experiment
 on:
   push:
     branches: ['astra/1238-source-snapshot']
+    paths: ['.astra-1238-part2']
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  publish:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    outputs:
+      revision: ${{ steps.publish.outputs.revision }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          persist-credentials: false
-      - name: Archive tracked source only
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          fetch-depth: 0
+      - name: Apply the reviewed patch and publish a clean branch
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .astra-1238-part1 .astra-1238-part2 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/1238.patch"
+          printf '%s  %s\n' b737cb0b594910135eb881e4b50529d270fde3d0d825a87c7b33380fb3f1a7dc "$RUNNER_TEMP/1238.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/1238.patch"
+          git apply "$RUNNER_TEMP/1238.patch"
+          git rm .astra-1238-part1 .astra-1238-part2 .github/workflows/astra-1238-source-snapshot.yml
+          git add src/buster/compiler
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          tree=$(git write-tree)
+          revision=$(printf '%s\n\n%s\n\n%s\n' 'checker: experiment with compact conversion IDs (#1238)' 'Preserve the dense default; add exact inline-type IDs, interned records, scalar/vector probes and differential coverage.' 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>' | git commit-tree "$tree" -p 441db2428d2bd8d28503037b28c1b3740fe4b25a)
+          git push origin "$revision:refs/heads/astra/1238-compact-checker-layout"
+          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+          git show --no-patch --format=fuller "$revision"
+  validate:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86-64, native]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      BUSTER_HOST_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          name: issue-1238-source
-          path: ${{ runner.temp }}/buster-source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+          ref: ${{ needs.publish.outputs.revision }}
+          persist-credentials: false
+      - name: Install the repository's pinned build and oracle tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build
+        shell: bash
+        run: set -o pipefail; ./build.sh --jobs 4 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Conversion ID and differential graph regressions
+        shell: bash
+        run: set -o pipefail; ./build/compiler test-checker --conversion-ids 2>&1 | tee "$RUNNER_TEMP/conversion-ids.log"
+      - name: Complete checker suite
+        shell: bash
+        run: set -o pipefail; ./build/compiler test-checker 2>&1 | tee "$RUNNER_TEMP/checker.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-1238-${{ matrix.arch }}
+          path: ${{ runner.temp }}/*.log
+          retention-days: 7
