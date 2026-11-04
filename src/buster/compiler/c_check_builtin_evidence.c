@@ -39,7 +39,8 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
         effects |= op == CHECK_OP_STATEMENT_VALUE && (graph->members[node] & BUSTER_CHECK_SIDE_EFFECT) != 0;
         effects |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP ||
                    builtin == CBUILTIN_PREFETCH || builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET ||
-                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA || cbuiltin_carry(builtin));
+                   builtin == CBUILTIN_MEMMOVE || builtin == CBUILTIN_ALLOCA || cbuiltin_carry(builtin) ||
+                   (builtin >= CBUILTIN_ALLOCA_UNINITIALIZED && builtin <= CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED));
         effects |= op == CHECK_OP_BUILTIN_VECTOR && (builtin == CBUILTIN_NONTEMPORAL_STORE || builtin == CBUILTIN_MASKED_STORE ||
                                                      builtin == CBUILTIN_MASKED_COMPRESS_STORE || builtin == CBUILTIN_MASKED_SCATTER);
         const bool unevaluated = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
@@ -76,7 +77,7 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
 // may be less than the type's, or else the type's, at least 16 for an array of 16 bytes or more (x86-64's large arrays).
 static uint32_t check_input_declaration_alignment(const CheckInputReader* reader, uint32_t declaration, TypeId type)
 {
-    const CheckInputAttributes* attributes = reader->output->attributes[declaration];
+    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
     uint32_t result = type_alignment_log2(reader->types, type);
     if (attributes != 0 && attributes->alignment_log2 != 0)
     {
@@ -136,6 +137,21 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
             leading = false;
         }
     }
+    // The functions the argument names, by their objects (the first four distinct): __builtin_function_start's operand.
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        const uint32_t declaration = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[token] : BUSTER_CHECK_NONE;
+        const uint32_t function = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION ? reader->objects[declaration] : 0;
+        bool known = function == 0;
+        for (uint32_t i = 0; i < evidence->function_object_count; i += 1)
+        {
+            known |= evidence->function_objects[i] == function;
+        }
+        if (!known && evidence->function_object_count < BUSTER_ARRAY_LENGTH(evidence->function_objects))
+        {
+            evidence->function_objects[evidence->function_object_count++] = function;
+        }
+    }
     const uint32_t object = base < end ? check_input_evidence_object(reader, base) : BUSTER_CHECK_NONE;
     if (object != BUSTER_CHECK_NONE)
     {
@@ -144,6 +160,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
         evidence->base_object = reader->objects[object];
     }
     bool address = false;
+    bool cast = false;
     while (first < end)
     {
         const uint8_t role = parser->tree.roles[first];
@@ -156,6 +173,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
         }
         else if (role == PARSE_ROLE_OPEN_CAST && close > first && close + 1 < end)
         {
+            cast = true;
             first = close + 1;
         }
         else if (kind == PARSE_KIND_AMP && role == PARSE_ROLE_PREFIX && !address)
@@ -186,6 +204,7 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
             evidence->nan_payload_known = literal && !address && element == BUSTER_TYPE_CHAR && string->byte_count != 0 && string->byte_count - 1 <= UINT32_MAX;
             evidence->nan_payload = evidence->nan_payload_known ? string->bytes : 0;
             evidence->nan_payload_length = evidence->nan_payload_known ? (uint32_t)string->byte_count - 1 : 0;
+            evidence->nan_payload_cast = evidence->nan_payload_known && cast;
             evidence->minimum_alignment = UINT64_C(1) << type_alignment_log2(reader->types, element);
             evidence->alignment_known = true;
             size = string->byte_count;
@@ -214,3 +233,22 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
         }
     }
 }
+
+static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
+
+// __builtin_annotation's string, its second argument from past `end` (its first's) to the call's closing parenthesis
+// `closing`, in place of the first's: the string witnesses (CheckBuiltinCall.nan_payload) of a narrow string literal.
+static __attribute__((noinline)) void check_input_annotation_evidence(CheckInputReader* reader, uint32_t end, uint32_t closing, CheckBuiltinCall* evidence)
+{
+    const uint32_t last = check_constant_punctuation(reader->parser, end + 1, closing, PARSE_KIND_COMMA);
+    CheckBuiltinCall second = { 0 };
+    if (last == closing && end + 1 < last)
+    {
+        check_input_builtin_evidence(reader, end + 1, last, &second);
+    }
+    evidence->nan_payload_known = second.nan_payload_known;
+    evidence->nan_payload_cast = second.nan_payload_cast;
+    evidence->nan_payload = second.nan_payload;
+    evidence->nan_payload_length = second.nan_payload_length;
+}
+

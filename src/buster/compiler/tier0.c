@@ -132,7 +132,13 @@
 //   - NEG and NOT: the operand (of `class`) negated or complemented (NOT for integers alone).
 //   - CONVERT: the operand converted to `class` (by C's rules for the two classes; a conversion to a narrower integer
 //     keeps the low bits).
-//   - LOAD: the value of `class` at the address the operand (U64) holds.
+//   - LOAD: the value of `class` at the address the operand (U64) holds. An integer class's LOAD, STORE and SET take a
+//     `value` (#1059): 0 for an ordinary access, or BUSTER_TYPED_ACCESS_ATOMIC with a C memory order
+//     (BUSTER_TYPED_FENCE_ORDER's bits) for an atomic one, a single access of the class's bytes, naturally aligned. Its
+//     code is an ordinary access's: on x86-64 a naturally aligned access of 1, 2, 4 or 8 bytes is atomic, and the total
+//     store order gives a load's and a release store's orders; a seq_cst store's fence is the FENCE of seq_cst after it,
+//     which its producer writes. The IR keeps the order (BUSTER_IR_ATOMIC), and ir_lower refuses a marker of another
+//     shape; Tier 0, whose code is the same either way, doesn't read it.
 //   - ADD ... SHR: the two operands' sum ... (by `class`, which both operands have, but a shift's count, any integer
 //     class); DIV, MOD and SHR divide and shift right as `class`'s signedness says. The generated code wraps.
 //   - PTR_ADD: the first operand (U64) plus the second (I64 or U64) times `value`, the element's size (nonzero).
@@ -186,6 +192,23 @@
 //     needs an instruction, mfence (tier0_fence_records); Tier 0, which moves no access across an entry, emits nothing
 //     for the others: the C producer's __atomic_thread_fence, __atomic_signal_fence, __sync_synchronize and C11's
 //     fences of a constant order (c_check_program_helpers.c's check_program_direct_fence).
+//   - ATOMIC_RMW: an atomic read/modify/write (#1059), which pops an address (U64) and an operand of `class` (an
+//     integer's, 1 to 8 bytes) and pushes the object's old value, of `class`: `value` its operation
+//     (BUSTER_TYPED_RMW_ADD for an addition, an exchange without it) and its C memory order (BUSTER_TYPED_FENCE_ORDER's
+//     bits). It is one locked access of the class's bytes at the address, naturally aligned: xchg (an exchange) or lock
+//     xadd (an addition), each a full barrier on x86-64, which every order takes. A consumer keeps it as an atomic
+//     store's and load's barrier: no access moves across it, and it is never eliminated. Tier 0 defers it
+//     (tier0_emit_atomic_rmw); the C producer's exchanges, additions and subtractions of a constant order
+//     (c_check_program_helpers.c's check_program_direct_rmw).
+//   - ATOMIC_CAS: an atomic compare-exchange (#1059), which pops the expected value and the desired one, both of `class`
+//     (an integer's, 1 to 8 bytes), and pushes the object's old value, of `class`: `value` its order
+//     (BUSTER_TYPED_FENCE_ORDER's bits) and, from BUSTER_TYPED_CAS_LOCAL_SHIFT, the local, of U64, that holds the
+//     object's address. It is one lock cmpxchg of the class's bytes at the address, naturally aligned, a full barrier
+//     on x86-64, which every order takes: the object takes the desired value where it holds the expected one, and the
+//     old value is pushed either way, so that the producer compares it with the expected one for the success. A
+//     consumer keeps it as an atomic read/modify/write's barrier, and its local as a use of it (the references that
+//     give a local its home: tier0_count_references). Tier 0 defers it (tier0_emit_atomic_cas); the C producer's
+//     compare-exchanges of a native object (c_check_program_atomic.c's plans).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
@@ -278,11 +301,19 @@
 #define BUSTER_TYPED_X86 48
 // Past the vectors' kind, so that the vector validator leaves it to the scalar one, whose vectors' test takes it.
 #define BUSTER_TYPED_FENCE 49
-#define BUSTER_TYPED_KINDS 50
+// Past the fence, as it is, for the scalar validator alone.
+#define BUSTER_TYPED_ATOMIC_RMW 50
+#define BUSTER_TYPED_ATOMIC_CAS 51
+#define BUSTER_TYPED_KINDS 52
 // A FENCE's value: its order (C's memory_order) and its scope (a signal fence's bit), and the one that takes mfence.
 #define BUSTER_TYPED_FENCE_ORDER 0x07
 #define BUSTER_TYPED_FENCE_SIGNAL 0x08
 #define BUSTER_TYPED_FENCE_SEQ_CST 5
+#define BUSTER_TYPED_ACCESS_ATOMIC 0x10
+// An ATOMIC_RMW's operation: an addition (lock xadd), and without it an exchange (xchg).
+#define BUSTER_TYPED_RMW_ADD 0x08
+// Where an ATOMIC_CAS's value has its address's local, above its order.
+#define BUSTER_TYPED_CAS_LOCAL_SHIFT 8
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -524,6 +555,9 @@ struct Tier0Function
     uint32_t x87_constant_count;
     bool x87;
     bool int128;
+    // Whether the function saves every callee-saved register and restores it, as LLVM's llvm.eh.unwind.init makes a
+    // function that calls __builtin_unwind_init (#148): its frame then holds their values, which an unwinder reads.
+    bool unwind_init;
     const uint64_t* vector_constants;
     const uint8_t* vector_constant_bytes;
     uint32_t vector_constant_count;
@@ -748,6 +782,21 @@ static bool tier0_moves_stack(uint32_t kind)
 static bool tier0_fence_valid(uint64_t value)
 {
     return (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_FENCE_SIGNAL)) == 0 && (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
+}
+
+// Whether an ATOMIC_RMW is one: of an integer class, and of an order of C's (0 to 5) and the operation's bit, nothing else.
+static bool tier0_atomic_rmw_valid(uint32_t class, uint64_t value)
+{
+    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (value & ~(uint64_t)(BUSTER_TYPED_FENCE_ORDER | BUSTER_TYPED_RMW_ADD)) == 0 &&
+           (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST;
+}
+
+// Whether an ATOMIC_CAS is one: of an integer class, of an order of C's (0 to 5) and of a local of U64, nothing else.
+static bool tier0_atomic_cas_valid(const Tier0Function* function, uint32_t class, uint64_t value)
+{
+    const uint64_t local = value >> BUSTER_TYPED_CAS_LOCAL_SHIFT;
+    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (value & ((UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT) - 1) & ~(uint64_t)BUSTER_TYPED_FENCE_ORDER) == 0 &&
+           (value & BUSTER_TYPED_FENCE_ORDER) <= BUSTER_TYPED_FENCE_SEQ_CST && local < function->local_count && function->local_classes[local] == BUSTER_TYPED_CLASS_U64;
 }
 
 // A FENCE's records: mfence for a thread fence of seq_cst, which orders the thread's stores before its later loads, as
@@ -1042,10 +1091,10 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
     return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
-// How many vector registers a vector result wider than the target's registers comes back in (#1193): 2 or 4 of 16
-// bytes each (xmm0 and xmm1, or xmm0 to xmm3, a vector of 32 or 64 bytes without AVX) or 2 of 32 (ymm0 and ymm1, one of
-// 64 bytes with AVX but not AVX-512F), registers[k] the k-th, part k at byte k * part_bytes (abi_value_result's split,
-// LLVM's and so clang's); 0 for any other result.
+// How many vector registers a vector result wider than the target's registers comes back in (#1193, #137): two or four
+// of the target's widest (a vector's size is a power of two), 16, 32 or 64 bytes each (xmm0 and xmm1 or xmm0 to xmm3
+// without AVX, ymm's with AVX, zmm's with AVX-512F, a transport vector's of more than 64 bytes among them), registers[k]
+// the k-th, part k at byte k * part_bytes (abi_value_result's split, LLVM's and so clang's); 0 for any other result.
 static uint32_t tier0_vector_result_parts(AbiReturn result)
 {
     uint32_t count = 0;
@@ -1058,16 +1107,47 @@ static uint32_t tier0_vector_result_parts(AbiReturn result)
     {
         rest = rest && result.registers[k] == BUSTER_ABI_REGISTER_NONE;
     }
-    const bool shape = (count == 2 && (result.part_bytes == 16 || result.part_bytes == 32)) || (count == 4 && result.part_bytes == 16);
+    const bool shape = (count == 2 || count == 4) && (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64);
     const bool split = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && shape && rest;
     return split ? count : 0;
 }
 
-// The parts of an aggregate result of `size` bytes returned in registers (none otherwise): a split vector's whole
-// registers (tier0_vector_result_parts), or as eightbytes.
+// How many registers hold a result of `size` bytes whose elements LLVM returns one per register (#137, abi_vector_llvm:
+// an extended vector in memory of three 8-byte elements): rax, rdx and rcx for integers, xmm0, xmm1 and st0 for doubles,
+// each 8 bytes of the result's object, the third at 16 (tier0_element_x87 for st0's); 0 for any other result.
+static uint32_t tier0_element_parts(AbiReturn result, uint32_t size)
+{
+    const bool integers = result.registers[0] == BUSTER_ABI_RAX && result.registers[1] == BUSTER_ABI_RDX && result.registers[2] == BUSTER_ABI_RCX;
+    const bool doubles = result.registers[0] == BUSTER_ABI_REGISTER_VECTOR && result.registers[1] == (BUSTER_ABI_REGISTER_VECTOR | 1) &&
+                         result.registers[2] == BUSTER_ABI_REGISTER_X87;
+    const bool shape = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.part_bytes == 8 && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 &&
+                       result.registers[3] == BUSTER_ABI_REGISTER_NONE && (integers || doubles) && size >= 24 && size <= 32;
+    return shape ? 3 : 0;
+}
+
+// Whether a result's elements are three doubles, the third in st0 (tier0_element_parts), which an fld and an fstp of
+// its 8 bytes move.
+static bool tier0_element_x87(AbiReturn result)
+{
+    return tier0_element_parts(result, 32) != 0 && result.registers[2] == BUSTER_ABI_REGISTER_X87;
+}
+
+// The parts of an aggregate result of `size` bytes returned in registers (none otherwise): three elements' general or
+// vector registers (tier0_element_parts, but st0's, which tier0_element_x87 takes), a split vector's whole registers
+// (tier0_vector_result_parts), or as eightbytes.
 static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* parts)
 {
-    const uint32_t split = tier0_vector_result_parts(result);
+    const uint32_t elements = tier0_element_parts(result, size) != 0 ? (tier0_element_x87(result) ? 2u : 3u) : 0u;
+    for (uint32_t k = 0; k < elements; k += 1)
+    {
+        parts[k] = (Tier0Part){
+            .reg = tier0_abi_register(result.registers[k]),
+            .offset = (uint8_t)(8 * k),
+            .bytes = 8,
+            .load = BUSTER_TIER0_PART_EXACT,
+        };
+    }
+    const uint32_t split = elements == 0 ? tier0_vector_result_parts(result) : 0;
     for (uint32_t k = 0; k < split; k += 1)
     {
         parts[k] = (Tier0Part){
@@ -1077,8 +1157,8 @@ static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* p
             .load = BUSTER_TIER0_PART_EXACT,
         };
     }
-    const bool eightbytes = split == 0 && result.kind == BUSTER_ABI_RESULT_REGISTERS;
-    return eightbytes ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, parts) : split;
+    const bool eightbytes = elements == 0 && split == 0 && result.kind == BUSTER_ABI_RESULT_REGISTERS;
+    return eightbytes ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, parts) : elements != 0 ? elements : split;
 }
 
 // ABI register `reg`'s bit in a register set when it is one of `allowed` (BUSTER_TIER0_ARGUMENT_REGISTERS or
@@ -1171,18 +1251,20 @@ static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
                             result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
                             tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
     const uint32_t split = tier0_vector_result_parts(result);
-    return eightbytes || (split != 0 && size == split * result.part_bytes) || (size != 0 && tier0_x87_result_valid(result, size));
+    return eightbytes || (split != 0 && size == split * result.part_bytes) || (size != 0 && tier0_x87_result_valid(result, size)) ||
+           tier0_element_parts(result, size) != 0;
 }
 
 // The bytes a call's aggregate result in registers stores into its object (tier0_emit_call): each part's register whole,
-// 8 bytes from its eightbyte's offset, or 16, 32 or 64 for a vector's (each of a split one's parts), or 16 for an x87
-// register's (whose fstp writes 10 of them).
+// 8 bytes from its eightbyte's offset (three elements' 24, tier0_element_parts), or 16, 32 or 64 for a vector's (each of
+// a split one's parts), or 16 for an x87 register's (whose fstp writes 10 of them).
 static uint32_t tier0_result_extent(AbiReturn result)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const uint32_t x87 = tier0_x87_parts(result);
     const uint32_t split = tier0_vector_result_parts(result);
-    return x87 != 0                     ? 16 * x87
+    return tier0_element_parts(result, 32) != 0 ? 24
+           : x87 != 0                     ? 16 * x87
            : split != 0                 ? split * result.part_bytes
            : result.part_bytes >= 16    ? result.part_bytes
            : high || result.registers[1] != BUSTER_ABI_REGISTER_NONE ? 16
@@ -2714,6 +2796,12 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     // FENCE: tier0_emit_deferred's, mfence or nothing by its value (tier0_fence_records).
     tier0_defer(BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
+    // ATOMIC_RMW and ATOMIC_CAS: tier0_emit_deferred's, of each integer class (tier0_emit_atomic_rmw, tier0_emit_atomic_cas).
+    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_U64; class += 1)
+    {
+        tier0_defer(BUSTER_TYPED_ATOMIC_RMW, class, BUSTER_TIER0_VARIANT_PLAIN);
+        tier0_defer(BUSTER_TYPED_ATOMIC_CAS, class, BUSTER_TIER0_VARIANT_PLAIN);
+    }
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -3279,6 +3367,8 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_TAIL_CALL] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
     [BUSTER_TYPED_FENCE] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
+    [BUSTER_TYPED_ATOMIC_RMW] = BUSTER_TIER0_ADDRESSED,
+    [BUSTER_TYPED_ATOMIC_CAS] = BUSTER_TIER0_BINARY,
     [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
@@ -3997,6 +4087,12 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
         {
             references[values[i]] += 1;
         }
+        else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+        {
+            // A compare-exchange reads its address from the local its value names (#1059), so that a parameter whose
+            // only use it is still has its home and its incoming register's save.
+            references[values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] += 1;
+        }
     }
     if (function->call_tails != 0)
     {
@@ -4007,14 +4103,16 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
 static __mmask64 tier0_lanes(int64_t first, uint32_t count);
 
 // tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
-// kinds in the four kinds' bitset), then a count per set bit, without a branch per entry.
+// kinds in the five kinds' bitset), then a count per set bit, without a branch per entry: an ATOMIC_CAS's local is its
+// value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
 static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
     const uint32_t count = function->count;
     memset(references, 0, function->local_count * sizeof(uint32_t));
-    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL;
+    const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL |
+                                     1ull << BUSTER_TYPED_ATOMIC_CAS;
     const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
     _Static_assert(BUSTER_TYPED_KIND_LIMIT == 64, "a kind is a bit of a quadword");
     for (uint32_t first = 0; first < count; first += 64)
@@ -4025,7 +4123,7 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
         {
             const uint32_t i = first + (uint32_t)__builtin_ctzll(bits);
             bits &= bits - 1;
-            references[values[i]] += 1;
+            references[values[i] >> (kinds[i] == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0)] += 1;
         }
     }
     if (function->call_tails != 0)
@@ -4398,6 +4496,11 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
         frame->saved |= (frame->clobbers & 1u << tier0_callee_saved[c]) != 0 ? 1u << c : 0;
     }
     frame->saved |= frame->based ? 1u << BUSTER_TIER0_SAVED_R15 : 0;
+    // __builtin_unwind_init's function saves them all (Tier0Function.unwind_init), rbp as the frame pointer where it is one.
+    for (uint32_t c = 0; function->unwind_init && c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    {
+        frame->saved |= tier0_callee_saved[c] != X86_REGISTER_RBP || !frame->pointer ? 1u << c : 0;
+    }
     // The frame pointer's push, first, counts with the others.
     frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
 }
@@ -5174,7 +5277,8 @@ static uint32_t tier0_result_object_records(AbiReturn returned)
 
 // A call's result in registers stored into its object at `home` (tier0_emit_call's and the deep call's): an x87 result's
 // parts popped in order, st0's at 0 and st1's 16 bytes on; else each register whole, an eightbyte's at its offset (8 for
-// the high one alone) and a vector register's at its part's (a split vector's k-th at k * part_bytes). Out of line: only
+// the high one alone, three elements' k-th at 8 * k, st0's popped) and a vector register's at its part's (a split
+// vector's k-th at k * part_bytes). Out of line: only
 // a call with a result object has it.
 static __attribute__((noinline)) void tier0_store_result(Tier0Writer* writer, AbiReturn returned, Tier0Home home)
 {
@@ -5187,7 +5291,12 @@ static __attribute__((noinline)) void tier0_store_result(Tier0Writer* writer, Ab
     }
     for (uint32_t k = 0; k < BUSTER_ABI_RESULT_PARTS && parts == 0; k += 1)
     {
-        if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+        if (returned.registers[k] == BUSTER_ABI_REGISTER_X87)
+        {
+            // The third of three doubles, in st0 (tier0_element_x87, #137), popped.
+            tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M64, 0, home.reg, home.mode, home.displacement + 8 * (int32_t)k, 0));
+        }
+        else if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
         {
             tier0_store_part(writer, tier0_abi_register(returned.registers[k]), bytes, home, high ? 8 : k * bytes);
         }
@@ -6023,6 +6132,60 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
     {
         tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RSP, tier0_integer_depths[depth - 1], BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
+}
+
+// An ATOMIC_RMW's records: xchg (an exchange) or lock xadd (an addition) of the operand's register, at depth - 1, with
+// the object at the address in depth - 2's register, which leaves the old value in the operand's register, then the old
+// value in depth - 2's register, extended as the class's load extends it (tier0_load_form's movsx, movzx or mov).
+#define BUSTER_TIER0_ATOMIC_RMW_RECORDS 2
+static void tier0_emit_atomic_rmw(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t depth = entries->depths[i];
+    const uint32_t class = entries->key_classes[i];
+    const uint8_t address = tier0_integer_depths[depth - 2];
+    const uint8_t operand = tier0_integer_depths[depth - 1];
+    const uint32_t bytes = tier0_class_bytes(class);
+    const bool add = (function->values[i] & BUSTER_TYPED_RMW_ADD) != 0;
+    const uint32_t form = add ? bytes == 1 ? X86_FORM_LOCK_XADD_M8_R8 : bytes == 2 ? X86_FORM_LOCK_XADD_M16_R16 : bytes == 4 ? X86_FORM_LOCK_XADD_M32_R32 : X86_FORM_LOCK_XADD_M64_R64
+                              : bytes == 1 ? X86_FORM_XCHG_RM8_R8 : bytes == 2 ? X86_FORM_XCHG_RM16_R16 : bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
+    tier0_put(writer, tier0_instruction(form, operand, address, BUSTER_X86_MEMORY_BASE, 0, 0));
+    tier0_put(writer, tier0_instruction(tier0_load_form(class), address, operand, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+}
+
+// An ATOMIC_CAS's records, with E its expected value's register at depth - 2, D its desired value's at depth - 1 and A the
+// stack's first free register, at the depth: E swapped with rax, where cmpxchg takes the expected value, rax's own (a
+// value deeper down's) kept in E; the address loaded from its local's home into A; lock cmpxchg of D with the object at
+// A, which leaves the old value in rax; rax swapped back with E, so that E holds the old value and rax its own again; and
+// the old value extended in E as the class's load extends it (tier0_load_form's movsx, movzx or mov). At depth 2, E is rax,
+// which takes no swap.
+static uint32_t tier0_atomic_cas_records(uint32_t depth)
+{
+    return depth == 2 ? 3 : 5;
+}
+
+static void tier0_emit_atomic_cas(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    const uint32_t depth = entries->depths[i];
+    const uint32_t class = entries->key_classes[i];
+    const uint8_t expected = tier0_integer_depths[depth - 2];
+    const uint8_t desired = tier0_integer_depths[depth - 1];
+    const uint8_t address = tier0_integer_depths[depth];
+    const Tier0Home* home = &homes[function->values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT];
+    const uint32_t bytes = tier0_class_bytes(class);
+    const uint32_t form = bytes == 1 ? X86_FORM_LOCK_CMPXCHG_M8_R8 : bytes == 2 ? X86_FORM_LOCK_CMPXCHG_M16_R16 : bytes == 4 ? X86_FORM_LOCK_CMPXCHG_M32_R32 : X86_FORM_LOCK_CMPXCHG_M64_R64;
+    const bool swap = expected != X86_REGISTER_RAX;
+    if (swap)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_XCHG_RM64_R64, expected, X86_REGISTER_RAX, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    tier0_put(writer, home->is_register != 0 ? tier0_instruction(X86_FORM_MOV_R64_RM64, address, home->reg, BUSTER_X86_REGISTER_DIRECT, 0, 0)
+                                            : tier0_instruction(X86_FORM_MOV_R64_RM64, address, home->reg, home->mode, home->displacement, 0));
+    tier0_put(writer, tier0_instruction(form, desired, address, BUSTER_X86_MEMORY_BASE, 0, 0));
+    if (swap)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_XCHG_RM64_R64, expected, X86_REGISTER_RAX, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    tier0_put(writer, tier0_instruction(tier0_load_form(class), expected, expected, BUSTER_X86_REGISTER_DIRECT, 0, 0));
 }
 
 // A FENCE's records (tier0_fence_records): mfence for a thread fence of seq_cst, none for the others.
@@ -8106,6 +8269,14 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     {
         tier0_emit_fence(function->values[i], writer);
     }
+    else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+    {
+        tier0_emit_atomic_rmw(function, entries, i, writer);
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+    {
+        tier0_emit_atomic_cas(function, entries, homes, i, writer);
+    }
     else if (memory && tier0_vector_entry(entries, i))
     {
         tier0_emit_vector_entry(function, entries, frame, homes, i, writer);
@@ -8327,6 +8498,14 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     else if (kind == BUSTER_TYPED_FENCE)
     {
         count = tier0_fence_records(function->values[i]);
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+    {
+        count = BUSTER_TIER0_ATOMIC_RMW_RECORDS;
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+    {
+        count = tier0_atomic_cas_records(entries->depths[i]);
     }
     else if (memory && tier0_vector_entry(entries, i))
     {
@@ -8556,6 +8735,11 @@ static __attribute__((noinline)) void tier0_load_result(const Tier0Function* fun
     {
         tier0_put(writer, tier0_instruction(X86_FORM_FLD_M80, 0, X86_REGISTER_RAX, BUSTER_X86_MEMORY_BASE, 16 * (int32_t)(k - 1), 0));
     }
+    if (tier0_element_x87(function->result))
+    {
+        // The third of three doubles into st0 (tier0_element_x87).
+        tier0_put(writer, tier0_instruction(X86_FORM_FLD_M64, 0, X86_REGISTER_RAX, BUSTER_X86_MEMORY_BASE, 16, 0));
+    }
     const uint32_t count = x87 == 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
     for (uint32_t k = 0; k < count; k += 1)
     {
@@ -8582,7 +8766,7 @@ static __attribute__((noinline)) uint32_t tier0_result_records(const Tier0Functi
     Tier0Part parts[BUSTER_ABI_RESULT_PARTS];
     const uint32_t x87 = tier0_x87_parts(function->result);
     const uint32_t count = x87 == 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
-    uint32_t records = x87;
+    uint32_t records = x87 + (tier0_element_x87(function->result) ? 1u : 0u);
     for (uint32_t k = 0; k < count; k += 1)
     {
         records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes) : 0);
@@ -8709,9 +8893,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 {
                     clobbers |= tier0_tail_clobbers(function, i);
                 }
-                else if (function->kinds[i] == BUSTER_TYPED_FENCE)
+                else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
                 {
-                    // No register: mfence or nothing.
+                    // No register past its operands': mfence or nothing, or an atomic read/modify/write in its operands'.
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
@@ -8719,6 +8903,12 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                     const bool wide = function->values[i] >= 16;
                     integer_top = !wide && depth > integer_top ? depth : integer_top;
                     floating_top = wide && floating > floating_top ? floating : floating_top;
+                }
+                else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
+                {
+                    // A compare-exchange's address, in the integer stack's first free register; rax, which it swaps with its
+                    // expected value, it gives back.
+                    integer_top = depth > integer_top ? depth : integer_top;
                 }
                 else if (tier0_moves_stack(function->kinds[i]))
                 {
@@ -8868,6 +9058,20 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     else if (kind == BUSTER_TYPED_FENCE)
     {
         // Neither stack: mfence or nothing.
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_RMW)
+    {
+        // Its address and its operand, whose registers it writes and no other.
+        uses[0] = true;
+        window[0] = 2;
+        touch[0] = (int32_t)before[0] - 1;
+    }
+    else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+    {
+        // Its expected and desired values, and its address in the register at the depth; rax it gives back.
+        uses[0] = true;
+        window[0] = 2;
+        touch[0] = (int32_t)before[0];
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
@@ -10640,6 +10844,31 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                     }
                     continue;
                 }
+                if (kind == BUSTER_TYPED_ATOMIC_CAS)
+                {
+                    // An atomic compare-exchange takes its expected and its desired values of its class, its address from its
+                    // local, and leaves the old value.
+                    const uint32_t desired = tier0_pop(&validator, i);
+                    const uint32_t expected = tier0_pop(&validator, i);
+                    if (!tier0_atomic_cas_valid(function, class, value) || desired != class || expected != class)
+                    {
+                        tier0_reject(&validator, i, "an atomic compare-exchange's values, class, order or address's local");
+                    }
+                    tier0_push(&validator, class);
+                    continue;
+                }
+                if (kind == BUSTER_TYPED_ATOMIC_RMW)
+                {
+                    // An atomic read/modify/write takes its operand of its class and an address, and leaves the old value.
+                    const uint32_t operand = tier0_pop(&validator, i);
+                    const uint32_t address = tier0_pop(&validator, i);
+                    if (!tier0_atomic_rmw_valid(class, value) || operand != class || address != BUSTER_TYPED_CLASS_U64)
+                    {
+                        tier0_reject(&validator, i, "an atomic read/modify/write's address, operand, class, operation or order");
+                    }
+                    tier0_push(&validator, class);
+                    continue;
+                }
                 tier0_validate_vector(function, &validator, hashes, seen, i);
                 continue;
             }
@@ -11951,15 +12180,19 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             {
                 clobbers |= tier0_tail_clobbers(function, i);
             }
-            else if (function->kinds[i] == BUSTER_TYPED_FENCE)
+            else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
             {
-                // No register, as the scalar selection has it.
+                // No register past its operands', as the scalar selection has it.
             }
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {
                 const bool wide = function->values[i] >= 16;
                 deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
+            }
+            else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
+            {
+                deferred_integer_top = entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
             }
             else if (tier0_moves_stack(function->kinds[i]))
             {

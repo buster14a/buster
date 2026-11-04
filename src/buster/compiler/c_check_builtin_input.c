@@ -104,7 +104,7 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
             {
                 context.last_parameter = parameter;
                 context.last_parameter_type = reader->declared_types[parameter];
-                context.last_parameter_flags = reader->registers[parameter] ? BUSTER_CHECK_REGISTER : 0;
+                context.last_parameter_flags = check_input_bit(reader->declaration_bits, parameter, BUSTER_CHECK_BITS_REGISTER) ? BUSTER_CHECK_REGISTER : 0;
             }
         }
         const uint32_t index = reader->vararg_count++;
@@ -175,6 +175,10 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         evidence->alignment_side_effects = (value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         evidence->alignment_low = (uint64_t)value.integer;
         evidence->alignment_high = (uint64_t)(value.integer >> 64);
+    }
+    if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
+    {
+        check_input_annotation_evidence(reader, end, token, evidence);
     }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)

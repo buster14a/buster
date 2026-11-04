@@ -62,10 +62,6 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
 {
     static const char* const flags[][2] = {
         {
-            "-fcommon",
-            "-fno-common",
-        },
-        {
             "-fvisibility=hidden",
             "-fvisibility=default",
         },
@@ -277,9 +273,10 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
     const int independent_status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_OBJECT, independent, BUSTER_ARRAY_LENGTH(independent), &text);
     check_test_expect(test, written && independent_status == 1 && text != NULL &&
                            strstr(text, "unsupported code generation option '-ffunction-sections'") != NULL && access(output, F_OK) != 0,
-                      "canceling common emission does not cancel function sections");
+                      "-fcommon and -fno-common, which common emission takes (#147), do not cancel function sections");
     free(text);
-    // The original two-unit failure must be a named option refusal, not a duplicate-definition link error.
+    // The original two-unit failure, a duplicate-definition link error, is a link of the two units' commons (#147): the
+    // executable runs.
     static const char first[] = "int shared; int get(void); int main(void) { shared = 3; return get() != 3; }\n";
     static const char second[] = "int shared; int get(void) { return shared; }\n";
     snprintf(header, sizeof(header), "%s/object-options-other.c", directory);
@@ -296,8 +293,11 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
     text = NULL;
     unlink(output);
     const int units_status = check_test_driver_spawn(arguments, &text);
-    check_test_expect(test, units_written && units_status == 1 && text != NULL && strstr(text, "unsupported code generation option '-fcommon'") != NULL &&
-                           access(output, F_OK) != 0, "multi-unit common emission is refused before linking");
+    char* run[] = { output, NULL };
+    char* run_text = NULL;
+    const int run_status = units_status == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+    free(run_text);
+    check_test_expect(test, units_written && units_status == 0 && run_status == 0, "multi-unit common emission links the units' commons, which run");
     free(text);
     unlink(header);
     unlink(source);

@@ -455,7 +455,7 @@ several, and several definitions can compete for one name. Columns:
 | `name` | its `NameId` |
 | `atom`, `value` | the defining atom and the offset in it |
 | `size` | its size |
-| `flags` | binding, visibility, type, where ELF's `st_info` and `st_other` have them |
+| `flags` | binding, visibility, type, where ELF's `st_info` and `st_other` have them; `STT_COMMON`'s type for a common symbol (#147), an object in its zero-filled atom that a relocatable object writes as `SHN_COMMON` (its value its atom's alignment, the atom left out) and an executable as `STT_OBJECT` |
 | `source` | where it is defined: program, runtime shared library, runtime archive member, foreign object, foreign shared library, or the linker |
 | `got_slot`, `dynamic_index`, `version` | its GOT slot, `.dynsym` index and version |
 | `reference` | after layout: what code that refers to it uses (its address, its GOT slot's for an import, its offset in the TLS block for a TLS variable) |

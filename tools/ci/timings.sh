@@ -11,13 +11,16 @@ mkdir -p "$output"
 : > "$output/observations.tsv"
 gh api "repos/$repository/actions/workflows/9700x.yml/runs?per_page=100" > "$output/runs.json"
 jq -e '.workflow_runs | type == "array"' "$output/runs.json" > /dev/null
-jq -r '.workflow_runs[] | select(.event == "pull_request" or .event == "push" or .event == "schedule" or .event == "workflow_dispatch") | [.id, .event] | @tsv' "$output/runs.json" > "$output/run-list.tsv"
-while IFS=$'\t' read -r run event; do
+# A nightly backlog dispatch's run name says it is one (9700x.yml's run-name): its coverage is targeted.
+jq -r '.workflow_runs[] | select(.event == "pull_request" or .event == "push" or .event == "schedule" or .event == "workflow_dispatch")
+    | [.id, .event, (if ((.display_title // "") | startswith("Nightly backlog ")) then "backlog" else "other" end)] | @tsv' "$output/runs.json" > "$output/run-list.tsv"
+while IFS=$'\t' read -r run event kind; do
     [[ "$run" =~ ^[1-9][0-9]*$ ]]
-    case "$event" in
-        pull_request) group=pr ;;
-        push) group=main ;;
-        schedule|workflow_dispatch) group=periodic ;;
+    case "$event:$kind" in
+        pull_request:*) group=pr ;;
+        push:*) group=main ;;
+        workflow_dispatch:backlog) group=targeted ;;
+        schedule:*|workflow_dispatch:*) group=full ;;
         *) exit 1 ;;
     esac
     gh api --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=latest" > "$output/jobs-$run.json"
@@ -32,7 +35,8 @@ while IFS=$'\t' read -r run event; do
         (([$job.steps[]? | select(.name == "Verify benchmark host")] | .[0]) as $verify |
         ([$job.steps[]? | select(.name == "Run complete native vector correctness before benchmarks" and .conclusion == "success")] | .[0]) as $native |
         row($job; "setup-build"; elapsed($verify.started_at; $native.started_at)),
-        row($job; "native-tests"; elapsed($native.started_at; $native.completed_at))),
+        row($job; "native-tests"; elapsed($native.started_at; $native.completed_at)),
+        row($job; "host-occupation"; elapsed($verify.started_at; $job.completed_at))),
         (([$job.steps[]? | select(.conclusion == "success" and (.name | startswith("Benchmark ") or startswith("Measure ") or startswith("Attribute "))) | elapsed(.started_at; .completed_at)]) as $measured |
         if ($measured | length) > 0 and ($measured | all(. != null)) then row($job; "benchmark-steps"; ($measured | add)) else empty end)
     ' "$output/jobs-$run.json" >> "$output/observations.tsv"

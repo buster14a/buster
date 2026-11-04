@@ -321,7 +321,15 @@ edge. Without it, the one `undef` per local that promotion puts in the entry
 block was live from there to every join that read it: around a loop, everywhere.
 Promotion makes such operands where a block's lifetime start kills a local
 ([the SSA guide](ssa.md)'s adapter), and Lua's `luaV_execute` had hundreds of
-them. Each value then gets an interval per block it is
+them.
+
+An edge can carry copies the allocation doesn't see: a long double phi's
+(#141), whose values live in frame objects, which the CFG consumer copies on the
+x87 stack (`tier1_emit_cfg_x87_phis`). Its optional per-edge column
+(`Tier1CfgInput.edge_copies`) places such an edge as one with moves, at its
+predecessor's end, its successor's start or a split's, though it has none of the
+allocation's; `tier1_cfg_verify` and the certificate's shape check take that
+placement. Each value then gets an interval per block it is
 defined in or live into, from its definition or the block's start to its last
 use there, or to the block's end where it stays live. A value's blocks come
 block by block from the live-in rows, counted and then filled, so building the
@@ -485,6 +493,16 @@ rather than through fixed ranges. No floating value is rematerializable: a
 constant's recipe would need its bits in a general register first, which the
 recipes don't make.
 
+The IR's vectors (#141), `v4i32`, `v8i32` and `v16i32`, are the class's values
+too, at their widths, 16, 32 and 64 bytes: a vector's slot is its bytes, aligned
+to 16 at most, which `vmovdqu32` of its width spills and reloads, and a move
+between two registers is a `vmovdqa64` of its ymm or zmm register (a 16-byte
+one's a `movaps`). In a function with vectors, the class's call-save rows and
+its temporary slot take the widest vector's bytes: the saves around a call move
+a register's whole widest vector (`Tier1EmitPrepared.vector_bytes`), and the
+temporary slot fits any value a cycle stages there; without one they stay 8 bytes
+and `movsd`'s. No vector is rematerializable either.
+
 A floating parameter arrives in xmm0 to xmm7 by its place among the function's
 floating parameters (`tier1_select_parameter_place`), its definition bound to
 that register (`Tier1CfgInput.definition_registers`) as a general parameter's
@@ -509,11 +527,10 @@ and counted.
 function `-c` compiles as `test-ir-source` does, lowers and promotes it, adapts
 it, allocates it by both paths and checks both with `tier1_cfg_verify`; any
 refusal but the model's, a rejection or paths that disagree fail it. With
-`--simd`, a function the SSA promoter refuses for its vectors (as
-`test-ir-source --simd` requires it to) is allocated as lowered, all its locals
-in slots, which is SSA too, and one whose only SIMD values are masks, which the
-promoter takes (#179), is promoted and allocated as any other: #732's `vcmp`
-results reach the opmask class from real C, and the run fails unless some do. On
+`--simd`, a function with vectors, which the SSA promoter takes (#141), and one
+whose only SIMD values are masks (#179) are promoted and allocated as any
+other: #732's `vcmp` results reach the opmask class from real C, and the run
+fails unless some do. On
 `tests/ir/vector-i32.c` with `-march=x86-64-v4`, its three functions' 3 masks
 allocate on both paths and pass the checker, and on `tests/ir/mask-builtins.c`
 its four functions of the `_k*` builtins, promoted, allocate their 76 masks on

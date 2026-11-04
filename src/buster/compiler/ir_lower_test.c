@@ -1081,6 +1081,170 @@ static void ir_lower_test_fixture(IrLowerTestTally* tally, const char* name, con
     arena_release(&execution);
 }
 
+// The objects and results of ir_lower_test_cas_native's child, on a page the parent shares.
+typedef struct IrLowerTestCasShared IrLowerTestCasShared;
+struct IrLowerTestCasShared
+{
+    int32_t object;
+    uint32_t results[2];
+};
+
+// Runs a function's code (`length` bytes) in a child, which must exit with status 0: mapped executable at a page of its
+// own and called twice from C on the shared object, its address in rdi, or with `second` in rsi and rdi 0.
+static __attribute__((no_sanitize("function"))) bool ir_lower_test_cas_native(const uint8_t* code, uint32_t length, bool second, IrLowerTestCasShared* shared)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
+        uint8_t* page = mmap(0, BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (page == MAP_FAILED || length > BUSTER_TIER0_TEST_PAGE)
+        {
+            _exit(3);
+        }
+        memcpy(page, code, length);
+        if (mprotect(page, BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) != 0)
+        {
+            _exit(4);
+        }
+        typedef uint64_t (*Body)(uint64_t, uint64_t);
+        Body body = 0;
+        const void* entry = page;
+        memcpy(&body, &entry, sizeof(body));
+        const uint64_t address = (uint64_t)(uintptr_t)&shared->object;
+        for (uint32_t r = 0; r < 2; r += 1)
+        {
+            shared->results[r] = (uint32_t)(second ? body(0, address) : body(address, 0));
+        }
+        _exit(0);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// #1246's review: an ATOMIC_CAS's address local is a use of that local, which Tier 0's homes count
+// (tier0_count_references and its vector twin), so that a pointer parameter whose only use is a compare-exchange's
+// address gets its home and its incoming register's save. Two functions whose pointer parameter is used only so: the
+// first's local 0 at depth 2 (its expected value is rax's), the second's local 1 (local 0 another parameter, unused) at
+// depth 3 under a value it keeps (its expected value swapped into rax). Each is compiled by both Tier 0 paths into the
+// same code, run natively twice on an int of 5 (cas 5, 9: the first succeeds and stores 9, the second fails), and run so
+// by the typed interpreter and, through both IR lowerings, by the IR interpreter: each its old values (plus 100, the
+// second's) and the int.
+static void ir_lower_test_cas_parameter(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[2][6] = {
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CONST, BUSTER_TYPED_ATOMIC_CAS, BUSTER_TYPED_RETURN },
+        { BUSTER_TYPED_CONST, BUSTER_TYPED_CONST, BUSTER_TYPED_CONST, BUSTER_TYPED_ATOMIC_CAS, BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN },
+    };
+    static const uint8_t classes[6] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32 };
+    static const uint64_t values[2][6] = {
+        { 5, 9, BUSTER_TYPED_FENCE_SEQ_CST, 0 },
+        { 100, 5, 9, 2 | UINT64_C(1) << BUSTER_TYPED_CAS_LOCAL_SHIFT, 0, 0 },
+    };
+    static const uint32_t counts[2] = { 4, 6 };
+    static const uint32_t expected[2][2] = { { 5, 9 }, { 105, 109 } };
+    static const uint8_t local_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t local_flags[2] = { 0, 0 };
+    static const AbiLocation parameters[2] = {
+        { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+        { .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS },
+    };
+    Arena arena = arena_reserve(1ull << 24);
+    Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena execution = arena_reserve(1ull << 30);
+    IrLowerTestCasShared* shared = mmap(0, sizeof(IrLowerTestCasShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    ir_lower_test_expect(tally, shared != MAP_FAILED, "a compare-exchange parameter's shared page", 0, 0);
+    for (uint32_t f = 0; f < 2 && shared != MAP_FAILED; f += 1)
+    {
+        Tier0Function function;
+        memset(&function, 0, sizeof(function));
+        function.kinds = kinds[f];
+        function.classes = classes;
+        function.values = values[f];
+        function.count = counts[f];
+        function.local_classes = local_classes;
+        function.local_flags = local_flags;
+        function.local_count = f + 1;
+        function.parameter_count = f + 1;
+        function.parameters = parameters;
+        const bool second = f == 1;
+        const Tier0Check check = tier0_validate(&function);
+        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+        const Tier0Code vector = tier0_compile(&function, &arena);
+        bool ready = ir_lower_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
+                                          "a compare-exchange whose address is a parameter's only use compiles alike by both Tier 0 paths", 0, f);
+        ready = ready && ir_lower_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
+                                              "a compare-exchange parameter's records are valid, without branches or references", 0, f);
+        const uint64_t room = ready ? BUSTER_X86_ENCODER_CAPACITY(scalar.count) : 0;
+        uint8_t* image = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room) : 0;
+        uint8_t* twin = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room) : 0;
+        const int64_t length = image != 0 ? x86_encode(vector.records, vector.count, image, room, 0, 0) : -1;
+        const int64_t twin_length = twin != 0 ? x86_encode_scalar(scalar.records, scalar.count, twin, room, 0, 0) : -1;
+        ready = ready && ir_lower_test_expect(tally, length > 0 && length == twin_length && memcmp(image, twin, (size_t)length) == 0,
+                                              "a compare-exchange parameter's code encodes alike by both encoders", 0, f);
+        if (ready)
+        {
+            shared->object = 5;
+            const bool ran = ir_lower_test_cas_native(image, (uint32_t)length, second, shared);
+            ir_lower_test_expect(tally, ran && shared->results[0] == expected[f][0] && shared->results[1] == expected[f][1] && shared->object == 9,
+                                 "Tier 0's compare-exchange reads its address from a parameter used only so", 0, f);
+            if (!(ran && shared->results[0] == expected[f][0] && shared->results[1] == expected[f][1] && shared->object == 9) && tally->failures < 20)
+            {
+                fprintf(stderr, "  ran %d, results %u and %u, object %d\n", ran, shared->results[0], shared->results[1], shared->object);
+            }
+        }
+        // The interpreters, the object's address unchecked: it is no memory they know.
+        InterpreterOptions options = interpreter_default_options();
+        options.check_memory = false;
+        int32_t object = 5;
+        const InterpreterValue arguments[2] = {
+            { .low = second ? 0 : (uint64_t)(uintptr_t)&object },
+            { .low = (uint64_t)(uintptr_t)&object },
+        };
+        const SymbolId symbol = 1;
+        const InterpreterProgram typed = {
+            .functions = &function,
+            .function_symbols = &symbol,
+            .function_count = 1,
+        };
+        bool same = true;
+        for (uint32_t r = 0; r < 2; r += 1)
+        {
+            InterpreterResult result;
+            const bool interpreted = interpreter_typed_run(&typed, symbol, arguments, f + 1, &execution, &options, &result);
+            same = same && interpreted && result.status == INTERPRETER_OK && (uint32_t)result.value.low == expected[f][r];
+        }
+        ir_lower_test_expect(tally, same && object == 9, "the typed interpreter's compare-exchange reads its address from a parameter used only so", 0, f);
+        IrFunction lowered = { 0 };
+        if (ir_lower_test_lower(tally, &function, IR_I32, 1, &output, &twin_output, &arena, &lowered, 0, f))
+        {
+            object = 5;
+            const IrInterpreterFunction code = { .symbol = symbol, .function = &lowered };
+            const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
+            same = true;
+            for (uint32_t r = 0; r < 2; r += 1)
+            {
+                const InterpreterResult result = ir_interpret(&program, symbol, arguments, f + 1, &options, &execution);
+                same = same && result.status == INTERPRETER_OK && (uint32_t)result.value.low == expected[f][r];
+            }
+            ir_lower_test_expect(tally, same && object == 9, "the IR interpreter's compare-exchange reads its address from a parameter used only so", 0, f);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&execution, 0);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(IrLowerTestCasShared));
+    }
+    arena_release(&execution);
+    arena_release(&twin_output);
+    arena_release(&output);
+    arena_release(&arena);
+}
+
 static void ir_lower_test_fixtures(IrLowerTestTally* tally)
 {
     // 10 + (outer ? (inner ? 20 : 30) : 40), preserving the outer value at both joins.
@@ -1821,6 +1985,42 @@ struct IrLowerTestStream
 // Narrow integers at a call's boundary (#141): f(signed char a, unsigned short b) returns g(a, b, (unsigned char)200,
 // (short)-3). Each narrow parameter arrives as an i32, truncated to its type before its slot's store, and each narrow
 // argument crosses its call as an i32, sign- or zero-extended by its class, with i32 call types, by both lowering paths.
+// ir_typed_ignored_arguments' twins (#141): random call argument locations of every kind, none, one or several of them
+// IGNORE, at every count from 0 to 40 and so at each of the vector path's 8 lanes and its partial tails, must agree.
+static void ir_lower_test_ignored_scan(IrLowerTestTally* tally)
+{
+    AbiLocation locations[40];
+    uint64_t random = 141;
+    uint32_t agreed = 0;
+    for (uint32_t trial = 0; trial < 2000; trial += 1)
+    {
+        const uint32_t count = trial % 41;
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            random = random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t bits = (uint32_t)(random >> 33);
+            locations[a] = (AbiLocation){
+                .stack_offset = bits & 0xff,
+                .registers = { (uint8_t)(bits >> 8), (uint8_t)(bits >> 16) },
+                .kind = (uint8_t)(1 + (bits >> 24) % 3),
+                .flags = (uint8_t)(bits >> 28),
+            };
+        }
+        // None, one at a random place, or one in each eighth of the trials' further ones.
+        random = random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        const uint32_t place = count != 0 ? (uint32_t)(random >> 33) % count : 0;
+        const uint32_t shape = trial % 3;
+        for (uint32_t a = 0; count != 0 && shape != 0 && a < count; a += 1)
+        {
+            locations[a].kind = (shape == 1 && a == place) || (shape == 2 && a % 8 == place % 8) ? BUSTER_ABI_LOCATION_IGNORE : locations[a].kind;
+        }
+        const Tier0Function function = { .argument_locations = count != 0 ? locations : NULL, .argument_count = count };
+        const bool expected = count != 0 && shape != 0;
+        agreed += ir_typed_ignored_arguments(&function, true) == expected && ir_typed_ignored_arguments(&function, false) == expected;
+    }
+    ir_lower_test_expect(tally, agreed == 2000, "ir_typed_ignored_arguments' paths find an ignored argument where there is one", 141, 0);
+}
+
 static void ir_lower_test_narrow(IrLowerTestTally* tally)
 {
     Arena output = arena_reserve(1ull << 20);
@@ -3446,9 +3646,11 @@ static int run_ir_lower_tests(int argc, char** argv)
         };
         ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
+        ir_lower_test_cas_parameter(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);
         ir_lower_test_aggregates(&tally);
+        ir_lower_test_ignored_scan(&tally);
         ir_lower_test_narrow(&tally);
         ir_lower_test_objects(&tally);
         ir_lower_test_copies(&tally);

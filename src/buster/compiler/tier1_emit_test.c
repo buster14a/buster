@@ -378,6 +378,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
 #include "tier1_labels_test.c"
 #include "tier1_variadic_test.c"
 #include "tier1_dropped_test.c"
+#include "tier1_code_certificate_test.c"
 #include "tier1_stack_test.c"
 #include "tier1_float_test.c"
 
@@ -1069,6 +1070,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_labels_tests(&test);
             tier1_variadic_tests(&test);
             tier1_dropped_tests(&test);
+            tier1_code_certificate_tests(&test);
             tier1_stack_tests(&test);
             tier1_float_tests(&test);
             tier1_emit_test_overlong(&test);

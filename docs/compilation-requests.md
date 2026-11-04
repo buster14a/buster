@@ -30,9 +30,9 @@ extends the existing contracts (`PPOptions`, `CheckProgramOptions`,
 - `check_request_refusal` says what the request asks for that the driver
   doesn't implement, and which option asked for it. In the driver's order:
   code generation (the hardening families of #1125 among them, and, when the
-  request emits code, #1124's object and linkage options: `-fcommon`, a
-  hidden, protected or internal default visibility, `-ffunction-sections`
-  and `-fdata-sections`), then, when the request emits code, instrumentation (#1112: a sanitizer, coverage or
+  request emits code, #1124's object and linkage options: a hidden,
+  protected or internal default visibility, `-ffunction-sections` and
+  `-fdata-sections`; `-fcommon` is implemented, #147), then, when the request emits code, instrumentation (#1112: a sanitizer, coverage or
   OpenMP, from the resolved predefines, which a later `-fno-` option may
   have cancelled) and position-independent code (#811), a layout, then a
   language or target the checker doesn't take

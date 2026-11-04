@@ -1036,8 +1036,9 @@ the lowering makes no type, and classifies only the types it has rows for. The
 selection now reads the static declaration keys retained by `check_data_prepare`
 (#592). The emission finds static-storage declarations 64 tokens at a time before
 the bodies compile on lanes, and initializes defined bytes only for symbol objects;
-other entries are not readable. After those compiles it finds nonnull attribute pointers
-eight tokens at a time, retains those at declaring tokens and gives the list back after
+other entries are not readable. After those compiles it finds the tokens with attributes
+16 at a time, skipping 256 tokens without any with a load of their directory entries
+(`check_input_attributed_next`, #1167), retains those at declaring tokens and gives the list back after
 the attribute passes, never holding it through Tier 0. It initializes retained flags only
 at those objects, including parameters. Of the
 names a unit gives, only asm labels with a `.` go in the made names' table,

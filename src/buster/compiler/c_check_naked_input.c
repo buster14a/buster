@@ -25,19 +25,19 @@ static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, 
     if (reader->naked_functions && (input->function_flags[previous] & CHECK_INPUT_FUNCTION_NAKED) != 0 &&
         (input->function_flags[token] & CHECK_INPUT_FUNCTION_NAKED) == 0)
     {
-        const CheckInputAttribute* attribute = check_input_naked_attribute(input->attributes[previous]);
+        const CheckInputAttribute* attribute = check_input_naked_attribute(check_input_attributes_at(input, previous));
         CheckInputAttributes* attributes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
         bool valid = attributes != NULL && attribute != NULL;
         if (valid)
         {
             *attributes = (CheckInputAttributes){ 0 };
-            valid = input->attributes[token] == NULL || check_input_attribute_copy(reader, input->attributes[token], attributes);
+            valid = check_input_attributes_at(input, token) == NULL || check_input_attribute_copy(reader, check_input_attributes_at(input, token), attributes);
             valid = valid && check_input_attribute_append(reader, attributes, *attribute);
         }
         input->resource |= !valid;
         if (valid)
         {
-            input->attributes[token] = attributes;
+            check_input_set_attributes_at(input, token, attributes);
             input->function_flags[token] |= CHECK_INPUT_FUNCTION_NAKED;
             reader->naked_functions = true;
         }
@@ -71,7 +71,7 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
                 continue;
             }
             bool label = false;
-            const CheckInputAttributes* attributes = input->attributes[token];
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
             for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
             {
                 label |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
@@ -231,7 +231,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
             continue;
         }
         const uint32_t closing = parser->tree.parents[body];
-        const CheckInputAttribute* attribute = check_input_naked_attribute(input->attributes[declaration]);
+        const CheckInputAttribute* attribute = check_input_naked_attribute(check_input_attributes_at(input, declaration));
         if (attribute == NULL)
         {
             continue;

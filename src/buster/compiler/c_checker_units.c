@@ -103,6 +103,11 @@ struct CheckUnitsRun
     // before a link, whose peak then stays the units'; otherwise the process's exit, which follows the lanes, frees the
     // memory of the lane that stops taking units last.
     bool release;
+    // The lanes that still take units, which the run counts itself, with or without a board (whose own count gates the
+    // help): the board's allocation may fail on several lanes, and only the lane that stops last may leave its memory to
+    // the exit (check_units_lane). `kept` counts the lanes that did, for --shared-parts' report.
+    uint32_t taking;
+    uint32_t kept;
 };
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
@@ -364,6 +369,33 @@ static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit
     return valid;
 }
 
+// Whether a unit's definition `symbol` of `link` takes a name's place from the earlier one, `earlier` of `earlier_link`,
+// and whether the two are a duplicate (#147): a strong definition takes a weak one's or a common one's place, a common
+// one (BUSTER_LINK_SYMBOL_COMMON) a weak one's and a smaller common one's, as a linker keeps the largest of a name's
+// commons, and only two strong definitions are a duplicate. The kept common takes the largest alignment of the name's
+// commons, whichever gives it, as GNU ld and lld take both maxima (check_units_common_alignment).
+static bool check_units_merge_replaces(const Link* earlier_link, SymbolId earlier, const Link* link, SymbolId symbol, bool* duplicate)
+{
+    const uint8_t was = earlier_link->symbols.flags[earlier];
+    const uint8_t is = link->symbols.flags[symbol];
+    const bool was_weak = (was & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool is_weak = (is & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const bool was_common = (was & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+    const bool is_common = (is & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+    const bool was_strong = !was_weak && !was_common;
+    const bool is_strong = !is_weak && !is_common;
+    const bool larger = link->symbols.size[symbol] > earlier_link->symbols.size[earlier];
+    *duplicate = was_strong && is_strong;
+    return is_strong ? !was_strong : is_common && (was_weak || (was_common && larger));
+}
+
+// The alignment (log2) a unit's symbol gives its name's common: its atom's for a common definition, else 0.
+static uint8_t check_units_common_alignment(const Link* unit, SymbolId symbol)
+{
+    const bool common = (unit->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON && unit->symbols.atom[symbol] != 0;
+    return common ? unit->atoms.alignment_log2[unit->symbols.atom[symbol]] : 0;
+}
+
 // The units' kept links joined into `link`, in the units' order, as check_program_emit builds one unit's (#152): every
 // symbol first, a global name's once and each unit's locals its own, the units' definitions marked as the program's;
 // then the C runtime, which binding (`binding`, bind_begin) joins between the program's symbols and its atoms, its units
@@ -403,6 +435,8 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     SymbolId* defining_symbol = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, symbols + 1) : NULL;
     uint8_t* visibility = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1) : NULL;
     uint8_t* strong = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1) : NULL;
+    // The largest alignment of each name's common definitions, which the kept common takes.
+    uint8_t* common_alignment = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1) : NULL;
     // The global names' table, open addressing on their hashes: twice the slots of the symbols, at least, each the link's
     // symbol of its name or 0.
     uint64_t slots = 16;
@@ -412,7 +446,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     }
     SymbolId* table = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, slots) : NULL;
     valid = valid && maps != NULL && first_unit != NULL && first_symbol != NULL && defining_unit != NULL && defining_symbol != NULL && visibility != NULL &&
-            strong != NULL && table != NULL;
+            strong != NULL && common_alignment != NULL && table != NULL;
     for (uint32_t u = 0; valid && u < count; u += 1)
     {
         maps[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, units[u].kept.link.symbols.count);
@@ -458,6 +492,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 defining_symbol[merged] = 0;
                 visibility[merged] = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
                 strong[merged] = 0;
+                common_alignment[merged] = 0;
                 if (global)
                 {
                     table[slot] = merged;
@@ -468,18 +503,19 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 visibility[merged] = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
             }
             strong[merged] |= binding_flags != BUSTER_LINK_SYMBOL_WEAK;
+            const uint8_t aligned = check_units_common_alignment(unit, s);
+            common_alignment[merged] = aligned > common_alignment[merged] ? aligned : common_alignment[merged];
             if (defined)
             {
-                const bool weak = binding_flags == BUSTER_LINK_SYMBOL_WEAK;
                 const bool earlier = defining_unit[merged] != count;
-                const bool earlier_weak = earlier && (units[defining_unit[merged]].kept.link.symbols.flags[defining_symbol[merged]] & BUSTER_LINK_SYMBOL_BINDING) ==
-                                                         BUSTER_LINK_SYMBOL_WEAK;
-                if (!earlier || (earlier_weak && !weak))
+                bool twice = false;
+                const bool replaces = earlier && check_units_merge_replaces(&units[defining_unit[merged]].kept.link, defining_symbol[merged], unit, s, &twice);
+                if (!earlier || replaces)
                 {
                     defining_unit[merged] = u;
                     defining_symbol[merged] = s;
                 }
-                else if (!earlier_weak && !weak)
+                else if (twice)
                 {
                     duplicate_unit = u;
                     duplicate = merged;
@@ -627,6 +663,10 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
             if (unit->symbols.atom[s] != 0 && defining_unit[merged] == u && defining_symbol[merged] == s)
             {
                 valid = link_define_symbol(link, merged, placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
+                // A kept common takes its name's commons' largest alignment.
+                const AtomId atom = placed[unit->symbols.atom[s]];
+                const bool common = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+                link->atoms.alignment_log2[atom] = common && common_alignment[merged] > link->atoms.alignment_log2[atom] ? common_alignment[merged] : link->atoms.alignment_log2[atom];
             }
         }
         for (uint32_t f = 0; described != NULL && valid && f < units[u].kept.debug.function_count; f += 1)
@@ -688,9 +728,9 @@ struct CheckUnitsMergeRecord
     SymbolId symbol;
 };
 
-// A global name's resolution, at its first record: its definition's record (the first strong one's, else the first weak
-// one's) or UINT32_MAX, its first duplicate definition's (a strong one after a strong one) or UINT32_MAX, the most
-// constraining visibility its symbols give it, and whether any of them binds it otherwise than weakly.
+// A global name's resolution, at its first record: its definition's record (check_units_merge_replaces') or UINT32_MAX,
+// its first duplicate definition's (a strong one after a strong one) or UINT32_MAX, the most constraining visibility its
+// symbols give it, whether any of them binds it otherwise than weakly, and its commons' largest alignment.
 typedef struct CheckUnitsMergeName CheckUnitsMergeName;
 struct CheckUnitsMergeName
 {
@@ -698,6 +738,7 @@ struct CheckUnitsMergeName
     uint32_t duplicate;
     uint8_t visibility;
     uint8_t strong;
+    uint8_t common_alignment;
 };
 
 // The partitions of the exchange per lane: enough that a lane's partitions balance, few enough that each one's table is
@@ -736,14 +777,15 @@ struct CheckUnitsMerge
     // Per unit: its symbols that take ids of their own, then the first of them (exclusive prefix sums, from 1).
     uint64_t* unit_ids;
     // Per record: the id of its name in the link, at a first record. Per id: the symbol that gives it its name and flags
-    // (the definition's, else the first reference's), whether it is defined, its visibility and whether it binds
-    // otherwise than weakly.
+    // (the definition's, else the first reference's), whether it is defined, its visibility, whether it binds otherwise
+    // than weakly and its commons' largest alignment, which a kept common takes.
     SymbolId* record_ids;
     uint32_t* source_unit;
     SymbolId* source_symbol;
     uint8_t* defined;
     uint8_t* visibility;
     uint8_t* strong;
+    uint8_t* common_alignment;
     SymbolId next;
     // -g's functions' symbols in the link, per unit (check_units_merge's `described`), and how many are replaced.
     SymbolId** described;
@@ -837,17 +879,19 @@ static uint64_t check_units_merge_resolve(CheckUnitsMerge* merge, uint64_t begin
         }
         const bool weak = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         resolution->strong |= !weak;
+        const uint8_t aligned = check_units_common_alignment(unit, record.symbol);
+        resolution->common_alignment = aligned > resolution->common_alignment ? aligned : resolution->common_alignment;
         if (check_units_merge_defines(unit, record.symbol))
         {
             const bool earlier = resolution->defining != UINT32_MAX;
             const CheckUnitsMergeRecord definer = earlier ? merge->records[resolution->defining] : (CheckUnitsMergeRecord){ 0 };
-            const bool earlier_weak = earlier && (merge->units[definer.unit].kept.link.symbols.flags[definer.symbol] & BUSTER_LINK_SYMBOL_BINDING) ==
-                                                     BUSTER_LINK_SYMBOL_WEAK;
-            if (!earlier || (earlier_weak && !weak))
+            bool twice = false;
+            const bool replaces = earlier && check_units_merge_replaces(&merge->units[definer.unit].kept.link, definer.symbol, unit, record.symbol, &twice);
+            if (!earlier || replaces)
             {
                 resolution->defining = (uint32_t)r;
             }
-            else if (!earlier_weak && !weak && resolution->duplicate == UINT32_MAX)
+            else if (twice && resolution->duplicate == UINT32_MAX)
             {
                 resolution->duplicate = (uint32_t)r;
                 const uint64_t key = (uint64_t)record.unit << 32 | record.symbol;
@@ -1015,6 +1059,7 @@ static void check_units_merge_lane(void* argument)
                     SymbolId source_symbol = s;
                     uint8_t visibility = unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_VISIBILITY;
                     uint8_t strong = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_WEAK;
+                    uint8_t common_alignment = check_units_common_alignment(unit, s);
                     bool defined = check_units_merge_defines(unit, s);
                     if (entry != UINT32_MAX)
                     {
@@ -1024,6 +1069,7 @@ static void check_units_merge_lane(void* argument)
                         source_symbol = defined ? merge->records[resolution->defining].symbol : source_symbol;
                         visibility = resolution->visibility;
                         strong = resolution->strong;
+                        common_alignment = resolution->common_alignment;
                         merge->record_ids[entry] = id;
                     }
                     merge->source_unit[id] = source_unit;
@@ -1031,6 +1077,7 @@ static void check_units_merge_lane(void* argument)
                     merge->defined[id] = defined;
                     merge->visibility[id] = visibility;
                     merge->strong[id] = strong;
+                    merge->common_alignment[id] = common_alignment;
                     id += 1;
                 }
             }
@@ -1297,9 +1344,14 @@ static void check_units_merge_lane(void* argument)
                 const SymbolId merged = map[s];
                 if (unit->symbols.atom[s] != 0 && merge->source_unit[merged] == u && merge->source_symbol[merged] == s && merge->defined[merged])
                 {
-                    link->symbols.atom[merged] = atom_base + unit->symbols.atom[s] - 1;
+                    const AtomId atom = atom_base + unit->symbols.atom[s] - 1;
+                    const bool common = (unit->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+                    link->symbols.atom[merged] = atom;
                     link->symbols.value[merged] = unit->symbols.value[s];
                     link->symbols.size[merged] = unit->symbols.size[s];
+                    // A kept common takes its name's commons' largest alignment, as the twin's does; its atom is this unit's.
+                    link->atoms.alignment_log2[atom] = common && merge->common_alignment[merged] > link->atoms.alignment_log2[atom] ? merge->common_alignment[merged] :
+                                                                                                                                   link->atoms.alignment_log2[atom];
                 }
             }
             for (uint32_t f = 0; merge->described != NULL && merge->described[u] != NULL && f < units[u].kept.debug.function_count; f += 1)
@@ -1384,6 +1436,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     merge.defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
     merge.visibility = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
     merge.strong = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
+    merge.common_alignment = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, symbols + 1);
     merge.described = debug != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId*, count) : NULL;
     merge.atom_base = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count);
     merge.fixup_base = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count);
@@ -1392,7 +1445,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     bool reserved = merge.symbol_costs != NULL && merge.record_costs != NULL && merge.counts != NULL && merge.partition_begin != NULL && merge.records != NULL &&
                     merge.firsts != NULL && merge.names != NULL && merge.record_ids != NULL && merge.entries != NULL && merge.maps != NULL && merge.unit_ids != NULL &&
                     merge.source_unit != NULL && merge.source_symbol != NULL && merge.defined != NULL && merge.visibility != NULL && merge.strong != NULL &&
-                    (debug == NULL || merge.described != NULL) && merge.atom_base != NULL && merge.fixup_base != NULL && merge.wide_base != NULL &&
+                    merge.common_alignment != NULL && (debug == NULL || merge.described != NULL) && merge.atom_base != NULL && merge.fixup_base != NULL && merge.wide_base != NULL &&
                     merge.priority_base != NULL;
     uint64_t symbol_cost = 0;
     uint64_t record_cost = 0;
@@ -1561,6 +1614,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->open_frames, unit_report->open_frames, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->return_tails, unit_report->return_tails, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->red_zones, unit_report->red_zones, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->code_certified, unit_report->code_certified, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->code_uncertified, unit_report->code_uncertified, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
@@ -1594,7 +1649,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 // Before a link it releases it, as every lane does, so that the link's peak stays the units'.
 static void check_units_lane(void* argument)
 {
-    const CheckUnitsRun* run = argument;
+    CheckUnitsRun* run = argument;
     const uint32_t index = lane_index();
     CheckUnitsLane* lane = run->lanes + index;
     arena_pool = &lane->pool;
@@ -1604,12 +1659,22 @@ static void check_units_lane(void* argument)
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
-    // The lanes that still take units after this one, which help the units' emissions (#777) from now on.
-    const uint32_t taking = run->board != NULL ? __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE) : 0;
+    // The lanes that still take units after this one: the board's, which help the units' emissions (#777) from now on,
+    // and the run's, which counts them without a board too. Every lane counts itself out of the board's first, so the
+    // one that leaves the run's at 0 finds no unit's emission left to help.
+    if (run->board != NULL)
+    {
+        __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE);
+    }
+    const uint32_t taking = __atomic_sub_fetch(&run->taking, 1, __ATOMIC_RELEASE);
     if (run->release || taking != 0)
     {
         check_units_lane_release(lane);
         arena_pool_release(&lane->pool);
+    }
+    else
+    {
+        __atomic_add_fetch(&run->kept, 1, __ATOMIC_RELAXED);
     }
     arena_pool = 0;
     // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
@@ -1812,8 +1877,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             memset(states, 0, (uint64_t)active * sizeof(*states));
             // The lanes' board (#777): every lane takes units at first. Without its memory, each unit's functions compile
-            // on its lane alone.
-            CheckEmitBoard* board = active > 1 ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
+            // on its lane alone; BUSTER_TEST_NO_UNITS_BOARD, a test hook (test-check-units), stands for its allocation
+            // failing.
+            const bool boarded = active > 1 && getenv("BUSTER_TEST_NO_UNITS_BOARD") == NULL;
+            CheckEmitBoard* board = boarded ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
             if (board != NULL)
             {
                 memset(board, 0, sizeof(*board));
@@ -1828,6 +1895,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .lanes = states,
                 .board = board,
                 .release = release || command->link,
+                .taking = active,
             };
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
@@ -1874,6 +1942,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             if (command->shared_parts)
             {
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
+                fprintf(stderr, "units' lanes: %u left %s memory to the exit\n", run.kept, run.kept != 1 ? "their" : "its");
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release), but the last one's in a
             // command without a link that doesn't release its memory: the kept links are all the link reads.

@@ -36,7 +36,7 @@
 #define BUSTER_SSA_TYPE_F80 9
 #define BUSTER_SSA_TYPE_PTR 10
 // The shared IR's vectors and masks (#179), whose codes are its own: the core compares types alone, so any of them
-// promotes as a scalar does. Which a caller admits is its own (ssa_ir.c refuses vectors).
+// promotes as a scalar does. Which a caller admits is its own (ssa_ir.c takes both, #179 and #141).
 #define BUSTER_SSA_TYPE_V4I32 11
 #define BUSTER_SSA_TYPE_V8I32 12
 #define BUSTER_SSA_TYPE_V16I32 13

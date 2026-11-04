@@ -76,6 +76,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
         case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
         case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_JUMP_ASM: result = "cannot jump from this asm goto statement to one of its possible targets"; break;
         case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
         case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;
         case CHECK_INPUT_CLEANUP_TYPE: result = "'cleanup' function parameter has incompatible type"; break;
@@ -112,6 +113,14 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
         case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
         case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
+        case CHECK_INPUT_LABEL_ATTRIBUTE: result = "attribute cannot be applied to a label"; break;
+        case CHECK_INPUT_STATEMENT_ATTRIBUTE: result = "attribute cannot be applied to a statement"; break;
+        case CHECK_INPUT_FALLTHROUGH_STATEMENT: result = "'fallthrough' attribute only applies to empty statements"; break;
+        case CHECK_INPUT_FALLTHROUGH_SWITCH: result = "fallthrough annotation is outside switch statement"; break;
+        case CHECK_INPUT_FALLTHROUGH_PLACEMENT: result = "fallthrough annotation does not directly precede switch label"; break;
+        case CHECK_INPUT_VERBOSE_TRAP_STRING: result = "argument to __builtin_verbose_trap must be a pointer to a constant string"; break;
+        case CHECK_INPUT_VERBOSE_TRAP_DOLLAR: result = "argument to __builtin_verbose_trap must not contain $"; break;
+        case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
@@ -373,6 +382,45 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 #include "c_check_warning_render.c"
 #include "c_check_literal_diagnostic.c"
+
+static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
+
+// The numeric constants a failed parse left unchecked, from `begin` (where the checked prefix or repair ends) to its first
+// error: clang diagnoses each as it parses it, before that error, which is where buster's checker never reaches them
+// (#1127). Each one's publication is its own token, so it sorts before the parse's diagnostics. Numbers in a C23
+// attribute list, whose tokens clang skips, have none.
+static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch)
+{
+    uint32_t end = parser->tokens.count;
+    for (uint32_t d = 0; d < parser->diagnostic_count && end == parser->tokens.count; d += 1)
+    {
+        end = parser->diagnostics[d].error && parser->diagnostics[d].token < end ? parser->diagnostics[d].token : end;
+    }
+    uint32_t t = begin;
+    while (t < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        if (kind == PARSE_KIND_L_SQUARE && t + 1 < end && parser->tokens.kinds[t + 1] == PARSE_KIND_L_SQUARE)
+        {
+            // Past the attribute list's brackets, balanced.
+            uint32_t depth = 0;
+            do
+            {
+                depth += parser->tokens.kinds[t] == PARSE_KIND_L_SQUARE;
+                depth -= depth != 0 && parser->tokens.kinds[t] == PARSE_KIND_R_SQUARE;
+                t += 1;
+            } while (t < end && depth != 0);
+        }
+        else
+        {
+            if (kind == PARSE_KIND_NUMBER)
+            {
+                check_driver_literal(pp, parser, t, parser->tokens.sources[t], parser->tokens.sources[t], scratch);
+            }
+            t += 1;
+        }
+    }
+}
 
 // A numeric constant the checker refused, worded and placed as clang does (c_check_literal_diagnostic.c, #1127): false if
 // clang has no error for it, which leaves the checker's own message.
@@ -726,21 +774,66 @@ static void check_driver_kr_definition(const Parser* parser, const Parser* origi
     }
 }
 
+// A type of the unit as clang's TypePrinter spells it, NUL-terminated in `scratch`, with " *" after it where `decay` says
+// (an array's element's, as a parameter decays the array), or NULL.
+static const char* check_driver_library_type(const Preprocessor* pp, const TypeTable* types, const TypeNames* names, TypeId type, bool decay, Arena* scratch)
+{
+    const TypeId base = type_strip_aligned(types, type);
+    const bool array = decay && type_kind_is_array(type_kind(types, base));
+    const String8 printed = type_is_valid(types, type) ? type_print(types, scratch, array ? type_element(types, base) : type, (String8){ 0 }, names,
+                                                                    pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0) :
+                                                         (String8){ 0 };
+    const bool star = printed.length != 0 && printed.pointer[printed.length - 1] == '*';
+    char* text = printed.length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, printed.length + 3) : NULL;
+    if (text != NULL)
+    {
+        memcpy(text, printed.pointer, printed.length);
+        memcpy(text + printed.length, array ? (star ? "*" : " *") : "", array ? (star ? 2 : 3) : 1);
+    }
+    return text;
+}
+
 // An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
 // C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
-// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t, and then its spelling without it), and
-// a note naming the header that declares it, where its row has one.
-static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity, uint32_t source, uint32_t publication, const uint8_t* name, uint32_t length,
-                                          bool c99)
+// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
+// and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
+// note naming the header that declares it, where its row has one.
+static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
+                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
+    const uint64_t mark = scratch->length;
+    CBuiltinLibraryNamed named = { 0 };
+    const bool needs = info != NULL && (memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
+                                        memchr(info->encoding, 'K', info->encoding_length) != NULL);
+    if (needs && types != NULL && input != NULL)
+    {
+        // The names' spellings, as the warnings' renderer builds them (check_driver_spelling_build), for these few types.
+        const uint32_t count = pp->table->count;
+        const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, count);
+        uint32_t* lengths = bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+        for (uint32_t i = 0; lengths != NULL && i < count; i += 1)
+        {
+            bytes[i] = intern_bytes(pp->table, i);
+            lengths[i] = intern_length(pp->table, i);
+        }
+        const TypeNames names = { .bytes = bytes, .lengths = lengths, .count = lengths != NULL ? count : 0 };
+        const TypeId* taken = input->implicit_library_types;
+        named = (CBuiltinLibraryNamed){
+            .file = taken[0] != 0 ? check_driver_library_type(pp, types, &names, taken[0], false, scratch) : NULL,
+            .jmp_buf = taken[1] != 0 ? check_driver_library_type(pp, types, &names, taken[1], true, scratch) : NULL,
+            .sigjmp_buf = taken[2] != 0 ? check_driver_library_type(pp, types, &names, taken[2], true, scratch) : NULL,
+            .ucontext = taken[3] != 0 ? check_driver_library_type(pp, types, &names, taken[3], false, scratch) : NULL,
+        };
+    }
     char sugared[256];
     char plain[256];
     bool sized = false;
     const bool spelled = info != NULL && cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, c99,
-                                                                 sugared, sizeof(sugared), &sized) &&
-                         cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, plain,
-                                                sizeof(plain), &sized);
+                                                                 &named, sugared, sizeof(sugared), &sized) &&
+                         cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, &named,
+                                                plain, sizeof(plain), &sized);
+    scratch->length = mark;
     char type[560];
     snprintf(type, sizeof(type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "int ()", plain);
     const char* header = info != NULL ? cbuiltin_library_header(info->header_token) : NULL;
@@ -773,7 +866,7 @@ static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity,
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
 static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
-                                  const CheckInput* input, const CheckStream* stream,
+                                  const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
@@ -913,9 +1006,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             firsts[first_count] = UINT64_MAX;
         }
-        for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
+        const CheckSparseWide attributes = input->attributes;
+        const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
+        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
         {
-            const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
+            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -1081,8 +1176,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
-                        check_driver_implicit_library(pp, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
-                                                      intern_length(pp->table, name), input->implicit_function_c99);
+                        check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
+                                                      intern_length(pp->table, name), input->implicit_function_c99, scratch);
                     }
                     else if (input->implicit_function_c99)
                     {
@@ -1138,6 +1233,31 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                  kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
                                                  kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
                         }
+                        else if ((kind == CHECK_INPUT_LABEL_ATTRIBUTE || kind == CHECK_INPUT_STATEMENT_ATTRIBUTE || kind == CHECK_INPUT_FALLTHROUGH_STATEMENT) && named)
+                        {
+                            // An attribute on a label or a statement that clang refuses there (#147), spelled as written
+                            // (a scope's `gnu::` too) and worded as clang's: a label's subjects by its name without a GNU
+                            // keyword's underscores (check_input_label_refusal).
+                            // `::` is one token in C23 and two colons before it.
+                            const bool scoped = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
+                            const uint32_t at = !scoped ? token : parser->tokens.kinds[token + 2] == PARSE_KIND_COLON && token + 3 < count ? token + 3 : token + 2;
+                            const uint32_t scope = scoped ? parser->tokens.names[token] : 0;
+                            const uint32_t name = parser->tokens.names[at];
+                            const InternSpan span = pp->table->spans[name];
+                            String8 bare = { (char*)pp->table->records + span.offset, span.length };
+                            if (bare.length >= 4 && bare.pointer[0] == '_' && bare.pointer[1] == '_' && bare.pointer[bare.length - 1] == '_' && bare.pointer[bare.length - 2] == '_')
+                            {
+                                bare.pointer += 2;
+                                bare.length -= 4;
+                            }
+                            const char* refusal = kind == CHECK_INPUT_LABEL_ATTRIBUTE ? check_input_label_refusal(bare) : NULL;
+                            const char* ending = kind == CHECK_INPUT_STATEMENT_ATTRIBUTE ? "cannot be applied to a statement" :
+                                                 kind == CHECK_INPUT_FALLTHROUGH_STATEMENT ? "only applies to empty statements" :
+                                                 refusal != NULL ? refusal : "cannot be applied to a label";
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s%s%.*s' attribute %s", scope != 0 ? (int)intern_length(pp->table, scope) : 0,
+                                                 scope != 0 ? (const char*)intern_bytes(pp->table, scope) : "", scope != 0 ? "::" : "", (int)intern_length(pp->table, name),
+                                                 (const char*)intern_bytes(pp->table, name), ending);
+                        }
                         else if (phase == 0 && kind >= CHECK_INPUT_SPECIFIER_COMBINE && kind <= CHECK_INPUT_SPECIFIER_COMPLEX)
                         {
                             // Specifiers that don't combine, named as clang's DeclSpec names them (#1127).
@@ -1165,11 +1285,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             // A numeric constant's error, worded and placed as clang's.
                         }
-                        else if (kind == CHECK_INPUT_UNDECLARED && named)
+                        else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
-                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            // clang's unknown builtin is an error of -Wimplicit-function-declaration's group, which it names.
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of %s '%.*s'%s", kind == CHECK_INPUT_UNDECLARED ? "undeclared identifier" :
+                                                 "unknown builtin", (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
+                                                 kind == CHECK_INPUT_UNDECLARED ? "" : " [-Wimplicit-function-declaration]");
                         }
                         else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
                         {
@@ -1577,7 +1699,7 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .types = program->types,
                 .output = output,
                 .scalar = parser->options.scalar,
-                .internal = program->input->linkage[candidate->declaration] == 1,
+                .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
             };
             Scratch work = scratch_begin(output);
             check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);
@@ -2805,7 +2927,7 @@ struct CheckDriverCommand
     bool poison_arenas;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
-    // they took, after the units' diagnostics (c_checker_units.c).
+    // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
@@ -3171,7 +3293,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                     }
                     if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, scratch) ||
-                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, repairing ? &repair : NULL,
+                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
@@ -3313,7 +3435,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
-                if (!check_driver_reports(checking, parser, pp, publication_end, &input, NULL, repairing ? &repair : NULL,
+                if (!check_driver_reports(checking, parser, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
                                           original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, scratch) ||
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {
@@ -3336,6 +3458,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             if (!pp->fatal)
             {
+                // The checked view's reports covered its tokens: the original ones of a repair, a prefix's whole.
+                const uint32_t checked_end = !ready || !prefix_only ? 0 : repairing ? repair.original_end : checking->tokens.count;
+                check_driver_unparsed_literals(parser, pp, checked_end, scratch);
                 parse_print_diagnostics(parser, pp);
             }
             result = 1;
@@ -3608,6 +3733,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes.budget = &worker_budget;
+    // A test's hook, in every build (#673): the jobserver tokens a growing team's lane 0 supplies itself after its first
+    // part (CheckProgramLanes.grow_supply), read only when it is set.
+    const char* grow_supply = getenv("BUSTER_TEST_WORKER_SUPPLY");
+    lanes.grow_supply = grow_supply != NULL ? (uint32_t)strtoul(grow_supply, NULL, 10) : 0;
     bool invalid_lanes = false;
     // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
     // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
@@ -3930,8 +4059,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && runtime_kind != RUNTIME_KIND_DYNAMIC;
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
     // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
-    // where it emits code, the object and linkage options its producer doesn't implement (#1124: common definitions, a
-    // command line's default visibility, per-definition sections), before any input or output is opened.
+    // where it emits code, the object and linkage options its producer doesn't implement (#1124: a command line's
+    // default visibility, per-definition sections), before any input or output is opened.
     const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, emit_object || link);
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
@@ -4102,8 +4231,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
                                worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
-            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tfallback=%u\n", mode,
-                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, (uint32_t)lanes.again);
+            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tgrown=%u\tworked=%u\tfallback=%u\n", mode,
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, lanes.grown, lanes.worked, (uint32_t)lanes.again);
         }
     }
     worker_budget_close(&worker_budget);

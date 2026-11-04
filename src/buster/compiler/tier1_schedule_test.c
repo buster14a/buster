@@ -206,6 +206,19 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     records[0] = tier1_schedule_test_instruction(X86_FORM_DIV_RM64, 0, X86_REGISTER_R8);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "possible arithmetic fault stays pinned");
     tier1_schedule_test_compare(test, input, scalar, vector);
+    // #1059's audit: a fence, a locked read/modify/write and a reader of the floating environment (MXCSR, which a
+    // FENV_ACCESS region's rounding mode and exception flags live in) stay pinned, so that no access, and no floating
+    // operation, moves across an ordering point or a fesetround call's effect.
+    records[0] = tier1_schedule_test_instruction(X86_FORM_MFENCE, 0, 0);
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a fence stays pinned");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[0] = tier1_schedule_test_instruction(X86_FORM_LOCK_CMPXCHG_M64_R64, X86_REGISTER_R9, X86_REGISTER_R8);
+    records[0].mode = BUSTER_X86_MEMORY_BASE;
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a locked compare-exchange stays pinned");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[0] = tier1_schedule_test_instruction(X86_FORM_ADDSD_X_XM64, 0, 1);
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a floating addition, which reads and writes MXCSR, stays pinned");
+    tier1_schedule_test_compare(test, input, scalar, vector);
     records[0] = tier1_schedule_test_instruction(X86_FORM_MOV_RM8_R8, X86_REGISTER_R8, X86_REGISTER_R9);
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "partial register write retains the whole-register dependency");
