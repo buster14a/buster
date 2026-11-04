@@ -1604,12 +1604,10 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
-          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions), in node order and keyed in
-          # 64-node windows, alone and after scalar work as its regions (`vector`) are.
+          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions), alone and after scalar work
+          # as its regions (`vector`) are.
           taskset -c 2 ./build/compiler benchmark-checker-source --only transitions "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only transitions --after-scalar 100 "${source[@]}"
-          taskset -c 2 ./build/compiler benchmark-checker-source --only windows "${source[@]}"
-          taskset -c 2 ./build/compiler benchmark-checker-source --only windows --after-scalar 100 "${source[@]}"
           # A second corpus, every path: musl's regcomp.c, with the per-file jobs' musl options.
           musl="$corpus/libc/musl"
           taskset -c 2 ./build/compiler benchmark-checker-source -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
@@ -1622,6 +1620,12 @@ jobs:
           taskset -c 2 ./build/compiler time-runs --runs 21 --list "${options[@]}" -o "$RUNNER_TEMP/regions.o" \
             --list --check-transitions "${options[@]}" -o "$RUNNER_TEMP/transitions.o"
           cmp "$RUNNER_TEMP/regions.o" "$RUNNER_TEMP/transitions.o"
+          # Where the graph run's gain goes in that compile: its stages with the transitions, and both compiles' counters.
+          taskset -c 2 ./build/compiler measure-compile --runs 11 -- --check-transitions "${options[@]}"
+          for transitions in "" --check-transitions; do
+            taskset -c 2 perf stat -r 11 -e cycles:u,instructions:u,branch-misses:u,cache-references:u,cache-misses:u \
+              -- ./build/compiler $transitions "${options[@]}" -o "$RUNNER_TEMP/counted.o"
+          done
 
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g

@@ -562,12 +562,11 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
 
 // The paths a sample takes: the scalar schedule (postorder, a node at a time), the vector path (its regions in postorder
 // batches), the vector path with its regions by dependency level instead (CheckOptions.level_order), the vector path by
-// its memoized transitions in node order (CheckOptions.transitions, #1050), and by its transitions keyed in 64-node
-// windows 16 lanes at a time (CheckOptions.transition_windows), on the same actions: #133's question of which order wins,
-// which these decided, what the transitions save, and which of their orders wins.
-#define BUSTER_CHECK_SOURCE_PATHS 5u
+// its memoized transitions in node order (CheckOptions.transitions, #1050), on the same actions: #133's question of which
+// order wins, which these decided, and what the transitions save.
+#define BUSTER_CHECK_SOURCE_PATHS 4u
 
-static const char* const check_source_path_names[BUSTER_CHECK_SOURCE_PATHS] = { "scalar", "vector", "levels", "transitions", "windows" };
+static const char* const check_source_path_names[BUSTER_CHECK_SOURCE_PATHS] = { "scalar", "vector", "levels", "transitions" };
 
 static bool check_source_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, uint32_t path, CheckStream* stream)
 {
@@ -575,8 +574,7 @@ static bool check_source_graph_run(TypeTable* types, const CheckGraph* graph, Ar
     const CheckOptions options = {
         .scalar = path == 0,
         .level_order = path == 2,
-        .transitions = path >= 3,
-        .transition_windows = path == 4,
+        .transitions = path == 3,
     };
     return check_graph_run(types, graph, output, scratch, &options, stream) && stream->report_count == 0;
 }
@@ -662,11 +660,10 @@ static int run_checker_source_benchmark(int count, char** arguments)
         arena_reserve(UINT64_C(1) << 36),
         arena_reserve(UINT64_C(1) << 36),
         arena_reserve(UINT64_C(1) << 36),
-        arena_reserve(UINT64_C(1) << 36),
     };
     Arena scratch = arena_reserve(UINT64_C(1) << 36);
     valid = valid && graph_arena.base != 0 && oracle_arena.base != 0 && outputs[0].base != 0 && outputs[1].base != 0 && outputs[2].base != 0 &&
-            outputs[3].base != 0 && outputs[4].base != 0 && scratch.base != 0;
+            outputs[3].base != 0 && scratch.base != 0;
     CheckGraph graph = { 0 };
     uint32_t bodies = 0;
     uint32_t* mapping = 0;
@@ -678,7 +675,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     valid = valid && check_source_graph_run(&paths[0].types, &graph, &oracle_arena, &scratch, 0, &reference);
     valid = valid && check_source_body_equal(&paths[0].input.graph, &paths[0].stream, &graph, &reference, mapping);
     // The level order and the transitions run on the vector path's table, as its regions do.
-    TypeTable* tables[BUSTER_CHECK_SOURCE_PATHS] = { &paths[0].types, &paths[1].types, &paths[1].types, &paths[1].types, &paths[1].types };
+    TypeTable* tables[BUSTER_CHECK_SOURCE_PATHS] = { &paths[0].types, &paths[1].types, &paths[1].types, &paths[1].types };
     for (uint32_t path = 0; valid && path < BUSTER_CHECK_SOURCE_PATHS; path += 1)
     {
         valid = check_source_graph_run(tables[path], &graph, outputs + path, &scratch, path, streams + path) &&
@@ -774,7 +771,6 @@ static int run_checker_source_benchmark(int count, char** arguments)
         close(counter);
     }
     arena_release(&scratch);
-    arena_release(outputs + 4);
     arena_release(outputs + 3);
     arena_release(outputs + 2);
     arena_release(outputs + 1);
