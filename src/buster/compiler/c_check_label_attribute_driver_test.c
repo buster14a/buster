@@ -949,6 +949,13 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "int c __attribute__((unavailable)) = E, d;\nint e __attribute__((deprecated)) = D, f;\n__attribute__((deprecated)) int g = D, h;\n"
         "typeof(E) n __attribute__((unavailable));\n__attribute__((deprecated)) typeof(D) p;\n"
         "typedef int T __attribute__((unavailable(\"gone\")));\nT __attribute__((aligned(8), unavailable)) r;\n",
+        // A comma inside a group the use is in, as `typeof((E, 1))`'s, is the specifiers' too; unmarked, the use keeps its
+        // diagnostic.
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1, D __attribute__((deprecated(\"old\"))) = 2 };\n"
+        "__attribute__((unavailable)) typeof((E, 1)) x;\n__attribute__((deprecated)) typeof((D, 1)) y;\n"
+        "__attribute__((unavailable)) typeof((D, 1)) z;\nint a = (E), b __attribute__((unavailable)) = sizeof(typeof((E, 1)));\n",
+        "enum { E __attribute__((unavailable(\"gone\"))) = 1 };\ntypeof((E, 1)) x;\n",
+        "enum { D __attribute__((deprecated(\"old\"))) = 2 };\ntypeof((D, 1)) y;\n",
         // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
         "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
         "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"

@@ -5968,11 +5968,16 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
         const uint8_t* contexts = reader->output->availability_contexts;
         // Where the function body a use is in ends.
         uint32_t body_end = 0;
+        // The brackets open before a use (`(`, `[` and `{` less their closers): a file-scope declaration's own level is 0.
+        int32_t level = 0;
         for (uint32_t t = 0; t < count; t += 1)
         {
             const uint8_t kind = parser->tokens.kinds[t];
             const uint8_t role = parser->tree.roles[t];
             const bool inside = t < body_end;
+            const uint8_t previous = t != 0 ? parser->tokens.kinds[t - 1] : PARSE_KIND_END;
+            level += (previous == PARSE_KIND_L_PAREN || previous == PARSE_KIND_L_SQUARE || previous == PARSE_KIND_L_BRACE) -
+                     (previous == PARSE_KIND_R_PAREN || previous == PARSE_KIND_R_SQUARE || previous == PARSE_KIND_R_BRACE);
             if (!inside && role == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
             {
                 body_end = parser->tree.parents[t];
@@ -6005,11 +6010,12 @@ static void check_input_deprecated_uses(CheckInputReader* reader)
             // A use in the specifiers of a declaration itself marked, which clang's delayed diagnostics read in that
             // declaration's context: one before its first declarator, which an attribute marks by its own token. Its worst
             // mark is a context as check_input_availability_contexts' are: a deprecated one drops a deprecated use, an
-            // unavailable one an unavailable use too. Only from the specifiers: a `,` or `=` outside the groups opened
-            // after the use (an attribute list's, a declarator's) ends an initializer or an earlier declarator, whose
-            // uses a later declarator's mark doesn't reach. Looked for only at a marked use, which are few.
+            // unavailable one an unavailable use too. Only from the specifiers: a `,` or `=` at the declaration's own
+            // level, outside every group (an attribute list's, `typeof`'s, a declarator's), ends an initializer or an
+            // earlier declarator, whose uses a later declarator's mark doesn't reach. Looked for only at a marked use,
+            // which are few.
             uint32_t declarator = marked && !inside ? t + 1 : count;
-            int32_t depth = 0;
+            int32_t depth = level;
             bool specifiers = true;
             while (specifiers && declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
                    parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
