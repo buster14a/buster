@@ -9,81 +9,38 @@ jobs:
   author:
     if: github.repository_id == '1421805693'
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_DEBUG_INFO: '0'
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 05061cf0c1127629ad14a5705656c31ea29fe552
-          fetch-depth: 1
-      - name: Match the object writer's ELF unwind section type
+          ref: ef732908efd1cf730e39c0452a93d49bf34941ee
+          fetch-depth: 6
+      - name: Finish whitespace and audit every PR commit
         shell: bash
         run: |
           set -euo pipefail
           file=src/buster/compiler/emitted_code_limits_test.c
-          test "$(git hash-object "$file")" = 62843a330dd462d7a0df842d8cf8a398ee8a4b1e
-          sed -i 's/bytes.length, SHT_PROGBITS, ".eh_frame", \&header)/bytes.length, SHT_X86_64_UNWIND, ".eh_frame", \&header)/' "$file"
           test "$(git hash-object "$file")" = 29836659b74cc6c762ac74e005b7132e70398fcd
-          git diff --check
+          sed -i '${/^$/d;}' "$file"
+          test "$(git hash-object "$file")" = 3127e65c93c472c893182c1c5168993758a20515
+          git diff --ignore-blank-lines --exit-code
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           sh .githooks/enable-sign-off.sh --maintainer-session
           git add -- "$file"
-          git commit -m 'test: inspect the ELF unwind section with its actual type' -m 'Match SHT_X86_64_UNWIND used by the object writer; retain the exact CFA-of-2^31 and byte-identical compile-only assertions.'
+          git commit -m 'style: remove the trailing empty line from the frame regression'
+          git diff --check 441db2428d2bd8d28503037b28c1b3740fe4b25a HEAD
+          mkdir -p build
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o build/dco tools/dco/dco.c
+          build/dco audit --base 441db2428d2bd8d28503037b28c1b3740fe4b25a --head HEAD
           git log -1 --format=fuller
           git push origin HEAD:refs/heads/fix/1149-wide-cfa
-      - name: Install the existing hosted test toolchain
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build
-        run: ./build.sh --config Release
-      - name: Show the actual near-limit object and CFI
+      - name: Retire temporary authoring files
         shell: bash
         run: |
           set -euo pipefail
-          compiler=$(./build.sh print-output --config Release)
-          printf '%s\n' 'extern void sink(void *); void large_frame(void) { char bytes[2147483632]; sink(bytes); }' > "$RUNNER_TEMP/wide-frame.c"
-          "$compiler" --lanes 1 -c --verify -o "$RUNNER_TEMP/wide-frame.o" "$RUNNER_TEMP/wide-frame.c"
-          readelf -SW "$RUNNER_TEMP/wide-frame.o"
-          readelf --debug-dump=frames "$RUNNER_TEMP/wide-frame.o"
-          objdump -dr "$RUNNER_TEMP/wide-frame.o"
-      - name: Emission metadata including standalone sanitizers
-        shell: bash
-        run: |
-          set -euo pipefail
-          compiler=$(./build.sh print-output --config Release)
-          "$compiler" test-emission-metadata
-          clang -std=c17 -O1 -g -march=x86-64 -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all -Isrc tests/emission-metadata/test.c -o "$RUNNER_TEMP/emission-metadata-sanitized"
-          "$RUNNER_TEMP/emission-metadata-sanitized"
-      - name: Emitted-code boundary and cross-check suite
-        shell: bash
-        run: |
-          set -euo pipefail
-          compiler=$(./build.sh print-output --config Release)
-          "$compiler" test-emitted-code --count 8 --cross-check
-      - name: Tier 0 object budget and cross-check suite
-        if: success() || failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          compiler=$(./build.sh print-output --config Release)
-          "$compiler" test-tier0 --count 8 --cross-check --cross-count 8
-      - name: Unwind and Tier 1 frame suites
-        if: success() || failure()
-        shell: bash
-        run: |
-          set -euo pipefail
-          compiler=$(./build.sh print-output --config Release)
-          "$compiler" test-unwind --cross-check
-          "$compiler" test-tier1-frame
-          "$compiler" test-tier1-frame-execution
-      - name: Export the exact resulting source
-        if: always()
-        run: git archive --format=tar HEAD > "$RUNNER_TEMP/issue-1149-source.tar"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: issue-1149-source
-          path: ${{ runner.temp }}/issue-1149-source.tar
-          retention-days: 1
+          git fetch --depth=1 origin refs/heads/astra/1149-wide-cfa
+          git checkout --detach FETCH_HEAD
+          git rm -- .github/workflows/issue-1149-author.yml .github/issue-1149.patch .github/issue-1149-core.diff .github/issue-1149-tests.diff .github/issue-1149-docs.diff
+          git commit -m 'chore: retire the completed issue 1149 authoring transport'
+          git push origin HEAD:refs/heads/astra/1149-wide-cfa
