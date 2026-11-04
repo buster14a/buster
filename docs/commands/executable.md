@@ -41,9 +41,13 @@ requirements. [Command index](README.md).
   old inode that a process still maps.
   A `__start_NAME` or `__stop_NAME` reference that binding gave the linker
   (#1122) is the section's lowest atom's image offset or its highest end.
-  Before the layout, a referenced section's atoms take its largest alignment
-  and become one run of their bucket, so that no other atom falls inside the
-  bounds.
+  Before the layout, a referenced section's atoms become one run of their
+  bucket, so that no other atom falls inside the bounds. The run's first atom
+  starts at the section's largest member alignment, as its output section
+  would; each later atom keeps its own alignment, so the bounds hold no
+  padding GNU ld wouldn't. A bound section whose atoms would need more than
+  one bucket (mixed classes, or TLS and non-TLS) is refused with
+  `EXECUTABLE_CAUSE_UNSUPPORTED_BOUND`.
   Local-exec accesses and undefined DTPOFF32 module offsets in shared
   libraries are refused. Distinct general-/initial-exec slot columns allow
   both models to reference the same symbol. TLSGD target bitsets are reduced

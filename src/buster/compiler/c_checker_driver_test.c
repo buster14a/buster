@@ -1566,6 +1566,7 @@ static void check_test_driver_section_bounds(CheckTest* test, const char* clang,
     const bool written = parse_test_write(source, program, sizeof(program) - 1);
     check_test_expect(test, written, "the section bounds fixture is written");
     char reference[256];
+    snprintf(reference, sizeof(reference), "%s/section-bounds-clang", directory);
     char expected[64] = { 0 };
     char* text = NULL;
     char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
@@ -1682,7 +1683,61 @@ static void check_test_driver_section_bounds_exact(CheckTest* test, const char* 
 
 // #1122's bound section's static members: nothing references a static in a bound section, so selection's edges alone
 // drop it and its section loses a member GNU ld's __stop covers. The bound references in the unit root the section's
-// members, the statics too, as gcc's objects keep them; clang's -c drops them, so the oracle is gcc's output, "24 5".
+// members, the statics too, as gcc's objects keep them; clang's -c drops them, so the oracle is gcc's output: `expected`.
+// `stem` names the fixture's files and `what` its checks.
+static void check_test_driver_section_bounds_rooted(CheckTest* test, const char* executable, const char* directory, const char* program, const char* stem,
+                                                    const char* expected, const char* what)
+{
+    char source[256];
+    char object[256];
+    char linked_path[256];
+    char direct_path[3][256];
+    char message[160];
+    snprintf(source, sizeof(source), "%s/%s.c", directory, stem);
+    snprintf(object, sizeof(object), "%s/%s.o", directory, stem);
+    snprintf(linked_path, sizeof(linked_path), "%s/%s-cc", directory, stem);
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/%s-%u", directory, stem, path);
+    }
+    const bool written = parse_test_write(source, program, strlen(program));
+    snprintf(message, sizeof(message), "the fixture of %s is written", what);
+    check_test_expect(test, written, message);
+    char* text = NULL;
+    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
+    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
+    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    snprintf(message, sizeof(message), "the object keeps %s, and cc's link's bounds cover them", what);
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0, message);
+    static const char* const option_names[] = { "the direct path", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
+        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
+        free(text);
+        text = NULL;
+        snprintf(message, sizeof(message), "%s covers %s", option_names[path], what);
+        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                          message);
+        unlink(direct_path[path]);
+    }
+    unlink(source);
+    unlink(object);
+    unlink(linked_path);
+}
+
+// The statics of a bound section, by plain bound names ("24 5", gcc's), and by bound names an asm label gives other
+// identifiers (#1187's review): the label is the bound's linkage name, so its section's members are rooted all the same
+// ("1 3 2", gcc's).
 static void check_test_driver_section_bounds_static(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "#include <stdio.h>\n"
@@ -1698,49 +1753,20 @@ static void check_test_driver_section_bounds_static(CheckTest* test, const char*
                                   "    printf(\"%ld %ld\\n\", total, (long)(__stop_st_sec - __start_st_sec));\n"
                                   "    return 0;\n"
                                   "}\n";
-    static const char expected[] = "24 5\n";
-    char source[256];
-    char object[256];
-    char linked_path[256];
-    char direct_path[3][256];
-    snprintf(source, sizeof(source), "%s/section-bounds-static.c", directory);
-    snprintf(object, sizeof(object), "%s/section-bounds-static.o", directory);
-    snprintf(linked_path, sizeof(linked_path), "%s/section-bounds-static-cc", directory);
-    for (uint32_t path = 0; path < 3; path += 1)
-    {
-        snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-static-%u", directory, path);
-    }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
-    check_test_expect(test, written, "the static members' fixture is written");
-    char* text = NULL;
-    char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
-    const int object_status = written ? check_test_driver_spawn(object_arguments, &text) : -1;
-    free(text);
-    text = NULL;
-    char* link_arguments[] = { "cc", "-o", linked_path, object, NULL };
-    const int linked = object_status == 0 ? check_test_driver_spawn(link_arguments, &text) : -1;
-    free(text);
-    text = NULL;
-    char captured[64];
-    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
-                      "the object keeps the section's statics, and cc's link's bounds cover them");
-    static const char* const option_names[] = { "the direct path covers the statics", "--tier1 covers the statics", "--tier1 --scalar covers the statics" };
-    for (uint32_t path = 0; path < 3; path += 1)
-    {
-        char* plain[] = { (char*)executable, "-o", direct_path[path], source, NULL };
-        char* tier1[] = { (char*)executable, "--tier1", "-o", direct_path[path], source, NULL };
-        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-o", direct_path[path], source, NULL };
-        char* const* arguments = path == 0 ? plain : path == 1 ? tier1 : tier1_scalar;
-        const int status = written ? check_test_driver_spawn((char* const*)arguments, &text) : -1;
-        free(text);
-        text = NULL;
-        check_test_expect(test, status == 0 && check_test_driver_capture(direct_path[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0,
-                          option_names[path]);
-        unlink(direct_path[path]);
-    }
-    unlink(source);
-    unlink(object);
-    unlink(linked_path);
+    static const char renamed[] = "#include <stdio.h>\n"
+                                  "__attribute__((section(\"mreg\"))) static int a = 1;\n"
+                                  "__attribute__((section(\"mreg\"))) static int b = 2;\n"
+                                  "extern int begin[] __asm__(\"__start_mreg\");\n"
+                                  "extern int end[] __asm__(\"__stop_mreg\");\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    int total = 0;\n"
+                                  "    for (int* p = begin; p < end; p++) total += *p;\n"
+                                  "    printf(\"%d %d %td\\n\", a, total, end - begin);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    check_test_driver_section_bounds_rooted(test, executable, directory, program, "section-bounds-static", "24 5\n", "the section's statics");
+    check_test_driver_section_bounds_rooted(test, executable, directory, renamed, "section-bounds-renamed", "1 3 2\n", "the statics of an asm-labelled bound");
 }
 
 // #1122: two bound sections of one bucket, whose largest member alignments match while their members' don't, so the

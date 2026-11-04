@@ -216,7 +216,11 @@ definition. Its flags and edges:
   section, not a member, so no edge reaches the members nothing else does — a
   static registry entry first — but GNU ld's bounds still cover them. After
   each reachability pass the members of the input sections that a selected
-  reference's bound names are rooted as `used`, iterated to a fixpoint; a unit
+  reference's bound names are rooted as `used`, iterated to a fixpoint. A
+  reference's bound name is its linkage name: an asm label from any of its
+  declarations (`extern int begin[] __asm__("__start_reg")`), else its
+  identifier. Each object's bound section is found once before the fixpoint,
+  and each pass compares the placements against the needed objects' few. A unit
   whose link is kept for a multi-unit command roots all of its named-section
   members, since a bound of another unit's may name them, as a `-c` object's
   members stand for any link's.

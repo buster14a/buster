@@ -609,11 +609,39 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         // names the section, not a member, so no edge reaches the members nothing else does, as GNU ld's and lld's
         // still place them. After each reachability pass the needed objects' bound names root their sections'
         // members, to a fixpoint; a kept unit's placements are all rooted instead, since a bound of another unit's
-        // may name them.
+        // may name them. An object's bound name is its linkage name: an asm label from any of its declarations, as
+        // check_program_emit names its symbol, or else its identifier. Each object's section is found once, before the
+        // fixpoint; each pass lists the needed objects' sections, few, which each placement compares.
         const CheckInputSections* sections = input->sections;
         const Preprocessor* pp = full->parser->preprocessor;
         const Parser* parser = full->parser;
         bool grow = valid && mode == C_LOWERING_REACHABLE && pp != 0 && sections != 0 && sections->placement_count != 0;
+        String8* object_bounds = grow && !keep_sectioned ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
+        String8* needed_bounds = object_bounds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
+        valid = valid && (!grow || keep_sectioned || needed_bounds != 0);
+        if (needed_bounds != 0)
+        {
+            memset(object_bounds, 0, (uint64_t)objects * sizeof(String8));
+            for (uint32_t token = 0; token < input->token_count; token += 1)
+            {
+                const uint32_t object = input->objects[token];
+                const CheckInputAttributes* attributes = object != 0 && object < objects && input->declarations[token] == token &&
+                                                         !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
+                for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + i;
+                    object_bounds[object] = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && object_bounds[object].length == 0 ? attribute->text : object_bounds[object];
+                }
+            }
+            for (uint32_t object = 1; object < objects; object += 1)
+            {
+                const uint32_t declaration = full->object_declarations[object];
+                const IdentId name = declaration != BUSTER_CHECK_NONE ? parser->tokens.names[declaration] : 0;
+                const String8 label = object_bounds[object];
+                object_bounds[object] = label.length != 0 ? link_bound_suffix_bytes((const uint8_t*)label.pointer, (uint32_t)label.length, 0) :
+                                        name != 0 ? link_bound_suffix_bytes(intern_bytes(pp->table, name), intern_length(pp->table, name), 0) : (String8){ 0 };
+            }
+        }
         while (valid && grow)
         {
             grow = false;
@@ -631,16 +659,20 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     needed[references[first + reference]] = 1;
                 }
             }
+            uint32_t bound_count = 0;
+            for (uint32_t object = 1; needed_bounds != 0 && object < objects; object += 1)
+            {
+                needed_bounds[bound_count] = object_bounds[object];
+                bound_count += needed[object] != 0 && object_bounds[object].length != 0;
+            }
             for (uint32_t p = 0; p < sections->placement_count; p += 1)
             {
                 const String8 section = sections->placements[p].name;
                 bool bound = keep_sectioned;
-                for (uint32_t object = 1; !bound && object < objects; object += 1)
+                for (uint32_t b = 0; !bound && b < bound_count; b += 1)
                 {
-                    const uint32_t declaration = needed[object] != 0 ? full->object_declarations[object] : BUSTER_CHECK_NONE;
-                    const IdentId name = declaration != BUSTER_CHECK_NONE ? parser->tokens.names[declaration] : 0;
-                    const String8 suffix = name != 0 ? link_bound_suffix_bytes(intern_bytes(pp->table, name), intern_length(pp->table, name), 0) : (String8){ 0 };
-                    bound = suffix.length == section.length && suffix.length != 0 && memcmp(suffix.pointer, section.pointer, section.length) == 0;
+                    const String8 suffix = needed_bounds[b];
+                    bound = suffix.length == section.length && memcmp(suffix.pointer, section.pointer, section.length) == 0;
                 }
                 const uint32_t member = bound ? input->objects[sections->placements[p].token] : 0;
                 const uint32_t definition = member < objects ? object_definitions[member] : 0;
