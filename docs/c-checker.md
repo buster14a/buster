@@ -1106,13 +1106,24 @@ whose independent folds fill a batch, as `benchmark-checker`'s synthetic ones
 do; `test-checker`, the graph tests' batch partitions and
 `benchmark-checker-source`'s `regions` path keep them checked and timed.
 
-On the 4-CPU Intel VM (no PMU), measured before the 9700X: the main loop of a
-cold `-c` of `sqlite3.c` took 44.41M cycles in node order against 48.27M by the
-regions (−8.0%, medians of 24 compiles each in ABBA order, `rdtsc` around the
-loop, the objects the same bytes), and `benchmark-checker-source` on its
-2,550 bodies (307,125 nodes, 10 passes) gave 46.0 ns a node in node order, 50.8
-by the regions, 53.3 by the transitions, 56.1 by level order and 75.1 by the
-scalar path.
+The 9700X job of `232654c1` ([job 126383843829](https://github.com/buster14a/buster/actions/runs/41771140390/job/126383843829))
+timed `benchmark-checker-source` on the frozen `sqlite3.c`'s 2,608 bodies
+(311,601 nodes), as nanoseconds and cycles a node, medians of 21 passes:
+
+| Path | Every path in one process | Alone | After 100 ms of scalar work |
+| --- | --- | --- | --- |
+| node order (`vector`) | 28.435 ns, 156.9 | 28.131 ns, 155.5 | 28.778 ns, 159.2 |
+| regions | 31.597 ns, 174.8 | 31.123 ns, 172.5 | 31.454 ns, 174.3 |
+| transitions | 34.191 ns, 189.4 | 32.254 ns, 178.7 | 34.358 ns, 190.3 |
+| level order | 34.551 ns, 191.5 | 34.259 ns, 189.8 | 34.441 ns, 190.6 |
+| scalar | 46.318 ns, 254.9 | 46.152 ns, 254.2 | |
+
+Node order took 10.0% less time a node than the regions in one process, 9.6%
+alone and 8.5% after scalar work. On musl's `regcomp.c` (8,881 nodes) it took
+23.94 ns against the regions' 25.80, and the transitions 20.30. The 4-CPU Intel
+VM, with no PMU, agreed: the main loop of a cold `-c` of `sqlite3.c` took
+44.41M cycles in node order against 48.27M by the regions (−8.0%, medians of
+24 compiles each in ABBA order, the objects the same bytes).
 
 ### Memoized transitions
 
@@ -1313,6 +1324,127 @@ first VM host, Lua 5.4.8's `lvm.c` took 15% less time, its `lparser.c`,
 `lstrlib.c` and musl's `vfprintf.c` 3 to 5% more, as their keys repeated less;
 on a Ryzen 9 7940HS (Zen 4), the review of #1146 measured `lvm.c` 10 to 20%
 faster and `sqlite3.c` no faster.
+
+### The per-node machinery (#1050)
+
+#1050's last two rounds memoized the actions and found that what a hit skips
+isn't where the time goes: what every path pays is the machinery around each
+node. A profile of one cold `-c` of `sqlite3.c` (a VM's sampler and a
+per-operator `rdtsc` table, measuring patches not kept) put the stage's time in:
+
+- **building each action** (`check_graph_action`): copying each operand's
+  96-byte value into the action from a temporary that `check_stream_value`
+  cleared by two overlapping 32-byte stores, by a 32-byte load across both,
+  which no store can forward: the most sampled instruction of the stage;
+- **the warning pass** (`check_input_warning_graph`), a tenth of the stage's
+  user time, almost all of it cold reads of each candidate's conversion record
+  and whole value after the run;
+- **calls**, about 650 to 850 cycles each, 15% of the main loop: a call built a
+  408-byte action per argument to convert it;
+- **statements' discards**, the casts to void every expression statement ends
+  in, the most common operator after the leaves;
+- **the stream's columns**, which every node writes: skipping the conversions,
+  the diagnostics, their operands, the warnings and the members' offsets (a
+  bound, not a valid output) took 11% of the main loop.
+
+What the run does now, each step exact (both paths' streams, the objects and
+the diagnostics are the same bytes):
+
+- `check_stream_value_to` writes a node's value into its destination by each
+  case's own stores, the columns' case as one 64-byte and one 32-byte store;
+  the action's operands and arguments take it.
+- `check_graph_store` writes the result's value from the action's fields
+  (`check_stream_set_value_flags`) and its conversion records field by field.
+- `check_action_operand_value` converts a value as an operand of an action
+  whose context and guards alone it reads: a call converts each argument with
+  it, as an operand of the call.
+- The warning pass reads a source's conversion record and whole value only for
+  an integer constant expression of value zero without a fault, which two narrow
+  columns and the payload row say, and builds an ordered comparison's action
+  only where an operand can be a pointer: the exact preconditions of its two
+  warnings.
+- In a fresh output (`CheckOptions.fresh_output`, the C driver's), the run
+  clears no column and its main loop writes no zero (`CheckStream.zero_columns`):
+  the diagnostics, their operands, the warnings and their ignored kinds take
+  no memory where no node has one, and a first write reads no payload row.
+- The vector path writes a discard of an rvalue without its action
+  (`check_graph_discard`): the operand's value, its conversion to void and the
+  cast's provenance, by the same helpers in the same order as the action, where
+  the action would read nothing else (`check_graph_discard_taken`). The scalar
+  path keeps the action, the twin whose streams the tests compare.
+- `check_graph_constant_contexts` passes over 64 nodes that hold neither a
+  context nor a mark at a time, and `check_graph_is_leaf` reads no leaf's record
+  without overload candidates.
+- The vector path takes its nodes in node order, its regions opt-in ("Node
+  order or regions" above). With them, a region's end is found 64 marks at a
+  time (`check_graph_marked_end`), whose exit, a node at a time, had been the
+  main loop's most sampled branch on the 9700X, and a region batches only the
+  operators whose integer folds `check_actions` takes 8 lanes at a time
+  (`check_action_fold_operator`), another node whose operands are done checked
+  at once by its own action.
+- `check_stream_value` returns a value by assignment, as main's did: the
+  lowering, its main caller, takes it into registers or a value of its own, and
+  through `check_stream_value_to`'s stores clang had laid the lowering's
+  functions out anew, which cost `lower` 1.2 to 1.9% on the 9700X.
+- An action looks up only the kinds its operator reads: the comparisons' and
+  the additions' pointer pairs, a complement's complex operand, a vector
+  operation's types.
+
+The 9700X job's step "Compare check-expressions with the pull request's base
+over placements" compares a pull request's base and tree on `-c sqlite3.c`,
+with each build's stages, counters, profile and forwarding failures. The job of
+`232654c1` ([job 126383843829](https://github.com/buster14a/buster/actions/runs/41771140390/job/126383843829))
+compared the base, `2fef25b0`, with the tree (with
+`-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5
+-DSQLITE_ENABLE_RTREE`), each at four placements of its checker unit. Each
+placement's stages, as `measure-compile`'s medians of 11 runs, in ms (base →
+tree):
+
+| Placement | `check-expressions` | `lower` | `check-program` | span |
+| --- | --- | --- | --- | --- |
+| 0 | 14.330 → 10.493 (−26.8%) | 12.959 → 13.308 | 10.099 → 10.163 | 108.877 → 105.814 |
+| 1088 | 14.233 → 10.420 (−26.8%) | 12.973 → 12.963 | 10.183 → 10.042 | 109.198 → 105.093 |
+| 2112 | 14.704 → 10.482 (−28.7%) | 12.968 → 12.919 | 10.150 → 10.127 | 109.527 → 105.783 |
+| 3136 | 14.240 → 10.414 (−26.9%) | 13.010 → 12.946 | 10.186 → 10.122 | 109.344 → 105.354 |
+
+- `time-runs`, 5 runs of two fresh copies of each placement of each build, with
+  the base's executables again as the floor: the wall time went from
+  110.333 ms to 106.625 ms (−3.36%; −3.70% to −3.08% over the placements) and
+  the user cycles from 523.6M to 504.0M (−3.74%). The base again read −0.14%.
+- `perf stat` counters, 11 runs at placement 0:
+  - instructions: 1,219.5M → 1,172.9M;
+  - branch misses: 3.13M → 3.04M;
+  - failed store-to-load forwards (`ls_bad_status2.stli_other`): 5.96M → 4.24M.
+- Memory: the wait4 peak went from 282,608–283,884 KiB to 278,316–278,368
+  KiB over the placements. `check-expressions`' approximate peak growth went from 4,904 KiB
+  to 872 KiB.
+- `lower`:
+  - At placement 0 it took 2.7% longer: 13.308 ms (13.251 to 13.546) against
+    12.896 to 13.063 ms. Most of that is in `lower.statements`.
+  - At the other three placements it took 0.1% to 0.5% less.
+  - Since `check_stream_value` is by assignment again, the lowering's functions
+    are the base's instruction for instruction, but for data addresses. The
+    difference at placement 0 is the code's placement.
+  - Over the four placements its median is 12.95 ms against 12.97.
+- `check-program` read −1.4% to +0.6%.
+- The objects are the same bytes, which the step requires.
+
+`check-expressions` over the rounds, base → tree, in ms (placement 0; the
+fourth row's are medians over the placements):
+
+| Tree | `check-expressions` |
+| --- | --- |
+| `43b84486` | 14.346 → 12.744 (−11.2%) |
+| `837e3638` | 14.211 → 12.528 (−11.8%) |
+| `7da3876f` | 14.446 → 11.805 (−18.3%) |
+| `1244e794` | 14.37 → 11.61 (−19.2%) |
+| `232654c1` (node order) | 14.330 → 10.493 (−26.8%) |
+
+What remains is spread over the actions. The forwarding failures are one lead.
+One sample in 500 put 8.2% of the compile's failures in `check_graph_run`. A
+quarter of those were at two wide copies of values just written field by
+field: an operand's converted value returned whole (`check_action_operand`),
+and a result copied into its payload row (`check_stream_set_value_flags`).
 
 ## Constant evaluation
 
