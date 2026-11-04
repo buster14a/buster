@@ -193,7 +193,8 @@ static bool asm_test_oracle(AsmTest* test, const char* source, const char* direc
         const int length = oracle_source != 0 ? snprintf(oracle_source, capacity, "%s\n.section .note.GNU-stack,\"\",@progbits\n", source) : -1;
         unlink(theirs_path);
         passed = length > 0 && object_write_file(assembly, (const uint8_t*)oracle_source, length) == OBJECT_ERROR_NONE && oracle_epoch_file(assembly);
-        char* arguments[] = {"as", "--64", "-o", theirs_path, assembly, 0};
+        // Uncompressed debug sections, which some binutils builds compress by default (#1115's line tables).
+        char* arguments[] = {"as", "--64", "--nocompress-debug-sections", "-o", theirs_path, assembly, 0};
         passed = passed && asm_test_tool(arguments, theirs_path, output, errors) == 0;
     }
     if (passed)

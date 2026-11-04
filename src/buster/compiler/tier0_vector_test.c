@@ -2322,6 +2322,33 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
     {
         tier0_test_expect(tally, tier0_operation_valid(&neighbours[n]), "vectors", "the narrow operands' neighbour %u refused", n);
     }
+    // The general-purpose legacy forms a row takes (#1059: an inline assembly statement placed in its caller): covered,
+    // their syntax naming their operands, control going on, no flag but the status ones, nothing of the x87's. And the
+    // ones it refuses: implicit registers (mul's rdx, a shift by cl, cpuid's, rdtsc's and syscall's), the stack (push,
+    // leave, popf), control (a jump through a register or a relative one, a trap), the direction flag (cld, std), the
+    // x87's stack and control word, and the forms x86_semantics.c doesn't cover (clflush, ldmxcsr), whose conservative
+    // record names every register.
+    static const uint16_t admitted[] = {
+        X86_FORM_ADD_R32_RM32, X86_FORM_LOCK_XADD_M32_R32, X86_FORM_LOCK_ADD_M32_R32, X86_FORM_LOCK_ADD_M32_IMM8, X86_FORM_POPCNT_R64_RM64,
+        X86_FORM_BSF_R32_RM32, X86_FORM_SHL_RM32_IMM8, X86_FORM_SHL_RM32_1, X86_FORM_BSWAP_R32, X86_FORM_BSWAP_R64, X86_FORM_CMOVE_R32_RM32,
+        X86_FORM_SETE_RM8, X86_FORM_NOT_RM32, X86_FORM_IMUL_R32_RM32, X86_FORM_XCHG_RM32_R32, X86_FORM_LEA_R64_M, X86_FORM_MOV_RM8_R8,
+        X86_FORM_MOVSX_R32_RM8, X86_FORM_MFENCE, X86_FORM_LFENCE, X86_FORM_SFENCE, X86_FORM_PAUSE, X86_FORM_PREFETCHT0_M8, X86_FORM_PREFETCHW_M8,
+        X86_FORM_STMXCSR_M32,
+    };
+    static const uint16_t refused[] = {
+        X86_FORM_MUL_RM32, X86_FORM_SHL_RM32_CL, X86_FORM_CPUID, X86_FORM_RDTSC, X86_FORM_SYSCALL, X86_FORM_PUSH_R64, X86_FORM_LEAVE, X86_FORM_POPFQ,
+        X86_FORM_JMP_RM64, X86_FORM_JMP_REL32, X86_FORM_UD2, X86_FORM_INT3, X86_FORM_CLD, X86_FORM_STD, X86_FORM_FLD_M64, X86_FORM_FNSTCW_M16,
+        X86_FORM_CLFLUSH_M8, X86_FORM_LDMXCSR_M32,
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(admitted); f += 1)
+    {
+        tier0_test_expect(tally, tier0_operation_form_valid(admitted[f]), "vectors", "the general-purpose form %s refused as a row's",
+                          x86_semantics_test_name(admitted[f]));
+    }
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(refused); f += 1)
+    {
+        tier0_test_expect(tally, !tier0_operation_form_valid(refused[f]), "vectors", "the form %s taken as a row's", x86_semantics_test_name(refused[f]));
+    }
     // The streams: a function of the programs' locals, and its entries.
     static const struct
     {

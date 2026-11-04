@@ -105,6 +105,20 @@ there at a time, so everything takes one lock:
   measured what it changes, and the full set took the job past its 10 minutes.
   The daily and dispatched runs, and the nightly snapshot's, have 25 minutes;
   a nightly backlog run has a pull request's 20.
+- A pull request that changes the checker's sources (the `changes` job's
+  `checker` output isn't `false`) also compares `-c sqlite3.c` by its base and
+  by its tree ("Compare check-expressions with the pull request's base over
+  placements", #1050). Each is built at four placements of
+  `main_unit_checker.c` (`./build.sh shifts`). The step then runs:
+  - `time-runs` over the placements, with the base's executables again as the
+    floor;
+  - each placement's `measure-compile` stages;
+  - `perf stat`'s counters, with failed store-to-load forwards;
+  - the checker's functions' samples;
+  - the forwarding failures by function.
+
+  The objects must be the same bytes. It takes about 90 s
+  (`docs/c-checker.md`, "The per-node machinery").
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
   before it decides, and fails the job (so that `test` runs everything) when

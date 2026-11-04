@@ -4592,6 +4592,32 @@ static uint64_t tier0_frame_objects_vector(const Tier0Function* function, const 
     return offset;
 }
 
+// Whether a function with vectors holds a VECTOR value, which its frame's slots (Tier0Frame.vectors, 64 bytes per depth)
+// take: an entry of class VECTOR, the value every VECTOR operand of a row is. A function whose X86 entries are scalar
+// alone (an asm statement's placed in its caller, #1059; an x86 builtin's of general registers or masks) has none.
+static bool tier0_vector_slots(const Tier0Function* function)
+{
+    bool found = false;
+    for (uint32_t i = 0; !found && i < function->count; i += 1)
+    {
+        found = function->classes[i] == BUSTER_TYPED_CLASS_VECTOR;
+    }
+    return found;
+}
+
+// tier0_vector_slots for the vector path: 64 entries' classes at a time.
+static bool tier0_vector_slots_vector(const Tier0Function* function)
+{
+    bool found = false;
+    for (uint32_t first = 0; !found && first < function->count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, function->count);
+        const __m512i classes = _mm512_maskz_loadu_epi8(lanes, function->classes + first);
+        found = _mm512_mask_cmpeq_epi8_mask(lanes, classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VECTOR)) != 0;
+    }
+    return found;
+}
+
 static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
 {
     (void)vector;
@@ -9811,7 +9837,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     // and the vectors'.
     frame.memory = tier0_memory_function(function);
     frame.memory_slots = function->x87 || function->int128;
-    frame.vectors = function->vectors;
+    frame.vectors = function->vectors && (BUSTER_VECTOR_PATH(vector) ? tier0_vector_slots_vector(function) : tier0_vector_slots(function));
     frame.x87_result = function->x87 && tier0_x87_returns(function);
     // The masks' slots: one per depth the mask stack reaches, and at least one per register, which a deep row's
     // borrowing saves (tier0_emit_operation).
@@ -10184,6 +10210,20 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_UWRMSR_R64_R64,
 };
 
+// Whether a general-purpose legacy form's effects (x86_semantics.c's) may be a row's (#1059: an inline assembly
+// statement placed in its caller, c_check_program_asm.c's check_asm_row), beside the rule every form keeps (a covered
+// form whose syntax names its operands, without implicit registers or a branch): control goes on (no jump through a
+// register, call, return or trap), no flag changes but the status ones (cld and std write the direction flag, which the
+// convention keeps clear at every call and Tier 0's code assumes clear), and it touches neither the x87's state (its
+// stack, which Tier 0 keeps empty between entries, and its control word), nor vector registers no field names (Key
+// Locker's), nor an operand no role names (RARE), nor an opmask register.
+static bool tier0_operation_general_effects(const X86Effects* effects)
+{
+    const uint32_t control = (uint32_t)effects->kinds >> 4;
+    const uint32_t kept = BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_IMPLICIT_VECTORS | BUSTER_X86_EFFECT_RARE | BUSTER_X86_EFFECT_OPMASKS;
+    return control == BUSTER_X86_CONTROL_NONE && ((effects->flags_written | effects->flags_undefined) & BUSTER_X86_FLAG_DF) == 0 && (effects->properties & kept) == 0;
+}
+
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override (below
 // X86_FORM_COUNT: without BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS, the only ones 64-bit mode has; a 64-bit-mode
 // record's decorations have none), a symbol or a branch, whose syntax names its operands (or that has none:
@@ -10192,7 +10232,8 @@ static const uint16_t tier0_operation_legacy_forms[] = {
 // (x86_semantics.c's, #760) touch nothing its syntax doesn't name: a covered form without implicit registers (mulx's
 // rdx) or vzeroupper's every vector register. A form the tables don't cover has the conservative record, whose
 // registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the string compares (rax, rcx, rdx and xmm0)
-// among them. Or one of tier0_operation_legacy_forms. Requires x86_semantics_initialize, as tier0_compile does.
+// among them. Or one of tier0_operation_legacy_forms. Or a general-purpose legacy form (#1059, inline assembly placed in
+// its caller: tier0_operation_general_effects) of the same rule. Requires x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
     bool valid = form < X86_FORM_COUNT;
@@ -10217,7 +10258,9 @@ static bool tier0_operation_form_valid(uint32_t form)
             legacy = form == tier0_operation_legacy_forms[k];
         }
         const bool sse = description->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_vector_operand(description);
-        valid = legacy || (explicit && (vex || evex || sse) && named && description->relative_bytes == 0);
+        const bool general = description->family == BUSTER_X86_FAMILY_LEGACY && !sse && (explicit || syntax == X86_SYNTAX_RM_ONE) && named &&
+                             description->relative_bytes == 0 && tier0_operation_general_effects(effects);
+        valid = legacy || general || (explicit && (vex || evex || sse) && named && description->relative_bytes == 0);
     }
     return valid;
 }
