@@ -1,0 +1,58 @@
+diff --git a/docs/commands/emission.md b/docs/commands/emission.md
+index 973dc8c..597f4df 100644
+--- a/docs/commands/emission.md
++++ b/docs/commands/emission.md
+@@ -30 +30,2 @@
+-  mutants refuted, the 2 GB edge's limit (unsupported, #1149) and
++  mutants refuted, `emitted_code_limits_test.c`'s near-2 GB frames with wide CFA values (#1149), compile-only
++  `-c`/`--verify` coverage, overflow-safe verifier tracking and
+diff --git a/docs/emission-metadata.md b/docs/emission-metadata.md
+index 6165176..b680939 100644
+--- a/docs/emission-metadata.md
++++ b/docs/emission-metadata.md
+@@ -155 +155 @@
+-| Frame events | `frames`/`frame_count` (`EmissionFrameEvent`, the x86-64 namespace below) and `frame_status`: described (none means the CIE's rules throughout), undescribed (the producer's frame isn't one its events describe: the emission's backend failure at the function), a limit (a fixed frame whose CFA offset passes the events' 32-bit values: unsupported, #1149), no room (a resource failure, which the emission's lanes retry on one), or none asked for |
++| Frame events | `frames`/`frame_count` (`EmissionFrameEvent`, the x86-64 namespace below) and `frame_status`: described (none means the CIE's rules throughout), undescribed (the producer's frame isn't one its events describe: the emission's backend failure at the function), no room (a resource failure, which the emission's lanes retry on one), or none asked for |
+@@ -171,5 +171,6 @@
+-this), in the fixed writer's order (`unwind_function_rows`). A frame whose CFA
+-would pass `INT32_MAX` (within 56 bytes of 2 GB) has no events: the events'
+-values are signed 32-bit, so the adapter marks it `EMITTED_FRAME_LIMIT` and the
+-emission refuses it as unsupported, by name, where the old descriptor took it
+-([#1149](https://github.com/buster14a/buster/issues/1149) is the follow-up).
++this), in the fixed writer's order (`unwind_function_rows`). Events and resolved
++rows carry signed 64-bit values (#1149): every fixed imm32 allocation plus its
++return address and callee-saved pushes is representable, including CFA offsets
++above `INT32_MAX`. Resolved rows remain padding-free for fixed-shape comparison.
++The general row writer retains wide unsigned LEB operands and remembered CFA
++state; lowering to a fixed descriptor checks the allocation before narrowing it.
+@@ -322,4 +323,8 @@
+-- limits: a fixed frame of `sub rsp, 0x7ffffff8` (its CFA offset 2^31) is
+-  `EMITTED_FRAME_LIMIT`, which the emission reports as unsupported naming #1149,
+-  and one 16 bytes smaller is described; `emitted_unwind_same` answers the same,
+-  different, and, without room for a fixed shape's rows, a resource failure;
++- limits: every save mask at and beyond the former signed 32-bit CFA boundary,
++  through `INT32_MAX` allocations, with the fixed writer's identical CFI; wide
++  row encodings and remembered state, overflow-safe signed 64-bit verifier
++  tracking (with `INT64_MIN` reserved for unknown), and Tier 1's large fixed and
++  probed frames; a near-2 GB local array compiled with `-c`, with and without
++  `--verify`, on both paths, with identical objects and a checked CFA of 2^31.
++  None of the large-frame code executes. `emitted_unwind_same` also covers the
++  same, different and insufficient-scratch answers;
+@@ -435,3 +439,0 @@
+-- Frames within 56 bytes of 2 GB: the events' signed 32-bit values can't carry
+-  their CFA offsets, so the emission refuses them as unsupported
+-  ([#1149](https://github.com/buster14a/buster/issues/1149)).
+diff --git a/docs/unwind.md b/docs/unwind.md
+index aa3c483..debe907 100644
+--- a/docs/unwind.md
++++ b/docs/unwind.md
+@@ -149,4 +149,5 @@
+-epilogue's restored state, with its remembering). Rows carry signed 32-bit
+-values: a frame whose CFA would pass `INT32_MAX` (within 56 bytes of 2 GB) has no
+-events, where the fixed descriptor took it; the emission refuses it as
+-unsupported ([#1149](https://github.com/buster14a/buster/issues/1149)).
++epilogue's restored state, with its remembering). Rows carry signed 64-bit
++values (#1149), including CFA offsets past `INT32_MAX` for every supported
++imm32 allocation plus the pushes and return address. Those fixed shapes retain
++the fixed writer's bytes and vector lowering; larger row-only offsets use
++64-bit LEB operands and cannot narrow into a fixed allocation.
