@@ -168,6 +168,26 @@ static void cc_compat_target_feature_emission(CCCompatibilityTest* test)
             "int f(int x) { switch (0) { case 0: switch (x) { if (h(1)) { case 0: x = h(2); break; } default: x = h(3); } break; case 1: x = h(4); } return x; }\n",
             3,
         },
+        {
+            "a named label on a null statement retains its enclosing condition",
+            "int f(int x) { goto lbl; if (h(1)) { lbl:; } return x; }\n",
+            1,
+        },
+        {
+            "a statement expression's null label retains its enclosing condition",
+            "int f(int x) { return ({ goto lbl; if (h(1)) { lbl:; } x; }); }\n",
+            1,
+        },
+        {
+            "a case on a null statement retains its enclosing condition",
+            "int f(int x) { switch (0) { if (h(1)) { case 0:; } } return x; }\n",
+            1,
+        },
+        {
+            "a for without a condition retains its initializer and increment",
+            "int f(int x) { switch (0) { for (x = h(1);; x = h(3)) { case 0: x = h(2); break; } case 1: x = h(4); } return x; }\n",
+            4,
+        },
     };
     for (uint32_t f = 0; f < sizeof(fixtures) / sizeof(fixtures[0]); f += 1)
     {
