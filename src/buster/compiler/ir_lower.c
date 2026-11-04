@@ -108,6 +108,9 @@ struct IrTypedPlan
     uint32_t indirect;
     // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
     bool ignored_arguments;
+    // The vectors' widths a whole-vector aggregate parameter's entry copy may take (#1282, ir_typed_vector_whole): bit 0
+    // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
+    uint8_t vector_copies;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -1045,6 +1048,21 @@ static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTyped
     }
 }
 
+// The vector type that copies an aggregate of `size` bytes at `location` whole (#1282): one that a vector register holds
+// whole (REGISTERS, a vector register alone, neither eightbyte alone: tier1_select_parts_of's "whole"), of 16, 32 or 64
+// bytes, a width `allowed` (IrTypedPlan.vector_copies) has; else IR_VOID, for a copy by integers. Its bytes are a
+// vector's, or a struct's whose high eightbyte is padding, which the copy keeps as padding: either way, one load and one
+// store of a vector move them, where eight of i64 each kept every aggregate parameter of a vector in memory.
+static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t allowed)
+{
+    const bool whole = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] != BUSTER_ABI_REGISTER_NONE &&
+                       (location.registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                       (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+    const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
+    const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
+    return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
+}
+
 static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -1358,6 +1376,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
         plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
+        // A function with vectors copies its whole-vector aggregate parameters by vectors of the widths its target has
+        // (#1282): the lowering admits those widths alone (AVX-512F, and VL for 16 and 32 bytes, as a vector entry's).
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
+        const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
+        plan.vector_copies = !input->vectors || (target_features & evex) != evex ? 0 : (target_features & narrow) == narrow ? 7 : 4;
         if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
         {
             plan.error = "no scratch memory for the depth slots";
