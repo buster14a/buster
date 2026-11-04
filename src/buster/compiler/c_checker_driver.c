@@ -71,6 +71,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
         case CHECK_INPUT_KR_IMPLICIT_INT: result = "parameter was not declared; ISO C99 and later do not support implicit int"; break;
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
+        case CHECK_INPUT_DIRECT_INITIALIZER_ARRAY: result = "array initializer must be an initializer list or string literal"; break;
+        case CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED: result = "initializer for a variable with deduced type contains multiple expressions"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
         case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
@@ -2040,6 +2042,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                             "'%.*s%s%.*s' attribute does not appear on the first declaration", (int)scope.length, scope.pointer,
                                                             scoped ? "::" : "", (int)attribute.length, attribute.pointer);
                             }
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED && input->reports[index].subject != 0 &&
+                                 input->reports[index].subject - 1 < count)
+                        {
+                            const uint32_t declaration = input->reports[index].subject - 1;
+                            const uint32_t name = parser->tokens.names[declaration];
+                            const bool c23 = input->reports[index].detail != 0;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                 "initializer for variable '%.*s' with type '%s' contains multiple expressions",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name), c23 ? "auto" : "__auto_type");
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)

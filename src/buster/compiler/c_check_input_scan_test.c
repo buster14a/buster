@@ -130,7 +130,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     // and an initializer's assignment, a builtin's token where the class's action would leave it to the walk, and an
     // intrinsic's call are the walk's.
     code = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[i] != 0 ? CHECK_INPUT_CODE_BINARY : code;
-    code = code == CHECK_INPUT_CODE_BINARY && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
+    code = (code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_GROUP) && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
     const bool builtin_declines = code == CHECK_INPUT_CODE_PREFIX || code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_CAST ||
                                   code == CHECK_INPUT_CODE_TERNARY || code == CHECK_INPUT_CODE_SUBSCRIPT || code == CHECK_INPUT_CODE_MEMBER ||
                                   code == CHECK_INPUT_CODE_POSTFIX || code == CHECK_INPUT_CODE_CONDITION || code == CHECK_INPUT_CODE_CALL;

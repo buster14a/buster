@@ -685,17 +685,25 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
 static uint32_t check_init_expression_end(const Parser* parser, uint32_t begin, uint32_t end)
 {
     uint32_t depth = 0;
+    uint32_t questions = 0;
     uint32_t token = begin;
     bool done = false;
     while (token < end && !done)
     {
         const uint8_t kind = parser->tokens.kinds[token];
-        if (depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_BRACE))
+        if (depth == 0 && ((kind == PARSE_KIND_COMMA && questions == 0) || kind == PARSE_KIND_R_BRACE))
         {
             done = true;
         }
         else
         {
+            // The middle operand of ?: is an expression, so an unparenthesized comma belongs to it, not the
+            // initializer list. Delimited operands own their question marks independently (#1252).
+            if (depth == 0)
+            {
+                questions += kind == PARSE_KIND_QUESTION;
+                questions -= kind == PARSE_KIND_COLON && questions != 0;
+            }
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
                 depth += 1;
