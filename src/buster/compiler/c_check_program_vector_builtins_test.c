@@ -771,7 +771,7 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "void tested(v4sfu* p){v4sf v={1};__builtin_nontemporal_store(v,p);}", "nontemporal vector builtins at underaligned addresses", 1 },
         { "znver5", "void tested(int* p,int v){__builtin_nontemporal_store(v,p);}", "nontemporal builtins of scalars", 0 },
         { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },
-        { "x86-64", "float tested(float x){return __builtin_elementwise_sqrt(x);}", "elementwise builtins of scalars without AVX-512F", 0 },
+        { "x86-64", "float tested(float x){return __builtin_elementwise_fma(x,x,x);}", "fused multiply-adds of scalars without FMA or AVX-512F", 0 },
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
           "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
