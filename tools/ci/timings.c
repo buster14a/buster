@@ -190,7 +190,7 @@ static int timing_report(FILE* input, FILE* output)
             fputs("\nNo eligible observations were returned; this is not zero latency.\n", output);
         }
         fputs("\np95 uses the nearest-rank definition. Missing timestamps are omitted.\n", output);
-        fputs("`runner-hook` is the job-started hook's step, from the API's whole-second step times. `lock-wait` and `lock-hold` come from the hooks' own log lines instead, rounded to whole seconds: the wait runs from the job-started hook's start to its `this job has the machine`, the hold from there to the job-completed hook's `gave the machine back`, the host's time under this job's lock.\n", output);
+        fputs("`runner-hook` is the job-started hook's step, from the API's whole-second step times. `lock-wait` and `lock-hold` come from the hooks' own log lines instead, rounded to whole seconds: the wait runs from the job-started hook's start to its `this job has the machine`, the hold from there to the job-completed hook's `gave the machine back`, the host's time under this job's lock. Those lines bracket the lock operations, so each includes the hook's own work around them, tens of milliseconds, below the rounding.\n", output);
         fputs("`setup-build` spans host verification through the start of native tests. `benchmark-steps` is the sum of successful benchmark/measurement step durations, not a performance result.\n", output);
         fputs("`host-occupation` spans the job's first step after the runner hook (the lock is held by then) through the job's end: the time the host was this job's.\n", output);
         valid = fflush(output) == 0;

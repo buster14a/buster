@@ -77,9 +77,10 @@
 // The window, in Europe/Madrid local time: hardware work starts at or after 04:00 and ends by 07:00.
 #define BUSTER_NIGHTLY_WINDOW_START_HOUR 4
 #define BUSTER_NIGHTLY_WINDOW_END_HOUR 7
-// A cycle's snapshot is pinned no earlier than this before its window (22:00 Europe/Madrid), so that the coordinator's
-// earlier schedules, there for GitHub's hours-late scheduled starts, pin nothing hours ahead.
-#define BUSTER_NIGHTLY_PIN_LEAD 21600
+// A cycle's snapshot is pinned no earlier than this hour of the evening before its window, Europe/Madrid local time
+// whatever the clocks do that night, so that the coordinator's earlier schedules, there for GitHub's hours-late
+// scheduled starts, pin nothing hours ahead.
+#define BUSTER_NIGHTLY_PIN_HOUR 22
 // A pull request's run older than this at its push is stale evidence: the host's unpinned packages (GCC, glibc, the
 // kernel) could have changed since, and the nightly snapshot rechecks native correctness daily anyway.
 #define BUSTER_NIGHTLY_REUSE_AGE 86400
@@ -449,6 +450,8 @@ struct NightlyWindow
     NightlyLocal local;
     // The cycle: the window that the instant prepares for (from noon) or is in or just ended (before noon).
     char cycle[11];
+    // 22:00 Europe/Madrid of the evening before: from then on, a step pins the cycle's snapshot.
+    int64_t pin;
     int64_t start;
     int64_t deadline;
     const char* reason;
@@ -465,6 +468,7 @@ static NightlyWindow nightly_window(int64_t now, int64_t bound)
         int64_t tomorrow = 0;
         window.valid = nightly_madrid_instant(window.local.year, window.local.month, window.local.day + 1, 12, &tomorrow) && nightly_madrid(tomorrow, &cycle);
     }
+    window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day - 1, BUSTER_NIGHTLY_PIN_HOUR, &window.pin);
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_START_HOUR, &window.start);
     window.valid = window.valid && nightly_madrid_instant(cycle.year, cycle.month, cycle.day, BUSTER_NIGHTLY_WINDOW_END_HOUR, &window.deadline);
     if (window.valid)
@@ -2261,9 +2265,9 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
         }
         // Before the pin's lead, a step pins and plans nothing, unless a person's override admits work now.
         const bool overridden = input->run && input->override != NULL && input->override[0] != 0;
-        if (cycle.snapshot == -1 && input->now < cycle.window.start - BUSTER_NIGHTLY_PIN_LEAD && !overridden)
+        if (cycle.snapshot == -1 && input->now < cycle.window.pin && !overridden)
         {
-            failure = "it is before 22:00 Europe/Madrid, 6 hours before the window: the cycle's snapshot isn't pinned yet";
+            failure = "it is before 22:00 Europe/Madrid, the evening before the window: the cycle's snapshot isn't pinned yet";
         }
         else if (cycle.snapshot == -1)
         {
@@ -2518,6 +2522,15 @@ static void nightly_test_window(NightlyTest* test)
     nightly_expect(test, after.valid && strcmp(after.cycle, "2026-11-04") == 0 && !after.open && after.deadline < nightly_test_madrid(2026, 11, 4, 7, 17), "07:17 reports the morning's cycle");
     NightlyWindow year_end = nightly_window(nightly_test_madrid(2026, 12, 31, 23, 0), 0);
     nightly_expect(test, year_end.valid && strcmp(year_end.cycle, "2027-01-01") == 0, "the cycle rolls over the year");
+    // The pin is the evening before at 22:00 local time, whatever the clocks do that night: 6 hours before the window
+    // on an ordinary night, 5 when the clocks go forward, 7 when they go back.
+    nightly_expect(test, evening.pin == nightly_test_madrid(2026, 11, 3, 22, 0) && evening.start - evening.pin == 6 * 3600, "an ordinary night pins from 22:00, 6 hours ahead");
+    NightlyWindow spring = nightly_window(nightly_test_madrid(2027, 3, 27, 21, 30), 0);
+    nightly_expect(test, spring.valid && strcmp(spring.cycle, "2027-03-28") == 0 && spring.pin == nightly_test_madrid(2027, 3, 27, 22, 0) && spring.start - spring.pin == 5 * 3600, "2027-03-27 pins from 22:00 CET, 5 hours before 04:00 CEST");
+    NightlyWindow autumn = nightly_window(nightly_test_madrid(2026, 10, 24, 22, 7), 0);
+    nightly_expect(test, autumn.valid && strcmp(autumn.cycle, "2026-10-25") == 0 && autumn.pin == nightly_test_madrid(2026, 10, 24, 22, 0) && autumn.start - autumn.pin == 7 * 3600, "2026-10-24 pins from 22:00 CEST, 7 hours before 04:00 CET");
+    NightlyWindow month_start = nightly_window(nightly_test_madrid(2026, 11, 30, 23, 0), 0);
+    nightly_expect(test, month_start.valid && strcmp(month_start.cycle, "2026-12-01") == 0 && month_start.pin == nightly_test_madrid(2026, 11, 30, 22, 0), "a cycle on the first of a month pins from the last day's 22:00");
 }
 
 typedef struct NightlyBuffer NightlyBuffer;
@@ -3354,7 +3367,7 @@ static void nightly_test_plan(NightlyTest* test)
     nightly_scenario_free(scenario);
 
     // The earlier schedules' steps, there for hours-late scheduled starts: before 22:00 the cycle pins and dispatches
-    // nothing; from 22:00, 6 hours before the window, it pins and prepares; an override pins at any hour.
+    // nothing; from 22:00, the evening before the window, it pins and prepares; an override pins at any hour.
     scenario = nightly_scenario(6, committed);
     nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 21, 59));
     nightly_expect(test, nightly_count(scenario, "pin\t") == 0 && nightly_count(scenario, "dispatch\t") == 0 && nightly_has(scenario, "done\tit is before 22:00 Europe/Madrid") && strstr(scenario->report, "No plan: it is before 22:00") != NULL, "a step before 22:00 pins nothing and plans nothing");
@@ -3369,6 +3382,19 @@ static void nightly_test_plan(NightlyTest* test)
     scenario->dry_run = true;
     nightly_scenario_plan(scenario, nightly_test_madrid(2026, 11, 3, 16, 7));
     nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "a dry run's override pins nothing early either");
+    nightly_scenario_free(scenario);
+    // The clock-change nights: 22:00 local either way. When the clocks go forward (2027-03-28), 21:30 CET, 5.5
+    // elapsed hours before the window, doesn't pin yet; when they go back (2026-10-25), 22:07 CEST, 6.9 hours before,
+    // does.
+    scenario = nightly_scenario(6, nightly_test_madrid(2026, 10, 20, 9, 0));
+    nightly_scenario_plan(scenario, nightly_test_madrid(2027, 3, 27, 21, 30));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "21:30 CET on the spring-forward evening pins nothing");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2027, 3, 27, 22, 0));
+    nightly_expect(test, nightly_count(scenario, "pin\tcycle\t2027-03-28\t") == 1, "22:00 CET on the spring-forward evening pins");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 10, 24, 21, 59));
+    nightly_expect(test, nightly_count(scenario, "pin\t") == 0, "21:59 CEST on the fall-back evening pins nothing");
+    nightly_scenario_plan(scenario, nightly_test_madrid(2026, 10, 24, 22, 7));
+    nightly_expect(test, nightly_count(scenario, "pin\tcycle\t2026-10-25\t") == 1, "22:07 CEST on the fall-back evening pins");
     nightly_scenario_free(scenario);
 
     // Inside the window, the hosted rows qualified and the snapshot prepared: its comprehensive run first.

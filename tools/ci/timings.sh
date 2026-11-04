@@ -8,7 +8,9 @@ output=${1:?usage: timings.sh OUTPUT_DIRECTORY}
 repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 [[ "$repository" == buster14a/buster ]]
 mkdir -p "$output"
+# Every run starts its observations and lock lines afresh, in a directory used before too.
 : > "$output/observations.tsv"
+: > "$output/locks.tsv"
 gh api "repos/$repository/actions/workflows/9700x.yml/runs?per_page=100" > "$output/runs.json"
 jq -e '.workflow_runs | type == "array"' "$output/runs.json" > /dev/null
 # A nightly backlog dispatch's run name says it is one (9700x.yml's run-name): its coverage is targeted.
@@ -67,7 +69,7 @@ instant()
         date -u -d "$1" +%s.%N
     fi
 }
-if [ -f "$output/locks.tsv" ]; then
+if [ -s "$output/locks.tsv" ]; then
     while IFS=$'\t' read -r job group start acquired released; do
         a=$(instant "$start") b=$(instant "$acquired") c=$(instant "$released")
         awk -v job="$job" -v group="$group" -v a="$a" -v b="$b" -v c="$c" 'BEGIN {

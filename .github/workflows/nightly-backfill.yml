@@ -11,8 +11,8 @@ name: Nightly main measurements
 # started 6h22m to 9h53m late, and selfhost.yml's 05:47 UTC run 7h13m late. So the schedules run every two hours from
 # 16:07 to 04:07, then at 05:37 and 07:17: for any common delay up to about 14 hours, some run starts between 22:05 and
 # 06:35, and its `prepare` job either waits for the window (up to 5 hours 55 minutes) or is in it. A run that starts
-# before 22:00 (an earlier schedule on time) pins and plans nothing: the cycle pins its snapshot from 6 hours before the
-# window (tools/ci/nightly.c, BUSTER_NIGHTLY_PIN_LEAD). A later run waits in the concurrency group and, past the window,
+# before 22:00 (an earlier schedule on time) pins and plans nothing: the cycle pins its snapshot from 22:00 Madrid the
+# evening before the window (tools/ci/nightly.c, BUSTER_NIGHTLY_PIN_HOUR). A later run waits in the concurrency group and, past the window,
 # reports. Until vars.BUSTER_NIGHTLY is `on`, every run is a dry run: it harvests, plans and reports, and dispatches
 # nothing; the old daily run of 9700x.yml keeps its place.
 on:

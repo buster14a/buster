@@ -99,6 +99,11 @@ if grep -Fq '| full (daily, dispatched, snapshot) | lock-hold |' "$work/report/s
     exit 1
 fi
 test ! -e "$work/report/job.log" || { echo 'a job log was kept' >&2; exit 1; }
+# The collector run again into the same directory reports the same observations, none of the first run's lock lines
+# replayed.
+PATH="$work/bin:$PATH" GITHUB_REPOSITORY=buster14a/buster bash tools/ci/timings.sh "$work/report" > /dev/null
+cmp "$work/expected.tsv" "$work/report/observations.tsv" || { echo 'a second run into the same directory replayed rows' >&2; exit 1; }
+test "$(wc -l < "$work/report/locks.tsv")" -eq 5 || { echo 'the lock lines were not started afresh' >&2; exit 1; }
 grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work/report/summary.md"
 grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
 grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"

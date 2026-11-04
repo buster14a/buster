@@ -216,8 +216,8 @@ failed/skipped is not a successful timing observation. No observations means
 unknown, not zero. `runner-hook` is the job-started hook's step, from the
 API's whole-second step times: hook overhead and any waiting.
 
-The shared lock's exact times come from the 9700X's runner hooks themselves,
-which log every acquisition and release in the job's log. The job-started hook
+The shared lock's times come from the 9700X's runner hooks themselves, which
+log every acquisition and release in the job's log. The job-started hook
 (`/usr/local/libexec/buster-9700x/job-started.sh`) prints
 `buster-9700x: waiting for the machine, held by: …` while another holder has
 it, then `buster-9700x: this job has the machine`. The job-completed hook prints
@@ -230,8 +230,12 @@ read as data and not kept, and reports two metrics:
 - `lock-hold`, from there to `gave the machine back`, the host's time under
   this job's lock.
 
-Both are rounded to whole seconds. A log that can't be read, or that lacks one
-of the lines, gives that metric no sample. On 2026-11-03, PR run 41664434811's
+Both are rounded to whole seconds. The lines bracket the lock operations, so
+each metric also includes the hook's own work around them. In the job below
+that was 14 ms from the hook's start to its `waiting` line, and 4 ms from the
+job-completed hook's start to its release line: tens of milliseconds, below
+the rounding, but not zero. A log that can't be read, or that lacks one of the
+lines, gives that metric no sample. On 2026-11-03, PR run 41664434811's
 job waited 8.0 s behind an agent session's differential test and held the
 lock for 151.6 s.
 
@@ -362,7 +366,8 @@ that state's own. Its run name, `Nightly PURPOSE (admit|defer) of SHA
    harvests the records of completed runs the ledger lacks. A record that
    disagrees with the API's job conclusions counts as nothing.
 2. **Pin.** The cycle (the night ahead, from noon) pins main's head as its
-   snapshot once, from 22:00 Europe/Madrid, 6 hours before the window. A step
+   snapshot once, from 22:00 Europe/Madrid the evening before the window, in
+   local time whatever the clocks do that night. A step
    before then pins and plans nothing, unless an override admits work now.
    Every dispatch of the cycle names that pin, not main's head
    at dispatch, which may have moved on. The worker checks the state's
