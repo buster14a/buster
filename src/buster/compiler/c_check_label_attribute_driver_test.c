@@ -899,6 +899,36 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "struct S { int u __attribute__((unavailable)); };\n__attribute__((unavailable)) int k(struct S *p) { return p->u; }\n",
         "struct S { int x __attribute__((deprecated)), y __attribute__((deprecated(\"y\"))); } s;\n"
         "struct T { struct S in; } t;\nint k(void) { return s.x + t.in.y + __builtin_offsetof(struct S, x); }\n",
+        // Both deprecated and unavailable: unavailable, whatever their order, one list or two, as clang's getAvailability
+        // takes the worst; a deprecated context doesn't drop it.
+        "struct S { int x __attribute__((deprecated(\"old\"), unavailable(\"gone\"))); };\nint f(struct S *s) { return s->x; }\n",
+        "struct S { int x __attribute__((unavailable(\"gone\"), deprecated(\"old\"))); };\nint f(struct S *s) { return s->x; }\n",
+        "struct S { int x __attribute__((deprecated(\"old\"))) __attribute__((unavailable(\"gone\"))); };\n"
+        "__attribute__((deprecated)) int f(struct S *s) { return s->x; }\n",
+        "int g(void) __attribute__((deprecated(\"old\"), unavailable(\"gone\")));\n"
+        "int h(void) __attribute__((unavailable(\"gone\"), deprecated(\"old\")));\nint f(void) { return g() + h(); }\n",
+        // Redeclarations (check_input_availability_mark): a use reads the marks up to the declaration its lookup finds,
+        // unavailable over deprecated and the latest of a kind's message, with the unavailable note at that declaration.
+        "int g(void) __attribute__((deprecated(\"old\")));\nint f(void) { return g(); }\n"
+        "int g(void) __attribute__((unavailable(\"gone\")));\nint g(void);\nint h(void) { return g(); }\n",
+        "int a(void) __attribute__((deprecated(\"old\")));\nint a(void) __attribute__((deprecated(\"older\")));\n"
+        "int b(void) __attribute__((unavailable(\"gone\")));\nint b(void) __attribute__((unavailable(\"really\")));\n"
+        "int b(void) __attribute__((deprecated(\"dep\")));\nint f(void) { return a() + b(); }\n",
+        // A block's later extern that the use doesn't see doesn't mark it; a block's earlier one marks a file-scope
+        // redeclaration, and a block's own redeclaration takes the note.
+        "void k(void) { extern int v __attribute__((deprecated(\"old\"))); { extern int v __attribute__((unavailable(\"gone\"))); } (void)v; }\n"
+        "void m(void) { extern int w __attribute__((unavailable(\"gone\"))); }\nextern int w;\nint f(void) { return w; }\n",
+        "int g(void) __attribute__((unavailable(\"gone\")));\nint f(void) { int g(void); return g(); }\n",
+        // A tag's: its attributes before the use, the note at its latest declaration's name; an enumerator's by its enum,
+        // the note naming the enum; a typedef's redeclaration.
+        "struct __attribute__((deprecated(\"old\"))) S;\nstruct S *p;\nstruct __attribute__((unavailable(\"gone\"))) S;\nstruct S;\n"
+        "struct S *q;\nstruct __attribute__((unavailable)) U { int a; };\nstruct U *r;\n",
+        "enum __attribute__((unavailable(\"gone\"))) E { A };\nenum __attribute__((deprecated(\"old\"), unavailable(\"gone\"))) F { B };\n"
+        "typedef int T __attribute__((deprecated(\"old\")));\ntypedef int T __attribute__((unavailable(\"gone\")));\nint x = A + B;\nT t;\n",
+        // A context's mark is the worst too: a deprecated function's body drops a deprecated use, not an unavailable one.
+        "int g(void) __attribute__((deprecated(\"old\")));\nint g(void) __attribute__((unavailable(\"gone\")));\n"
+        "__attribute__((deprecated)) int f(void) { return g(); }\n__attribute__((unavailable)) int h(void) { return g(); }\n"
+        "int k(void) __attribute__((deprecated(\"x\")));\nint k(void) __attribute__((unavailable(\"y\")));\nint k(void) { return g(); }\n",
         // Initializers' uses (check_init_member_use): a designator's member, a value's member by its position at each level
         // of elided braces, through an anonymous member and a union's first; none in a deprecated declaration's.
         "struct S { int x __attribute__((deprecated(\"m\"))); int y; struct { int z __attribute__((deprecated)); }; };\n"

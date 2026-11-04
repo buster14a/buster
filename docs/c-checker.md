@@ -5581,8 +5581,16 @@ arguments against the function. The checker now gives these as clang does.
   (`-Wdeprecated-declarations`), or "'X' is deprecated: MESSAGE" with its
   string, and a note "'X' has been explicitly marked deprecated here" at the
   attribute. An `unavailable` one's use is clang's error "'X' is
-  unavailable", with its note at the declaration. An enumerator of a
-  deprecated enum is deprecated by its enum, which the note names. As clang's
+  unavailable", with its note at the name of the declaration the use's lookup
+  finds (a tag's latest declaration). An enumerator of a deprecated or
+  unavailable enum is marked by its enum, which the note names. Where both
+  attributes mark it, by one declaration or by several, the use is
+  unavailable, whatever their order, as clang's `Decl::getAvailability` takes
+  the worst; the message is the latest such declaration's. A use reads the
+  marks of the declarations up to the one its lookup finds, which inherits
+  those before it, as clang's redeclarations inherit their attributes; so a
+  block's later `extern` redeclaration that a use doesn't see doesn't mark it,
+  and a block's earlier one does mark a later file-scope redeclaration. As clang's
   context rules have it, a deprecated context drops a deprecated use's
   warning and an unavailable one an unavailable use's error too: the body of
   a function itself marked (by any declaration before its body) and a marked
@@ -5591,14 +5599,16 @@ arguments against the function. The checker now gives these as clang does.
   deprecated, or in a bare declaration of a tag. The pass runs after the bindings, only in a unit where some
   `deprecated` or `unavailable` attribute was read: the uses are the tokens
   bound to another declaration, and each marked declaration is found once by
-  the declaration its uses count by (its object's first, its tag's first).
+  the declaration its uses count by (its object's first, its tag's first),
+  chained in source order to the next of the same one.
 - **Deprecated and unavailable members** (`check_input_member_uses`). A
   struct's or union's member that such an attribute marks is recorded when
   its record is completed, by its index in the type table's members
   (`CheckInput.marked_members`, ascending). After checking, in a unit with
   one, each `.` or `->` whose member the operand's checked record finds by
   its name (through anonymous members, as the checker found it) gets
-  clang's warning at the member's name, or the unavailable error with its
+  clang's warning at the member's name, or the unavailable error (where it is
+  both, whatever the order) with its
   note at the member's declaration: of any operand (a dereference, an
   address, a call, a compound literal) and in `sizeof`'s. The error is a
   reader report made after checking, which the driver and the corpus
