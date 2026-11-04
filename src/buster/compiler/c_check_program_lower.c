@@ -10407,15 +10407,16 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             {
                 // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
                 // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
+                // Nor does any other node take #624's leaf path (check_lower_value, which its test still compares with the
+                // expansion): on the 9700X, sqlite3.c's lowering took 0.20 ms less without it (#1048, docs/c-lowering.md's
+                // "The leaf path and the runtimes' names"). The wrappers' and truth tests' path pays, and stays.
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
-                                    check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
-                const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && !simple && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
+                const bool plain = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
                                      writer->type_templates != NULL && (flags & 5) == 0 && check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
-                    if (!simple && !plain)
+                    if (!plain)
                     {
                         check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
                     }
@@ -11883,44 +11884,47 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
     *lowered = (CheckProgramLowered){ .status = status, .token = token, .backend_node = backend_node, .reason = reason };
 }
 
-// `declaring` is check_program_declaring's source-ordered list, including initializer-only tokens. Its logical
-// length is declaring_count; no padding is read here and the original declaration/linkage predicates still apply.
-// The normal path reuses that already-built compact list; the scalar oracle retains the independent full-token
-// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared. The names
-// are the `spelled` runtime functions' the unit spells, `identifiers[s]` runtime function `runtimes[s]`'s.
+// Whether `declaration` declares one of the `spelled` runtime functions the unit spells (`identifiers`, their runtimes in
+// `runtimes`), as a declaration with linkage of an object: the first one's symbol becomes the runtime's.
+static inline __attribute__((always_inline)) void check_lower_declared_runtime(const CheckProgram* program, uint32_t declaration, const IdentId* names,
+                                                                              const IdentId* identifiers, const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols)
+{
+    const CheckInput* input = program->input;
+    const uint32_t object = input->objects[declaration];
+    const IdentId name = names[declaration];
+    if (name != 0 && input->declarations[declaration] == declaration && check_input_linkage(input->declaration_bits, declaration) == 2 && object != 0 &&
+        object < program->object_count)
+    {
+        // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
+        bool any = false;
+        for (uint32_t s = 0; s < spelled; s += 1)
+        {
+            any |= identifiers[s] == name;
+        }
+        for (uint32_t s = 0; any && s < spelled; s += 1)
+        {
+            const uint32_t r = runtimes[s];
+            if (identifiers[s] == name && symbols[r] == 0)
+            {
+                symbols[r] = program->object_symbols[object];
+            }
+        }
+    }
+}
+
+// The runtime functions' declarations, the scalar path's pass over every token: the twin of the vector path's, which
+// takes them in the preparation's pass over check_program_declaring's source-ordered list of the declaring tokens
+// (including initializer-only ones), with the same per-token test (check_lower_declared_runtime). `declaring` is that list,
+// declaring_count long, which a vector-path caller without that pass passes. All borrowed columns are immutable during
+// this pass, and symbols belongs to CheckLowerShared. The names are the `spelled` runtime functions' the unit spells,
+// `identifiers[s]` runtime function `runtimes[s]`'s.
 static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers,
                                           const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols, bool scalar)
 {
-    const CheckInput* input = program->input;
-    const uint32_t* declarations = input->declarations;
-    const uint32_t* objects = input->objects;
-    const IdentId* names = program->parser->tokens.names;
-    const uint8_t* declaration_bits = input->declaration_bits;
-    const SymbolId* object_symbols = program->object_symbols;
-    const uint32_t object_count = program->object_count;
-    const uint32_t count = scalar ? input->token_count : declaring_count;
+    const uint32_t count = scalar ? program->input->token_count : declaring_count;
     for (uint32_t d = 0; d < count; d += 1)
     {
-        const uint32_t declaration = scalar ? d : declaring[d];
-        const uint32_t object = objects[declaration];
-        const IdentId name = names[declaration];
-        if (name != 0 && declarations[declaration] == declaration && check_input_linkage(declaration_bits, declaration) == 2 && object != 0 && object < object_count)
-        {
-            // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
-            bool any = false;
-            for (uint32_t s = 0; s < spelled; s += 1)
-            {
-                any |= identifiers[s] == name;
-            }
-            for (uint32_t s = 0; any && s < spelled; s += 1)
-            {
-                const uint32_t r = runtimes[s];
-                if (identifiers[s] == name && symbols[r] == 0)
-                {
-                    symbols[r] = object_symbols[object];
-                }
-            }
-        }
+        check_lower_declared_runtime(program, scalar ? d : declaring[d], program->parser->tokens.names, identifiers, runtimes, spelled, symbols);
     }
 }
 
@@ -12285,6 +12289,39 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         const uint32_t declaring_count = check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
+        shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
+        uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
+        for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
+        {
+            const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
+            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
+                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+            if (library != CBUILTIN_LIBRARY_COUNT)
+            {
+                const uint32_t runtime = check_lower_library_runtime(library);
+                called[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
+            }
+        }
+        IdentId identifiers[CHECK_LOWER_RUNTIMES];
+        uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
+        uint32_t spelled = 0;
+        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
+        {
+            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
+            {
+                const char* name = check_lower_runtime_names[r];
+                const uint32_t length = (uint32_t)strlen(name);
+                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
+                identifiers[spelled] = identifier;
+                spelled_runtimes[spelled] = (uint16_t)r;
+                spelled += identifier != 0;
+            }
+        }
+        // On the vector path, the runtimes' declarations are found in the locals' first pass below, which loads the same
+        // declaring tokens' columns (#1048: 0.02 ms of sqlite3.c's preparation on the 9700X); the scalar path's own pass
+        // over every token (check_lower_declared_runtimes) is its twin.
+        const bool runtimes_merged = !BUSTER_SCALAR_PATH(scalar) && spelled != 0 && program->parser != NULL;
+        const IdentId* token_names = runtimes_merged ? program->parser->tokens.names : NULL;
         // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
         // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
         for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -12304,6 +12341,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
             const uint32_t token = declaring[d];
+            if (runtimes_merged)
+            {
+                check_lower_declared_runtime(program, token, token_names, identifiers, spelled_runtimes, spelled, shared->declared_runtimes);
+            }
             const uint32_t opening = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
             const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
             const uint32_t b = candidate < program->body_count && program->bodies[candidate].opening == opening ? candidate : BUSTER_CHECK_NONE;
@@ -12359,35 +12400,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         // lowering's own functions' and those of the library builtins the unit calls (#148), of which the ones the unit
         // spells are listed, `spelled` of them, and one pass over the declarations, which only such a unit takes, matches
         // each declaration's name with them.
-        shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
-        uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
-        for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
-        {
-            const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
-            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
-                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
-            if (library != CBUILTIN_LIBRARY_COUNT)
-            {
-                const uint32_t runtime = check_lower_library_runtime(library);
-                called[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
-            }
-        }
-        IdentId identifiers[CHECK_LOWER_RUNTIMES];
-        uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
-        uint32_t spelled = 0;
-        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
-        {
-            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
-            {
-                const char* name = check_lower_runtime_names[r];
-                const uint32_t length = (uint32_t)strlen(name);
-                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
-                identifiers[spelled] = identifier;
-                spelled_runtimes[spelled] = (uint16_t)r;
-                spelled += identifier != 0;
-            }
-        }
-        if (spelled != 0)
+        if (spelled != 0 && !runtimes_merged)
         {
             check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, spelled_runtimes, spelled, shared->declared_runtimes,
                                           BUSTER_SCALAR_PATH(scalar));

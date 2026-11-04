@@ -232,8 +232,9 @@ task loop expands them. The original
 scalar expression expansion remains the oracle (`--scalar`). Since #1048 no
 compile takes the fragments (`CheckLowerWriter.fragments`, which only their
 test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
-saved ("The vector path's fast paths" below). The wrappers' and truth tests'
-path and the leaf path described here still run.
+saved ("The vector path's fast paths" below), and none takes the leaf path
+either ("The leaf path and the runtimes' names"). The wrappers' and truth
+tests' path described here still runs.
 
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
@@ -928,11 +929,37 @@ compact locals (every variant's object was the base's):
   still compares them with the expansion.
 - **The wrappers' and truth tests' path** saves 0.45 ms, and stays.
 - **The leaf path** cost 0.12 ms, every round; its own run on the base without
-  the fragments decides it.
+  the fragments decided it (the next section).
 - **The lean steps**, interleaved with the base, didn't pay either: 7.926 ms of
   statements against 7.938, and against 7.730 with the three paths left out,
   which they also leave out. The separate runs' reading in "Lean steps in the
   tasks' loop" stands.
+
+## The leaf path and the runtimes' names (#1048)
+
+The next run ([run at `c9a61be9`](https://github.com/buster14a/buster/actions/runs/41771038578/job/126383658074)),
+on the base without the fragments (every variant's object was the base's):
+
+| row | the base | no leaf path | the runtimes' names in the locals' pass | both |
+| --- | ---: | ---: | ---: | ---: |
+| `lower` | 11.452 [11.393 to 11.477] | 11.251 [11.244 to 11.273] | 11.422 | 11.158 [11.113 to 11.170] |
+| `lower.prepare` | 1.290 [1.288 to 1.291] | 1.282 | 1.269 [1.264 to 1.272] | 1.266 |
+| `lower.statements` | 7.522 | 7.456 | 7.547 | 7.294 |
+
+- **The leaf path** (`check_lower_value`) took a node other than a `VALUE`
+  whose value is a proven integer constant before the expansion, at the cost
+  of reading its value for every node it didn't take. No compile tries it now;
+  its test (`c_check_program_batch_test.c`) still calls it.
+- **The runtimes' names.** The preparation matched the declarations' names
+  with the runtime functions the unit spells in a pass of its own over the
+  declaring tokens (`check_lower_declared_runtimes`). The vector path now
+  matches them in the locals' first pass over the same tokens
+  (`check_lower_declared_runtime`, the per-token test both use), which loads
+  the same columns; the scalar path keeps its pass over every token, its
+  twin.
+
+Every round of the two together was below every round of the base: `lower`
+0.29 ms lower.
 
 ## Against clang -O0's objects
 
