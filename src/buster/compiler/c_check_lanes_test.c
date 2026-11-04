@@ -61,12 +61,13 @@
 //   the cores' for the default, and 4 and 1 for that failure.
 // - A growing team (#673's tail). The growth gate alone (check_program_emit_grow), under a jobserver pipe of 7 tokens:
 //   parts left of one token fewer than pay for a guardian don't grow a team of 1 of 8 lanes, and the least that pays
-//   grows it by 7; --lanes N grows it whatever they pay; the parts left, the lanes left and the spare tokens each bound
-//   the growth; no part left, none; a guardian only for a growth, and the tokens back after each; and a guardian that
+//   grows it by 7; --lanes N grows it whatever they pay; with every part lowered, their code's share of the tokens
+//   decides, one token short and the least that pays; the items left, the lanes left and the spare tokens each bound
+//   the growth; no item left, none; a guardian only for a growth, and the tokens back after each; and a guardian that
 //   took no token, from a reader whose bytes FIONREAD counts but no guardian takes (a file's), released at once rather
 //   than left holding one of the team's leases. Then the driver: the first program of 600 functions by --lanes 4, and
 //   programs of 4,000 and 200 functions by the default policy (with --worker-budget 3 and without), under a jobserver
-//   pipe of no token or one, its lane 0 writing none, 2, 3 or 5 more after its first part (BUSTER_TEST_WORKER_SUPPLY),
+//   pipe of no token or one, its lane 0 writing none, 2, 3 or 5 more after its first item (BUSTER_TEST_WORKER_SUPPLY),
 //   as another recipe returning them would: --time-stages reports the lanes the lane rule asked for, those the
 //   jobserver granted as it started, the lanes it ran on at its end and those it grew by, up to its lanes and the cap,
 //   none for the 200 functions, which ask for more than one lane but whose parts don't pay for a guardian, and no more
@@ -1644,9 +1645,10 @@ static bool check_lanes_test_report_budget(const char* path, uint32_t* reported)
 // (see the file's comment).
 static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
 {
-    // A team of `admitted` of up to `lanes` lanes, `ticket` of 100 parts taken, the parts left of `rest` tokens, --lanes
-    // N's or not, and the lanes it must admit. With 1 of 8 admitted and 7 spare, the least that pays is the ceiling of
-    // BUSTER_CHECK_EMIT_GROW_TOKENS × 1 × 8 / 7.
+    // A team of `admitted` of up to `lanes` lanes, `ticket` of 100 parts' 200 items taken (their lowering, then their
+    // code), the parts from its place on of `rest` tokens, --lanes N's or not, and the lanes it must admit. With 1 of 8
+    // admitted and 7 spare, the least work left that pays is the ceiling of BUSTER_CHECK_EMIT_GROW_TOKENS × 1 × 8 / 7:
+    // as many tokens with no part lowered yet, and with every part lowered, the tokens whose code's share is that.
     typedef struct CheckLanesGate CheckLanesGate;
     struct CheckLanesGate
     {
@@ -1659,15 +1661,19 @@ static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
         const char* what;
     };
     const uint64_t least = ((uint64_t)BUSTER_CHECK_EMIT_GROW_TOKENS * 8 + 6) / 7;
+    const uint64_t code = 16 - BUSTER_CHECK_EMIT_GROW_LOWER_SIXTEENTHS;
+    const uint64_t lowered = (least * 16 + code - 1) / code;
     const CheckLanesGate gates[] = {
         { 0, least - 1, 1, 8, false, 0, "parts left just short of paying for a guardian don't grow the team" },
         { 0, least, 1, 8, false, 7, "parts left that just pay for a guardian grow the team by every spare token" },
         { 0, 1, 1, 8, false, 0, "too little work left doesn't grow the team, whatever is spare" },
         { 0, 1, 1, 8, true, 7, "--lanes N grows the team whatever the parts left pay" },
-        { 98, UINT64_C(1) << 40, 1, 8, false, 2, "a team grows by no more lanes than parts left" },
+        { 100, lowered - 1, 1, 8, false, 0, "lowered parts whose code's share falls just short of paying don't grow the team" },
+        { 100, lowered, 1, 8, false, 7, "lowered parts whose code's share just pays grow the team" },
+        { 198, UINT64_C(1) << 40, 1, 8, false, 2, "a team grows by no more lanes than items left" },
         { 0, UINT64_C(1) << 40, 6, 8, false, 2, "a team grows by no more lanes than it may take" },
         { 0, UINT64_C(1) << 40, 1, 16, false, 7, "a team grows by no more lanes than spare tokens" },
-        { 100, UINT64_C(1) << 40, 1, 8, false, 0, "a team with no part left doesn't grow" },
+        { 200, UINT64_C(1) << 40, 1, 8, false, 0, "a team with no item left doesn't grow" },
     };
     static const uint8_t tokens[] = { 1, 2, 3, 4, 5, 6, 7 };
     int fds[2] = { -1, -1 };
@@ -1684,7 +1690,9 @@ static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
         CheckProgramLanes lanes = { .every_lane = gate->every_lane };
         CheckEmitRun run = { .lanes = &lanes };
         CheckEmitGrowth growth = { .ticket = gate->ticket, .parts = 100, .rest = rest };
-        rest[gate->ticket] = gate->rest;
+        // The tokens from the place of the part the ticket's item is of on, and with no part lowered, every part's code.
+        rest[gate->ticket < 100 ? gate->ticket : gate->ticket - 100] = gate->rest;
+        rest[0] = gate->ticket < 100 ? gate->rest : rest[0];
         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
         const uint32_t more = check_program_emit_grow(&run, &growth, gate->admitted, gate->lanes, &budget, &lease);
         // A guardian only for a growth, and its tokens only while it holds them.
@@ -1741,7 +1749,7 @@ static void check_lanes_test_grow_gate(CheckLanesTestTally* tally)
 
 // A growing team in the driver (#673's tail; see the file's comment): the first generated program of 600 functions,
 // `program_N.c` for N `programs`, by --lanes 4, and programs of 4,000 and of 200 functions of the test's own by the
-// default policy, under a jobserver pipe of a case's tokens, lane 0 writing a case's more after its first part
+// default policy, under a jobserver pipe of a case's tokens, lane 0 writing a case's more after its first item
 // (BUSTER_TEST_WORKER_SUPPLY).
 static void check_lanes_test_driver_growth(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs)
 {
@@ -2388,7 +2396,7 @@ static void check_lanes_test_growth_flow(void* argument)
 
 // The first program of 600 functions, `program_N.c` for N `programs`, by --lanes 4 in a command on a session of 4 lanes
 // in this process, with `cap` workers by --worker-budget (0 for none), under a jobserver pipe without a token, whose lane
-// 0 supplies 3 after its first part: the team must grow to 4 lanes, or to the cap, which the session's lanes don't bound
+// 0 supplies 3 after its first item: the team must grow to 4 lanes, or to the cap, which the session's lanes don't bound
 // here as a command's own session's do; the pipe must hold the 3 as the command returns, while this process and anything
 // it leaked still live; and the object must be the growth's reference (check_lanes_test_driver_growth's, --lanes 1's).
 static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const char* directory, uint32_t programs, uint32_t cap)
