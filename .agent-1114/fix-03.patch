@@ -1,0 +1,295 @@
+--- a/src/buster/compiler/native_debug.h
++++ b/src/buster/compiler/native_debug.h
+@@ -39,7 +39,8 @@
+ static bool native_debug_extra_valid(const String8* sections, const NativeDebugExtra* extra)
+ {
+     const uint64_t size = sections[0].length;
+-    bool valid = (extra->field_count == 0 || extra->fields != NULL) && (extra->address_count == 0 || extra->addresses != NULL);
++    bool valid = (extra->field_count == 0 || extra->fields != NULL) && (extra->address_count == 0 || extra->addresses != NULL) &&
++                 ((extra->field_count == 0 && extra->address_count == 0) || sections[0].pointer != NULL);
+     uint64_t previous = 12;
+     for (uint32_t f = 0; valid && f < extra->field_count; f += 1)
+     {
+@@ -66,6 +67,62 @@
+         valid = valid && (field == extra->field_count || extra->fields[field].offset >= (uint64_t)address.offset + 8);
+         previous = (uint64_t)address.offset + 8;
+     }
++    // The optional location section consists of complete DWARF 5 contributions, without an offset table.
++    const String8 locations = sections[BUSTER_NATIVE_DEBUG_LOCLISTS];
++    uint64_t at = 0;
++    valid = valid && (locations.length == 0 || locations.pointer != NULL);
++    while (valid && at < locations.length)
++    {
++        valid = locations.length - at >= 12;
++        if (valid)
++        {
++            uint32_t length = 0;
++            uint32_t entries = 0;
++            uint16_t version = 0;
++            memcpy(&length, locations.pointer + at, 4);
++            memcpy(&version, locations.pointer + at + 4, 2);
++            memcpy(&entries, locations.pointer + at + 8, 4);
++            valid = length >= 8 && length < 0xfffffff0u && length <= locations.length - at - 4 && version == 5 &&
++                    locations.pointer[at + 6] == 8 && locations.pointer[at + 7] == 0 && entries == 0;
++            at += (uint64_t)length + 4;
++        }
++    }
++    // Extra patches belong to child DIEs, not the core producer's CU header, strings or four section fields.
++    // Walk the sorted columns together across contributions and reject fields which straddle a unit boundary.
++    at = 0;
++    field = 0;
++    uint32_t address = 0;
++    while (valid && (field < extra->field_count || address < extra->address_count))
++    {
++        uint32_t length = 0;
++        valid = at <= size && size - at >= 13;
++        if (valid)
++        {
++            memcpy(&length, sections[0].pointer + at, 4);
++            valid = length >= 9 && length < 0xfffffff0u && length <= size - at - 4 && sections[0].pointer[at + 12] == 1;
++        }
++        const uint64_t end = at + 4 + length;
++        uint64_t children = at + 13;
++        for (uint32_t string = 0; valid && string < 3; string += 1)
++        {
++            const char* nul = children < end ? memchr(sections[0].pointer + children, 0, end - children) : NULL;
++            valid = nul != NULL;
++            children = valid ? (uint64_t)(nul - sections[0].pointer) + 1 : children;
++        }
++        children += 14; // language, statement list, address base and CU ranges
++        valid = valid && children < end;
++        while (valid && field < extra->field_count && extra->fields[field].offset < end)
++        {
++            const uint64_t offset = extra->fields[field++].offset;
++            valid = offset >= children && offset + 4 <= end;
++        }
++        while (valid && address < extra->address_count && extra->addresses[address].offset < end)
++        {
++            const uint64_t offset = extra->addresses[address++].offset;
++            valid = offset >= children && offset + 8 <= end;
++        }
++        at = end;
++    }
+     return valid;
+ }
+ 
+--- a/src/buster/compiler/tier0.c
++++ b/src/buster/compiler/tier0.c
+@@ -652,6 +652,17 @@
+     TIER0_ERROR_RETURNS_TWICE,
+ } Tier0Error;
+ 
++// A local's final home, in the hole block's layout: a register, or a slot relative to its frame base.
++typedef struct Tier0Home Tier0Home;
++struct Tier0Home
++{
++    int32_t displacement;
++    uint8_t reg;
++    uint8_t mode;
++    uint8_t is_register;
++    uint8_t padding;
++};
++
+ // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
+ // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
+ // end), and a LinkReference per symbolic field, its instruction a record index. With Tier0Function.entry_records,
+@@ -677,16 +688,6 @@
+ // tables' tail calls take them. Tier 1's code in Tier 0's place (c_check_tier1.c, #177) publishes the same frame, and
+ // its early returns' rets as `tail_records` after their epilogues; `frame_open` when its last record isn't its last
+ // epilogue's ret, every return then among `tail_records` (UnwindFunction.open). Tier 0's code ends in its epilogue.
+-typedef struct Tier0Home Tier0Home;
+-struct Tier0Home
+-{
+-    int32_t displacement;
+-    uint8_t reg;
+-    uint8_t mode;
+-    uint8_t is_register;
+-    uint8_t padding;
+-};
+-
+ typedef struct Tier0Code Tier0Code;
+ struct Tier0Code
+ {
+@@ -3940,8 +3941,6 @@
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
+ // Homes and the frame
+-
+-// A local's home, in the hole block's layout: a register (mode 0) or a frame slot ([rsp + displacement]).
+ 
+ _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
+ 
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -918,9 +918,6 @@
+             if (valid)
+             {
+                 CheckDebugValueSpan* spans = body->debug_spans;
+-                valid = spans != NULL;
+-                failure = valid ? failure : CHECK_PROGRAM_RESOURCE;
+-                body->debug_spans = spans;
+                 const Tier0Function* function = run->lowered->functions + b;
+                 const uint32_t* tokens = run->lowered->entry_tokens[b];
+                 for (uint32_t e = 0; valid && e < code->source_count; e += 1)
+--- a/src/buster/compiler/c_check_debug_values_test.c
++++ b/src/buster/compiler/c_check_debug_values_test.c
+@@ -5,8 +5,53 @@
+ // values gdb must read before those calls, including after entering/leaving a shadowing scope. Check the native
+ // driver, relocated -c output, and merged translation units; a valid DIE tree alone cannot prove a location.
+ 
++static void check_debug_values_test_descriptors(CheckDebugTestTally* tally)
++{
++    for (uint32_t change = 0; change < 19; change += 1)
++    {
++        uint8_t info[96] = { 92, 0, 0, 0, 5, 0, 1, 8, 0, 0, 0, 0, 1, 'a', 0, 'b', 0, 'c', 0 };
++        uint8_t locations[] = { 9, 0, 0, 0, 5, 0, 8, 0, 0, 0, 0, 0, 0 };
++        uint8_t ranges[16] = { 12, 0, 0, 0, 5, 0, 8, 0 };
++        const uint32_t offset = 12;
++        memcpy(info + 36, &offset, 4);
++        memcpy(info + 40, &offset, 4);
++        String8 sections[BUSTER_NATIVE_DEBUG_SECTIONS] = { 0 };
++        sections[0] = (String8){ .pointer = (char*)info, .length = sizeof(info) };
++        sections[4] = (String8){ .pointer = (char*)ranges, .length = sizeof(ranges) };
++        sections[5] = (String8){ .pointer = (char*)locations, .length = sizeof(locations) };
++        NativeDebugField fields[] = { { .offset = 36, .section = 5 }, { .offset = 40, .section = 4 } };
++        NativeDebugAddress addresses[] = { { .offset = 48, .symbol = 1 } };
++        NativeDebugExtra extra = { .fields = fields, .addresses = addresses, .field_count = 2, .address_count = 1 };
++        switch (change)
++        {
++            case 0: break;
++            case 1: extra.fields = NULL; break;
++            case 2: extra.addresses = NULL; break;
++            case 3: fields[0].offset = 8; break;
++            case 4: fields[0].offset = 13; break;
++            case 5: fields[1].offset = 38; break;
++            case 6: fields[0].section = 6; break;
++            case 7: fields[0].section = 0; break;
++            case 8: fields[1].offset = 94; break;
++            case 9: addresses[0].offset = 38; break;
++            case 10: addresses[0].offset = 92; break;
++            case 11: addresses[0].offset = 16; break;
++            case 12: addresses[0].symbol = 0; break;
++            case 13: locations[4] = 4; break;
++            case 14: locations[8] = 1; break;
++            case 15: sections[5].length -= 1; break;
++            case 16: sections[5].pointer = NULL; break;
++            case 17: info[0] = 48; break;
++            case 18: info[36] = 13; break;
++        }
++        const bool valid = native_debug_extra_valid(sections, &extra);
++        check_debug_test_expect(tally, valid == (change == 0), "value descriptor rejects overlapping, truncated and header-overwriting patches", NULL);
++    }
++}
++
+ static const char check_debug_values_fixture[] =
+     "#include <stdio.h>\n"
++    "#line 1 \"dbg_values.c\"\n"
+     "typedef struct Node { int x; struct Node *next; unsigned flag:3; signed delta:5; } Node;\n"
+     "typedef int Count;\n"
+     "enum Mode { cold=-2, warm=7 };\n"
+--- a/src/buster/compiler/c_check_debug_test.c
++++ b/src/buster/compiler/c_check_debug_test.c
+@@ -1210,7 +1210,7 @@
+     return result;
+ }
+ 
+-// Whether the object's five DWARF sections are the executable's but at their relocations' fields, which hold zero in
++// Whether the object's six DWARF sections are the executable's but at their relocations' fields, which hold zero in
+ // the object: -c -g's unit is -g's.
+ static bool check_debug_test_same_unit(String8 object, String8 executable)
+ {
+@@ -1411,6 +1411,7 @@
+     {
+         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
+         check_debug_test_expect(&tally, initialized, "initialize the backend", 0);
++        check_debug_values_test_descriptors(&tally);
+         check_debug_test_rows(&tally);
+         check_debug_test_keep(&tally);
+         check_debug_test_sources(&tally, directory, programs);
+--- a/docs/debug.md
++++ b/docs/debug.md
+@@ -1,10 +1,12 @@
+-# DWARF source lines and final addresses
++# DWARF source lines, C values and final addresses
+ 
+ `src/buster/compiler/debug.c` supplies a bounded part of [#88](https://github.com/buster14a/buster/issues/88):
+ DWARF 5 function names, ranges and source lines. It emits `.debug_info`,
+ `.debug_abbrev`, `.debug_line`, `.debug_addr` and `.debug_rnglists` in DWARF32
+-format for Linux x86-64. Types, variables, inline scopes and unwind instructions
+-are not represented by this interface.
++format for Linux x86-64. This core interface remains independent of C types and
++storage allocation. The C producer adds types, variables and lexical scopes for
++`-g` as described below; inline scopes are not represented. Unwind instructions
++use the separate frame-event interface.
+ 
+ `debug_write` emits the sections before final layout, with zeroes in address
+ slots. `debug_finalize` later writes the function addresses into `.debug_addr`
+@@ -71,10 +73,67 @@
+ DWARF32 is refused before anything is written. `test-debug` compares a unit
+ written at bases with the same unit alone, byte for byte but the four offsets.
+ 
++## C types and values (`-g`)
++
++`c_check_debug_values.c` enriches the core producer for [#1114](https://github.com/buster14a/buster/issues/1114).
++It emits a DIE for each reachable, qualified `TypeId` in the translation unit:
++base and pointer types, fixed and incomplete arrays, records and unions (with
++byte or bit offsets), enums and enumerators, function signatures, qualifiers,
++and declaration-scoped typedef names. A bounded worklist handles recursive
++records without recursion. Two passes measure and then write CU-relative
++`DW_FORM_ref4` references, including forward references; these references need
++no relocation when units are concatenated.
++
++Named parameters and locals retain their source declarations through lowering.
++Tier 0 publishes its final local homes with source-aware output only. The C
++producer describes register values with `DW_OP_regx`, and storage with
++`DW_OP_bregx` plus the actual home displacement. It does not force a frame
++pointer, spill a register value, or otherwise change generated instructions.
++Indirect homes for variable-length arrays dereference the saved array pointer;
++the variable-length bound itself is currently unspecified in the array type.
++
++`.debug_loclists` restricts a home to encoded source-entry ranges after the
++prologue and within the declaration's lexical scope. Shared epilogues and
++whole tail-call entries are omitted: those can restore registers or destroy a
++frame base. Lexical blocks use corresponding `.debug_rnglists` entries, so
++nested shadowed names stop being visible on leaving their scope. The ranges
++use the existing function address table. They are derived after branch sizing,
++not from estimated instruction lengths.
++
++Ordinary defined globals, file statics and block statics use `DW_OP_addr`,
++relocated against their actual definition's atom and symbol offset. Debug
++construction therefore follows data publication. A data-only translation unit
++also retains its variable definitions. Multi-unit linking remaps these
++references separately from reference binding, preserving replaced weak
++definitions just as it does for function debug addresses.
++
++`NativeDebugExtra` describes the additional `.debug_info` section-offset and
++definition-address fields. Its two sorted, nonoverlapping columns remain
++caller-owned through emission. Section offsets target range or location lists;
++address fields target ordinary object definitions. The native executable
++writer patches copies after layout. The object writer emits `R_X86_64_32` and
++`R_X86_64_64` relocations against section symbols, with zeroes in the relocated
++fields and their values in relocation addends. The optional sixth section is
++omitted for producers which supply only the five core sections.
++
++**Limits:** Tier 1 allocator-interval locations remain a later step of #1114.
++Its parameters and locals are named and typed but deliberately have no location;
++no Tier 0 home is reused as a guess. Thread-local, unresolved and common symbols
++without a published ordinary object definition likewise have no location.
++Values before initialization are not guaranteed meaningful. The existing
++single-source-file-per-function and no-inline-scope limits still apply.
++
++`test-check-debug --cross-check` compares GDB reads against a fixture's own
++printed values: integer and floating parameters, pointers, arrays, recursive
++records, bit fields, unions, enums, typedefs, shadowing, statics, and aligned
++and dynamic frames. It checks native executables, `-c -g` objects linked by
++GNU ld, lld and `link-foreign`, and merged data-only units, together with
++`llvm-dwarfdump --verify` and scalar/vector/lane determinism.
++
+ ## Native executable attachment
+ 
+ `ExecutableOptions.debug` accepts an `ExecutableDebug` descriptor containing
+-the five section byte slices, a function `SymbolId` column in their address-table
++the five core section byte slices (and optional `.debug_loclists`), a function `SymbolId` column in their address-table
+ order, and the line-address-offset column. It attaches one unit or several
+ (#395): `unit_functions` and `unit_count` give each unit's function count, each
+ section's slice holds the units' contributions one after another (each unit
