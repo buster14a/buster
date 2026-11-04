@@ -990,6 +990,9 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
 #define BUSTER_CHECK_EMIT_COMMON_DEFINED 0x04u
 #define BUSTER_CHECK_EMIT_COMMON_TENTATIVE 0x08u
 #define BUSTER_CHECK_EMIT_NOCOMMON 0x10u
+// A loader_uninitialized declaration (#147): a definition that clang's code gives common linkage where a tentative one
+// would have it, made weak for its initializer that isn't zero (EmitGlobalVarDefinition).
+#define BUSTER_CHECK_EMIT_COMMON_LOADER 0x20u
 
 // The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
 // tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
@@ -2644,6 +2647,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
                     // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).
                     weak[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_WEAK;
+                    // A weak_import declaration's symbol is a weak reference where the unit doesn't define it (#147, clang's
+                    // isWeakImported, of declarations alone).
+                    weak[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_WEAK_IMPORT && !defined[object];
                     const uint32_t structor = (kind == CHECK_ATTRIBUTE_DESTRUCTOR ? 1u : 0u) + 2 * symbol;
                     if (symbol != 0 && !attribute->ignored && (kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR) &&
                         program->input->declaration_kinds[token] == C_BINDING_FUNCTION && (structors[structor] == 0 || structor_tokens[structor] < token))
@@ -2661,6 +2667,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_COMMON ? BUSTER_CHECK_EMIT_COMMON : 0;
                     commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_SECTION ? BUSTER_CHECK_EMIT_COMMON_SECTION : 0;
                     commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_NOCOMMON ? BUSTER_CHECK_EMIT_NOCOMMON : 0;
+                    commons[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_LOADER_UNINITIALIZED ? BUSTER_CHECK_EMIT_COMMON_LOADER : 0;
                     common |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_COMMON;
                 }
             }
@@ -2722,6 +2729,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && common)
     {
         check_program_emit_commons(program, commons, BUSTER_SCALAR_PATH(scalar));
+    }
+    // A loader_uninitialized variable of external linkage that common or -fcommon (without nocommon or a section) would
+    // make common is a weak definition, as clang's code has it (#147).
+    for (uint32_t s = 1; valid && common && s <= program->symbol_count; s += 1)
+    {
+        const uint8_t bits = commons[s];
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s - 1]];
+        const bool asked = (bits & BUSTER_CHECK_EMIT_COMMON) != 0 || (program->input->common_tentatives && (bits & BUSTER_CHECK_EMIT_NOCOMMON) == 0);
+        weak[s] |= (bits & BUSTER_CHECK_EMIT_COMMON_LOADER) != 0 && asked && (bits & BUSTER_CHECK_EMIT_COMMON_SECTION) == 0 && declaration < program->input->token_count &&
+                   check_input_linkage(program->input->declaration_bits, declaration) == 2 && !check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
     }
     // An alias of a variable whose definition is a common symbol (#147, #1126's review): clang's integrated assembler
     // refuses it ("Common symbol 'x' cannot be used in assignment expr"), and a common's storage is the linker's, which no

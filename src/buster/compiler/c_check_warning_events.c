@@ -38,6 +38,7 @@ enum
     CHECK_WARNING_ID_UNSUPPORTED_AVAILABILITY_GUARD = 46,
     CHECK_WARNING_ID_AVAILABILITY = 47,
     CHECK_WARNING_ID_COUNTED_BY_ELEMENT = 48,
+    CHECK_WARNING_ID_EXTERN_INITIALIZER = 49,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -117,6 +118,16 @@ typedef enum CheckWarningEventKind
     // check_input_counted_by_member), which clang drops: payload.first_type the element's type, payload.name the
     // attribute's kind less one.
     CHECK_WARNING_EVENT_COUNTED_BY_ELEMENT,
+    // -Wignored-attributes' warnings of attributes clang's handlers ignore (#147, check_input_attribute_subjects): weak_import
+    // on a definition, and internal_linkage on a parameter (named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are), at the
+    // attribute; internal_linkage on a variable of local storage, at the variable's name; nocf_check without -fcf-protection,
+    // at the attribute (check_input_attribute_read_item).
+    CHECK_WARNING_EVENT_ATTRIBUTE_DEFINITION,
+    CHECK_WARNING_EVENT_ATTRIBUTE_VARIABLES_FUNCTIONS,
+    CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL,
+    CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED,
+    // A file-scope extern variable's initializer (clang's warn_extern_init), at the variable's name.
+    CHECK_WARNING_EVENT_EXTERN_INITIALIZER,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

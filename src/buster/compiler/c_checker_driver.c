@@ -169,6 +169,14 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_COUNTED_PAREN: result = "expected ')'"; break;
         case CHECK_INPUT_COUNTED_REF_LEAK: result = "value returned by '__builtin_counted_by_ref' cannot be assigned to a variable"; break;
         case CHECK_INPUT_COUNTED_REF_USE: result = "value returned by '__builtin_counted_by_ref' cannot be used in a binary expression"; break;
+        case CHECK_INPUT_LIFETIMEBOUND_VOID:
+            result = "'lifetimebound' attribute cannot be applied to a parameter of a function that returns void; did you mean 'lifetime_capture_by(X)'";
+            break;
+        case CHECK_INPUT_LIFETIMEBOUND_OBJECT: result = "'lifetimebound' attribute cannot be applied; non-member function has no implicit object parameter"; break;
+        case CHECK_INPUT_LOADER_INITIALIZER: result = "variable with 'loader_uninitialized' attribute cannot have an initializer"; break;
+        case CHECK_INPUT_LOADER_EXTERN: result = "variable cannot be declared both 'extern' and with the 'loader_uninitialized' attribute"; break;
+        case CHECK_INPUT_LOADER_REDECLARATION: result = "redeclaration cannot add 'loader_uninitialized' attribute"; break;
+        case CHECK_INPUT_INTERNAL_LINKAGE_FIRST: result = "attribute does not appear on the first declaration"; break;
     }
     return result;
 }
@@ -1664,6 +1672,43 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                                         label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
                                                         label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_LOADER_EXTERN || input->reports[index].message == CHECK_INPUT_LOADER_REDECLARATION ||
+                                                input->reports[index].message == CHECK_INPUT_INTERNAL_LINKAGE_FIRST) && token < count)
+                        {
+                            // loader_uninitialized's and internal_linkage's errors (#147), as clang's messages word them: an extern
+                            // variable named, and the others with their notes at the earlier declaration; internal_linkage named as
+                            // clang prints an attribute it applied, its scope as written and its name without a keyword's underscores
+                            // (the report's attribute its first token, its detail its name's plus one where it has a scope).
+                            const CheckInputReport* report = input->reports + index;
+                            const CheckInputMessage message = report->message;
+                            const uint32_t previous = report->note_kind != CHECK_INPUT_NOTE_NONE ? report->note_token : count;
+                            const PPOutputDiagnosticNote note = {
+                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .message = message == CHECK_INPUT_LOADER_REDECLARATION ? "previous definition is here" : "previous declaration is here",
+                            };
+                            if (message == CHECK_INPUT_LOADER_EXTERN)
+                            {
+                                const uint32_t name = parser->tokens.names[token];
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "variable '%.*s' cannot be declared both 'extern' and with the 'loader_uninitialized' attribute",
+                                                      (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            }
+                            else if (message == CHECK_INPUT_LOADER_REDECLARATION)
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                            "redeclaration cannot add 'loader_uninitialized' attribute");
+                            }
+                            else
+                            {
+                                const bool scoped = report->detail != 0 && report->detail - 1 < count && report->attribute < count;
+                                const String8 scope = scoped ? check_driver_attribute_spelling(parser, pp, report->attribute, false) : (String8){ "", 0 };
+                                const uint32_t name_token = scoped ? report->detail - 1 : report->attribute;
+                                const String8 attribute = check_warning_attribute_normalized(check_driver_attribute_spelling(parser, pp, name_token, false));
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
+                                                            "'%.*s%s%.*s' attribute does not appear on the first declaration", (int)scope.length, scope.pointer,
+                                                            scoped ? "::" : "", (int)attribute.length, attribute.pointer);
+                            }
                         }
                         else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)

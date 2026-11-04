@@ -107,6 +107,12 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_SUPPRESS,
     // clang's counted_by, sized_by, counted_by_or_null and sized_by_or_null (#148, c_check_counted_by_input.c).
     CHECK_ATTRIBUTE_COUNTED_BY,
+    // clang's lifetimebound (its checks alone in C), loader_uninitialized (a definition without an initializer),
+    // weak_import (a weak reference where the unit doesn't define its entity) and internal_linkage (#147).
+    CHECK_ATTRIBUTE_LIFETIMEBOUND,
+    CHECK_ATTRIBUTE_LOADER_UNINITIALIZED,
+    CHECK_ATTRIBUTE_WEAK_IMPORT,
+    CHECK_ATTRIBUTE_INTERNAL_LINKAGE,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -318,6 +324,10 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "unused", CHECK_ATTRIBUTE_UNUSED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "maybe_unused", CHECK_ATTRIBUTE_UNUSED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "retain", CHECK_ATTRIBUTE_RETAIN, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "lifetimebound", CHECK_ATTRIBUTE_LIFETIMEBOUND, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "loader_uninitialized", CHECK_ATTRIBUTE_LOADER_UNINITIALIZED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "weak_import", CHECK_ATTRIBUTE_WEAK_IMPORT, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    { "internal_linkage", CHECK_ATTRIBUTE_INTERNAL_LINKAGE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "externally_visible", CHECK_ATTRIBUTE_EXTERNALLY_VISIBLE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "constructor", CHECK_ATTRIBUTE_CONSTRUCTOR, CHECK_ATTRIBUTE_INTEGER, 0, 1 },
     { "destructor", CHECK_ATTRIBUTE_DESTRUCTOR, CHECK_ATTRIBUTE_INTEGER, 0, 1 },
@@ -1131,6 +1141,9 @@ static const CheckInputClangAttribute check_input_clang_scopes[] =
 // transparent_union takes beside a union, and a variable or parameter of a function pointer's type, which sentinel takes.
 #define BUSTER_CHECK_SUBJECT_UNION_TYPEDEF 0x400000u
 #define BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE 0x800000u
+// A variable's declaration that defines it, tentatively or not (#147): no table row's subject, but weak_import's handler's
+// (clang's canBeWeakImported).
+#define BUSTER_CHECK_SUBJECT_DEFINITION 0x1000000u
 
 typedef struct CheckInputSubjectRow CheckInputSubjectRow;
 struct CheckInputSubjectRow
@@ -1142,12 +1155,19 @@ struct CheckInputSubjectRow
     const char* message;
 };
 
-// The subjects of GNU attributes that clang's handlers check themselves, rather than its generated diagAppertainsToDecl,
-// as rows, in byte order (check_input_subject_row): handleSentinelAttr's and handleTransparentUnionAttr's.
+// The subjects of attributes that clang's handlers check themselves, rather than its generated diagAppertainsToDecl,
+// as rows, in byte order (check_input_subject_row): GCC's, GNU's spelling and gnu::'s, handleSentinelAttr's and
+// handleTransparentUnionAttr's; and clang's own, GNU's spelling and clang::'s, handleWeakImportAttr's (#147), whose
+// definitions it ignores with its own warning (check_input_attribute_subjects).
 static const CheckInputSubjectRow check_input_subject_handlers[] =
 {
     { "sentinel", 8, BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_FUNCTION_POINTER_VARIABLE, false, "functions, methods and blocks" },
     { "transparent_union", 17, BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_UNION_TYPEDEF, false, "unions" },
+};
+
+static const CheckInputSubjectRow check_input_subject_clang_handlers[] =
+{
+    { "weak_import", 11, BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_VARIABLE, false, "variables and functions" },
 };
 
 #define BUSTER_CHECK_FACT_GNU(spelling, flags, minimum, maximum)
@@ -1293,7 +1313,10 @@ static const CheckInputSubjectRow* check_input_subject_row(String8 scope, String
         }
     }
     const bool gnu_scope = !standard || (scoped && ((scope.length == 3 && memcmp(scope.pointer, "gnu", 3) == 0) || (scope.length == 7 && memcmp(scope.pointer, "__gnu__", 7) == 0)));
-    const CheckInputSubjectRow* handler = gnu_scope ? check_input_subject_find(check_input_subject_handlers, BUSTER_ARRAY_LENGTH(check_input_subject_handlers), name) : NULL;
+    const bool clang_scope = !standard || (scoped && ((scope.length == 5 && memcmp(scope.pointer, "clang", 5) == 0) || (scope.length == 6 && memcmp(scope.pointer, "_Clang", 6) == 0)));
+    const CheckInputSubjectRow* gcc = gnu_scope ? check_input_subject_find(check_input_subject_handlers, BUSTER_ARRAY_LENGTH(check_input_subject_handlers), name) : NULL;
+    const CheckInputSubjectRow* handler = gcc == NULL && clang_scope ?
+                                          check_input_subject_find(check_input_subject_clang_handlers, BUSTER_ARRAY_LENGTH(check_input_subject_clang_handlers), name) : gcc;
     result = result != NULL ? result : handler;
     return result;
 }
@@ -1601,16 +1624,15 @@ static uint8_t check_input_attribute_count_check(const CheckInputFactRow* fact, 
 }
 
 // Whether clang applies an attribute of `name` in a way that changes nothing this checker models (#147): one its generated
-// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT),
-// no_caller_saved_registers (a calling convention) and loader_uninitialized (no initializer), which stay refused by name;
+// handler applies with nothing more (its facts' SIMPLE), no type's or statement's alone, but selectany (a COMDAT) and
+// no_caller_saved_registers (a calling convention), which stay refused by name;
 // and these whose own handlers check what is checked here: minsize, optnone (check_input_attribute_optnone), noescape
 // (a pointer parameter's, check_input_attribute_subjects), annotate (a string first, check_input_attribute_read_item),
 // uninitialized, gcc_struct (the default layout), no_sanitize_memory, analyzer_noreturn and carries_dependency.
 static bool check_input_attribute_generic(String8 name, const CheckInputFactRow* fact)
 {
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
-    const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers") ||
-                        check_input_attribute_equal(name, "loader_uninitialized");
+    const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
     const bool handled = check_input_attribute_equal(name, "minsize") || check_input_attribute_equal(name, "optnone") ||
                          check_input_attribute_equal(name, "noescape") || check_input_attribute_equal(name, "annotate") ||
                          check_input_attribute_equal(name, "uninitialized") || check_input_attribute_equal(name, "gcc_struct") ||
@@ -1806,6 +1828,16 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 attributes->error_first = attribute.first;
                 attributes->error_end = attribute.end;
             }
+            else if (rule->kind == CHECK_ATTRIBUTE_LIFETIMEBOUND && standard && place == BUSTER_CHECK_PLACE_FUNCTION)
+            {
+                // A C23 lifetimebound after a function's declarator is its type's, whose implicit object parameter C's
+                // functions haven't (#147, clang's checkLifetimeBoundAttr).
+                check_input_report(reader, attribute.first, CHECK_INPUT_LIFETIMEBOUND_OBJECT);
+                valid = false;
+                attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+                attributes->error_first = attribute.first;
+                attributes->error_end = attribute.end;
+            }
             else if (rule->kind == CHECK_ATTRIBUTE_MUSTTAIL)
             {
                 valid = check_input_attribute_musttail(reader, attributes, &attribute);
@@ -1828,6 +1860,13 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             // Another language's: clang's warning that it ignores it, before anything else (#147).
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ATTRIBUTE_IGNORED);
+            unknown = true;
+        }
+        else if (valid && known && rule == 0 && check_input_attribute_equal(name, "nocf_check"))
+        {
+            // clang takes nocf_check as a function type's, whose handler without -fcf-protection (which the driver refuses)
+            // warns that it ignores it, wherever it is and whatever its arguments (#147).
+            check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED);
             unknown = true;
         }
         else if (valid && known && check_input_attribute_generic(name, generic_fact))
@@ -2920,6 +2959,26 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             type != 0 && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_POINTER)
         {
             check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NONNULL_POINTERS);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        // weak_import's and internal_linkage's handlers (#147), each of which ignores it with its warning: weak_import on a
+        // variable's definition (a parameter's among them; a function's body isn't its yet); internal_linkage on a
+        // parameter (its generated check takes it as a variable, its handler names its subjects otherwise), and on a
+        // variable of local storage, at the variable's name.
+        const bool weak_definition = !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_WEAK_IMPORT &&
+                                     (declaration & (BUSTER_CHECK_SUBJECT_PARAMETER | BUSTER_CHECK_SUBJECT_DEFINITION)) != 0;
+        const bool internal = !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_INTERNAL_LINKAGE;
+        if (weak_definition || (internal && (declaration & BUSTER_CHECK_SUBJECT_PARAMETER) != 0))
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                                              weak_definition ? CHECK_WARNING_EVENT_ATTRIBUTE_DEFINITION : CHECK_WARNING_EVENT_ATTRIBUTE_VARIABLES_FUNCTIONS);
+            attribute->ignored = true;
+            attribute->subject_ignored = true;
+        }
+        else if (internal && (declaration & BUSTER_CHECK_SUBJECT_LOCAL) != 0 && name < parser->tokens.count)
+        {
+            check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL, name, CHECK_WARNING_COMPLETE_AT_TOKEN, name + 1);
             attribute->ignored = true;
             attribute->subject_ignored = true;
         }

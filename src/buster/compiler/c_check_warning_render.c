@@ -616,6 +616,30 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
             break;
         }
+        case CHECK_WARNING_EVENT_ATTRIBUTE_VARIABLES_FUNCTIONS:
+        {
+            // clang's handleInternalLinkageAttr's subjects (#147), the attribute named as the unknown one's warning names it.
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "'%.*s%s%.*s' attribute only applies to variables and functions", (int)scope.length, scope.pointer,
+                                        scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
+            break;
+        }
+        case CHECK_WARNING_EVENT_ATTRIBUTE_DEFINITION:
+            // clang's diagnostic takes the attribute's name as a string: 'weak_import' however it is spelled.
+            result = "'weak_import' attribute cannot be specified on a definition";
+            break;
+        case CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL:
+            result = "'internal_linkage' attribute on a non-static local variable is ignored";
+            break;
+        case CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED:
+            result = "'nocf_check' attribute ignored; use -fcf-protection to enable the attribute";
+            break;
+        case CHECK_WARNING_EVENT_EXTERN_INITIALIZER:
+            result = "'extern' variable has an initializer";
+            break;
         case CHECK_WARNING_EVENT_GCC_ATTRIBUTE_POSITION:
             result = check_warning_text(scratch, "GCC does not allow '%.*s' attribute in this position on a function definition", (int)name.length, name.pointer);
             break;

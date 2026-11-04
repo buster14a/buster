@@ -85,6 +85,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wunsupported-availability-guard", NULL, "__builtin_available does not guard availability here; use if (__builtin_available) instead" },
     { "-Wavailability", NULL, "use same version number separators '_' or '.'; as in 'major[.minor[.subminor]]'" },
     { "-Wbounds-safety-counted-by-elt-type-unknown-size", NULL, "'counted_by' should not be applied to an array with element of unknown size" },
+    { "-Wextern-initializer", NULL, "'extern' variable has an initializer" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

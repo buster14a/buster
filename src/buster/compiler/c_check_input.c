@@ -187,6 +187,17 @@ typedef enum CheckInputMessage
     // 0 assigned, 1 passed, 2 returned; and 0 in a subscript's base, 1 a binary operator's operand.
     CHECK_INPUT_COUNTED_REF_LEAK,
     CHECK_INPUT_COUNTED_REF_USE,
+    // clang's errors of lifetimebound, loader_uninitialized and internal_linkage (#147): lifetimebound on a parameter of a
+    // function that returns void, and a C23 one on a function's type, at the attribute; loader_uninitialized on a variable
+    // with an initializer or an extern one,
+    // at its name, and added to a variable after its definition, at the attribute (a note at the definition);
+    // internal_linkage that a function's or variable's first declaration hasn't, at its name (a note at that one).
+    CHECK_INPUT_LIFETIMEBOUND_VOID,
+    CHECK_INPUT_LIFETIMEBOUND_OBJECT,
+    CHECK_INPUT_LOADER_INITIALIZER,
+    CHECK_INPUT_LOADER_EXTERN,
+    CHECK_INPUT_LOADER_REDECLARATION,
+    CHECK_INPUT_INTERNAL_LINKAGE_FIRST,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -290,6 +301,12 @@ static const char* const check_input_messages[] =
     "expected ')'",
     "value returned by '__builtin_counted_by_ref' cannot be assigned to a variable",
     "value returned by '__builtin_counted_by_ref' cannot be used in a binary expression",
+    "'lifetimebound' attribute cannot be applied to a parameter of a function that returns void; did you mean 'lifetime_capture_by(X)'",
+    "'lifetimebound' attribute cannot be applied; non-member function has no implicit object parameter",
+    "variable with 'loader_uninitialized' attribute cannot have an initializer",
+    "variable cannot be declared both 'extern' and with the 'loader_uninitialized' attribute",
+    "redeclaration cannot add 'loader_uninitialized' attribute",
+    "attribute does not appear on the first declaration",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -325,6 +342,8 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_COUNTED_FIELD,
     // The attribute's `(`, which a second argument's `,` doesn't match (#148): "to match this '('".
     CHECK_INPUT_NOTE_MATCH_PAREN,
+    // A declaration before the one a message is about (#147): "previous declaration is here".
+    CHECK_INPUT_NOTE_PREVIOUS_DECLARATION,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -1374,6 +1393,9 @@ struct CheckInputReader
     bool specifier_thread_local;
     // Whether the last complete declarator's own function declarator had a K&R identifier list.
     bool declarator_identifier_list;
+    // The last complete declarator's lifetimebound attribute on a parameter of its own function declarator, where that
+    // function returns void (#147), or BUSTER_CHECK_NONE.
+    uint32_t declarator_lifetimebound;
     uint32_t* activate;
     uint32_t* activation_next;
     // Each token's tests by its syntax alone (BUSTER_CHECK_SYNTAX_*), from check_input_count_tokens' pass: the walk
@@ -2275,6 +2297,17 @@ static bool check_input_noreturn_attribute(const CheckInputAttributes* attribute
     return noreturn;
 }
 static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous);
+
+// The first attribute of `kind` among a declaration's that isn't ignored, or NULL (#147).
+static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttributes* attributes, CheckInputAttributeKind kind)
+{
+    const CheckInputAttribute* result = NULL;
+    for (uint32_t i = 0; result == NULL && attributes != NULL && i < attributes->count; i += 1)
+    {
+        result = attributes->records[i].kind == kind && !attributes->records[i].ignored ? attributes->records + i : NULL;
+    }
+    return result;
+}
 
 // clang's warning for a function type's attribute (a calling convention, GNU's noreturn, regparm) on a declarator whose
 // type is no function's and no pointer's, array's or aligned typedef's to one (#147): "'X' only applies to function types;
@@ -3969,6 +4002,8 @@ struct CheckDeclaratorPart
     // A function's K&R identifier list (C17 6.7.6.3p3, 6.9.1): its names, whose types a definition's declaration list
     // gives (check_input_kr_declarations), and no parameter types, so no prototype.
     bool identifier_list;
+    // A function's first parameter's lifetimebound attribute (#147), its first token plus one, or 0.
+    uint32_t lifetimebound;
 };
 
 typedef struct CheckDeclaratorParameter CheckDeclaratorParameter;
@@ -4605,6 +4640,9 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         {
                             check_input_attribute_nonnull_parameter(reader, frame->common_attributes, adjusted);
                             check_input_attribute_nonnull_parameter(reader, frame->attributes, adjusted);
+                            const CheckInputAttribute* bound = check_input_attribute_of(frame->common_attributes, CHECK_ATTRIBUTE_LIFETIMEBOUND);
+                            bound = bound != NULL ? bound : check_input_attribute_of(frame->attributes, CHECK_ATTRIBUTE_LIFETIMEBOUND);
+                            function->lifetimebound = function->lifetimebound == 0 && bound != NULL ? bound->first + 1 : function->lifetimebound;
                         }
                         if (valid)
                         {
@@ -4724,6 +4762,10 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     reader->declarator_declarations = complete ? run->declarations : BUSTER_CHECK_NONE;
     reader->declarator_abi_origin = complete ? run->abi_origin : 0;
     reader->declarator_identifier_list = complete && run->identifier_list;
+    // A lifetimebound parameter of the declared function's own list, where the function returns void (#147).
+    const CheckDeclaratorPart* own = complete && run->function_part != BUSTER_CHECK_NONE ? run->parts + run->function_part : NULL;
+    reader->declarator_lifetimebound = own != NULL && own->lifetimebound != 0 && type_kind(reader->types, run->result) == BUSTER_TYPE_KIND_FUNCTION &&
+                                       type_kind(reader->types, type_return(reader->types, run->result)) == BUSTER_TYPE_KIND_VOID ? own->lifetimebound - 1 : BUSTER_CHECK_NONE;
     const TypeId result = complete ? run->result : 0;
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
@@ -5280,6 +5322,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         *name = BUSTER_CHECK_NONE;
         *names = BUSTER_CHECK_NONE;
         reader->declarator_attributes = 0;
+        reader->declarator_lifetimebound = BUSTER_CHECK_NONE;
         reader->declarator_declarations = BUSTER_CHECK_NONE;
         reader->declarator_abi_origin = 0;
         reader->declarator_identifier_list = false;
@@ -6223,7 +6266,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             // function (inline or not), or a variable of global storage (a thread's or not, an external one's at file scope)
             // or local storage, each function-like by its type.
             const bool global = !is_typedef && !function && (file || is_static || storage == C_NAME_EXTERN || thread_local);
+            // A variable's definition, tentative or not, as clang's attributes see it, before its initializer: all but an
+            // extern one's.
+            const bool variable_definition = !is_typedef && !function && storage != C_NAME_EXTERN;
             const uint32_t variable_subjects = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_NON_PARAMETER_VARIABLE |
+                                               (variable_definition ? BUSTER_CHECK_SUBJECT_DEFINITION : 0) |
                                                (global ? BUSTER_CHECK_SUBJECT_GLOBAL | (thread_local ? BUSTER_CHECK_SUBJECT_THREAD_LOCAL : BUSTER_CHECK_SUBJECT_SHARED) |
                                                              (file && !is_static ? BUSTER_CHECK_SUBJECT_EXTERNAL_GLOBAL : 0)
                                                        : BUSTER_CHECK_SUBJECT_LOCAL);
@@ -6238,6 +6285,63 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             valid = valid && check_input_attribute_subjects(reader, attributes, subjects, type, check_input_attribute_begin(parser, declaration_group, count), name);
             valid = valid && check_input_attribute_definition(reader, attributes, subject);
+            // clang's lifetimebound on a parameter of a function that returns void (#147, checkLifetimeBoundAttr), at the
+            // attribute: of a function's declaration alone.
+            if (valid && function && !is_typedef && reader->declarator_lifetimebound != BUSTER_CHECK_NONE)
+            {
+                check_input_report(reader, reader->declarator_lifetimebound, CHECK_INPUT_LIFETIMEBOUND_VOID);
+                valid = false;
+            }
+            // loader_uninitialized (#147): a variable with it has no initializer (ActOnInitializer's error, at its name), isn't
+            // extern (ActOnUninitializedDecl's, at its name) and is of a complete type; a later declaration doesn't add it to
+            // a variable already defined (checkNewAttributesAfterDef's, at the attribute, a note at the definition).
+            const CheckInputAttribute* loader = valid && !function && !is_typedef ? check_input_attribute_of(attributes, CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) : NULL;
+            const bool loader_defined = loader != NULL && previous_declaration != BUSTER_CHECK_NONE && reader->definition_origins[previous_declaration] != 0 &&
+                                        check_input_attribute_of(previous_attributes, CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) == NULL;
+            if (loader != NULL && (kind == PARSE_KIND_EQUAL || storage == C_NAME_EXTERN))
+            {
+                check_input_report(reader, name, kind == PARSE_KIND_EQUAL ? CHECK_INPUT_LOADER_INITIALIZER : CHECK_INPUT_LOADER_EXTERN);
+                valid = false;
+            }
+            else if (loader != NULL && !type_is_complete(reader->types, type))
+            {
+                reader->declared_types[name] = type;
+                check_input_report(reader, name, CHECK_INPUT_INCOMPLETE_OBJECT);
+                valid = false;
+            }
+            else if (loader_defined)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, loader->first, CHECK_INPUT_LOADER_REDECLARATION);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].note_token = reader->definition_origins[previous_declaration] - 1;
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+                }
+                valid = false;
+            }
+            // A file-scope extern variable's initializer: clang's warning at its name, after its attributes' (AddInitializerToDecl).
+            if (valid && file && !is_typedef && !function && storage == C_NAME_EXTERN && kind == PARSE_KIND_EQUAL)
+            {
+                check_input_warning(reader, CHECK_WARNING_ID_EXTERN_INITIALIZER, CHECK_WARNING_EVENT_EXTERN_INITIALIZER, name, CHECK_WARNING_COMPLETE_AT_TOKEN, name + 1);
+            }
+            // internal_linkage on a redeclaration that its entity's first declaration hasn't (#147, MergeFunctionDecl's
+            // and MergeVarDecl's error, at its name, a note at the previous declaration).
+            const CheckInputAttribute* internal = valid && !is_typedef ? check_input_attribute_of(attributes, CHECK_ATTRIBUTE_INTERNAL_LINKAGE) : NULL;
+            if (internal != NULL && previous_declaration != BUSTER_CHECK_NONE && check_input_linkage(reader->declaration_bits, previous_declaration) != 0 &&
+                check_input_attribute_of(first_attributes, CHECK_ATTRIBUTE_INTERNAL_LINKAGE) == NULL)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, name, CHECK_INPUT_INTERNAL_LINKAGE_FIRST);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].note_token = previous_declaration;
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+                    reader->output->reports[before].attribute = internal->first;
+                    reader->output->reports[before].detail = internal->first != internal->name_token ? internal->name_token + 1 : 0;
+                }
+                valid = false;
+            }
             if (attributes_valid && function && !is_typedef)
             {
                 check_input_attribute_multiversion(reader, attributes, name, first_attributes, first_declaration, is_inline, first_inline);
@@ -6277,8 +6381,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 const bool gnu_inline_definition = function && !is_typedef && kind == PARSE_KIND_L_BRACE && is_inline && storage == C_NAME_EXTERN && !prior_definition &&
                                                    (predefines_gnu_inline(&reader->pp->options.predefines, reader->pp->options.language) ||
                                                     check_input_attribute_gnu_inline(attributes) || check_input_attribute_gnu_inline(previous_attributes));
+                // A loader_uninitialized variable's declaration defines it, without an initializer (#147).
                 const bool defines = ((kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition) ||
-                                     (!is_typedef && !function && !file && is_static);
+                                     (!is_typedef && !function && !file && is_static) || loader != NULL;
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED, defines);
                 // A function's or variable's alias, ifunc or weakref target defines it (#147).
                 const bool alias_definition = !is_typedef && check_input_attribute_alias_definition(attributes);
@@ -6287,7 +6392,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_lane_refuse(reader, reader->lane && alias_definition, "a body's alias changes its linked entity's definition history");
                 reader->definition_origins[name] = check_input_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED) || alias_definition ? name + 1 : 0;
                 // A static variable's alias or weakref is its definition, not a tentative one: it has no storage of its own.
-                check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_TENTATIVE, !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL && !alias_definition);
+                check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_TENTATIVE, !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL && !alias_definition &&
+                                    loader == NULL);
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_STATIC, !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0));
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 check_input_set_bit(reader->output->declaration_bits, name, BUSTER_CHECK_BITS_THREAD_LOCAL, thread_local);
@@ -6308,8 +6414,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NORETURN;
                     }
                 }
-                // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793).
-                check_input_set_linkage(reader->declaration_bits, name, is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static || (constexpr_decl && file) ? 1 : 2);
+                // A file-scope constexpr object has internal linkage, as clang's C23 has it (#793), and so has a declaration
+                // with internal_linkage (#147, clang's getLVForNamespaceScopeDecl).
+                check_input_set_linkage(reader->declaration_bits, name, is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 :
+                                                                        is_static || (constexpr_decl && file) || internal != NULL ? 1 : 2);
                 if ((storage == C_NAME_EXTERN || (function && storage == 0)) && check_input_linkage(reader->declaration_bits, name) != 0)
                 {
                     const uint32_t previous = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);

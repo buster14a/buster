@@ -5827,6 +5827,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 #include "c_check_symbol_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
+#include "c_check_attribute_effects_driver_test.c"
 #include "c_check_convention_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_fence_driver_test.c"
@@ -7073,6 +7074,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_commons(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_attribute_effects(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

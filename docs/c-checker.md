@@ -3756,7 +3756,9 @@ declarator, at file scope and for a member), the ungrouped plain `_Complex` assu
 `-Wgnu-variable-sized-type-not-at-end`, `-Wstatic-local-in-inline` with its `static` note, the
 `-Wmany-braces-around-scalar-init` excess brace, `-Winitializer-overrides` with its prior-initialization note,
 `-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
-for an unnamed parameter before C23. Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+for an unnamed parameter before C23. Since then (#147), `-Wextern-initializer` warns of a file-scope extern
+variable's initializer at its name, after its attributes' warnings, as clang's `AddInitializerToDecl` does (a block
+scope's is an error). Command-line options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
 compares the driver's complete diagnostics with clang's for every producer and policy, and
@@ -5201,8 +5203,8 @@ clang does (`check_input_attribute_subjects`, `c_check_attribute.c`).
 - **Differences left.**
   - An attribute clang knows that the checker neither has a rule for nor takes
     generically (the next section's "Attributes without a rule") is refused by
-    name before its subject is checked: `int v __attribute__((weak_import));`
-    is refused, where clang warns.
+    name before its subject is checked: `int v __attribute__((selectany));` is
+    refused, where clang takes it.
   - The checker stops at a declaration's first error. So a later
     declaration's warnings, which clang gives too, are missing after an error
     row's error (`int e __attribute__((error("x")));`), as after any other
@@ -5426,11 +5428,34 @@ arguments against the function. The checker now gives these as clang does.
     "'X' attribute ignored" with a note at `optnone`. `annotate`'s first
     argument must be a string literal.
 
+  Five have rules of their own, with their handlers' checks and effects:
+  - `lifetimebound` changes nothing in C. On a parameter of a function that
+    returns void it is clang's error, at the attribute; a C23 one after a
+    function's declarator is its type's, clang's "non-member function has no
+    implicit object parameter" error; elsewhere its subjects' error.
+  - `loader_uninitialized`'s variable is a definition without an initializer,
+    in `.bss`, never common: where common linkage would be clang's (`-fcommon`,
+    or `common`, without `nocommon` or a section) a weak one, as clang's code
+    makes it for an initializer that isn't zero. An initializer, `extern`, an
+    incomplete type, and adding it after the variable's definition are clang's
+    errors (the last with its note at the definition).
+  - `weak_import`'s declaration is a weak reference where the unit doesn't
+    define its entity. On a variable's definition (a tentative one, a local's
+    or a parameter's) it is clang's warning "cannot be specified on a
+    definition", and on other declarations its subjects' ("variables and
+    functions"), both of which ignore it.
+  - `internal_linkage` gives its declaration internal linkage: a local
+    symbol, with `-Wundefined-internal` for a function used and never
+    defined. A redeclaration that its entity's first declaration hasn't is
+    clang's error, with its note there; on a parameter and on a variable of
+    local storage, clang's warnings, which ignore it.
+  - `nocf_check` is clang's "ignored; use -fcf-protection" warning wherever it
+    is, whatever its arguments: the driver refuses `-fcf-protection`.
+
   The rest stay refused by name: `selectany` (a COMDAT),
-  `no_caller_saved_registers` (a calling convention), `loader_uninitialized`,
-  `weak_import`, and the attributes whose handlers clang has its own (the
-  thread-safety analysis's, `pass_object_size`, `ms_struct`, `interrupt`,
-  `internal_linkage` and others).
+  `no_caller_saved_registers` (a calling convention), and the attributes
+  whose handlers clang has its own (the thread-safety analysis's,
+  `pass_object_size`, `ms_struct`, `interrupt` and others).
 - **Argument counts.** An attribute's count of arguments other than clang's
   is clang's error, worded as clang's three messages: "'X' attribute takes no
   arguments", "takes one argument", "requires exactly N arguments", "takes at
@@ -5456,9 +5481,14 @@ arguments against the function. The checker now gives these as clang does.
   - The checker stops at a declaration's first error. So clang's later errors
     of the same declaration are missing: a second list's, and its parser's
     recovery errors and their "to match this '('" notes.
-  - GNU's `noderef` is refused by name, and so are `lifetimebound` and
-    `nocf_check` elsewhere (clang's subject error, and its warning without
-    `-fcf-protection`).
+  - GNU's `noderef` is refused by name.
+  - A `loader_uninitialized` variable's incomplete type is the generic
+    "object has incomplete type", and a definition after one the generic
+    "conflicting declaration", as every incomplete object's and redefinition's
+    are here, where clang names the type and the variable (with notes). With a
+    `section` attribute too, clang's object marks its section read-only
+    (LLVM's kind of an undefined initializer), which a write faults in; its
+    section here is writable.
   - `int * _Atomic [[gnu::unused]] p` is the generic error, where clang's is
     "an attribute list cannot appear here".
   - When a GNU attribute of a declaration and a calling convention keyword

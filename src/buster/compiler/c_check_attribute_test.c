@@ -535,6 +535,12 @@ static void check_test_attribute_vocabulary(CheckTest* test)
                           check_input_subject_row((String8){ "clang", 5 }, (String8){ "transparent_union", 17 }, true, true) == NULL &&
                           check_input_subject_row((String8){ "", 0 }, (String8){ "transparent_union", 17 }, false, true) == NULL,
                       "attribute subjects: sentinel's and transparent_union's rows, which their handlers check, by their spellings alone");
+    // weak_import's (#147): GNU's spelling and clang::'s (_Clang too), and none under gnu::.
+    const CheckInputSubjectRow* weak_import = check_input_subject_row((String8){ "_Clang", 6 }, (String8){ "weak_import", 11 }, true, true);
+    check_test_expect(test, weak_import != NULL && weak_import->subjects == (BUSTER_CHECK_SUBJECT_FUNCTION | BUSTER_CHECK_SUBJECT_VARIABLE) &&
+                          check_input_subject_row((String8){ "", 0 }, (String8){ "weak_import", 11 }, false, false) != NULL &&
+                          check_input_subject_row((String8){ "gnu", 3 }, (String8){ "weak_import", 11 }, true, true) == NULL,
+                      "attribute subjects: weak_import's row, which its handler checks, by its spellings alone");
     TypeTestTable storage;
     const bool ready = type_test_table_open(&storage, 4096);
     check_test_expect(test, ready, "attribute subjects: nonstring's type table opens");
