@@ -139,6 +139,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT,
     CHECK_INPUT_ATTRIBUTE_EXCLUSION,
     CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING,
+    CHECK_INPUT_UNAVAILABLE_USE,
     // GNU's function multiversioning: a function attribute clang refuses beside target("default"), target_clones or
     // cpu_specific/cpu_dispatch, at the function's name, naming the attribute; and a target attribute incompatible with
     // another multiversioning attribute, at the later attribute, with a note at the earlier one.
@@ -267,6 +268,7 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED,
     CHECK_INPUT_NOTE_ATTRIBUTE_HERE,
     CHECK_INPUT_NOTE_PREVIOUS_DEFINITION,
+    CHECK_INPUT_NOTE_UNAVAILABLE_HERE,
 } CheckInputNoteKind;
 
 typedef struct CheckInputReport CheckInputReport;
@@ -1410,6 +1412,8 @@ struct CheckInputReader
     bool statement_attributes;
     bool weak_attributes;
     bool late_attributes;
+    // Whether a deprecated or unavailable attribute was read, for its uses' diagnostics (check_input_deprecated_uses).
+    bool deprecated_attributes;
     // Allocated only after the first late attribute: accepted attribute kinds indexed by linked object, the late classes
     // (check_input_attribute_late_bit) and two words of the other kinds (check_input_attribute_after_kinds).
     uint8_t* late_attribute_masks;
@@ -9987,6 +9991,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_fallthrough_placements(&reader);
             }
             check_input_diagnostic_recover(&reader, resolved);
+            if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
+            {
+                check_input_deprecated_uses(&reader);
+            }
             for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)
             {
                 const uint32_t token = input->reports[report].token;

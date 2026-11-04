@@ -140,6 +140,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT: result = "attribute takes another count of arguments"; break;
         case CHECK_INPUT_ATTRIBUTE_EXCLUSION: result = "attributes are not compatible"; break;
         case CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING: result = "expected string literal as argument of 'annotate' attribute"; break;
+        case CHECK_INPUT_UNAVAILABLE_USE: result = "use of an unavailable declaration"; break;
         case CHECK_INPUT_MULTIVERSION_ATTRIBUTE: result = "attribute multiversioning cannot be combined with another attribute"; break;
         case CHECK_INPUT_MULTIVERSION_INCOMPATIBLE: result = "multiversioning attributes are not compatible"; break;
         case CHECK_INPUT_MULTIVERSION_DUPLICATE: result = "attribute cannot appear more than once on a declaration"; break;
@@ -1327,6 +1328,23 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &conflicting, other < count ? 1u : 0u, "'%.*s%s%.*s' %s%s",
                                                         (int)scope_text.length, scope_text.pointer, scope != 0 ? "::" : "", (int)spelled.length, spelled.pointer,
                                                         other < count ? "" : "attribute ", ending);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_UNAVAILABLE_USE && token < count)
+                        {
+                            // A use of what an unavailable attribute marks (#147, check_input_deprecated_uses): its name, the
+                            // attribute's message, and the note at it.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t used = parser->tokens.names[token];
+                            const String8 message = report->detail != 0 ? check_warning_string_text(parser, pp, report->detail - 1, scratch) : (String8){ 0 };
+                            char noted[160];
+                            snprintf(noted, sizeof(noted), "'%.*s' has been explicitly marked unavailable here", (int)intern_length(pp->table, used), intern_bytes(pp->table, used));
+                            const PPOutputDiagnosticNote note = {
+                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .message = noted,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u, "'%.*s' is unavailable%s%.*s",
+                                                        (int)intern_length(pp->table, used), intern_bytes(pp->table, used), message.length != 0 ? ": " : "",
+                                                        (int)message.length, message.pointer);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_VECTOR_ELEMENT)
                         {

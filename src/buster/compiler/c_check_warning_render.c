@@ -56,6 +56,30 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
+// The text of the string literal at parser token `token` as written, between its quotes (past an encoding prefix), in
+// `scratch`; empty for none.
+static String8 check_warning_string_text(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    String8 result = { 0 };
+    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : UINT32_MAX;
+    const PPTokens* output = &pp->output;
+    if (source < output->count)
+    {
+        const uint64_t capacity = (uint64_t)output->values[source] - output->locations[source] + 1;
+        uint8_t* buffer = capacity < (UINT64_C(1) << 20) ? arena_push(scratch, capacity, 1) : NULL;
+        const uint8_t* bytes = NULL;
+        const uint32_t length = buffer != NULL ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
+        uint32_t open = 0;
+        while (open < length && bytes[open] != '"')
+        {
+            open += 1;
+        }
+        const bool quoted = open + 1 < length && bytes[length - 1] == '"';
+        result = quoted ? (String8){ (char*)bytes + open + 1, length - open - 2 } : result;
+    }
+    return result;
+}
+
 // One publication pass's name views for type_print (#992): the identifier table's spelling columns and, where
 // the unit has unnamed tags, a `file:line:col` or typedef-name text by tag index. Both are built once before the
 // pass's events take their marks, so per-event release cannot invalidate them; `anonymous` stays empty where
@@ -533,6 +557,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "attribute declaration must precede definition";
             break;
         }
+        case CHECK_WARNING_EVENT_DEPRECATED_USE:
+        {
+            // The message is the attribute's string as written, without its quotes or prefix.
+            const String8 message = check_warning_string_text(parser, pp, payload->token, scratch);
+            result = message.length != 0 ? check_warning_text(scratch, "'%.*s' is deprecated: %.*s", (int)name.length, name.pointer, (int)message.length, message.pointer) :
+                                          check_warning_text(scratch, "'%.*s' is deprecated", (int)name.length, name.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
@@ -601,6 +633,12 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
+        case CHECK_WARNING_NOTE_DEPRECATED_HERE:
+        {
+            const String8 noted = check_driver_warning_name(pp, note->payload.name);
+            result = check_warning_text(scratch, "'%.*s' has been explicitly marked deprecated here", (int)noted.length, noted.pointer);
+            break;
+        }
         case CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD:
             result = check_warning_text(scratch, "%s of first field is %u bits", (note->payload.data & 0xffu) == BUSTER_CHECK_TRANSPARENT_SIZE ? "size" : "alignment",
                                         note->payload.data >> 8);

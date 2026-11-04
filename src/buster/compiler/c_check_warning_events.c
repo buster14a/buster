@@ -33,6 +33,7 @@ enum
     CHECK_WARNING_ID_UNKNOWN_ATTRIBUTE = 41,
     CHECK_WARNING_ID_GCC_COMPAT = 42,
     CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION = 43,
+    CHECK_WARNING_ID_DEPRECATED_DECLARATIONS = 44,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -99,6 +100,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_TYPE_NAME_ATTRIBUTE,
     // _Alignof or alignof of an expression (#147, check_input_alignof_expression): its keyword in the payload's name.
     CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION,
+    // A use of what a deprecated attribute marks (#147, check_input_deprecated_uses): the used name, and the attribute's
+    // message's string token in the payload's token (or none).
+    CHECK_WARNING_EVENT_DEPRECATED_USE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -118,6 +122,7 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
     CHECK_WARNING_NOTE_TRANSPARENT_FIRST_FIELD,
     CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE,
+    CHECK_WARNING_NOTE_DEPRECATED_HERE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

@@ -683,8 +683,9 @@ and its header says so.
   `Parser.cpp`, and the x86-64 target's `checkCallingConvention`; and
   `BuildVectorType` (`SemaType.cpp`), `ActOnTag` and
   `checkNewAttributesAfterDef` (`SemaDecl.cpp`), and `ParseClassSpecifier`
-  (`ParseDeclCXX.cpp`), for tags' attributes, type names' and `vector_size`'s.
-  None of that code is copied.
+  (`ParseDeclCXX.cpp`), for tags' attributes, type names' and `vector_size`'s;
+  and `DiagnoseUseOfDecl` with its availability checks (`SemaAvailability.cpp`)
+  for deprecated and unavailable uses. None of that code is copied.
 - **Procedure:** [the checker guide](docs/c-checker.md)'s "Attributes on
   declarations they don't apply to (#147)".
 

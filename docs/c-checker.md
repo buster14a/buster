@@ -5369,6 +5369,21 @@ arguments against the function. The checker now gives these as clang does.
   `maybe_unused` and `nodiscard`. A tentative definition is no definition
   here. The check runs on the serial path: a body that a lane checks gets
   none.
+- **Deprecated and unavailable uses** (`check_input_deprecated_uses`). A use
+  of a function, variable, typedef, tag or enumerator after a declaration
+  that a `deprecated` attribute marks gets clang's "'X' is deprecated"
+  (`-Wdeprecated-declarations`), or "'X' is deprecated: MESSAGE" with its
+  string, and a note "'X' has been explicitly marked deprecated here" at the
+  attribute. An `unavailable` one's use is clang's error "'X' is
+  unavailable", with its note at the declaration. An enumerator of a
+  deprecated enum is deprecated by its enum, which the note names. As clang's
+  context rules have it, there is none in the body of a function itself
+  deprecated (by any declaration before its body), in the specifiers of a
+  declaration whose declarator is deprecated, or in a bare declaration of a
+  tag. The pass runs after the bindings, only in a unit where some
+  `deprecated` or `unavailable` attribute was read: the uses are the tokens
+  bound to another declaration, and each marked declaration is found once by
+  the declaration its uses count by (its object's first, its tag's first).
 - **Attributes without a rule** (`check_input_attribute_generic`). An
   attribute clang knows that the checker has no rule for is taken by its facts:
   - one clang ignores everywhere (`bounded`) is ignored without a word;
@@ -5424,8 +5439,11 @@ arguments against the function. The checker now gives these as clang does.
   - When a GNU attribute of a declaration and a calling convention keyword
     on another type share the specifiers, the two warnings come in the
     attributes' order. Clang gives the type's first.
-  - Clang's `-Wdeprecated-declarations` warnings at uses of what
-    `deprecated` marks are not made, for tags or anything else.
+  - A field's use (`m.x`) of a deprecated field gets no warning: its
+    declaration is found by the expression's type, which the uses' pass
+    doesn't have. Nor does an overloadable function's call that resolves to a
+    deprecated overload, which clang warns of (it doesn't at an address taken
+    through the overload set, and neither does the checker).
   - A body checked on a lane doesn't warn of attributes after a definition, nor
     check mutual exclusions across redeclarations.
   - An argument count of a supported attribute is checked as its arguments are
@@ -5447,7 +5465,8 @@ arguments against the function. The checker now gives these as clang does.
   - attributes after a definition, with the alignment they no longer give;
   - attributes without a rule of each kind, argument counts, and mutual
     exclusions on one declaration, through a specifier's list and across
-    redeclarations.
+    redeclarations;
+  - deprecated and unavailable uses of each kind, and their context rules.
 
   `test-checker` checks the exclusions table's order and pairs, and that the
   facts tell C's attributes from another language's.

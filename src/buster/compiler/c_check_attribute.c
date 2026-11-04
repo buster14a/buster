@@ -1730,6 +1730,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_WEAKREF;
             const bool late_kind = check_input_attribute_late_kind(&attribute);
             reader->late_attributes |= late_kind;
+            reader->deprecated_attributes |= rule->kind == CHECK_ATTRIBUTE_DEPRECATED || rule->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
             // An argument count other than clang's is its error, worded as clang's (#147): before the arguments are read,
@@ -3406,3 +3407,176 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
     }
     return valid;
 }
+
+static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token, uint32_t end);
+
+// The declaration a deprecated or unavailable attribute's uses are counted by (#147): a tag's first declaration's name
+// for a tag keyword's attributes (at `token`) or a tag's name, its object's first declaration for a function's or a
+// variable's, and the declaration itself for a typedef or an enumerator.
+static uint32_t check_input_deprecated_key(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint8_t kind = parser->tokens.kinds[token];
+    const uint32_t name = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ? check_input_skip_attributes(parser, token + 1, count) : token;
+    const uint32_t declared = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[name] : BUSTER_CHECK_NONE;
+    const uint32_t object = declared < count && reader->objects != NULL ? reader->objects[declared] : 0;
+    return object != 0 && object - 1 < count ? object - 1 : declared;
+}
+
+// The tag key (check_input_deprecated_key) of the enum whose body declares the enumerator at `enumerator`: its `{`'s, back
+// past the earlier enumerators, and its keyword's before that; `count` for none.
+static uint32_t check_input_deprecated_enum(const CheckInputReader* reader, uint32_t enumerator)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t i = enumerator;
+    uint32_t depth = 0;
+    bool scanning = true;
+    while (scanning && i > 0)
+    {
+        i -= 1;
+        const uint8_t kind = parser->tokens.kinds[i];
+        scanning = !(kind == PARSE_KIND_L_BRACE && depth == 0);
+        depth = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? depth + 1 :
+                (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && depth != 0 ? depth - 1 : depth;
+    }
+    uint32_t keyword = i;
+    while (!scanning && keyword > 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
+    {
+        keyword -= 1;
+    }
+    return !scanning && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM ? check_input_deprecated_key(reader, keyword) : count;
+}
+
+// The deprecated or unavailable record of `attributes`, kept, or null.
+static const CheckInputAttribute* check_input_deprecated_record(const CheckInputAttributes* attributes)
+{
+    const CheckInputAttribute* result = NULL;
+    for (uint32_t i = 0; attributes != NULL && result == NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool marks = attribute->kind == CHECK_ATTRIBUTE_DEPRECATED || attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE;
+        result = marks && !attribute->ignored && !attribute->subject_ignored ? attribute : NULL;
+    }
+    return result;
+}
+
+// clang's diagnostics of a use of what a deprecated or unavailable attribute marks (#147, DiagnoseUseOfDecl's): at each
+// use of a function, a variable, a typedef, an enumerator or a tag after the declaration that marks it, "'X' is
+// deprecated" (-Wdeprecated-declarations), or the error "'X' is unavailable", with the attribute's message after a colon
+// and a note at the attribute. None in the body of a function itself deprecated, nor in a bare declaration of a tag. A
+// field's use (`m.x`) isn't diagnosed: its declaration is found by the expression's type, which this pass doesn't have.
+// The uses are the tokens the bindings resolved to another declaration than their own (CheckInput.declarations); the
+// marks are found once, by the declaration a use counts by (check_input_deprecated_key).
+static void check_input_deprecated_uses(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint64_t mark = reader->scratch->length;
+    uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+    reader->output->resource |= marks == NULL;
+    if (marks != NULL)
+    {
+        memset(marks, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        const bool scalar = parser->options.scalar;
+        const CheckSparseWide all = reader->output->attributes;
+        for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
+        {
+            const uint32_t lanes = check_input_attributed_group(all, first, count, scalar);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t key = check_input_deprecated_record(check_input_attributes_at(reader->output, d)) != NULL ? check_input_deprecated_key(reader, d) : count;
+                if (key < count && (marks[key] == 0 || d + 1 < marks[key]))
+                {
+                    marks[key] = d + 1;
+                }
+            }
+        }
+        // The function whose body a use is in, if it is deprecated (as clang's context is), and where that body ends.
+        uint32_t function = BUSTER_CHECK_NONE;
+        uint32_t body_end = 0;
+        bool deprecated_body = false;
+        for (uint32_t t = 0; t < count; t += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[t];
+            const uint8_t role = parser->tree.roles[t];
+            const bool inside = t < body_end;
+            function = !inside && kind == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[t] == C_BINDING_FUNCTION ? t : function;
+            if (!inside && role == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] < count)
+            {
+                // Deprecated by any of its declarations up to its definition's.
+                const uint32_t function_key = function != BUSTER_CHECK_NONE ? check_input_deprecated_key(reader, function) : count;
+                body_end = parser->tree.parents[t];
+                deprecated_body = function_key < count && marks[function_key] != 0 && marks[function_key] - 1 <= function;
+            }
+            const uint32_t declared = kind == PARSE_KIND_IDENTIFIER ? reader->output->declarations[t] : BUSTER_CHECK_NONE;
+            const bool tag = role == PARSE_ROLE_TAG;
+            const uint8_t next = t + 1 < count ? parser->tokens.kinds[t + 1] : PARSE_KIND_END;
+            // An overloadable function's name is its overload set's, whose resolution clang checks otherwise.
+            const bool overloaded = reader->output->overload_heads != NULL && reader->output->overload_heads[t] != 0;
+            const bool use = declared < count && declared != t && role != PARSE_ROLE_MEMBER && !overloaded &&
+                             (tag ? next != PARSE_KIND_SEMI && next != PARSE_KIND_L_BRACE : reader->declaration_kinds[t] == 0);
+            uint32_t key = use ? (tag ? declared : check_input_deprecated_key(reader, t)) : count;
+            // An enumerator of a deprecated enum is deprecated by its enum (the note names the enum).
+            if (use && key < count && marks[key] == 0 && reader->declaration_kinds[declared] == C_BINDING_ENUMERATOR)
+            {
+                key = check_input_deprecated_enum(reader, declared);
+            }
+            const uint32_t marking = key < count ? marks[key] : 0;
+            const bool marked = marking != 0 && marking - 1 < t && !(inside && deprecated_body);
+            // A use in the declaration of something itself deprecated, as clang's delayed diagnostics drop it: one before
+            // the declaration's first declarator, which a deprecated attribute marks by its own token. Looked for only at a
+            // marked use, which are few.
+            uint32_t declarator = marked && !inside ? t + 1 : count;
+            while (declarator < count && reader->declaration_kinds[declarator] == 0 && parser->tokens.kinds[declarator] != PARSE_KIND_SEMI &&
+                   parser->tokens.kinds[declarator] != PARSE_KIND_L_BRACE)
+            {
+                declarator += 1;
+            }
+            const uint32_t declarator_key = declarator < count && reader->declaration_kinds[declarator] != 0 ? check_input_deprecated_key(reader, declarator) : count;
+            const bool deprecated_declaration = declarator_key < count && marks[declarator_key] != 0 && marks[declarator_key] - 1 <= declarator;
+            const CheckInputAttribute* attribute = marked && !deprecated_declaration ?
+                                                   check_input_deprecated_record(check_input_attributes_at(reader->output, marking - 1)) : NULL;
+            // The attribute's message, its first argument's string.
+            const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
+                                     parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
+            if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE)
+            {
+                // Its note is at the declaration, not the attribute.
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, t, CHECK_INPUT_UNAVAILABLE_USE);
+                if (reader->output->report_count > before)
+                {
+                    reader->output->reports[before].note_token = marking - 1;
+                    reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
+                    reader->output->reports[before].detail = message != BUSTER_CHECK_WARNING_NO_SOURCE ? message + 1 : 0;
+                }
+            }
+            else if (attribute != NULL)
+            {
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_DEPRECATED_DECLARATIONS,
+                    .kind = CHECK_WARNING_EVENT_DEPRECATED_USE,
+                    .token = t,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = t + 1,
+                    .payload = { .name = parser->tokens.names[t], .token = message },
+                };
+                const CheckWarningNote note =
+                {
+                    .kind = CHECK_WARNING_NOTE_DEPRECATED_HERE,
+                    .token = attribute->first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .name = parser->tokens.names[key], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, &note, 1);
+            }
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+

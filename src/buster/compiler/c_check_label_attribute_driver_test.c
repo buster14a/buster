@@ -856,6 +856,18 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "void h(void) __attribute__((cold));\nvoid h(void);\nvoid h(void) __attribute__((hot));\n",
         "static void s(void) __attribute__((hot));\nstatic void s(void) __attribute__((cold)) {}\n",
         "void k(void) __attribute__((hot)) {}\nvoid k(void) __attribute__((cold));\nvoid c(void) __attribute__((cold)) __attribute__((cold));\n",
+        // Uses of what deprecated marks (check_input_deprecated_uses): functions, variables, typedefs, tags, enumerators (by
+        // their enum too), with a message or none, after the declaration that marks them; none in a deprecated function's
+        // body (deprecated by an earlier declaration too), in a deprecated declaration's specifiers, or in a bare tag
+        // declaration; and an unavailable one's error, with its note at the declaration.
+        "void f(void) __attribute__((deprecated));\nvoid g(void) __attribute__((deprecated(\"use h\")));\n[[deprecated]] int v;\n"
+        "[[deprecated(\"old\")]] int w;\ntypedef int T __attribute__((deprecated));\nstruct __attribute__((deprecated)) S { int a; };\n"
+        "enum E { A __attribute__((deprecated)), B };\nint main(void)\n{\n    f();\n    g();\n    T t = v + w + A;\n    struct S s;\n"
+        "    (void)t; (void)s;\n    void (*p)(void) = f;\n    (void)p;\n    return sizeof(v);\n}\nvoid d(void) __attribute__((deprecated));\n"
+        "void d(void) { f(); }\nvoid e(void);\nvoid e(void) __attribute__((deprecated));\nvoid e(void);\nT x __attribute__((deprecated));\n"
+        "struct S;\nstruct S *ps;\nenum __attribute__((deprecated)) F { F0 };\nenum F ef;\nint k(void) { e(); return F0; }\n",
+        "void u(void) __attribute__((unavailable(\"gone\")));\nint h(void) { return sizeof(u); }\n",
+        "void u(void) __attribute__((unavailable));\nvoid z(void) { u(); }\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {
