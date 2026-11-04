@@ -1047,6 +1047,55 @@ among them) in place too, `lower.statements` 6.720 ms against 6.768 with
 rounds overlapping the base's; and a conversion between two plain scalars'
 types by their packed classes alone, in a copy of the loop, 6.833 ms.
 
+## The initializers' map, the bodies' copies and the writer's reloads (#1048)
+
+The preparation cleared `initializer_declarations`, a word for each of the
+graph's nodes (1.3 MB on `sqlite3.c`'s 323,557), before writing it at the
+initializers' nodes, and the expansion reads it only at `INITIALIZE` nodes.
+It is no longer cleared: a read (`check_lower_initializer_of`) takes a slot's
+token as the node's declaration only where `initializer_nodes` maps the token
+back to the node, which a stale slot's can't, since every token whose
+initializer is a node is among the declaring tokens that write the map
+(`check_program_declaring`). Filling every slot with another node's declaring
+token beforehand left `sqlite3.c`'s, Lua's and c-testsuite's objects the same.
+#1235's run at `ff461ce9`
+([run](https://github.com/buster14a/buster/actions/runs/41791985354/job/126450663310)),
+five rounds in turn on `sqlite3.c`:
+
+| row | the base | without the clearing |
+| --- | ---: | ---: |
+| `lower.prepare` | 1.196 [1.186 to 1.198] | 1.156 [1.154 to 1.167] |
+| `lower` | 10.611 [10.601 to 10.657] | 10.587 [10.514 to 10.609] |
+
+Every round of the preparation without it was below every round of the base.
+`sqlite3.c` has no variable-length array, so the token-indexed clearings of
+the arrays' identities and saved positions, which only such a unit takes,
+don't run there.
+
+Three more didn't pay:
+
+- **The bodies' short columns.** Each body's end copies about ten columns from
+  the writer to the output arena, most of a few bytes. Copying one of at most
+  64 bytes by a masked load and store instead of `memcpy`
+  ([run at `c4b2f341`](https://github.com/buster14a/buster/actions/runs/41789197103/job/126441581914))
+  put `lower.bodies` at 1.284 ms against 1.311, but its slowest round (1.296)
+  was above the base's fastest (1.295), and `lower`'s rounds overlapped.
+- **A restrict writer.** The build's `-fno-strict-aliasing` lets every store
+  to an entry's byte columns alias the writer, so the loop reloads its depth,
+  tasks, count, output and program after each, and reaches a node's op through
+  four dependent loads (`writer->program->input->graph.ops`). A copy of the
+  loop whose writer is `restrict` compiled to the same code: the writer is
+  passed to the out-of-line helpers on the loop's paths, so clang may not
+  assume that a pointer loaded from memory doesn't reach it.
+- **The value's fields alone.** The expansion builds the node's 96-byte
+  `CheckValue` on the stack (five fields and four overlapping zeroing
+  stores), as two of its cases take its address. A copy of the loop that read
+  only the seven fields it uses, and built the whole value at those two cases,
+  was 330 bytes shorter but took `lower.statements` 0.6 ms higher on this
+  session's Xeon in each of three alternating rounds: its stack accesses rose
+  from 401 to 474, the fields' registers spilling what the value's copy had
+  held.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

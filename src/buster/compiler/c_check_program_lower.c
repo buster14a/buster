@@ -605,6 +605,7 @@ struct CheckLowerWriter
     uint32_t* vla_identities;
     uint32_t* save_locals;
     uint8_t* indirect;
+    // Each initializer's node's declaration, by node, written only at those nodes: read through check_lower_initializer_of.
     uint32_t* initializer_declarations;
     uint8_t* local_classes;
     uint8_t* local_flags;
@@ -822,6 +823,18 @@ struct CheckLowerWriter
 static uint32_t check_lower_local_of(const CheckLowerWriter* writer, uint32_t object)
 {
     return writer->locals == NULL || check_program_bit(writer->locals, object) ? writer->local_map[object] : BUSTER_CHECK_NONE;
+}
+
+// The declaration whose initializer `node` is, or none (CheckLowerWriter.initializer_declarations). The preparation writes
+// the map only at the initializers' nodes, without clearing it first (#1048: 0.04 ms of sqlite3.c's preparation on the
+// 9700X), and a slot's token is the node's declaration only where initializer_nodes maps it back to the node, which a
+// stale slot's can't: every token whose initializer is a node is among the declaring tokens that write the map
+// (check_program_declaring).
+static inline uint32_t check_lower_initializer_of(const CheckLowerWriter* writer, uint32_t node)
+{
+    const uint32_t token = writer->initializer_declarations[node];
+    const bool valid = token < writer->program->input->token_count && check_sparse_get(writer->program->input->initializer_nodes, token) == node;
+    return valid ? token : BUSTER_CHECK_NONE;
 }
 
 
@@ -10166,7 +10179,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const TypeId destination = op == CHECK_OP_ASSIGN ? check_stream_type(stream, a) :
                                    declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
         const bool volatile_copy = check_lower_copy_node_volatile(writer, op == CHECK_OP_INITIALIZE ? a : b, destination) ||
@@ -10188,7 +10201,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE)
     {
-        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
         const uint32_t object = declaration != BUSTER_CHECK_NONE ? program->input->objects[declaration] : graph->ops[a] == CHECK_OP_VALUE ? check_stream_object(stream, a) : 0;
         const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
         const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
@@ -12340,7 +12353,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     if (valid)
     {
-        memset(shared->initializer_declarations, 0xff, ((uint64_t)nodes + 1) * sizeof(uint32_t));
         memset(shared->locals, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         // A switch's local is read only at its cases' owner (check_lower_case and the dispatch), after the switch wrote it;
         // a case of an invalid program may read it first, and must find none. So only the owners are cleared, rather
