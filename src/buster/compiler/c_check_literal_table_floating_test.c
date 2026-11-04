@@ -264,22 +264,18 @@ static void check_test_literal_floating_tails(CheckTest* test, bool wide)
         };
         const uint32_t width = wide ? 64 : 32;
         const TypeId element = wide ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_FLOAT;
-        // The batch's elements as check_literal_table_floating gathers them, none converted before the batch.
+        // The batch's elements as check_literal_table_floating reads them (check_literal_table_element), none converted
+        // before the batch.
         const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
         uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH];
-        uint64_t converted[1] = { 0 };
+        CheckLiteralTableSource source = { 0 };
         bool spelled = true;
         for (uint32_t i = 0; spelled && i < found; i += 1)
         {
-            spelled = check_input_spelling(&reader, tokens[i], &spellings[i], &lengths[i]);
+            uint32_t category = 0;
+            spelled = check_literal_table_element(&reader, &source, tokens[i], width, false, &spellings[i], &lengths[i], &category);
         }
         check_test_expect(test, spelled, "floating tail fixture's spellings are made");
-        const CheckLiteralTableElements elements = {
-            .tokens = tokens,
-            .spellings = spellings,
-            .lengths = lengths,
-            .converted = converted,
-        };
         const uint64_t spelled_length = scratch.length;
         for (uint32_t path = 0; spelled && path < 2; path += 1)
         {
@@ -288,7 +284,7 @@ static void check_test_literal_floating_tails(CheckTest* test, bool wide)
             {
                 const uint64_t bytes = (uint64_t)count * (width / 8);
                 uint8_t* destination = mapping + page - bytes;
-                const bool accepted = check_literal_table_floating_batch(&reader, &elements, 0, count, element, width, destination);
+                const bool accepted = check_literal_table_floating_batch(&reader, tokens, spellings, lengths, 0, count, element, width, destination);
                 check_test_expect(test, accepted && (bytes == 0 || memcmp(destination, expected, bytes) == 0) &&
                                        !input.resource && scratch.length == spelled_length,
                                   "every scalar/vector floating store tail equals dense bytes without touching the protected page");
@@ -361,11 +357,126 @@ static void check_test_literal_floating_radix(CheckTest* test)
     }
 }
 
+// check_literal_table_classify against its scalar twin over random spellings of 1 to 72 bytes from number-like
+// characters (past 64 the vector path takes the twin), each with and without splice checks, trigraphs and rounding, for
+// both formats, and over the boundary spellings check_test_literal_floating_integer_spellings names.
+static void check_test_literal_floating_classify(CheckTest* test)
+{
+    static const char alphabet[] = "0123456789abcdefABCDEFxXbBpPeE.'\\?uUlLwW+-";
+    static const char* const spellings[] = {
+        "16777217",
+        "16777216",
+        "0xffffff",
+        "0x1000001",
+        "077777777",
+        "0100000001",
+        "0b111111111111111111111111",
+        "0b1000000000000000000000001",
+        "9007199254740993ULL",
+        "0x20000000000001",
+        "0400000000000000001",
+        "16'777'217",
+        "1e5",
+        "0x1p3",
+        "0x1e5",
+        "1.5",
+        "1677\\\n7217",
+        "1?" "?/\n2",
+    };
+    uint8_t bytes[80];
+    uint64_t state = 0x5d1f2a3b4c6e7f80ull;
+    uint32_t mismatches = 0;
+    uint32_t cases = 0;
+    for (uint32_t i = 0; i < 20000 + BUSTER_ARRAY_LENGTH(spellings) * 32; i += 1)
+    {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const uint32_t named = i >= 20000 ? (i - 20000) / 32 : UINT32_MAX;
+        uint32_t length = named != UINT32_MAX ? (uint32_t)strlen(spellings[named]) : 1 + (uint32_t)(state >> 33) % 72;
+        if (named != UINT32_MAX)
+        {
+            memcpy(bytes, spellings[named], length);
+        }
+        for (uint32_t j = 0; named == UINT32_MAX && j < length; j += 1)
+        {
+            state = state * 6364136223846793005ull + 1442695040888963407ull;
+            // Mostly digits, and a prefix now and then, so that long integers come up.
+            const uint32_t pick = (uint32_t)(state >> 33);
+            bytes[j] = pick % 4 != 0 ? (uint8_t)('0' + pick / 4 % 10) : (uint8_t)alphabet[pick / 4 % (sizeof(alphabet) - 1)];
+        }
+        if (named == UINT32_MAX && (state >> 60) == 0 && length > 2)
+        {
+            bytes[0] = '0';
+            bytes[1] = (uint8_t)"xXbB"[(state >> 56) & 3];
+        }
+        const uint32_t flags = named != UINT32_MAX ? (i - 20000) % 32 : (uint32_t)(state >> 40) & 31;
+        const uint32_t width = (flags & 1) != 0 ? 64 : 32;
+        const bool splices = (flags & 2) != 0;
+        const bool trigraphs = (flags & 4) != 0;
+        const bool round = (flags & 8) != 0;
+        const uint32_t vector = check_literal_table_classify(bytes, length, width, splices, trigraphs, round);
+        const uint32_t scalar = check_literal_table_classify_scalar(bytes, length, width, splices, trigraphs, round);
+        mismatches += vector != scalar;
+        cases += 1;
+    }
+    check_test_expect(test, mismatches == 0 && cases != 0, "the vector classifier of a table element's bytes equals its scalar twin");
+}
+
+// Elements read in place and through check_input_spelling (check_literal_table_element): numbers with line splices in
+// them, exact and inexact once spliced; numbers from macros; and numbers that ## pastes, whose bytes are clean scratch
+// spellings in a range of their own. Each table against the ordinary path, scalar and vector.
+static void check_test_literal_floating_elements(CheckTest* test)
+{
+    typedef struct ElementCase ElementCase;
+    struct ElementCase
+    {
+        const char* prologue;
+        const char* type;
+        const char* early;
+        const char* late;
+        bool compact;
+    };
+    static const ElementCase cases[] = {
+        { "", "float", "1.\\\n5", "1677\\\n7216", true },
+        { "", "float", "1\\\n2", "1677\\\n7217", false },
+        { "", "double", "0.\\\n25", "9007\\\n199254740993", false },
+        { "#define BIG 0x1000001\n#define HALF 0.5f\n", "float", "HALF", "BIG", false },
+        { "#define BIG 0x1000000\n#define HALF 0.5f\n", "float", "HALF", "BIG", true },
+        { "#define CAT(a, b) a##b\n", "float", "CAT(1., 5)", "CAT(1677, 7216)", true },
+        { "#define CAT(a, b) a##b\n", "float", "CAT(1., 5)", "CAT(1677, 7217)", false },
+        { "#define CAT(a, b) a##b\n", "double", "CAT(0x, fffffffffffff)", "CAT(0x2, 0000000000001)", false },
+    };
+    static const char* const fill[] = {
+        "1.5",
+        "-2",
+        "0.25f",
+        "7",
+        "-0x10",
+    };
+    char source[16384];
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        int used = snprintf(source, sizeof(source), "%s%s table[] = {", cases[c].prologue, cases[c].type);
+        for (uint32_t i = 0; i < 129 && used > 0 && (uint64_t)used < sizeof(source); i += 1)
+        {
+            const char* element = i == 128 ? cases[c].late : i == 63 || i == 64 || i == 0 ? cases[c].early : fill[i % BUSTER_ARRAY_LENGTH(fill)];
+            used += snprintf(source + used, sizeof(source) - (uint64_t)used, "%s%s", element, i < 128 ? "," : "};\n");
+        }
+        const bool made = used > 0 && (uint64_t)used < sizeof(source);
+        check_test_expect(test, made, "table element source fits");
+        if (made)
+        {
+            check_test_literal_table_case(test, source, cases[c].compact, false);
+        }
+    }
+}
+
 static void check_test_literal_floating_tables(CheckTest* test, const char* clang)
 {
     check_test_literal_floating_values(test);
     check_test_literal_floating_integer_spellings(test);
     check_test_literal_floating_radix(test);
+    check_test_literal_floating_classify(test);
+    check_test_literal_floating_elements(test);
     static const uint32_t counts[] = { 127, 128, 129, 255, 256, 257 };
     char source[32768];
     char table[8192];

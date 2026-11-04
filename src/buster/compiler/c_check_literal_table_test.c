@@ -278,15 +278,20 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
             check_test_expect(test, unchanged, "payload and retained-record allocation failures restore arenas and publish no ignored range or table");
             rollback.capacity = capacity;
         }
-        // A floating table's scratch, refused at every 4 bytes past its length (#1210's review): its four columns
-        // (check_literal_table_floating: the tokens, the spellings, their lengths and the converted bitset of 129
-        // elements, with their alignment), then its first spellings. Each refusal is a resource failure that restores
-        // both arenas and publishes no ignored range or table.
+        // A floating table's scratch, refused at every 4 bytes past its length (#1210's review): its converted bitset
+        // (check_literal_table_floating), then what its conversions take, until the table is accepted. Each refusal is a
+        // resource failure that restores both arenas and publishes no ignored range or table; the first room that holds
+        // the table accepts it, and no step before it does.
         const bool floating = strcmp(element, "float") == 0 || strcmp(element, "double") == 0;
-        const uint64_t columns = (uint64_t)129 * (sizeof(uint32_t) + sizeof(const uint8_t*) + sizeof(uint32_t)) + 3 * sizeof(uint64_t) + 64;
+        // What an accepted table writes besides the table: its query's type and its name's linked type.
+        TypeId* query_types = BUSTER_ARENA_PUSH_ARRAY(&scratch, TypeId, (uint64_t)parser.tokens.count + 1);
+        TypeId* linked_types = query_types != NULL ? BUSTER_ARENA_PUSH_ARRAY(&scratch, TypeId, (uint64_t)identifiers.count + 1) : NULL;
+        allocated = allocated && linked_types != NULL;
+        check_test_expect(test, allocated, "floating scratch refusal adapter has room");
         const uint64_t scratch_capacity = scratch.capacity;
         uint32_t refusals = 0;
-        for (uint64_t room = 0; allocated && floating && room <= columns; room += 4)
+        bool accepted = false;
+        for (uint64_t room = 0; allocated && floating && !accepted && room <= 4096; room += 4)
         {
             CheckInput copy = input;
             copy.literal_tables = NULL;
@@ -300,19 +305,24 @@ static void check_test_literal_table_contract(CheckTest* test, const char* eleme
             reader.initializer_declarations = declarations;
             reader.ignored = ignored;
             reader.function_body = BUSTER_CHECK_NONE;
+            reader.query_types = query_types;
+            reader.linked_types = linked_types;
+            reader.declaration_bits = input.declaration_bits;
             const uint64_t before = scratch.length;
             scratch.capacity = before + room;
-            bool unchanged = !check_input_literal_table_prepare(&reader, begin - 1) && copy.resource && rollback.length == 17 &&
-                             scratch.length == before && copy.literal_tables == NULL && copy.literal_table_count == 0;
+            accepted = check_input_literal_table_prepare(&reader, begin - 1);
             scratch.capacity = scratch_capacity;
+            bool unchanged = !accepted && copy.resource && rollback.length == 17 && scratch.length == before && copy.literal_tables == NULL &&
+                             copy.literal_table_count == 0;
             for (uint32_t token = 0; unchanged && token <= parser.tokens.count; token += 1)
             {
                 unchanged = ignored[token] == 0x9d;
             }
-            refusals += unchanged;
-            check_test_expect(test, unchanged, "each floating scratch column's and spelling's allocation failure restores arenas and publishes no ignored range or table");
+            refusals += !accepted;
+            check_test_expect(test, accepted ? copy.literal_table_count == 1 && !copy.resource && scratch.length == before : unchanged,
+                              "a floating table's scratch refusal restores arenas and publishes nothing, and enough room accepts it");
         }
-        check_test_expect(test, !floating || refusals == columns / 4 + 1, "every floating scratch refusal was checked");
+        check_test_expect(test, !floating || (accepted && refusals != 0), "a floating table's scratch is refused, then accepted with room");
         arena_pop_to(&scratch, scratch_mark);
     }
     if (mapping != MAP_FAILED)

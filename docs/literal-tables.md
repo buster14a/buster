@@ -45,19 +45,30 @@ publication use the existing lifetime and deferred-replay contract.
 ## Data-parallel work
 
 The existing grammar kernel checks 64 token kinds at a time. A floating table
-then gathers every element's spelling once, kept in scratch until the table is
-decided, and first converts the integers whose digits allow a value the format
-can't hold (`check_literal_table_integer_may_round`: more than 7 decimal, 6
-hexadecimal, 8 octal or 24 binary digits for `float`; 15, 13, 17 or 53 for
-`double`), so that one whose value float or double can't hold refuses the table
-before any other conversion. Refused at its last element, a 200,000-element
-`float` table took 27.8% longer than main when every element before it was
-converted first, and still 23% longer when every integer of four characters or
-more was converted first in a table of such integers (buster-performance#250).
-Integers exact by their digits wait for their batch, which converts each
-element once. Each batch takes 16 of the gathered spellings, skipping the
-integers already converted; common short integer spellings use the existing
-SIMD decoder. Floating payloads are stored in masked eight-element batches, with
+then converts first the integers whose digits allow a value the format can't
+hold (more than 7 decimal, 6 hexadecimal, 8 octal or 24 binary digits for
+`float`; 15, 13, 17 or 53 for `double`), so that one refuses the table before
+any other element is converted (`check_literal_table_floating_integers`). An
+element shorter than 8 bytes (16 for `double`) can't be one, and passes on its
+token's length alone, without its bytes being read. A longer one is read in
+place (`check_literal_table_element`): a number token whose bytes are in one
+source range without a line splice is spelled by those bytes, as `pp_spelling`
+spells it, with the range searched for once and kept from element to element,
+and no scratch taken; any other token takes `check_input_spelling`. One masked
+64-byte load classifies the bytes (`check_literal_table_classify`): its splices,
+its '.' and exponent, and its digits up to the first character past its prefix
+that is neither a digit nor a separator; the scalar functions are its twin and
+oracle. The batches then read each element in place again, skipping the
+integers already converted, and the scratch holds only the converted bitset.
+Common short integer spellings use the existing SIMD decoder.
+
+Refused at its last element, a 200,000-element `float` table took 27.8% longer
+than main when every element before it was converted first, 23% longer when
+every integer of four characters or more was, and 6.3% longer when each
+element's spelling was gathered into scratch (`check_input_spelling`) before
+any conversion (buster-performance#250).
+
+Floating payloads are stored in masked eight-element batches, with
 bit-preserving 64-to-32-bit narrowing for `float`. The scalar path stores the
 same representations without vector instructions. Stable parser options and
 token-kind pointers are cached across spelling normalization and output stores.

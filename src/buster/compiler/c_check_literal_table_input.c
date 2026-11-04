@@ -309,72 +309,188 @@ static bool check_literal_table_integer_may_round(const uint8_t* spelling, uint3
     return digits > limit;
 }
 
-// A floating table's elements, gathered once before any is converted: each one's token and spelling
-// (check_input_spelling, kept in scratch until the table is decided, so that no spelling is made twice), and which ones
-// are already converted, into the payload.
-typedef struct CheckLiteralTableElements CheckLiteralTableElements;
-struct CheckLiteralTableElements
+// What check_literal_table_classify finds in a number's bytes: a line splice (or, with trigraphs, a '?'), which leaves
+// its spelling to check_input_spelling; or an integer whose digits allow a value the format can't hold
+// (check_literal_table_integer_may_round).
+#define BUSTER_CHECK_LITERAL_TABLE_SPLICED 1u
+#define BUSTER_CHECK_LITERAL_TABLE_ROUND 2u
+
+// The scalar twin of check_literal_table_classify, and its oracle: `splices` says whether to look for splices, and
+// `trigraphs` whether a '?' counts as one, as pp_remove_splices reads them; `round` whether to look for an integer that
+// may round in `width`'s format.
+static uint32_t check_literal_table_classify_scalar(const uint8_t* bytes, uint32_t length, uint32_t width, bool splices, bool trigraphs, bool round)
 {
-    uint32_t* tokens;
-    const uint8_t** spellings;
-    uint32_t* lengths;
-    uint64_t* converted;
+    bool spliced = false;
+    for (uint32_t i = 0; splices && i < length; i += 1)
+    {
+        spliced = spliced || bytes[i] == '\\' || (trigraphs && bytes[i] == '?');
+    }
+    const bool rounds = round && !spliced && check_literal_table_integer_spelling(bytes, length) && check_literal_table_integer_may_round(bytes, length, width);
+    return spliced ? BUSTER_CHECK_LITERAL_TABLE_SPLICED : rounds ? BUSTER_CHECK_LITERAL_TABLE_ROUND : 0;
+}
+
+// A number's category (BUSTER_CHECK_LITERAL_TABLE_SPLICED, _ROUND or neither) from one masked load of its bytes: masks of its
+// splices, its '.' and exponent (an integer has none), and its digits up to the first character past its prefix that is
+// neither a digit nor a separator. The masked-off lanes past `length` are never read. A number longer than 64 bytes takes
+// the scalar twin.
+static uint32_t check_literal_table_classify(const uint8_t* bytes, uint32_t length, uint32_t width, bool splices, bool trigraphs, bool round)
+{
+    uint32_t result = 0;
+    if (length > 64)
+    {
+        result = check_literal_table_classify_scalar(bytes, length, width, splices, trigraphs, round);
+    }
+    else
+    {
+        const uint64_t live = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+        const __m512i text = _mm512_maskz_loadu_epi8((__mmask64)live, bytes);
+        const __m512i lower = _mm512_or_si512(text, _mm512_set1_epi8(0x20));
+        const uint64_t backslash = _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('\\'));
+        const uint64_t question = trigraphs ? _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('?')) : 0;
+        const uint64_t spliced = splices ? live & (backslash | question) : 0;
+        const bool hexadecimal = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'x';
+        const bool binary = length > 2 && bytes[0] == '0' && (bytes[1] | 0x20) == 'b';
+        const bool octal = !hexadecimal && !binary && length > 1 && bytes[0] == '0';
+        const uint32_t first = hexadecimal || binary ? 2 : octal ? 1 : 0;
+        const uint32_t limit = hexadecimal ? (width == 32 ? 6 : 13) : binary ? (width == 32 ? 24 : 53) : octal ? (width == 32 ? 8 : 17) : (width == 32 ? 7 : 15);
+        const uint64_t floating = live & (_mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('.')) |
+                                          _mm512_cmpeq_epi8_mask(lower, _mm512_set1_epi8(hexadecimal ? 'p' : 'e')));
+        const uint64_t decimal = _mm512_cmple_epu8_mask(_mm512_sub_epi8(text, _mm512_set1_epi8('0')), _mm512_set1_epi8(9));
+        const uint64_t letter = hexadecimal ? _mm512_cmple_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(5)) : 0;
+        const uint64_t digit = live & (decimal | letter);
+        const uint64_t separator = live & _mm512_cmpeq_epi8_mask(text, _mm512_set1_epi8('\''));
+        const uint64_t from = live & (UINT64_MAX << first);
+        const uint64_t stops = from & ~(digit | separator);
+        const uint64_t before = stops != 0 ? (stops & (0 - stops)) - 1 : UINT64_MAX;
+        const uint32_t digits = (uint32_t)__builtin_popcountll(digit & from & before);
+        result = spliced != 0 ? BUSTER_CHECK_LITERAL_TABLE_SPLICED : round && floating == 0 && digits > limit ? BUSTER_CHECK_LITERAL_TABLE_ROUND : 0;
+    }
+    return result;
+}
+
+// The source range a floating table's elements are read from, kept from element to element: a table's numbers written
+// in one file are in one range, which pp_find_range then searches for once rather than for each element.
+typedef struct CheckLiteralTableSource CheckLiteralTableSource;
+struct CheckLiteralTableSource
+{
+    const uint8_t* bytes;
+    uint32_t base;
+    uint32_t length;
 };
 
-// Gathers the elements of tokens [begin, end), `count` of them, and converts those spelled as integers (no '.', no
-// exponent) whose value may not be exact in the element's format (check_literal_table_integer_may_round) into
-// `payload`, before any other conversion: so the refusals an integer's precision loss makes come first. One late in a
-// table would otherwise come after every element before it was converted in vain, which the ordinary path then converts
-// again: 28% slower than main on a 200,000-element table refused at its last element on the 9700X (#1210). Testing every
-// integer of four characters or more first still left that table of exact long integers 23% slower, all of them
-// converted before the last refused it; integers that are exact by their digits now wait for their batch. The other
-// late refusals (a range warning, an imaginary, bit-precise or malformed constant) are code that warns or fails, and
-// keep their cost.
+// Element `token`'s spelling, as check_input_spelling makes it, and with `classify`, its category: whether it is an
+// integer that may round (check_literal_table_classify). Only a number of 8 bytes or more for float, 16 for double, may
+// be one (an integer of fewer has at most 7 or 15 digits), and a shorter one is passed by its token's length alone when
+// `spelling` is null. A number token whose bytes are in one source range without a splice is spelled by those bytes
+// (pp_spelling's pp_without_splices), which takes no scratch and no search but the range's, kept in `source`; any other
+// token, and a spliced one, takes check_input_spelling, whose scratch the caller pops.
+static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTableSource* source, uint32_t token, uint32_t width, bool classify,
+                                        const uint8_t** spelling, uint32_t* length, uint32_t* category)
+{
+    Preprocessor* pp = reader->pp;
+    const PPTokens* output = &pp->output;
+    const uint32_t index = reader->parser->tokens.sources[token];
+    const uint32_t location = output->locations[index];
+    const uint32_t end = output->values[index];
+    const bool number = output->kinds[index] == C_TOKEN_NUMERIC_CONSTANT && end > location;
+    const uint32_t shortest = width == 32 ? 8 : 16;
+    // The bytes as written are at least as long as the spelling, which drops a splice's.
+    const bool short_number = number && end - location < shortest;
+    bool valid = true;
+    *category = 0;
+    if (!(classify && short_number && spelling == NULL))
+    {
+        if (number && !(location - source->base < source->length && end - source->base <= source->length))
+        {
+            const uint32_t range = pp_find_range(pp, location);
+            *source = range != BUSTER_PP_NONE ? (CheckLiteralTableSource){ .bytes = pp->ranges[range].bytes, .base = pp->ranges[range].base, .length = pp->ranges[range].length } :
+                                                (CheckLiteralTableSource){ 0 };
+        }
+        const bool ranged = number && source->bytes != NULL && location - source->base < source->length && end - source->base <= source->length;
+        const uint8_t* bytes = ranged ? source->bytes + (location - source->base) : NULL;
+        // A clean scratch spelling is final, splices and all (pp_without_splices).
+        const Arena* clean = &pp->scratch[1];
+        const uintptr_t address = (uintptr_t)bytes;
+        const bool final = ranged && address >= (uintptr_t)clean->base && address - (uintptr_t)clean->base < clean->capacity;
+        const bool trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
+        const bool scalar = reader->parser->options.scalar;
+        uint32_t kind = BUSTER_CHECK_LITERAL_TABLE_SPLICED;
+        if (ranged)
+        {
+            kind = scalar ? check_literal_table_classify_scalar(bytes, end - location, width, !final, trigraphs, classify) :
+                            check_literal_table_classify(bytes, end - location, width, !final, trigraphs, classify);
+        }
+        const uint8_t* spelled = bytes;
+        uint32_t spelled_length = end - location;
+        if (kind == BUSTER_CHECK_LITERAL_TABLE_SPLICED)
+        {
+            valid = check_input_spelling(reader, token, &spelled, &spelled_length);
+            kind = !valid ? 0 : scalar ? check_literal_table_classify_scalar(spelled, spelled_length, width, false, false, classify) :
+                                         check_literal_table_classify(spelled, spelled_length, width, false, false, classify);
+        }
+        *category = kind;
+        if (spelling != NULL)
+        {
+            *spelling = spelled;
+            *length = spelled_length;
+        }
+    }
+    return valid;
+}
+
+// Converts, into `payload`, the elements of tokens [begin, end) that may hold an integer the format can't
+// (BUSTER_CHECK_LITERAL_TABLE_ROUND), and marks them in `converted`, before any other conversion: so the refusals an
+// integer's precision loss makes come first. One late in a table would otherwise come after every element before it was
+// converted in vain, which the ordinary path then converts again: 28% slower than main on a 200,000-element table refused
+// at its last element on the 9700X (#1210). Converting every integer of four characters or more first still left that
+// table of exact long integers 23% slower, and gathering every element's spelling (check_input_spelling, kept in scratch
+// for the batches) 6% slower. Now an element shorter than its format's shortest such integer (8 bytes for float, 16 for
+// double) is passed by its token's length alone, and a longer one is read in place (check_literal_table_element), with
+// nothing kept: the batches read the bytes again. The other late refusals (a range warning, an imaginary, bit-precise or
+// malformed constant) are code that warns or fails, and keep their cost.
 static bool check_literal_table_floating_integers(CheckInputReader* reader, uint32_t begin, uint32_t end, TypeId element, uint32_t width,
-                                                  uint8_t* payload, const CheckLiteralTableElements* elements)
+                                                  uint8_t* payload, uint64_t* converted)
 {
     const uint8_t* kinds = reader->parser->tokens.kinds;
     const uint32_t unit = width / 8;
+    CheckLiteralTableSource source = { 0 };
     uint32_t index = 0;
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
     {
         if (kinds[token] == PARSE_KIND_NUMBER)
         {
-            elements->tokens[index] = token;
-            valid = check_input_spelling(reader, token, &elements->spellings[index], &elements->lengths[index]);
-            const uint8_t* spelling = valid ? elements->spellings[index] : NULL;
-            const uint32_t length = valid ? elements->lengths[index] : 0;
-            if (valid && length > 3 && check_literal_table_integer_spelling(spelling, length) && check_literal_table_integer_may_round(spelling, length, width))
+            const uint64_t mark = reader->scratch->length;
+            uint32_t category = 0;
+            valid = check_literal_table_element(reader, &source, token, width, true, NULL, NULL, &category);
+            if (valid && category == BUSTER_CHECK_LITERAL_TABLE_ROUND)
             {
-                const uint64_t mark = reader->scratch->length;
+                const uint8_t* spelling = NULL;
+                uint32_t length = 0;
                 uint64_t bits = 0;
-                valid = check_literal_table_floating_value(reader, spelling, length, kinds[token - 1] == PARSE_KIND_MINUS, element, &bits);
-                arena_pop_to(reader->scratch, mark);
+                valid = check_literal_table_element(reader, &source, token, width, false, &spelling, &length, &category) &&
+                        check_literal_table_floating_value(reader, spelling, length, kinds[token - 1] == PARSE_KIND_MINUS, element, &bits);
                 memcpy(payload + (uint64_t)index * unit, &bits, unit);
-                elements->converted[index / 64] |= (uint64_t)valid << (index % 64);
+                converted[index / 64] |= (uint64_t)valid << (index % 64);
             }
+            arena_pop_to(reader->scratch, mark);
             index += 1;
         }
     }
     return valid;
 }
 
-// Converts the `count` elements from `first` (at most a batch) into `destination`, those `converted` marks being there
-// already.
-static bool check_literal_table_floating_batch(CheckInputReader* reader, const CheckLiteralTableElements* elements, uint32_t first, uint32_t count,
-                                               TypeId element, uint32_t width, uint8_t* destination)
+// Converts a batch's `count` elements (at most BUSTER_CHECK_LITERAL_TABLE_BATCH), their tokens and spellings given, into
+// `destination`, but those `converted` marks, which are there already.
+static bool check_literal_table_floating_batch(CheckInputReader* reader, const uint32_t* tokens, const uint8_t* const* spellings, const uint32_t* spelled,
+                                               uint32_t converted, uint32_t count, TypeId element, uint32_t width, uint8_t* destination)
 {
     uint32_t words[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
-    // The decoder reads 16 lengths whatever the batch's count: a copy, zero past it, rather than the shared column's end.
+    // The decoder reads 16 lengths whatever the batch's count: a copy, zero past it.
     uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH] = { 0 };
     uint32_t decoded[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint64_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH];
-    const uint32_t* tokens = elements->tokens + first;
-    const uint8_t* const* spellings = elements->spellings + first;
-    memcpy(lengths, elements->lengths + first, (uint64_t)count * sizeof(uint32_t));
-    // A batch is 16 elements from a multiple of 16, within one word of the bitset.
-    const uint32_t converted = (uint32_t)(elements->converted[first / 64] >> (first % 64)) & 0xffffu;
+    memcpy(lengths, spelled, (uint64_t)count * sizeof(uint32_t));
     // The parser's columns/options stay immutable and disjoint from output.
     const bool scalar = reader->parser->options.scalar;
     const uint8_t* kinds = reader->parser->tokens.kinds;
@@ -442,29 +558,47 @@ static bool check_literal_table_floating_batch(CheckInputReader* reader, const C
     return valid;
 }
 
-// A floating table's elements, gathered and their long integers converted (check_literal_table_floating_integers),
-// then converted a batch at a time into `payload`. Its scratch, the spellings among it, is popped once it is decided.
+// A floating table's `count` elements, tokens [begin, end): the integers that may round converted first
+// (check_literal_table_floating_integers), then every element a batch at a time into `payload`, each batch's spellings
+// read in place again (check_literal_table_element) and its scratch popped after it. The scratch holds only the
+// converted bitset, and is popped once the table is decided.
 static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t count, TypeId element, uint32_t width, uint8_t* payload)
 {
     const uint64_t mark = reader->scratch->length;
     const uint32_t words = (count + 63) / 64;
-    CheckLiteralTableElements elements = {
-        .tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count),
-        .spellings = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const uint8_t*, count),
-        .lengths = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count),
-        .converted = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words),
-    };
-    const bool reserved = elements.tokens != NULL && elements.spellings != NULL && elements.lengths != NULL && elements.converted != NULL;
-    reader->output->resource |= !reserved;
-    if (reserved)
+    uint64_t* converted = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
+    reader->output->resource |= converted == NULL;
+    if (converted != NULL)
     {
-        memset(elements.converted, 0, (uint64_t)words * sizeof(uint64_t));
+        memset(converted, 0, (uint64_t)words * sizeof(uint64_t));
     }
-    bool valid = reserved && check_literal_table_floating_integers(reader, begin, end, element, width, payload, &elements);
-    for (uint32_t first = 0; valid && first < count; first += BUSTER_CHECK_LITERAL_TABLE_BATCH)
+    bool valid = converted != NULL && check_literal_table_floating_integers(reader, begin, end, element, width, payload, converted);
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    CheckLiteralTableSource source = { 0 };
+    uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    uint32_t batch = 0;
+    uint32_t written = 0;
+    const uint64_t batch_mark = reader->scratch->length;
+    for (uint32_t token = begin; valid && token < end; token += 1)
     {
-        const uint32_t batch = count - first < BUSTER_CHECK_LITERAL_TABLE_BATCH ? count - first : BUSTER_CHECK_LITERAL_TABLE_BATCH;
-        valid = check_literal_table_floating_batch(reader, &elements, first, batch, element, width, payload + (uint64_t)first * (width / 8));
+        if (kinds[token] == PARSE_KIND_NUMBER)
+        {
+            uint32_t category = 0;
+            tokens[batch] = token;
+            valid = check_literal_table_element(reader, &source, token, width, false, &spellings[batch], &lengths[batch], &category);
+            batch += 1;
+            if (valid && (batch == BUSTER_CHECK_LITERAL_TABLE_BATCH || written + batch == count))
+            {
+                // A batch is 16 elements from a multiple of 16, within one word of the bitset.
+                const uint32_t marks = (uint32_t)(converted[written / 64] >> (written % 64)) & 0xffffu;
+                valid = check_literal_table_floating_batch(reader, tokens, spellings, lengths, marks, batch, element, width, payload + (uint64_t)written * (width / 8));
+                written += batch;
+                batch = 0;
+                arena_pop_to(reader->scratch, batch_mark);
+            }
+        }
     }
     arena_pop_to(reader->scratch, mark);
     return valid;
