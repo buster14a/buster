@@ -273,6 +273,26 @@ static void tier1_masks_test_pressure_model32(const uint8_t* input, uint64_t cou
     tier1_masks_test_pressure(input, output, 32);
 }
 
+// The read-only row's buffer (#1293's review): of the 15 32-byte vectors at 0, 4, ..., 56, the exclusive or of the last 14
+// at 128, and the first, the row's result, at 160.
+static void tier1_masks_test_read_only_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    for (uint32_t lane = 0; lane < 8; lane += 1)
+    {
+        uint32_t folded = 0;
+        for (uint32_t v = 1; v < 15; v += 1)
+        {
+            uint32_t x = 0;
+            memcpy(&x, input + 4 * v + 4 * lane, 4);
+            folded ^= x;
+        }
+        memcpy(output + 128 + 4 * lane, &folded, 4);
+    }
+    memcpy(output + 160, input, 32);
+}
+
 // The floating row's buffer (#141): the low lanes of a float's and another's bits added as integers at 128, the result
 // read as its first operand, of the floats at 0 and 4.
 static void tier1_masks_test_floating_model(const uint8_t* input, uint64_t count, uint8_t* output)
@@ -1665,6 +1685,69 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "  %48 = ret.void\n"
                 "}\n",
         .model = tier1_masks_test_pressure_model32,
+        .v3 = true,
+    },
+    {
+        // #1293's review: a VEX row whose result is its first operand, which no record writes, and which writes its second
+        // operand, live past it, at x86-64-v3 under the same pressure: 14 vectors live across it beside its dying first
+        // operand, so that only xmm15 is free below 16. VECTOR(0) stays in the first operand's register, taking none, and
+        // the second operand is staged in xmm15.
+        .name = "a VEX row of a read-only result under register pressure at x86-64-v3",
+        .text = "function (ptr) -> void {\n"
+                "  row #0 (vector32, vector32) -> vector32 [VPADDD_Y_Y_YM256 0x81 0x81 0x80 0x00 0x00 0x00 0 0]\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = address.ptr %0 offset=0\n"
+                "  %2 = load.v8i32 %1 align=4\n"
+                "  %3 = address.ptr %0 offset=4\n"
+                "  %4 = load.v8i32 %3 align=4\n"
+                "  %5 = address.ptr %0 offset=8\n"
+                "  %6 = load.v8i32 %5 align=4\n"
+                "  %7 = address.ptr %0 offset=12\n"
+                "  %8 = load.v8i32 %7 align=4\n"
+                "  %9 = address.ptr %0 offset=16\n"
+                "  %10 = load.v8i32 %9 align=4\n"
+                "  %11 = address.ptr %0 offset=20\n"
+                "  %12 = load.v8i32 %11 align=4\n"
+                "  %13 = address.ptr %0 offset=24\n"
+                "  %14 = load.v8i32 %13 align=4\n"
+                "  %15 = address.ptr %0 offset=28\n"
+                "  %16 = load.v8i32 %15 align=4\n"
+                "  %17 = address.ptr %0 offset=32\n"
+                "  %18 = load.v8i32 %17 align=4\n"
+                "  %19 = address.ptr %0 offset=36\n"
+                "  %20 = load.v8i32 %19 align=4\n"
+                "  %21 = address.ptr %0 offset=40\n"
+                "  %22 = load.v8i32 %21 align=4\n"
+                "  %23 = address.ptr %0 offset=44\n"
+                "  %24 = load.v8i32 %23 align=4\n"
+                "  %25 = address.ptr %0 offset=48\n"
+                "  %26 = load.v8i32 %25 align=4\n"
+                "  %27 = address.ptr %0 offset=52\n"
+                "  %28 = load.v8i32 %27 align=4\n"
+                "  %29 = address.ptr %0 offset=56\n"
+                "  %30 = load.v8i32 %29 align=4\n"
+                "  %31 = call.v8i32 row #0(%2, %4) fixed=(v8i32, v8i32) variadic=0\n"
+                "  %32 = xor.v8i32 %4, %6\n"
+                "  %33 = xor.v8i32 %32, %8\n"
+                "  %34 = xor.v8i32 %33, %10\n"
+                "  %35 = xor.v8i32 %34, %12\n"
+                "  %36 = xor.v8i32 %35, %14\n"
+                "  %37 = xor.v8i32 %36, %16\n"
+                "  %38 = xor.v8i32 %37, %18\n"
+                "  %39 = xor.v8i32 %38, %20\n"
+                "  %40 = xor.v8i32 %39, %22\n"
+                "  %41 = xor.v8i32 %40, %24\n"
+                "  %42 = xor.v8i32 %41, %26\n"
+                "  %43 = xor.v8i32 %42, %28\n"
+                "  %44 = xor.v8i32 %43, %30\n"
+                "  %45 = address.ptr %0 offset=128\n"
+                "  %46 = store.void %45, %44 align=1\n"
+                "  %47 = address.ptr %0 offset=160\n"
+                "  %48 = store.void %47, %31 align=1\n"
+                "  %49 = ret.void\n"
+                "}\n",
+        .model = tier1_masks_test_read_only_model,
         .v3 = true,
     },
     {

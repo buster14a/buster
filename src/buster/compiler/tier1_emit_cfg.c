@@ -2427,15 +2427,18 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
             blocked |= sources[j] == destination && (copied_in || tier0_class_floating(class) || (own && late));
         }
         in_place = !blocked && clean;
-        // Below 16 (#1281), the destination taken by the result written in place, else VECTOR(0) a free register.
+        // Below 16 (#1281), the destination taken by the result written in place; else VECTOR(0) takes a free register
+        // only where it is placed and doesn't stay in the first operand's (#1293's review: a row that never writes it
+        // reads it there), in the operand loop or after it.
         free_low &= in_place ? ~(1u << d) : UINT32_MAX;
-        vectors[0] = in_place ? d : vectors[0] == UINT8_MAX ? tier1_emit_cfg_take(&free_low) : vectors[0];
+        vectors[0] = in_place ? d : vectors[0];
         split = in_place && splits ? write : 0;
         early = split != 0 ? (uint8_t)(sources[0] - BUSTER_TIER1_EMIT_VECTOR_LOCATION) : 0;
         result_register = vectors[0];
         result_moves = !in_place || roles.widest_written[0] > row->result_bytes;
     }
-    error = error == TIER1_EMIT_OK && (result_class == BUSTER_TYPED_CLASS_VOID || result_register != UINT8_MAX) ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
+    // A vector result's VECTOR(0) below 16 may be placed later (low_vectors).
+    error = error == TIER1_EMIT_OK && (result_class == BUSTER_TYPED_CLASS_VOID || result_register != UINT8_MAX || (low_vectors && tier0_class_vector(result_class))) ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
     // The moves into place and out of it (#1283, Tier1EmitResult.row_moves): the operands' and the result's.
     uint32_t moves = 0;
     for (uint32_t j = 0; error == TIER1_EMIT_OK && j < row->operand_count; j += 1)
@@ -2511,12 +2514,14 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         }
     }
     error = error == TIER1_EMIT_OK && next_floating <= 32 ? error : error == TIER1_EMIT_OK ? TIER1_EMIT_UNSUPPORTED : error;
-    // The vector roles below 16 no operand or result placed (a row's own vector scratch), each a free register.
+    // The vector roles below 16 no operand placed (a row's own vector scratch, and a vector result's VECTOR(0) where its
+    // first operand is no vector), each a free register; the result's register, VECTOR(0)'s.
     for (uint32_t j = 0; error == TIER1_EMIT_OK && j < reach.vectors; j += 1)
     {
         vectors[j] = vectors[j] == UINT8_MAX ? tier1_emit_cfg_take(&free_low) : vectors[j];
         error = vectors[j] != UINT8_MAX ? error : TIER1_EMIT_UNSUPPORTED;
     }
+    result_register = error == TIER1_EMIT_OK && tier0_class_vector(result_class) ? vectors[0] : result_register;
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < reach.scratch; k += 1)
     {
         placement.scratch[k] = tier1_emit_cfg_take(&free_general);
