@@ -189,6 +189,12 @@ struct Tier1RowPlacement
     uint8_t floating_result;
     uint8_t mask_result;
     uint8_t renamed[8];
+    // VECTOR(0)'s register up to the result's first write, record `split` (an index plus one, 0 for none), where the first
+    // operand is read in its own register (#1283: tier1_emit_cfg_row_place's `early`), and that write's field
+    // (BUSTER_X86_ROLE_REG, _RM or _VVVV): the fields naming VECTOR(0) before it, and that record's others, read `early`.
+    uint8_t early;
+    uint8_t split;
+    uint8_t position;
 };
 
 typedef struct Tier1EmitResult Tier1EmitResult;
@@ -219,6 +225,10 @@ struct Tier1EmitResult
     uint32_t symbol_access_count;
     uint32_t call_stores;
     uint32_t call_loads;
+    // The CFG consumer's machine rows (#141, tier1_emit_cfg_row), and the moves it wrote around them into their roles'
+    // registers and out of them (#1283): their operands' and their results'.
+    uint32_t machine_rows;
+    uint32_t row_moves;
     uint64_t retained_bytes;
     uint64_t transition_scratch_bytes;
     // A function the straight-line consumer doesn't take goes through tier1_emit_cfg.c, which leaves `liveness` and

@@ -1104,6 +1104,9 @@ struct CheckTestTier1Build
     uint64_t slots;
     uint64_t frame;
     uint64_t call_stores;
+    // Its machine rows and the moves around them into their roles' registers and out of them (#1283).
+    uint64_t machine_rows;
+    uint64_t row_moves;
     bool reported;
 };
 
@@ -1161,7 +1164,8 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "dropped_definitions", &build->dropped) &&
                       check_test_tier1_field(text, "spill_stores", &build->stores) && check_test_tier1_field(text, "spill_loads", &build->loads) &&
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
-                      check_test_tier1_field(text, "call_stores", &build->call_stores);
+                      check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
+                      check_test_tier1_field(text, "row_moves", &build->row_moves);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -2947,6 +2951,30 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-rows", "machine rows'", check_test_tier1_rows_header, check_test_tier1_rows_source,
                                   check_test_tier1_rows_other_source, "-march=x86-64-v4", host, 0);
+    // #1283: Tier 1 places a row's vector roles one at a time, so that most rows take no move into or out of place: by
+    // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
+    // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows).
+    char header[512];
+    char unit[512];
+    char object[512];
+    snprintf(header, sizeof(header), "%s/tier1-rows.h", directory);
+    snprintf(unit, sizeof(unit), "%s/tier1-rows-moves.c", directory);
+    snprintf(object, sizeof(object), "%s/tier1-rows-moves.o", directory);
+    const bool written = parse_test_write(header, check_test_tier1_rows_header, strlen(check_test_tier1_rows_header)) &&
+                         parse_test_write(unit, check_test_tier1_rows_source, strlen(check_test_tier1_rows_source));
+    check_test_expect(test, written, "the machine rows' unit is written for its moves' count");
+    for (uint32_t run = 0; written && run < 4; run += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "", object, (run & 2) == 0, (run & 1) != 0, true, false, "-march=x86-64-v4", &build);
+        char message[256];
+        snprintf(message, sizeof(message), "the machine rows' unit takes at most a move into or out of place for every two rows (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
+                 (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
+        check_test_expect(test, compiled && build.machine_rows >= 50 && 2 * build.row_moves <= build.machine_rows, message);
+        unlink(object);
+    }
+    unlink(unit);
+    unlink(header);
 }
 
 // The SSE carriers' fixture (#1280): vectors of 4 and 8 bytes, an f32 or f64 in the IR, in and out of the machine rows

@@ -141,8 +141,10 @@ contract. The report also sums Tier 1's code: its records, its spills' stores
 and reloads, the saves and restores
 around its calls and fixed registers' sequences, its recomputed values and the
 definitions of them it left out, its edges' moves, its spill slots, its
-frames' bytes, and its unwind tables' shapes: open frames, returns published as
-tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`).
+frames' bytes, its unwind tables' shapes: open frames, returns published as
+tails and frames in the red zone (`open_frames`, `return_tails`, `red_zones`),
+and its machine rows and the moves around them into their roles' registers and
+out of them (`machine_rows`, `row_moves`, #1283).
 Its `requested`, `admitted`, `compiled`, `unsupported`, `resource_failures`,
 `resource_retries`, `internal_failures` and `fallbacks` fields count the
 selected, admitted and compiled bodies and the disposition of the rest.

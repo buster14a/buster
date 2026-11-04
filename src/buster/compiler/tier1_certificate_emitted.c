@@ -2118,6 +2118,11 @@ static bool tier1_cert_emitted_epilogue(Tier1CertEmittedBuild* build, uint32_t f
 
 // A role of a row's (tier1_cert_emitted_row_roles): its register file (0 general, 1 vector, 2 opmask), its register, and
 // whether it is operand `operand`'s (UINT32_MAX for none) or the result's.
+// A machine row's role (#1284): its operand (UINT32_MAX for none), its register file (general, vector, opmask) and
+// register, whether it is the result's; and a VECTOR(j) role's j (UINT8_MAX for another role), and the records over
+// which it holds its register (#1283), [start, end] by index plus one: from the row's entry (0) for an operand there, else
+// from its first write; to the last record naming it, or past the row for the result. VECTOR(0)'s early register
+// (`early`) holds the first operand up to the result's first write, which reads it alone.
 typedef struct Tier1CertEmittedRole Tier1CertEmittedRole;
 struct Tier1CertEmittedRole
 {
@@ -2125,7 +2130,43 @@ struct Tier1CertEmittedRole
     uint8_t file;
     uint8_t reg;
     bool result;
+    uint8_t vector;
+    uint8_t start;
+    uint8_t end;
+    bool early;
 };
+
+// Whether template record `record` writes VECTOR(j) in any field (tier1_select_row_vectors' reading of its fields: a form
+// x86 semantics' tables don't cover writes every field it names).
+static bool tier1_cert_emitted_row_writes(X86Instruction record, uint32_t j)
+{
+    const Tier0Fields fields = tier0_operation_fields(&record);
+    const X86Effects* effects = x86_effects(record.form);
+    const bool covered = effects->operation != X86_OPERATION_NONE;
+    bool writes = false;
+    for (uint32_t k = 0; k < fields.count; k += 1)
+    {
+        const uint8_t role = *fields.bytes[k];
+        const bool vector = tier0_vector_register_class(fields.classes[k]) && role >= BUSTER_TIER0_ROLE && role < BUSTER_TIER0_ROLE_FLOATING(0);
+        const uint32_t position = fields.bytes[k] == &record.reg ? BUSTER_X86_ROLE_REG : fields.bytes[k] == &record.vvvv ? BUSTER_X86_ROLE_VVVV : BUSTER_X86_ROLE_RM;
+        const bool address = record.mode != BUSTER_X86_REGISTER_DIRECT && (fields.bytes[k] == &record.rm || fields.bytes[k] == &record.index);
+        const uint32_t bits = covered ? x86_effects_role(effects, position) : BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE;
+        writes |= vector && (role & 15u) == j && !address && (bits & BUSTER_X86_ROLE_WRITE) != 0;
+    }
+    return writes;
+}
+
+// Whether VECTOR role `a` is done with the register it shares with VECTOR role `b` before `b` takes it (#1283): `a` named
+// last before `b`'s first write, or in that record where the write is a pure one (it reads none of `b`'s earlier value)
+// of a form whose destination may be one of its sources, and that record doesn't write `a`: an instruction reads its
+// sources before it writes its destination.
+static bool tier1_cert_emitted_row_before(const Tier0Operation* row, const Tier1SelectRowVectors* facts, Tier1CertEmittedRole a, Tier1CertEmittedRole b)
+{
+    const bool born = !b.early && b.start != 0 && b.start == facts->first_write[b.vector & 15];
+    const bool touching = born && a.end == b.start && ((facts->pure >> (b.vector & 15)) & 1) != 0 && ((facts->exclusive >> (b.start - 1)) & 1) == 0 &&
+                          (a.early || !tier1_cert_emitted_row_writes(row->records[b.start - 1], a.vector));
+    return (born && a.end < b.start) || touching;
+}
 
 #define BUSTER_CERT_EMITTED_ROLES (BUSTER_TIER0_OPERATION_VECTORS + 2 * BUSTER_TIER0_OPERATION_OPERANDS + 2 * BUSTER_TIER0_SCRATCH + 3 + 8)
 
@@ -2171,11 +2212,13 @@ static uint8_t tier1_cert_emitted_row_register(uint8_t role, uint32_t class, con
 // registers by number and the mask result.
 #define BUSTER_CERT_EMITTED_ROLE_NAMES (2 * BUSTER_TIER0_OPERATION_VECTORS + 6 + BUSTER_TIER0_SCRATCH + 9)
 
-// Template record `record` placed by `placement` (#1284): each register field's role its register, an /is4 operand's
-// VECTOR(j) in its immediate's bits 7 to 4, an opmask decoration's role its register and a number renamed. Each role it
-// names into `named` (a bit per tier1_cert_emitted_row_register's name), and its explicit registers into `explicit_registers`
+// Template record `record`, the row's `r`-th, placed by `placement` (#1284): each register field's role its register, an
+// /is4 operand's VECTOR(j) in its immediate's bits 7 to 4, an opmask decoration's role its register and a number
+// renamed. VECTOR(0) is `early` up to the result's first write, record `split` (#1283, tier1_emit_cfg_row_place): in the
+// records before it, and in its fields but that write's (a VSIB index among them, which it reads). Each role it names into
+// `named` (a bit per tier1_cert_emitted_row_register's name), and its explicit registers into `explicit_registers`
 // (BUSTER_X86_RESOURCE_*) and `explicit_masks` (a bit per opmask register). False where a role has no register.
-static bool tier1_cert_emitted_row_place(X86Instruction record, const Tier1RowPlacement* placement, X86Instruction* placed, uint64_t* named, uint64_t* explicit_registers, uint32_t* explicit_masks)
+static bool tier1_cert_emitted_row_place(X86Instruction record, uint32_t r, const Tier1RowPlacement* placement, X86Instruction* placed, uint64_t* named, uint64_t* explicit_registers, uint32_t* explicit_masks)
 {
     const X86FormDescription* description = x86_form_description(record.form);
     uint8_t* fields[4] = { 0 };
@@ -2218,8 +2261,13 @@ static bool tier1_cert_emitted_row_place(X86Instruction record, const Tier1RowPl
     for (uint32_t k = 0; valid && k < count; k += 1)
     {
         uint32_t name = UINT32_MAX;
-        const uint8_t reg = tier1_cert_emitted_row_register(*fields[k], classes[k], placement, &name);
+        const uint8_t role = *fields[k];
         const bool vector = classes[k] == BUSTER_X86_CLASS_XMM || classes[k] == BUSTER_X86_CLASS_YMM || classes[k] == BUSTER_X86_CLASS_ZMM;
+        const uint32_t at = fields[k] == &result.reg ? BUSTER_X86_ROLE_REG : fields[k] == &result.vvvv ? BUSTER_X86_ROLE_VVVV : BUSTER_X86_ROLE_RM;
+        const bool before = r + 1 < placement->split || (r + 1 == placement->split && (at != placement->position || fields[k] == &result.index));
+        const bool early = vector && role >= BUSTER_TIER0_ROLE && role < BUSTER_TIER0_ROLE_FLOATING(0) && (role & 15) == 0 && before;
+        const uint8_t reg = early ? placement->early : tier1_cert_emitted_row_register(role, classes[k], placement, &name);
+        name = early ? 0 : name;
         const bool mask = classes[k] == BUSTER_X86_CLASS_OPMASK;
         valid = reg != UINT8_MAX && name < BUSTER_CERT_EMITTED_ROLE_NAMES;
         *fields[k] = reg;
@@ -2234,7 +2282,7 @@ static bool tier1_cert_emitted_row_place(X86Instruction record, const Tier1RowPl
     if (valid && is4)
     {
         const uint32_t j = ((uint32_t)record.immediate >> 4) & 15;
-        const uint32_t reg = placement->vectors[j];
+        const uint32_t reg = j == 0 && r + 1 <= placement->split ? placement->early : placement->vectors[j];
         valid = reg < 16;
         result.immediate = (int32_t)((reg << 4) | ((uint32_t)record.immediate & 15));
         *named |= UINT64_C(1) << j;
@@ -2280,7 +2328,7 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
     {
         uint64_t explicit_registers = 0;
         uint32_t explicit_masks = 0;
-        valid = tier1_cert_emitted_row_place(row->records[k], placement, &placed[k], &named, &explicit_registers, &explicit_masks);
+        valid = tier1_cert_emitted_row_place(row->records[k], k, placement, &placed[k], &named, &explicit_registers, &explicit_masks);
         valid = valid && tier1_cert_emitted_exactly(emitted->code.records[r + k], placed[k]) && x86_validate(&placed[k], 1) == 1 && tier1_cert_emitted_take_reference(build, r + k, 0);
         uint64_t read = 0;
         uint64_t written = 0;
@@ -2293,7 +2341,11 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         mask_writes |= (uint32_t)opmasks >> 8;
     }
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
-    // The roles: each operand's by its class, the result's, and each other role the records name.
+    // The roles: each operand's by its class, the result's, and each other role the records name; VECTOR(j)'s with the
+    // records they hold their registers over, by the template's own uses of them (tier1_select_row_vectors).
+    const Tier1SelectRowVectors facts = valid ? tier1_select_row_vectors(row) : (Tier1SelectRowVectors){ 0 };
+    const uint8_t past = (uint8_t)(row != 0 ? row->record_count + 1 : 0);
+    const bool split = valid && placement->split != 0;
     Tier1CertEmittedRole roles[BUSTER_CERT_EMITTED_ROLES];
     uint32_t role_count = 0;
     uint64_t taken = 0;
@@ -2307,8 +2359,17 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         const bool floating = tier0_class_floating(class);
         const bool mask = tier0_class_mask(class);
         const uint8_t file = vector || floating ? 1 : mask ? 2 : 0;
-        const uint8_t reg = vector ? placement->vectors[j] : mask ? placement->masks[j] : placement->operands[j];
-        roles[role_count++] = (Tier1CertEmittedRole){ .operand = j, .file = file, .reg = reg };
+        // The first operand read in its own register up to the result's first write (#1283).
+        const bool early = vector && j == 0 && split;
+        const uint8_t reg = early ? placement->early : vector ? placement->vectors[j] : mask ? placement->masks[j] : placement->operands[j];
+        roles[role_count++] = (Tier1CertEmittedRole){
+            .operand = j,
+            .file = file,
+            .reg = reg,
+            .vector = vector ? (uint8_t)j : UINT8_MAX,
+            .end = early ? placement->split : facts.last_named[j & 15],
+            .early = early,
+        };
         taken |= UINT64_C(1) << (vector ? j : mask ? 24 + j : 16 + j);
         const uint32_t stack = mask ? 2 : floating ? 1 : 0;
         first_of[stack] = first_of[stack] == UINT32_MAX ? j : first_of[stack];
@@ -2329,11 +2390,23 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
                                : floating_result ? placement->floating_result
                                : mask_result     ? placement->mask_result
                                                  : placement->integer_result;
+    const bool first_vector = valid && row->operand_count != 0 && tier0_class_vector(row->operand_classes[0]);
+    // A split (#1283) is VECTOR(0)'s first write, a pure one in the claimed field, the first operand a vector's.
+    valid = valid && (!split || (vector_result && first_vector && placement->split == facts.first_write[0] && (facts.pure & 1) != 0 && placement->position == facts.write_position[0]));
+    valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
     if (valid && result_class != BUSTER_TYPED_CLASS_VOID)
     {
-        // A vector result is VECTOR(0)'s, operand 0's own role where it is a vector.
-        const bool same = vector_result && row->operand_count != 0 && tier0_class_vector(row->operand_classes[0]);
-        roles[same ? 0 : role_count] = (Tier1CertEmittedRole){ .operand = same ? 0 : UINT32_MAX, .file = (uint8_t)(vector_result || floating_result ? 1 : mask_result ? 2 : 0), .reg = result_reg, .result = true };
+        // A vector result is VECTOR(0)'s, operand 0's own role where it is a vector read in VECTOR(0)'s register.
+        const bool same = vector_result && first_vector && !split;
+        roles[same ? 0 : role_count] = (Tier1CertEmittedRole){
+            .operand = same ? 0 : UINT32_MAX,
+            .file = (uint8_t)(vector_result || floating_result ? 1 : mask_result ? 2 : 0),
+            .reg = result_reg,
+            .result = true,
+            .vector = vector_result ? 0 : UINT8_MAX,
+            .start = vector_result && !same ? facts.first_write[0] : 0,
+            .end = past,
+        };
         role_count += same ? 0 : 1;
         taken |= UINT64_C(1) << (vector_result ? 0 : floating_result ? 32 : integer_result ? 33 : 50);
         // Tier 0's placement has the result in its class's first operand's register.
@@ -2353,7 +2426,14 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         {
             const uint8_t reg = vector ? placement->vectors[name] : scratch ? placement->scratch[name - 34] : mask_scratch ? placement->mask_scratch[name - 38] : placement->renamed[name - 42];
             valid = role_count < BUSTER_CERT_EMITTED_ROLES;
-            roles[valid ? role_count : 0] = (Tier1CertEmittedRole){ .operand = UINT32_MAX, .file = (uint8_t)(vector ? 1 : scratch ? 0 : 2), .reg = reg };
+            roles[valid ? role_count : 0] = (Tier1CertEmittedRole){
+                .operand = UINT32_MAX,
+                .file = (uint8_t)(vector ? 1 : scratch ? 0 : 2),
+                .reg = reg,
+                .vector = vector ? (uint8_t)name : UINT8_MAX,
+                .start = vector ? facts.first_write[name] : 0,
+                .end = vector ? facts.last_named[name] : 0,
+            };
             role_count += valid;
         }
         valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
@@ -2374,15 +2454,22 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         valid = role.file == 0 ? role.reg < 16 && role.reg != X86_REGISTER_RSP : role.file == 1 ? role.reg < 32 : role.reg < 8;
         role_registers |= role.file == 0 ? BUSTER_X86_RESOURCE_GPR(role.reg & 15) : role.file == 1 ? BUSTER_X86_RESOURCE_VECTOR(role.reg & 31) : 0;
         role_masks |= role.file == 2 ? 1u << (role.reg & 7) : 0;
-        // No two roles share a register, but the result and its class's first operand, and operands no record writes.
+        // No two roles share a register while both hold their values, but where Tier 0's placement puts them together:
+        // the result and its class's first operand, and operands no record writes. Two VECTOR(j) roles may share one
+        // over records apart (#1283), one done with it before the other takes it.
         for (uint32_t m = 0; valid && m < k; m += 1)
         {
             const Tier1CertEmittedRole other = roles[m];
             const bool shared = other.file == role.file && other.reg == role.reg;
             const bool aliased = alias != UINT32_MAX && ((role.result && other.operand == alias) || (other.result && role.operand == alias));
-            const bool written = role.file == 0 ? (writes & BUSTER_X86_RESOURCE_GPR(role.reg & 15)) != 0 : role.file == 1 ? (writes & BUSTER_X86_RESOURCE_VECTOR(role.reg & 31)) != 0 : ((mask_writes >> (role.reg & 7)) & 1) != 0;
-            const bool read_only = role.operand != UINT32_MAX && other.operand != UINT32_MAX && !role.result && !other.result && !written;
-            valid = !shared || aliased || read_only;
+            const bool vectors = role.vector != UINT8_MAX && other.vector != UINT8_MAX;
+            const bool unwritten = vectors ? (role.early || ((facts.written >> role.vector) & 1) == 0) && (other.early || ((facts.written >> other.vector) & 1) == 0)
+                                   : role.file == 0 ? (writes & BUSTER_X86_RESOURCE_GPR(role.reg & 15)) == 0
+                                   : role.file == 1 ? (writes & BUSTER_X86_RESOURCE_VECTOR(role.reg & 31)) == 0
+                                                    : ((mask_writes >> (role.reg & 7)) & 1) == 0;
+            const bool read_only = role.operand != UINT32_MAX && other.operand != UINT32_MAX && !role.result && !other.result && unwritten;
+            const bool apart = vectors && (tier1_cert_emitted_row_before(row, &facts, role, other) || tier1_cert_emitted_row_before(row, &facts, other, role));
+            valid = !shared || aliased || read_only || apart;
         }
     }
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
@@ -2400,7 +2487,7 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
         const uint32_t class = row->operand_classes[j];
         const uint32_t value = emitted->node_values[build->plan->effective_use_values[first + j]];
         const uint32_t width = value != BUSTER_TIER1_CFG_NONE ? tier1_cert_emitted_width(emitted, value) : 0;
-        const uint32_t location = tier0_class_vector(class)     ? tier1_cert_emitted_vector(build, placement->vectors[j], width)
+        const uint32_t location = tier0_class_vector(class)     ? tier1_cert_emitted_vector(build, roles[j].reg, width)
                                   : tier0_class_floating(class) ? tier1_cert_emitted_vector(build, placement->operands[j], width)
                                   : tier0_class_mask(class)     ? tier1_cert_emitted_mask(placement->masks[j], width)
                                                                 : tier1_cert_emitted_gpr(placement->operands[j], width);

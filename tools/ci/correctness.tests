@@ -611,6 +611,18 @@ if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$d
     --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
 grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
 rm -rf "$errors" "$directory"
+== Dispatch Tier 1's vector code measurement and refuse its incomplete commands
+# #1283's measure-tier1-rows runs on the 9700X only where `tier1_programs` changes, so its dispatch is checked here, on
+# every run, without timing anything: a command without --clang must print its usage and fail, and one whose --base isn't
+# there must fail that build, after this compiler's Tier 0 builds (compiled for x86-64-v4 on any host, never run).
+errors=$(mktemp)
+directory=$(mktemp -d)
+if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-rows --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 --clang clang --base "$directory/none" --march x86-64-v4 --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q "^measure-tier1-rows: Tier 0's builds built$" "$errors"
+grep -q "^measure-tier1-rows: --tier1 (base)'s builds FAILED$" "$errors"
+rm -rf "$errors" "$directory"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c

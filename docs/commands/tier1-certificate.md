@@ -40,8 +40,9 @@ requirements. [Command index](README.md).
   its own cases too. Its realigned fixture's prologue, its allocation moved
   before its push of rbx and its epilogue matched, must be refused. `test-tier1-masks` corrupts machine rows and wide vectors'
   moves: borrowed masks' reloads left out, staging copies onto live registers,
-  claimed placements of roles sharing a register or of k0 for a numbered opmask
-  register, and ymm or zmm moves narrowed to xmm; each must be refused.
+  claimed placements of roles sharing a register while both hold values, of k0
+  for a numbered opmask register or of a corrupted split (#1283's early
+  register), and ymm or zmm moves narrowed to xmm; each must be refused.
 - The emitter checks its allocations, and the CFG consumer's code, under
   `Tier1EmitOptions.certify`, which its tests and the driver's `--verify` set. A failure is the emission stage's
   cause `certificate`: a refusal (`TIER1_EMIT_CERTIFICATE`) is internal, and

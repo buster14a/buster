@@ -571,11 +571,21 @@ The decoding:
   and validates them (`x86_validate`). The roles are registers that hold
   values: no rsp; k0 no decoration's role, and by number only as itself, k1 to
   k7 only as one of them; a pair's registers (VP2INTERSECT's) themselves. No two
-  roles share a register but those Tier 0's placement puts together
-  (`tier0_operation_placement`, `tier0_operation_mask_place`), which the
-  template may take for granted: the result and the first operand of its stack
-  (an integer's where that operand is an integer, a floating one's, a mask's),
-  or operands no record writes. The records are one instruction: each operand
+  roles share a register while both hold their values but those Tier 0's
+  placement puts together (`tier0_operation_placement`,
+  `tier0_operation_mask_place`), which the template may take for granted: the
+  result and the first operand of its stack (an integer's where that operand is
+  an integer, a floating one's, a mask's), or operands no record writes. Since
+  #1283 places VECTOR roles one at a time, a VECTOR role holds its register over
+  the records from the row's entry (an operand there) or its first write, to the
+  last record naming it (past the row for the result), by the template's own
+  uses (`tier1_select_row_vectors`); two may share one where one is done with it
+  before the other's first write, or in that record where the write is pure, the
+  form's destination may be a source, and the record doesn't write the first.
+  VECTOR(0)'s early register, where the first operand is read in its own
+  register up to the result's first write, must be that first write's, a pure
+  one, in the claimed field; the fields naming VECTOR(0) before it read the
+  early register. The records are one instruction: each operand
   read at its role's register at its value's width, what they write killed,
   the result defined at its role's. The operands' staging into their roles'
   registers, the result's move out, and the borrowed opmask registers' saves
@@ -689,11 +699,17 @@ its move into itself, the mask it held lost; each staging copy into a general
 register renamed, through the row's records and its claimed placement, to a
 register holding a value live across the row; the claim corrupted with the
 row's records placed by it, so that only the claim's checks can refuse it
-(a non-operand role, SCRATCH, MASK_SCRATCH or a temporary VECTOR, in the
-result's register; the result in an operand's that Tier 0's own placement
-doesn't give it; an opmask register named by number made k0); and each
-ymm or zmm value's reload or register move narrowed to its xmm form. Each is
-refused, and the code put back is certified.
+(a non-operand role, SCRATCH, MASK_SCRATCH or a temporary VECTOR still in
+use when the result is written, in the result's register; the result in an
+operand's that Tier 0's own placement doesn't give it; an opmask register named
+by number made k0; a split's claim cleared, or its early register made the
+result's); and each ymm or zmm value's reload or register move narrowed to its
+xmm form. Each is refused, and the code put back is certified. The rule on
+VECTOR roles sharing a register is checked on its own too, on `vpaddd V2, V0,
+V1; vpaddd V0, V2, V1`: V1 and V2 may each share the result's register, each
+last read where the result's pure write makes it; V1 and V2 may not; nor V1 and
+the result where that write merges or its record's destination can't be a
+source.
 `test-tier1-pipeline` also corrupts each
 certified function's records: every prologue and epilogue record, and a sample
 of its moves and nodes' (another register, a frame access 8 bytes off, an
