@@ -1,0 +1,602 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+#
+# The micro-architecture campaign's driver (docs/commands/microarch.md):
+#
+#   tools/microarch/run.sh tools/microarch/hosts/HOST.sh STEP...
+#
+# The run root (ROOT, build/microarch by default) holds bin/compiler-*, corpus,
+# self-main.i, predefines-znver5.h, results/HOST and scratch/HOST; `setup`
+# makes it. Steps:
+#   setup        the run root: corpus link, builds of this checkout (BUILD_ARCHES),
+#                predefines-znver5.h, self-main.i and the uarch tool
+#   build-commit NAME COMMIT ARCH[,ARCH...]  bin/compiler-NAME-ARCH from `git archive COMMIT`
+#   env          the host's identity (no lock: reads sysfs, perf's catalogs, hashes)
+#   validate     every variant's outputs, hashed (the objects must be identical)
+#   time         whole-process wall time and rusage, 11 rotated rounds, with the
+#                compiler's --time-stages reports
+#   time-self    the compiler's own main.c (.i), 3 rotated rounds
+#   groups       six fixed counter groups (each one perf stat group, never multiplexed)
+#                per variant and workload, 5 runs
+#   groups-self  the same groups for the main.c workload, 2 runs
+#   sweep        every core event (user and kernel, with cycles:u and instructions:u)
+#                per sweep variant and workload, 2 runs, in chunks
+#   metrics      every perf metric, one perf stat -M each, native variant, 2 runs
+#   profiles     leader-sampled groups, IBS ops (all and L3 misses only), LBR and
+#                cycles (user and kernel) of sq-c, reduced to per-symbol tables;
+#                musl's cycles; the microcode group
+#   profiles-same  the znver4 build's profiles (the same binary on every host)
+#   profile-self   IBS ops of the main.c workload, by function and by line
+#   scaling      one compile on 1..N lanes, musl's sources on 1..N lanes, and K
+#                independent compiles on K cores, with package energy
+#   energy       package energy, core energy and APERF/MPERF of single-core compiles
+#   uncore       UMC CAS commands (where the host exposes amd_umc)
+#   ab           AB_BUILDS (bin/compiler-NAME for each NAME) on sq-c and sq-syn with
+#                the stage clock, 11 rotated rounds, to results/HOST/AB_NAME
+#   ab-self      AB_BUILDS on the main.c workload, 3 rotated rounds
+#   generic-scaling  -fsyntax-only of generated units of 250..4,000 _Generic
+#                selections for AB_BUILDS (#1341)
+#   summarize    the tables of every step's raw files
+# SWEEP_WORKLOADS and METRIC_WORKLOADS (default "sq-c sq-syn") and the profile's
+# VARIANTS, SWEEP_VARIANTS and SELF_VARIANTS narrow a run. Each step, or each chunk
+# of one, takes the host's lock or core grant itself, for that chunk alone; no step
+# needs another's output except summarize.
+set -u
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repository=$(cd "$here/../.." && pwd)
+profile=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+shift
+# shellcheck source=/dev/null
+source "$profile"
+ROOT=${ROOT:-$repository/build/microarch}
+mkdir -p "$ROOT"
+cd "$ROOT" || exit 2
+OUT=results/$HOST
+SCRATCH=scratch/$HOST
+UARCH=$ROOT/uarch
+export LC_ALL=C LC_NUMERIC=C SOURCE_DATE_EPOCH=1792454400
+unset CPATH C_INCLUDE_PATH
+mkdir -p "$OUT" "$SCRATCH"
+if [[ ! -x $UARCH || $here/uarch.c -nt $UARCH ]]; then
+    clang -std=c17 -O2 -Wall -Wextra -Werror -o "$UARCH" "$here/uarch.c" -lm || exit 2
+fi
+# shellcheck source=workloads.sh
+source "$here/workloads.sh"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*" | tee -a "$OUT/run.log" >&2; }
+
+# The CPUs this process may run on, one per line.
+affinity_cpus()
+{
+    local list part
+    list=$(taskset -pc $$ | sed 's/.*: //')
+    for part in ${list//,/ }; do
+        if [[ $part == *-* ]]; then seq "${part%-*}" "${part#*-}"; else echo "$part"; fi
+    done
+}
+
+# One CPU per physical core of this process's affinity, comma-separated.
+physical_cpus()
+{
+    local seen=" " cpu core out=""
+    for cpu in $(affinity_cpus); do
+        core="$(cat "/sys/devices/system/cpu/cpu$cpu/topology/physical_package_id" 2>/dev/null):$(cat "/sys/devices/system/cpu/cpu$cpu/topology/core_id" 2>/dev/null)"
+        if [[ $seen != *" $core "* ]]; then seen+="$core "; out+="${out:+,}$cpu"; fi
+    done
+    echo "$out"
+}
+
+single_cpu() { if [[ -n ${SINGLE_CPU:-} ]]; then echo "$SINGLE_CPU"; else affinity_cpus | head -1; fi; }
+
+# Runs "$0 PROFILE --inner STEP ARG..." under the host's single-core hold, pinned.
+held() { hold "$here/run.sh" "$profile" --inner "$@"; local s=$?; [[ $PAUSE -gt 0 ]] && sleep "$PAUSE"; return $s; }
+held_multi() { hold_multi "$here/run.sh" "$profile" --inner-multi "$@"; local s=$?; [[ $PAUSE -gt 0 ]] && sleep "$PAUSE"; return $s; }
+
+group_spec()
+{
+    case $1 in
+        basic) echo "-e {cycles:u,instructions:u,cycles:k,instructions:k} -e task-clock,page-faults,minor-faults,major-faults,context-switches,cpu-migrations" ;;
+        td1) echo "-e {ls_not_halted_cyc:u,de_src_op_disp.all:u,ex_ret_ops:u,de_no_dispatch_per_slot.no_ops_from_frontend:u,de_no_dispatch_per_slot.backend_stalls:u}" ;;
+        td2) echo "-e {ls_not_halted_cyc:u,ex_no_retire.load_not_complete:u,ex_no_retire.not_complete:u,cpu/de_no_dispatch_per_slot.no_ops_from_frontend,cmask=$TD_WIDTH/u,ex_ret_ucode_ops:u}" ;;
+        br) echo "-e {instructions:u,ex_ret_brn:u,ex_ret_brn_misp:u,ex_ret_brn_tkn:u,$TD_RESYNC:u}" ;;
+        fe) echo "-e {instructions:u,ic_tag_hit_miss.instruction_cache_miss:u,op_cache_hit_miss.op_cache_miss:u,op_cache_hit_miss.all_op_cache_accesses:u,bp_l1_tlb_miss_l2_tlb_miss.all:u}" ;;
+        mem) echo "-e {instructions:u,ls_dmnd_fills_from_sys.all:u,ls_dmnd_fills_from_sys.dram_io_near:u,l2_cache_req_stat.ic_dc_miss_in_l2:u,ls_l1_d_tlb_miss.all:u}" ;;
+    esac
+}
+COUNTER_GROUPS="basic td1 td2 br fe mem"
+
+# ---------------------------------------------------------------------------
+# Steps inside a hold (pinned to one CPU).
+
+inner_validate()
+{
+    local v f="$OUT/validate.tsv" status
+    : > "$f"
+    for v in $VARIANTS; do
+        workload "$v" sq-c && "${WL[@]}" > "$SCRATCH/validate-$v-sq-c.log" 2>&1
+        status=$?
+        printf '%s\tsq-c\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/$v-sq.o" | cut -d' ' -f1)" >> "$f"
+        workload "$v" sq-E && "${WL[@]}" > "$SCRATCH/validate-$v-sq-E.log" 2>&1
+        status=$?
+        printf '%s\tsq-E\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/$v-sq.i" | cut -d' ' -f1)" >> "$f"
+        workload "$v" sq-c-default && "${WL[@]}" > "$SCRATCH/validate-$v-sq-c-default.log" 2>&1
+        status=$?
+        printf '%s\tsq-c-default\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/$v-sq-default.o" | cut -d' ' -f1)" >> "$f"
+        # The diagnostics, which every variant must print alike.
+        workload "$v" sq-syn && "${WL[@]}" > "$SCRATCH/validate-$v-sq-syn.log" 2>&1
+        status=$?
+        printf '%s\tsq-syn\t%s\t%s\n' "$v" "$status" "$(sha256sum < "$SCRATCH/validate-$v-sq-syn.log" | cut -d' ' -f1)" >> "$f"
+    done
+    if command -v tcc > /dev/null; then
+        workload x tcc-c && "${WL[@]}" > "$SCRATCH/validate-tcc.log" 2>&1
+        status=$?
+        printf 'tcc\ttcc-c\t%s\t%s\n' "$status" "$(sha256sum < "$SCRATCH/tcc-sq.o" | cut -d' ' -f1)" >> "$f"
+    fi
+    cat "$f"
+}
+
+inner_time()
+{
+    local args=() v w
+    for v in $VARIANTS; do
+        for w in sq-c sq-syn sq-E; do
+            workload "$v" "$w"
+            args+=(--list "$v:$w" "${WL[@]}")
+        done
+        workload "$v" sq-c
+        args+=(--list "stages-$v" "${WL[@]}" --time-stages)
+    done
+    if command -v tcc > /dev/null; then
+        workload x tcc-c
+        args+=(--list "tcc:tcc-c" "${WL[@]}")
+    fi
+    "$UARCH" time "$OUT/time" 11 "${args[@]}"
+}
+
+inner_time_self()
+{
+    local args=() v
+    for v in $SELF_VARIANTS; do
+        workload "$v" self-syn
+        args+=(--list "$v:self-syn" "${WL[@]}" --list "stages-self-$v" "${WL[@]}" --time-stages)
+    done
+    "$UARCH" time "$OUT/time-self" 3 "${args[@]}"
+}
+
+# AB_BUILDS on sq-c and sq-syn (ab) or on the main.c workload (ab-self).
+inner_ab()
+{
+    local dir=$1 rounds=$2; shift 2
+    local args=() v w
+    for v in ${AB_BUILDS:?AB_BUILDS names bin/compiler-NAME builds}; do
+        for w in "$@"; do
+            workload "$v" "$w"
+            args+=(--list "$v:$w" "${WL[@]}" --time-stages)
+        done
+    done
+    "$UARCH" time "$OUT/$dir" "$rounds" "${args[@]}"
+    if [[ $* == *sq-c* ]]; then
+        for v in $AB_BUILDS; do
+            workload "$v" sq-c
+            # shellcheck disable=SC2046
+            "$UARCH" stat "$OUT/$dir" "$v.sq-c.basic" 5 $(group_spec basic) -- "${WL[@]}"
+            # shellcheck disable=SC2046
+            "$UARCH" stat "$OUT/$dir" "$v.sq-c.br" 5 $(group_spec br) -- "${WL[@]}"
+            # shellcheck disable=SC2046
+            "$UARCH" stat "$OUT/$dir" "$v.sq-c.td1" 5 $(group_spec td1) -- "${WL[@]}"
+        done
+    fi
+}
+
+# -fsyntax-only --time-stages of generated units of N _Generic selections, 3 runs
+# each, for AB_BUILDS (#1341).
+inner_generic_scaling()
+{
+    local dir="$OUT/generic-scaling" v n r
+    mkdir -p "$dir"
+    for n in 250 500 1000 2000 4000; do
+        "$UARCH" generate-generic "$n" > "$SCRATCH/generic-$n.c"
+    done
+    for v in ${AB_BUILDS:?AB_BUILDS names bin/compiler-NAME builds}; do
+        for n in 250 500 1000 2000 4000; do
+            for r in 0 1 2; do
+                [[ -s $dir/$v.$n.r$r.log ]] && continue
+                "bin/compiler-$v" -fsyntax-only --time-stages "$SCRATCH/generic-$n.c" > "$dir/$v.$n.r$r.log" 2>&1
+            done
+        done
+    done
+    {
+        printf 'build\tselections\tcheck_program_ms\ttotal_ms\n'
+        for v in $AB_BUILDS; do
+            for n in 250 500 1000 2000 4000; do
+                "$UARCH" stages "$dir/$v.$n".r*.log | awk -F'\t' -v v="$v" -v n="$n" '
+                    $2 == "check-program" && $3 == "ms" { c = $4 } $2 == "total" && $3 == "ms" { t = $4 }
+                    END { printf "%s\t%s\t%s\t%s\n", v, n, c, t }'
+            done
+        done
+    } > "$dir/generic-scaling.tsv"
+    cat "$dir/generic-scaling.tsv"
+}
+
+inner_groups()
+{
+    local v=$1 runs=$2; shift 2
+    local w g
+    for w in "$@"; do
+        workload "$v" "$w"
+        for g in $COUNTER_GROUPS; do
+            # shellcheck disable=SC2046
+            "$UARCH" stat "$OUT/groups" "$v.$w.$g" "$runs" $(group_spec "$g") -- "${WL[@]}"
+        done
+    done
+}
+
+inner_sweep()
+{
+    local v=$1 w=$2 from=$3 to=$4
+    workload "$v" "$w"
+    "$UARCH" sweep "$OUT/sweep-$v-$w" "$OUT/env/core-events.txt" "$from" "$to" 2 "cycles:u,instructions:u" -- "${WL[@]}"
+}
+
+inner_metrics()
+{
+    local v=$1 w=$2 from=$3 to=$4
+    workload "$v" "$w"
+    "$UARCH" metrics "$OUT/metrics-$v-$w" "$OUT/env/metrics.txt" "$from" "$to" 2 -- "${WL[@]}"
+}
+
+# Records 8 compiles of sq-c (or PROFILE_RUNS of PROFILE_WORKLOAD) under one perf
+# record and reduces the samples. Leader-sampled groups use a 50,021-cycle period:
+# each sample's member deltas go to the leader's address, so a long period blends
+# short functions with their neighbours. perf.data stays in scratch/HOST.
+profile_one()
+{
+    local name=$1 v=$2; shift 2
+    local dir="$OUT/profiles/$v" data="$SCRATCH/profile-$v-$name.data"
+    mkdir -p "$dir"
+    [[ -s $dir/$name.done ]] && return 0
+    workload "$v" "${PROFILE_WORKLOAD:-sq-c}"
+    local loop="" runs=${PROFILE_RUNS:-8}
+    printf -v loop '%q ' "${WL[@]}"
+    perf record -q -o "$data" "$@" -- bash -c "for ((i = 0; i < $runs; i++)); do $loop > /dev/null 2>&1 || exit 1; done" \
+        > "$dir/$name.record.log" 2>&1
+    echo "status $?" >> "$dir/$name.record.log"
+    case $name in
+        cycles | musl-cycles | self-cycles)
+            perf report -i "$data" --no-children --sort dso,sym --stdio -q --percent-limit 0.05 > "$dir/$name.txt" 2>/dev/null
+            perf report -i "$data" --no-children --sort dso --stdio -q > "$dir/$name-dso.txt" 2>/dev/null ;;
+        lbr)
+            perf script -i "$data" -F brstacksym 2>/dev/null | "$UARCH" branches - 120 > "$dir/lbr.tsv" ;;
+        ibs | ibs-l3)
+            perf script -i "$data" -F ip,sym,data_src,weight 2>/dev/null | "$UARCH" memory - > "$dir/$name.tsv" ;;
+        self-ibs)
+            perf report -i "$data" --no-children --sort sym --stdio -q --percent-limit 0.3 > "$dir/self-ibs.txt" 2>/dev/null
+            "$here/inline-split.sh" "bin/compiler-$v" "$data" '^check_common_evaluated$' check_common_evaluated --lines \
+                > "$dir/self-ibs-check-common-evaluated-lines.tsv" ;;
+        *)
+            perf script -i "$data" -F period,event,ip,sym 2>/dev/null | "$UARCH" symbols - > "$dir/$name.tsv" ;;
+    esac
+    perf report -i "$data" --header-only > "$dir/$name.header.txt" 2>/dev/null
+    stat -c %s "$data" > "$dir/$name.done"
+}
+
+inner_profiles()
+{
+    local v=$1 part=$2
+    case $part in
+        a)
+            profile_one cycles "$v" -e cycles -c 100003
+            profile_one td1 "$v" -e "{ls_not_halted_cyc:u,de_src_op_disp.all:u,ex_ret_ops:u,de_no_dispatch_per_slot.no_ops_from_frontend:u,de_no_dispatch_per_slot.backend_stalls:u}:S" -c 50021
+            profile_one td2 "$v" -e "{ls_not_halted_cyc:u,ex_no_retire.load_not_complete:u,ex_no_retire.not_complete:u,instructions:u,ex_ret_brn_misp:u}:S" -c 50021 ;;
+        b)
+            profile_one mem "$v" -e "{cycles:u,ls_dmnd_fills_from_sys.all:u,ls_dmnd_fills_from_sys.dram_io_near:u,l2_cache_req_stat.ic_dc_miss_in_l2:u,ls_l1_d_tlb_miss.all:u}:S" -c 50021
+            profile_one fe "$v" -e "{cycles:u,ic_tag_hit_miss.instruction_cache_miss:u,op_cache_hit_miss.op_cache_miss:u,op_cache_hit_miss.all_op_cache_accesses:u,bp_l1_tlb_miss_l2_tlb_miss.all:u}:S" -c 50021 ;;
+        c)
+            profile_one ibs "$v" -e "ibs_op/cnt_ctl=1,swfilt=1/u" -d -W -c 200000
+            profile_one ibs-l3 "$v" -e "ibs_op/cnt_ctl=1,swfilt=1,l3missonly=1/u" -d -W -c 4000
+            profile_one lbr "$v" -j any,u -e cycles:u -c 1000003 ;;
+        d)
+            PROFILE_WORKLOAD=musl-syn PROFILE_RUNS=2 profile_one musl-cycles "$v" -e cycles -c 100003 ;;
+        e)
+            profile_one ucode "$v" -e "{cycles:u,ex_ret_ucode_ops:u,ex_ret_ops:u,fp_ops_retired_by_width.pack_512_uops_retired:u,ls_bad_status2.stli_other:u}:S" -c 50021 ;;
+        self)
+            PROFILE_WORKLOAD=self-syn PROFILE_RUNS=1 profile_one self-ibs "$v" -e "ibs_op/cnt_ctl=1,swfilt=1/u" -c 400000 ;;
+    esac
+}
+
+inner_energy()
+{
+    local cpu=$1 v loop dir="$OUT/energy"
+    mkdir -p "$dir"
+    perf stat -a -x, -o "$dir/idle.csv" -e power/energy-pkg/ -- sleep 3 2>/dev/null
+    for v in $VARIANTS; do
+        workload "$v" sq-c
+        printf -v loop '%q ' "${WL[@]}"
+        perf stat -a -x, -o "$dir/$v.pkg.csv" -e power/energy-pkg/ -- bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1; done"
+        perf stat -C "$cpu" -x, -o "$dir/$v.freq.csv" -e msr/aperf/,msr/mperf/,msr/tsc/,cycles,instructions -- \
+            bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1; done"
+        perf stat -a --per-core -x, -o "$dir/$v.core.csv" -e power_core/energy-core/ -- bash -c "for i in 1 2 3 4 5 6 7 8 9 10; do $loop > /dev/null 2>&1; done"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Steps inside a multi-core hold.
+
+inner_scaling()
+{
+    local cpus=$1 dir="$OUT/scaling" n k r list args=()
+    mkdir -p "$dir"
+    echo "$cpus" > "$dir/cpus.txt"
+    # One compile on N lanes and musl's sources on N lanes, rotated.
+    for n in $SCALING_LANES; do
+        workload "$NATIVE:$n" sq-c
+        args+=(--list "sq-c-lanes$n" taskset -c "$cpus" "${WL[@]}")
+        workload "$NATIVE:$n" musl-syn
+        args+=(--list "musl-lanes$n" taskset -c "$cpus" "${WL[@]}")
+    done
+    workload "$NATIVE" sq-c-default
+    args+=(--list "sq-c-default" taskset -c "$cpus" "${WL[@]}")
+    "$UARCH" time "$dir" 5 "${args[@]}"
+    for n in $SCALING_LANES; do
+        workload "$NATIVE:$n" sq-c
+        "$UARCH" stat "$dir" "sq-c-lanes$n" 3 -e task-clock,cycles:u,instructions:u,cycles:k,instructions:k,context-switches,cpu-migrations,page-faults -- taskset -c "$cpus" "${WL[@]}"
+        workload "$NATIVE:$n" musl-syn
+        "$UARCH" stat "$dir" "musl-lanes$n" 2 -e task-clock,cycles:u,instructions:u,cycles:k,instructions:k,context-switches,cpu-migrations,page-faults -- taskset -c "$cpus" "${WL[@]}"
+    done
+    # K independent single-lane compiles on K cores, each batch under package energy.
+    for k in $FANOUT_WORKERS; do
+        list=$(echo "$cpus" | cut -d, -f1-"$k")
+        workload "$NATIVE" sq-c
+        local command=("${WL[@]}")
+        command[${#command[@]}-3]="$SCRATCH/fan-{i}.o"
+        for r in 0 1 2 3; do
+            [[ -s $dir/fanout-energy-$k.r$r.csv ]] && continue
+            perf stat -a -x, -o "$dir/fanout-energy-$k.r$r.csv" -e power/energy-pkg/ -- \
+                "$UARCH" fanout "$dir" "fanout$k-r$r" 1 "$list" -- "${command[@]}"
+        done
+    done
+}
+
+inner_uncore()
+{
+    local cpus=$1 dir="$OUT/uncore" loop
+    mkdir -p "$dir"
+    local events="amd_umc/umc_cas_cmd.rd/,amd_umc/umc_cas_cmd.wr/,amd_umc/umc_act_cmd.all/,amd_umc/umc_mem_clk/"
+    perf stat -a -x, -o "$dir/idle.csv" -e "$events" -- sleep 2
+    workload "$NATIVE" sq-c
+    printf -v loop '%q ' "${WL[@]}"
+    perf stat -a -x, -o "$dir/single.csv" -e "$events" -- taskset -c "$(single_cpu)" bash -c "for i in 1 2 3 4 5 6 7 8; do $loop > /dev/null 2>&1; done"
+    local command=("${WL[@]}")
+    command[${#command[@]}-3]="$SCRATCH/fan-{i}.o"
+    perf stat -a -x, -o "$dir/fanout8.csv" -e "$events" -- "$UARCH" fanout "$dir" fanout8 2 "$cpus" -- "${command[@]}"
+}
+
+inner()
+{
+    local step=$1 cpu; shift
+    receipt >> "$OUT/holds.txt"
+    cpu=$(single_cpu)
+    log "inner $step $* (cpu $cpu)"
+    taskset -pc "$cpu" $$ > /dev/null
+    case $step in
+        validate) inner_validate ;;
+        time) inner_time ;;
+        time-self) inner_time_self ;;
+        ab) inner_ab "${AB_NAME:-ab}" 11 sq-c sq-syn ;;
+        ab-self) inner_ab "${AB_NAME:-ab-self}" 3 self-syn ;;
+        generic-scaling) inner_generic_scaling ;;
+        groups) inner_groups "$@" ;;
+        sweep) inner_sweep "$@" ;;
+        metrics) inner_metrics "$@" ;;
+        profiles) inner_profiles "$@" ;;
+        energy) inner_energy "$cpu" ;;
+    esac
+    log "inner $step $* done"
+}
+
+inner_multi()
+{
+    local step=$1 cpus; shift
+    receipt >> "$OUT/holds.txt"
+    cpus=$(physical_cpus)
+    log "inner-multi $step (cpus $cpus)"
+    case $step in
+        scaling) inner_scaling "$cpus" ;;
+        uncore) inner_uncore "$cpus" ;;
+    esac
+    log "inner-multi $step done"
+}
+
+# ---------------------------------------------------------------------------
+# Outer steps.
+
+# The run root from this checkout: the frozen corpus (CORPUS, the 9700X's copy, or
+# fetched into ROOT), each BUILD_ARCHES build of the checkout, the predefines and
+# the preprocessed main.c. Copy bin/ and self-main.i from one host to the others to
+# run identical executables and input everywhere.
+step_setup()
+{
+    local corpus=${CORPUS:-} arch
+    if [[ -z $corpus && -d /var/lib/buster-9700x/corpora/preprocessor-391e729af658 ]]; then
+        corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+    fi
+    if [[ -z $corpus ]]; then
+        corpus=$ROOT/corpus-preprocessor-391e729af658
+        [[ -f $corpus/MANIFESTS.sha256 ]] || bash "$repository/tools/ci/fetch-corpus.sh" "$corpus" || exit 2
+    fi
+    ln -sfn "$corpus" corpus
+    mkdir -p bin
+    for arch in ${BUILD_ARCHES:-znver4 znver5 x86-64}; do
+        [[ -x bin/compiler-$arch ]] && continue
+        log "setup: build $arch"
+        hold_build env BUSTER_HOST_ARCH="$arch" "$repository/build.sh" > "$SCRATCH/build-$arch.log" 2>&1 || { log "setup: build $arch failed"; exit 2; }
+        cp "$repository/build/compiler" "bin/compiler-$arch"
+        git -C "$repository" rev-parse HEAD > "bin/compiler-$arch.commit"
+    done
+    [[ -s predefines-znver5.h ]] || clang -dM -E -march=znver5 -fwrapv -funsigned-char -x c /dev/null > predefines-znver5.h
+    if [[ ! -s self-main.i ]]; then
+        "bin/compiler-${SELF_PREPROCESSOR:-znver4}" --predefines predefines-znver5.h -march=znver5 "-I$repository/src" -fwrapv -funsigned-char \
+            -fno-strict-aliasing -E -o self-main.i "$repository/src/buster/compiler/main.c" || exit 2
+    fi
+    log "setup: $(ls bin | tr '\n' ' ')"
+}
+
+# bin/compiler-NAME-ARCH for each ARCH, built from `git archive COMMIT`.
+step_build_commit()
+{
+    local name=$1 commit=$2 arch tree; shift 2
+    tree=$ROOT/trees/$name
+    if [[ ! -f $tree/COMMIT ]]; then
+        mkdir -p "$tree"
+        git -C "$repository" archive "$commit" | tar -x -C "$tree" || exit 2
+        git -C "$repository" rev-parse "$commit" > "$tree/COMMIT"
+    fi
+    for arch in "$@"; do
+        [[ -x bin/compiler-$name-$arch ]] && continue
+        log "build-commit: $name $arch ($(cat "$tree/COMMIT"))"
+        hold_build env BUSTER_HOST_ARCH="$arch" "$tree/build.sh" > "$SCRATCH/build-$name-$arch.log" 2>&1 || { log "build-commit: $name $arch failed"; exit 2; }
+        cp "$tree/build/compiler" "bin/compiler-$name-$arch"
+        cp "$tree/COMMIT" "bin/compiler-$name-$arch.commit"
+    done
+}
+
+step_env()
+{
+    local dir="$OUT/env" c
+    mkdir -p "$dir"
+    uname -a > "$dir/uname.txt"
+    lscpu > "$dir/lscpu.txt"
+    awk '/^$/{exit} {print}' /proc/cpuinfo > "$dir/cpuinfo-cpu0.txt"
+    {
+        printf 'cpu\tonline\tgovernor\tepp\tmin_khz\tmax_khz\tcur_khz\n'
+        for c in /sys/devices/system/cpu/cpu[0-9]*; do
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${c##*/}" "$(cat "$c/online" 2>/dev/null || echo 1)" \
+                "$(cat "$c/cpufreq/scaling_governor" 2>/dev/null)" "$(cat "$c/cpufreq/energy_performance_preference" 2>/dev/null)" \
+                "$(cat "$c/cpufreq/scaling_min_freq" 2>/dev/null)" "$(cat "$c/cpufreq/scaling_max_freq" 2>/dev/null)" \
+                "$(cat "$c/cpufreq/scaling_cur_freq" 2>/dev/null)"
+        done
+    } > "$dir/cpufreq.tsv"
+    {
+        echo "boost $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null)"
+        echo "thp_enabled $(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+        echo "thp_defrag $(cat /sys/kernel/mm/transparent_hugepage/defrag)"
+        echo "perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid)"
+        echo "nmi_watchdog $(cat /proc/sys/kernel/nmi_watchdog)"
+        echo "perf_event_max_sample_rate $(cat /proc/sys/kernel/perf_event_max_sample_rate)"
+        # Device identifiers stay out of the record.
+        echo "kernel_cmdline $(sed 's/cryptdevice=[^ ]*//g; s/root=[^ ]*//g; s/resume=[^ ]*//g; s/rd\.luks[^ ]*//g; s/initrd=[^ ]*//g' /proc/cmdline)"
+        echo "loadavg $(cat /proc/loadavg)"
+        echo "pmus $(ls /sys/bus/event_source/devices | tr '\n' ' ')"
+        echo "harness_commit $(git -C "$repository" rev-parse HEAD 2>/dev/null)"
+    } > "$dir/settings.txt"
+    free -m > "$dir/memory.txt"
+    { perf --version; clang --version | head -1; tcc -v 2>&1 | head -1; bash --version | head -1; } > "$dir/tools.txt"
+    sha256sum bin/compiler-* self-main.i predefines-znver5.h "$here"/uarch.c "$here"/run.sh "$here"/workloads.sh "$profile" > "$dir/sha256.txt" 2>/dev/null
+    sha256sum corpus/MANIFESTS.sha256 corpus/sqlite/sqlite3.c >> "$dir/sha256.txt"
+    perf list -j 2> /dev/null | gzip -9n > "$dir/perf-list.json.gz"
+    # perf lists tool and sensor names beside the core events; they don't count per thread.
+    perf list --raw-dump pmu 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v / | grep -v '^drm-' \
+        | grep -v -x -E 'core_wide|duration_time|has_pmem|num_cores|num_cpus|num_cpus_online|num_dies|num_packages|slots|smt_on|system_time|user_time' \
+        | sort -u > "$dir/core-events.txt"
+    perf list -j metrics 2>/dev/null | sed -n 's/.*"MetricName": "\([^"]*\)".*/\1/p' | sort -u > "$dir/metrics.txt"
+    log "env: $(wc -l < "$dir/core-events.txt") core events, $(wc -l < "$dir/metrics.txt") metrics"
+}
+
+# The chunk [FROM, FROM + CHUNK) is done when its last event's last run is.
+chunk_done()
+{
+    local dir=$1 from=$2 chunk=$3 count=$4 last
+    last=$((from + chunk < count ? from + chunk - 1 : count - 1))
+    [[ -f $dir/$(printf '%04d' "$last").r1.status ]]
+}
+
+step_sweep()
+{
+    local v w n from
+    n=$(wc -l < "$OUT/env/core-events.txt")
+    for v in $SWEEP_VARIANTS; do
+        for w in ${SWEEP_WORKLOADS:-sq-c sq-syn}; do
+            for ((from = 0; from < n; from += SWEEP_CHUNK)); do
+                chunk_done "$OUT/sweep-$v-$w/sweep" "$from" "$SWEEP_CHUNK" "$n" && continue
+                log "sweep $v $w $from"
+                held sweep "$v" "$w" "$from" $((from + SWEEP_CHUNK))
+            done
+        done
+    done
+}
+
+step_metrics()
+{
+    local w n from
+    n=$(wc -l < "$OUT/env/metrics.txt")
+    for w in ${METRIC_WORKLOADS:-sq-c sq-syn}; do
+        for ((from = 0; from < n; from += METRIC_CHUNK)); do
+            chunk_done "$OUT/metrics-$NATIVE-$w/metrics" "$from" "$METRIC_CHUNK" "$n" && continue
+            log "metrics $w $from"
+            held metrics "$NATIVE" "$w" "$from" $((from + METRIC_CHUNK))
+        done
+    done
+}
+
+step_summarize()
+{
+    local d v
+    for d in "$OUT"/time "$OUT"/time-self "$OUT"/groups "$OUT"/sweep-* "$OUT"/metrics-* "$OUT"/scaling "$OUT"/ab*; do
+        [[ -d $d ]] && "$UARCH" summarize "$d"
+    done
+    for v in $VARIANTS; do
+        compgen -G "$OUT/time/logs/stages-$v.r*.log" > /dev/null && "$UARCH" stages "$OUT"/time/logs/stages-"$v".r*.log > "$OUT/stages-$v.tsv"
+    done
+    for v in $SELF_VARIANTS; do
+        compgen -G "$OUT/time-self/logs/stages-self-$v.r*.log" > /dev/null && "$UARCH" stages "$OUT"/time-self/logs/stages-self-"$v".r*.log > "$OUT/stages-self-$v.tsv"
+    done
+}
+
+if [[ ${1:-} == --inner ]]; then
+    shift
+    inner "$@"
+    exit $?
+elif [[ ${1:-} == --inner-multi ]]; then
+    shift
+    inner_multi "$@"
+    exit $?
+fi
+
+while [[ $# -gt 0 ]]; do
+    step=$1
+    shift
+    log "step $step"
+    case $step in
+        setup) step_setup ;;
+        build-commit)
+            # build-commit NAME COMMIT ARCH[,ARCH...]
+            step_build_commit "$1" "$2" ${3//,/ }
+            shift 3 ;;
+        env) step_env ;;
+        validate) held validate ;;
+        time) held time ;;
+        time-self) held time-self ;;
+        ab) held ab ;;
+        ab-self) held ab-self ;;
+        generic-scaling) held generic-scaling ;;
+        groups)
+            first=1
+            for v in $VARIANTS; do
+                held groups "$v" 5 sq-c sq-syn sq-E
+                if [[ $first == 1 ]] && command -v tcc > /dev/null; then held groups tcc 5 tcc-c; fi
+                first=0
+            done ;;
+        groups-self) for v in $SELF_VARIANTS; do held groups "$v" 2 self-syn; done ;;
+        sweep) step_sweep ;;
+        metrics) step_metrics ;;
+        profiles) for part in a b c d e; do held profiles "$NATIVE" "$part"; done ;;
+        profiles-same) for part in a b c e; do held profiles znver4 "$part"; done ;;
+        profile-self) held profiles "$NATIVE" self ;;
+        scaling) held_multi scaling ;;
+        energy) held energy ;;
+        uncore) [[ $UNCORE == 1 ]] && held_multi uncore ;;
+        summarize) step_summarize ;;
+        *) log "unknown step $step" ;;
+    esac
+done
