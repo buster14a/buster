@@ -14,6 +14,7 @@
 
 #include "ir_optimize_verified.c"
 #include "ir_wide.c"
+#include "ir_truth.c"
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
                    BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
@@ -322,6 +323,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
+    }
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
+        // No later consumer reads their old operands and no analysis revision has been published. Simplify before
+        // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
+        ir_truth_simplify(&wide.function, scalar);
     }
     IrOptimizeResult optimized = { 0 };
     IrVerifiedRevision revision = { 0 };
