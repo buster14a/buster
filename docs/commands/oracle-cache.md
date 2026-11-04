@@ -215,21 +215,33 @@ run left wrong. The counts of what runs did (taken, run, stale, not kept) are
 in shared memory, which the parts a test forks after it sets up the cache add
 to, and a test prints them at its end (`oracle_cache_report`).
 
-A take (`oracle_run_take`) does what can fail without changing a file first
-(#1317): it copies the entry's output and errors, and reads each file the run
-writes as it is, one the entry rewrites by its bytes and one it removes linked
-to another name beside it (`NAME.PID.N.taken`, which `link` makes only where
-nothing has that name). A file there that isn't a regular one (a directory, a
-symbolic link the replay would write through) isn't taken. Only then does it
-write each file in place, so a file that was there keeps its permissions,
-owner and links, or remove it. If a write or a removal fails, the take puts
-back what it changed: a rewritten file's bytes and times in place, a removed
-one linked again, a made one removed. The tool then runs on its files as they
-were. If that fails too, the run fails without its tool, and the errors name
-each file it couldn't put back: a tool that reads a file it writes (whose
-bytes before the run `oracle_run_probes` keeps) would see it changed, which
-isn't the run the entry stands for. Staging the files and renaming them over
-theirs wouldn't spare the undo: several renames aren't atomic together.
+A take (`oracle_run_take`) does what can fail first, changing nothing, not
+even a file's status-change time or its directory's times (#1317): it copies
+the entry's output and errors, and `lstat`s each file the run writes, reading
+the bytes and extended attributes of one the entry rewrites. A file there that
+isn't a regular one (a directory, a symbolic link the replay would write
+through) isn't taken. Only then does it replay, each file only if it is as the
+take found it, else another process has changed it since and the tool, not the
+take, deals with it: a file that was there is rewritten in place if it is still
+that inode, so it keeps its permissions, owner and links; one that wasn't is
+made with `O_EXCL`; one the entry removes is moved aside with `renameat2`'s
+`RENAME_NOREPLACE` (to `NAME.PID.N.taken`), and moved back unless it was that
+inode; one the entry removes that wasn't there must still not be. If a write
+or a removal fails, or a file has changed, the take puts back what it changed
+and checks it: a rewritten file's bytes, permissions (the set-user and
+set-group bits a write by a process that isn't root takes) and modification
+time, in the same inode, then its mode, owner, size, time and extended
+attributes as they were (a file capability a write took, which only root can
+give back, isn't, so the take fails); a moved one moved back where nothing has
+come since; a made one removed if it is still that inode. The tool then runs
+on its files as they were, but for what no call gives back and a tool's result
+mustn't depend on here: their status-change times, link counts and access
+times and their directory's times. If putting back fails, the run fails without
+its tool, and the errors name each file it couldn't put back (and the name a
+moved one is kept under, which is left): a tool that reads a file it writes
+(whose bytes before the run `oracle_run_probes` keeps) would see it changed,
+which isn't the run the entry stands for. Staging the files and renaming them
+over theirs wouldn't spare the undo: several renames aren't atomic together.
 
 The twelve standalone `test-check-builtins` commands (the base command and
 `-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
@@ -381,14 +393,23 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   again when those bytes differ and taken when they are an entry's; clang's
   object where the last compile left one, run again once, then taken, and in
   the other directory, without one, taken;
-- replays (#1317, sh): a run that adds one to a counter it reads and writes,
-  makes a file and removes one, taken with the counter rewritten in place (its
-  inode and mode kept); each step of a take that can fail made to fail
-  (`oracle_replay_faults`: the output's and errors' copies, the files' reads
-  and links, each write and removal after it has changed its file), its files
-  left or put back, then its tool run on them as they were (their bytes, sizes,
-  modes, times and inodes, as its `stat` prints them), counting to 2; and two
-  steps failing, the second a restoration's, the run failed, its tool not run;
+- replays (#1317, the test's program's `replay`): a run that adds one to a
+  counter it reads and writes (mode 06750, whose set-user and set-group bits a
+  write takes), makes a file and removes one, taken with the counter rewritten
+  in place (its inode kept); each step of a take that can fail made to fail
+  (`oracle_replay_faults`: the output's and errors' copies, the counter's read,
+  each write and removal after it has changed its file), its files left or put
+  back, then its tool run on them as they were, counting to 2: wholly where the
+  take changed nothing (their status-change times, link counts and directory's
+  times too, as the tool prints them), and in their bytes, sizes, modes,
+  modification times and inodes where it put them back; of two steps failing,
+  exactly the 1 + 2 + 3 pairs whose second is a restoration's failing the run
+  without its tool and each other one running it so; and another process's
+  change between the take's preparation and its replay
+  (`oracle_replay_between`): the file the take would make made, which it
+  neither truncates nor removes; the counter and the file it would remove each
+  replaced, neither rewritten nor removed, and the tool run on them; that file
+  removed, taken; and made where it wasn't, the tool run;
 - listings (the test's program's `getdents64`, as `ls -i` lists): a file made
   anew with the same name and bytes, its inode another, run again;
 - changes (the test's program's `mkdir`, and traced sh's `rmdir`): `mkdir`'s
