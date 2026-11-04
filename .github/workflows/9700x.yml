@@ -1604,10 +1604,12 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
-          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions), alone and after scalar work
-          # as its regions (`vector`) are.
+          # #1050: the vector path by its memoized transitions (opt-in, CheckOptions.transitions) and with its regions in
+          # postorder batches (opt-in, CheckOptions.regions), alone and after scalar work as its node order (`vector`) is.
           taskset -c 2 ./build/compiler benchmark-checker-source --only transitions "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only transitions --after-scalar 100 "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only regions "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only regions --after-scalar 100 "${source[@]}"
           # A second corpus, every path: musl's regcomp.c, with the per-file jobs' musl options.
           musl="$corpus/libc/musl"
           taskset -c 2 ./build/compiler benchmark-checker-source -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \

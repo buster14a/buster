@@ -955,10 +955,12 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder, one at a time. The
-vector schedule finds contiguous regions whose type behavior is known to stay
-within builtin arithmetic types, and checks each region in postorder batches
-(`check_graph_region_postorder`). From the first node not yet done, a batch
+The scalar schedule processes graph nodes in postorder, one at a time. So
+does the vector schedule by default, with its leaves and statements' discards
+without their actions ("Node order or regions" below). With its regions
+(`CheckOptions.regions`), it finds contiguous regions whose type behavior is
+known to stay within builtin arithmetic types, and checks each region in
+postorder batches (`check_graph_region_postorder`). From the first node not yet done, a batch
 takes consecutive nodes that read none of each other, up to the batch size.
 The alternative, the region's level order (`check_graph_region`,
 `CheckOptions.level_order`), computes the nodes' relative dependency heights
@@ -1020,10 +1022,13 @@ before return.
 #133 left open which schedule the vector path's regions should take, decided
 by a benchmark on the same tables: their level order, or a vectorized walk in
 postorder. `benchmark-checker-source` times both in one build, with the same
-actions, type table and graph: its paths `vector` (the postorder batches, the
-default) and `levels` (`CheckOptions.level_order`), beside `scalar`. Before it
-times them, it checks that each gives the scalar path's typed stream, and
-`test-checker` compares both orders at every batch size with the scalar path.
+actions, type table and graph: its paths `regions` (the postorder batches,
+`CheckOptions.regions`, which were `vector`, the vector path's default, until
+#1050 made it node order: "Node order or regions" below) and `levels`
+(`CheckOptions.level_order`), beside `scalar`. Before it times them, it checks
+that each gives the scalar path's typed stream, and `test-checker` compares both
+orders at every batch size with the scalar path. The measurements below, from
+#133, name the postorder batches as they were then.
 
 Level order computes each region node's height from its operands, counts the
 heights, places the nodes by height, then checks each level in batches. The
@@ -1081,6 +1086,33 @@ instruction delta. The first build's other changes (the
 catalogue's fixes, the comparison builtins, K&R definitions) cost 0.78M on
 `-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
 the commands, the trees and the logs.
+
+### Node order or regions
+
+#1050 measured what the regions do on `sqlite3.c`'s `-c`. A region's batch held
+1.4 nodes: in a tree's postorder a parent follows its last child, so the next
+node most often reads the one before it, and few of a region's nodes are the
+integer folds that a batch takes 8 lanes at a time. What every region paid was
+its machinery: a pass over its nodes for its leaves, then for each node a test
+of its done mark and of each operand's, the batch's packing, and the scan for
+the region's end. The vector path's default is node order now: each node in
+turn, a leaf without its action (`check_graph_leaf`), a statement's discard of
+an rvalue without its action (`check_graph_discard`), and any other node by its
+action, the integer folds by the scalar fold. A region's nodes are pure (they
+intern no type and have no effects), so in node order they make the same typed
+stream, the same table and the same objects. The regions stay, opt-in
+(`CheckOptions.regions`, which `CheckOptions.level_order` takes), for graphs
+whose independent folds fill a batch, as `benchmark-checker`'s synthetic ones
+do; `test-checker`, the graph tests' batch partitions and
+`benchmark-checker-source`'s `regions` path keep them checked and timed.
+
+On the 4-CPU Intel VM (no PMU), measured before the 9700X: the main loop of a
+cold `-c` of `sqlite3.c` took 44.41M cycles in node order against 48.27M by the
+regions (−8.0%, medians of 24 compiles each in ABBA order, `rdtsc` around the
+loop, the objects the same bytes), and `benchmark-checker-source` on its
+2,550 bodies (307,125 nodes, 10 passes) gave 46.0 ns a node in node order, 50.8
+by the regions, 53.3 by the transitions, 56.1 by level order and 75.1 by the
+scalar path.
 
 ### Memoized transitions
 

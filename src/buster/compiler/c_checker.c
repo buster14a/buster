@@ -596,15 +596,20 @@ struct CheckOptions
     bool scalar;
     // Validate reader-owned graphs too, and compare their retained purity/allocation facts with the oracle.
     bool verify;
-    // 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
+    // With regions, 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
     uint32_t batch_size;
-    // The vector path's regions by dependency level (check_graph_region) rather than in postorder batches
-    // (check_graph_region_postorder), its default since the benchmark measured the two on the same actions and
-    // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
+    // The vector path's mutation-free regions: each run of pure nodes checked as a region, in postorder batches whose
+    // integer folds take 8 lanes at a time (check_graph_region_postorder), rather than each node in node order, the vector
+    // path's default since on sqlite3.c's -c a region's machinery cost more than its batches saved (#1050; docs/c-checker.md,
+    // "Node order or regions"). The typed stream is the same.
+    bool regions;
+    // The regions by dependency level (check_graph_region) rather than in postorder batches (check_graph_region_postorder),
+    // their order since the benchmark measured the two on the same actions and postorder won (#133's open question;
+    // docs/c-checker.md, "Level order or postorder"); it takes the regions. The typed stream is the same.
     bool level_order;
-    // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than its regions in postorder
-    // batches: opt in (the driver's --check-transitions), since they don't save a large fraction of check-expressions, and
-    // the benchmark compares them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
+    // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than in node order: opt in (the
+    // driver's --check-transitions), since they don't save a large fraction of check-expressions, and the benchmark compares
+    // them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
     bool transitions;
     // Each transition hit's action run as well, its result stored and compared with the transition's
     // (CheckStatistics.transition_mismatches): the tests' check of the memo, node by node.
@@ -3404,9 +3409,9 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         // The vector path's memoized transitions (#1050, c_check_transitions.c) where the options ask for them, unless
         // overload sets make operands contextual, a column its keys read is absent (as check_graph_validate_vector's blocks
-        // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's impure
-        // leaves without their actions, its other impure nodes one at a time, and each run of pure nodes as a region; the scalar
-        // path's nodes one at a time.
+        // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's leaves
+        // without their actions and its other nodes one at a time, or with its regions (CheckOptions.regions, level_order)
+        // each run of pure nodes as a region; the scalar path's nodes one at a time.
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
         const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
@@ -3421,14 +3426,15 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         // passes after it, which may write a node again, do.
         stream->zero_columns = zero_output;
         uint32_t node = transitions ? count : 0;
+        const bool regions = !BUSTER_SCALAR_PATH(options->scalar) && (options->regions || options->level_order);
         while (node < count)
         {
-            if (!BUSTER_SCALAR_PATH(options->scalar) && pure[node] == 0 && check_graph_is_leaf(graph, node))
+            if (!BUSTER_SCALAR_PATH(options->scalar) && (!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
             {
                 check_graph_leaf(types, graph, stream, node);
                 node += 1;
             }
-            else if (BUSTER_SCALAR_PATH(options->scalar) || pure[node] == 0)
+            else if (!regions || pure[node] == 0)
             {
                 check_graph_scalar_node(types, graph, stream, node, arguments, scratch, BUSTER_SCALAR_PATH(options->scalar));
                 node += 1;

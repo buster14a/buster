@@ -72,9 +72,9 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
                                    check_stream_value(&expected, query).integer == 1 && (check_stream_flags(&expected, query) & BUSTER_CHECK_SIDE_EFFECT) == 0,
                               "unselected and unevaluated overflow stores stay descriptors without becoming executed effects");
             const uint64_t comparison_mark = output->length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
-                const CheckOptions vector = { .batch_size = batch };
+                const CheckOptions vector = { .batch_size = batch, .regions = batch != 0 };
                 CheckStream actual;
                 checked = check_graph_run(table, &graph, output, scratch, &vector, &actual);
                 check_test_expect(test, checked && check_test_stream_equal(&expected, &actual, graph.argument_count),
@@ -125,9 +125,9 @@ static void check_test_builtin_graph_typed(CheckTest* test, TypeTable* table, Ar
                                    expected.effects[2].destination.type == type_pointer(table, BUSTER_TYPE_ULONG),
                               "typed overflow qualifier warnings stay distinct from errors and from its converted store destination");
             const uint64_t mark = output->length;
-            for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
+            for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
-                const CheckOptions options = { .batch_size = batch };
+                const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
                 CheckStream actual;
                 check_test_expect(test, check_graph_run(table, &graph, output, scratch, &options, &actual) &&
                                        check_test_stream_equal(&expected, &actual, graph.argument_count),
