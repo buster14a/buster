@@ -191,6 +191,45 @@ static void interpreter_test_wide_conversions(InterpreterTestTally* tally, Arena
     interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "wide: missing long-double constant pool refused");
 }
 
+static void interpreter_test_wide_float_rounding(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONVERT, BUSTER_TYPED_RETURN };
+    uint8_t classes[] = { BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_F32 };
+    const uint64_t values[] = { 0, 0, 0 };
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = classes,
+        .local_count = 1,
+        .parameter_count = 1,
+    };
+    const SymbolId symbol = 1;
+    const InterpreterProgram program = { .functions = &function, .function_symbols = &symbol, .function_count = 1 };
+    const uint8_t destinations[] = { BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_F64 };
+    const uint32_t midpoint_bits[] = { 76, 47 };
+    const uint64_t expected[] = { UINT64_C(0x71800001), UINT64_C(0x4630000000000001) };
+    const uint64_t sign_bits[] = { UINT64_C(1) << 31, UINT64_C(1) << 63 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(destinations); i += 1)
+    {
+        classes[1] = destinations[i];
+        classes[2] = destinations[i];
+        // One integer beyond a midpoint above 2^100: x87 loses that final bit, but a direct cast must not.
+        const unsigned __int128 magnitude = ((unsigned __int128)1 << 100) + ((unsigned __int128)1 << midpoint_bits[i]) + 1;
+        for (uint32_t variant = 0; variant < 3; variant += 1)
+        {
+            classes[0] = variant == 0 ? BUSTER_TYPED_CLASS_U128 : BUSTER_TYPED_CLASS_I128;
+            const bool negative = variant == 2;
+            const InterpreterValue argument = interpreter_test_wide_bits(negative ? 0 - magnitude : magnitude);
+            InterpreterResult result;
+            const bool ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+            const uint64_t want = expected[i] | (negative ? sign_bits[i] : 0);
+            interpreter_test_expect(tally, ran && result.value.low == want && result.value.high == 0, "wide: signed and unsigned integer casts round directly to float and double");
+        }
+    }
+}
+
 static __attribute__((noinline)) long double interpreter_test_wide_native(__int128 a, long double b)
 {
     const long double result = (long double)a + b;
@@ -381,6 +420,7 @@ static void interpreter_test_wide(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_wide_integer(tally, scratch);
     interpreter_test_wide_shift_count(tally, scratch);
     interpreter_test_wide_conversions(tally, scratch);
+    interpreter_test_wide_float_rounding(tally, scratch);
     interpreter_test_wide_calls(tally, scratch);
     interpreter_test_wide_memory(tally, scratch);
     interpreter_test_wide_integer_return(tally, scratch);

@@ -42,7 +42,23 @@ static InterpreterValue interpreter_typed_convert_value(uint32_t to, uint32_t fr
     }
     else if (to_floating)
     {
-        const long double number = from_signed ? (long double)interpreter_value_signed(value, source_type) : (long double)interpreter_value_integer(value);
+        const __int128 signed_value = interpreter_value_signed(value, source_type);
+        const unsigned __int128 unsigned_value = interpreter_value_integer(value);
+        long double number = 0;
+        // Round directly to the destination precision. An x87 intermediate can turn a value just beyond a
+        // float or double midpoint into a tie and round it a second time in the wrong direction.
+        if (to == BUSTER_TYPED_CLASS_F32)
+        {
+            number = from_signed ? (float)signed_value : (float)unsigned_value;
+        }
+        else if (to == BUSTER_TYPED_CLASS_F64)
+        {
+            number = from_signed ? (double)signed_value : (double)unsigned_value;
+        }
+        else
+        {
+            number = from_signed ? (long double)signed_value : (long double)unsigned_value;
+        }
         result = interpreter_value_float_value(number, result_type);
     }
     else if (from_floating)
