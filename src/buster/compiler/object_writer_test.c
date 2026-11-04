@@ -2276,10 +2276,16 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         arena_release(&small);
     }
     arena_pop_to(arena, length);
-    // A link of one unit without atoms, as an empty translation unit's: an object all the same.
+    // A link of one unit without atoms, as an empty translation unit's: an object all the same. Its arrays are sized by
+    // its one unit and its atoms, part boundaries included (two, #1236): a page holds them, where BUSTER_LANE_MAX_PARTS
+    // + 1 boundaries took 128 KB, past an arena's base pages (-c's scratch arena took a huge page for them).
     Link empty;
     const LinkCapacity nothing = { 0 };
-    const bool empty_prepared = link_initialize(&empty, arena, arena, nothing) && object_prepare(&units, &empty, 1, arena) && object_map_symbols(&symbols, &empty, arena);
+    const bool empty_made = link_initialize(&empty, arena, arena, nothing);
+    const uint64_t empty_before = arena->length;
+    const bool empty_units = empty_made && object_prepare(&units, &empty, 1, arena);
+    object_test_expect(&tally, empty_units && arena->length - empty_before <= BUSTER_ARENA_PAGE_BYTES, "object_prepare of one unit within a page", 0);
+    const bool empty_prepared = empty_units && object_map_symbols(&symbols, &empty, arena);
     object_test_expect(&tally, empty_prepared && units.count == 1, "object_prepare on a link without atoms", 0);
     for (uint32_t sections = 0; empty_prepared && sections < 2; sections += 1)
     {
