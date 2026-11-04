@@ -3,7 +3,8 @@
 //
 // #658's floating-table continuation. The ordinary expression graph is the source/byte oracle; hand-written
 // IEEE representations independently check zero signs and boundary values. Every masked store tail ends at a
-// protected page. Precision loss and literal diagnostics must refuse the compact producer, including late in a list.
+// protected page. Integer precision loss and literal diagnostics must refuse the compact producer, including late in a
+// list; a floating source rounds as the ordinary initializer rounds it.
 
 static bool check_test_literal_floating_source(char* source, uint64_t capacity, const char* type, uint32_t count, bool sized, bool wide, const char* last)
 {
@@ -23,6 +24,9 @@ static bool check_test_literal_floating_source(char* source, uint64_t capacity, 
         "3.0e-4f",
         "0x1p24",
         "16777216U",
+        "0.1",
+        "1e300",
+        "-0.1L",
     };
     static const char* const double_precision[] = {
         "0.1",
@@ -40,6 +44,8 @@ static bool check_test_literal_floating_source(char* source, uint64_t capacity, 
         "3.0e-200",
         "9007199254740992ULL",
         "0x1p53",
+        "0.1L",
+        "-1e4000L",
     };
     const char* const* spellings = wide ? double_precision : single;
     const uint32_t spelling_count = wide ? BUSTER_ARRAY_LENGTH(double_precision) : BUSTER_ARRAY_LENGTH(single);
@@ -86,7 +92,11 @@ static void check_test_literal_floating_values(CheckTest* test)
         { "0x1p-149f", BUSTER_TYPE_FLOAT, 1, false, true },
         { "0x1p-1074", BUSTER_TYPE_DOUBLE, 1, false, true },
         { "9007199254740992ULL", BUSTER_TYPE_DOUBLE, UINT64_C(0x4340000000000000), false, true },
-        { "0.1", BUSTER_TYPE_FLOAT, 0, false, false },
+        { "0.1", BUSTER_TYPE_FLOAT, UINT64_C(0x3dcccccd), false, true },
+        { "0.1", BUSTER_TYPE_FLOAT, UINT64_C(0xbdcccccd), true, true },
+        { "0.1L", BUSTER_TYPE_DOUBLE, UINT64_C(0x3fb999999999999a), false, true },
+        { "1e300", BUSTER_TYPE_FLOAT, UINT64_C(0x7f800000), false, true },
+        { "16777216", BUSTER_TYPE_FLOAT, UINT64_C(0x4b800000), false, true },
         { "16777217", BUSTER_TYPE_FLOAT, 0, false, false },
         { "9007199254740993ULL", BUSTER_TYPE_DOUBLE, 0, false, false },
         { "1e9999f", BUSTER_TYPE_FLOAT, 0, false, false },
@@ -266,11 +276,12 @@ static void check_test_literal_floating_tables(CheckTest* test, const char* clan
             check_test_program_source(test, source, "literal-floating-table-native", clang);
         }
     }
-    const bool made = check_test_literal_floating_source(source, sizeof(source), "float", 129, true, false, "0.1");
-    check_test_expect(test, made, "late floating precision-loss source fits");
+    // Floating sources round as the ordinary initializer rounds them, without a warning, so they stay compact.
+    const bool made = check_test_literal_floating_source(source, sizeof(source), "float", 129, true, false, "0.3");
+    check_test_expect(test, made, "late rounded floating source fits");
     if (made)
     {
-        check_test_literal_table_case(test, source, false, false);
+        check_test_literal_table_case(test, source, true, false);
     }
     for (uint32_t form = 5; form <= 7; form += 2)
     {

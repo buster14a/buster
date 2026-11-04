@@ -189,9 +189,11 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
 }
 
 // Keep the ordinary literal parser's rounding and range classification. Same-format real literals need no
-// expression action; other source types use the ordinary unary/initializer actions and must convert exactly.
-// In particular, test an integer in the host's exact 64-bit-significand format, not after rounding it to double.
-// Losing precision, range warnings, imaginary/bit-precise constants and malformed spellings retain dense checking.
+// expression action; other source types use the ordinary unary/initializer actions, whose result is the value the
+// ordinary path stores. A floating source rounds silently there (clang warns only under -Wimplicit-float-conversion),
+// so `float t[] = { 0.1, ... }` stays compact. An integer must convert exactly, since clang warns by default when
+// one changes value: test it in the host's exact 64-bit-significand format, not after rounding it to double.
+// Range warnings, imaginary/bit-precise constants and malformed spellings retain dense checking.
 static bool check_literal_table_floating_value(CheckInputReader* reader, const uint8_t* spelling, uint32_t length, bool negative, TypeId element, uint64_t* bits)
 {
     CheckLiteral literal = { 0 };
@@ -219,7 +221,8 @@ static bool check_literal_table_floating_value(CheckInputReader* reader, const u
             value = result.value;
         }
         long double original = 0;
-        if (valid && value.constant_kind == CHECK_CONSTANT_INTEGER)
+        const bool integer = value.constant_kind == CHECK_CONSTANT_INTEGER;
+        if (valid && integer)
         {
             uint32_t width = 0;
             bool is_signed = false;
@@ -248,7 +251,7 @@ static bool check_literal_table_floating_value(CheckInputReader* reader, const u
             check_action_scalar(reader->types, &action, &result);
             reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
             valid = result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 && result.value.fault == CHECK_FAULT_NONE &&
-                    result.value.constant_kind == CHECK_CONSTANT_FLOATING && result.value.floating == original;
+                    result.value.constant_kind == CHECK_CONSTANT_FLOATING && (!integer || result.value.floating == original);
             number = result.value.floating;
         }
     }

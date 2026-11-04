@@ -17,13 +17,19 @@ omitted elements remain zero, and an incomplete array acquires its extent.
 
 Floating literals are parsed by the ordinary literal reader, including their
 source suffix's rounding. Same-format real literals can supply their bytes
-directly. Other source types use the ordinary unary and initializer actions
-and must convert exactly, without a diagnostic, warning or constant-evaluation
-fault. The exactness comparison uses the host's 64-bit-significand `long double`,
-not a prematurely rounded `double`, for ordinary integer literals up to 64 bits.
-Integer `-0` becomes positive floating zero; floating `-0.0` retains its sign.
+directly. Other source types use the ordinary unary and initializer actions,
+without a diagnostic, warning or constant-evaluation fault, and store the value
+those actions give. A floating source rounds silently, as the ordinary path
+rounds it: `float t[] = { 0.1, ... }` stays compact, and `1e300` becomes
+infinity as clang's does. Without this, a 200,000-element `float` table of
+such double literals took 2.8 times as long as the same table spelled with `f`,
+all of it in the fallback. An integer source must convert exactly, since clang
+warns by default when its value changes. Its comparison uses the host's
+64-bit-significand `long double`, not a prematurely rounded `double`, for
+ordinary integer literals up to 64 bits. Integer `-0` becomes positive floating
+zero; floating `-0.0` retains its sign.
 
-Precision-losing conversions, literal overflow or underflow warnings, imaginary
+Integer precision loss, literal overflow or underflow warnings, imaginary
 and bit-precise constants, malformed spellings, designators, nested braces and
 general expressions keep the ordinary path for the **whole table**. Unsupported
 element types, automatic objects, compound literals and volatile elements also
@@ -57,8 +63,8 @@ establish the remaining parsing cost and whether another decoding kernel pays.
 existing literal-table section. Its fixtures compare compact scalar and SIMD
 paths with the ordinary per-element graph and byte planner. Coverage includes
 127/128/129 and 255/256/257 elements, sized and inferred arrays, mixed suffixes,
-negative zero, subnormals and finite extrema, zero tails, late precision-loss
-fallback, volatile/designated/expression fallback, and deferred replay with
+negative zero, subnormals and finite extrema, rounded and overflowing floating
+sources, zero tails, late integer precision-loss fallback, volatile/designated/expression fallback, and deferred replay with
 forced late fallback. Hand-written IEEE representations independently check
 selected values. Every batch store tail, including an empty batch, ends at a
 protected page. Allocation failures cover spelling scratch, payload and
