@@ -11877,6 +11877,8 @@ struct CheckLowerShared
     uint32_t* local_start;
     uint32_t* local_tokens;
     uint32_t* local_objects;
+    // #1048's experiment, temporary (#1235, bit 32): each local's declared type in the same slice, or null.
+    TypeId* local_types;
     uint32_t* opening_bodies;
     uint32_t* local_bodies;
     // Each body's own signature, its index in its part's batch, and whether the body starts its variadic list.
@@ -12455,6 +12457,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         shared->local_tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)local_count + 1);
         shared->local_objects = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)local_count + 1);
+        const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
+        shared->local_types = experiment != NULL && (strtoul(experiment, NULL, 10) & 32) != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, (uint64_t)local_count + 1) : NULL;
         if (shared->local_tokens == 0 || shared->local_objects == 0)
         {
             lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -12474,6 +12478,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 const uint32_t k = --shared->local_start[b + 1];
                 shared->local_tokens[k] = token;
                 shared->local_objects[k] = input->objects[token];
+                if (shared->local_types != NULL)
+                {
+                    shared->local_types[k] = input->declared_types[token];
+                }
             }
         }
         for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -12984,7 +12992,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const uint32_t declared_object = shared->local_objects[slot];
             if (check_lower_local_of(writer, declared_object) == BUSTER_CHECK_NONE)
             {
-                const TypeId local_type = input->declared_types[declaration];
+                // #1048's experiment's bit 32: the slice's type (CheckLowerShared.local_types).
+                const TypeId local_type = shared->local_types != NULL ? shared->local_types[slot] : input->declared_types[declaration];
                 // A plain scalar's local (check_lower_plain_scalar, neither an array's nor a function's) of no attribute's
                 // alignment, nor one past 8 bytes, is a temporary of its class, as the rules below make it, by its packed
                 // class and facts on the vector path (#1048: 0.08 ms of sqlite3.c's bodies on the 9700X), rather than by
