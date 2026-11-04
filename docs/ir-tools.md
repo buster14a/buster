@@ -292,7 +292,10 @@ about indeterminate values and padding discussed separately in
 undefined-padding checks, allocation rollback, repeated calls and expired
 callee addresses. Its wide scalar cases cover full-word arithmetic and shifts,
 signed division boundaries, checked floating-to-integer conversions, x87
-constants and payloads across interpreted and native calls. The existing
+constants and payloads across interpreted and native calls. Indirect scalar
+calls consume a pointer below their arguments and resolve it only against the
+program's interpreted-function tokens or explicitly registered native addresses;
+unregistered addresses are rejected, never executed. The existing
 Tier 0 comparison also copies actual object locals through the typed oracle.
 `test-ir-lowering` additionally runs each generated 128-bit/x87 program through
 the production typed front, checking its outputs against the independent
@@ -300,7 +303,7 @@ fixture machine as well as checking the lowered IR.
 
 These are typed-stream fixtures, not the source acceptance required to close
 [#176](https://github.com/buster14a/buster/issues/176). Typed by-value aggregate
-parameters/results, variadic definitions, indirect calls/jumps and the
+parameters/results, variadic definitions, indirect jumps and the
 source-facing c-testsuite/#142 integration remain unsupported. The IR front's
 aggregate/variadic support below does not imply support in the typed front.
 The native scalar bridge already accepts outgoing promoted variadic calls.

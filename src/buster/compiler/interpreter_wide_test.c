@@ -415,6 +415,99 @@ static void interpreter_test_wide_integer_return(InterpreterTestTally* tally, Ar
     interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: typed native integer returns preserve both rax and rdx");
 }
 
+static void interpreter_test_wide_indirect_calls(InterpreterTestTally* tally, Arena* scratch)
+{
+    uint8_t kinds[] = { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN };
+    uint8_t classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128 };
+    uint64_t values[] = { 2, 0, 0, 0 };
+    const uint8_t local = BUSTER_TYPED_CLASS_U128;
+    const SymbolId target = 0;
+    const uint32_t first = 0;
+    const uint32_t count = 1;
+    const uint8_t variadic = 0;
+    const uint8_t callee_kinds[] = { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN };
+    const uint8_t callee_classes[] = { BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_U128 };
+    const uint64_t callee_values[] = { 0, 7, 0, 0 };
+    Tier0Function functions[] = {
+        {
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .count = BUSTER_ARRAY_LENGTH(kinds),
+            .local_classes = &local,
+            .local_count = 1,
+            .parameter_count = 1,
+            .call_targets = &target,
+            .call_first = &first,
+            .call_argument_counts = &count,
+            .call_variadic = &variadic,
+            .argument_classes = &local,
+            .call_count = 1,
+            .argument_count = 1,
+        },
+        {
+            .kinds = callee_kinds,
+            .classes = callee_classes,
+            .values = callee_values,
+            .count = BUSTER_ARRAY_LENGTH(callee_kinds),
+            .local_classes = &local,
+            .local_count = 1,
+            .parameter_count = 1,
+        },
+    };
+    const SymbolId symbols[] = { 1, 2 };
+    const InterpreterNativeBinding native = { .symbol = 2, .address = (void*)interpreter_test_wide_native_integer };
+    InterpreterProgram program = { .functions = functions, .function_symbols = symbols, .function_count = 2 };
+    const unsigned __int128 integer = ((unsigned __int128)UINT64_C(0x123456789abcdef0) << 64) | UINT64_MAX;
+    const InterpreterValue argument = interpreter_test_wide_bits(integer);
+    InterpreterResult result;
+    bool ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+    InterpreterValue expected = interpreter_test_wide_bits(integer + 7);
+    interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: an indirect interpreted call consumes its token and preserves both words");
+    program.function_count = 1;
+    program.natives = &native;
+    program.native_count = 1;
+    ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+    expected = interpreter_test_wide_bits(interpreter_test_wide_native_integer(integer));
+    interpreter_test_expect(tally, ran && result.value.low == expected.low && result.value.high == expected.high, "wide: an indirect native call resolves only a registered address");
+    kinds[0] = BUSTER_TYPED_CONST;
+    values[0] = 0;
+    ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_SYMBOL && result.entry == 2, "wide: an unregistered indirect target is refused without host execution");
+    classes[0] = BUSTER_TYPED_CLASS_I64;
+    values[0] = (uint64_t)(uintptr_t)native.address;
+    ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_INVALID && result.entry == 2, "wide: an indirect target must have pointer class");
+    functions[0].kinds = kinds + 1;
+    functions[0].classes = classes + 1;
+    functions[0].values = values + 1;
+    functions[0].count -= 1;
+    ran = interpreter_typed_run(&program, 1, &argument, 1, scratch, 0, &result);
+    interpreter_test_expect(tally, !ran && result.status == INTERPRETER_INVALID && result.entry == 1, "wide: indirect calls check the target's stack slot as well as their arguments");
+
+    const uint8_t void_kinds[] = { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN };
+    const uint8_t void_classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID };
+    const uint64_t void_values[] = { 2, 0, 0 };
+    const uint32_t no_arguments = 0;
+    functions[0] = (Tier0Function){
+        .kinds = void_kinds,
+        .classes = void_classes,
+        .values = void_values,
+        .count = BUSTER_ARRAY_LENGTH(void_kinds),
+        .call_targets = &target,
+        .call_first = &first,
+        .call_argument_counts = &no_arguments,
+        .call_variadic = &variadic,
+        .call_count = 1,
+    };
+    functions[1] = (Tier0Function){ .kinds = void_kinds + 2, .classes = void_classes + 2, .values = void_values + 2, .count = 1 };
+    program.function_count = 2;
+    program.natives = 0;
+    program.native_count = 0;
+    ran = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, ran, "wide: a zero-argument void indirect call consumes its target exactly once");
+}
+
 static void interpreter_test_wide(InterpreterTestTally* tally, Arena* scratch)
 {
     interpreter_test_wide_integer(tally, scratch);
@@ -424,4 +517,5 @@ static void interpreter_test_wide(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_wide_calls(tally, scratch);
     interpreter_test_wide_memory(tally, scratch);
     interpreter_test_wide_integer_return(tally, scratch);
+    interpreter_test_wide_indirect_calls(tally, scratch);
 }
