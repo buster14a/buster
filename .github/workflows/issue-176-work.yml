@@ -1,0 +1,24 @@
+name: Issue 176 isolated working snapshot
+on:
+  push:
+    branches: [chatgpt/176-typed-oracle-continuation]
+    paths: [.github/workflows/issue-176-work.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive tracked source for the isolated coding session
+        run: git archive --format=tar.gz -o "$RUNNER_TEMP/issue-176-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-176-source
+          path: ${{ runner.temp }}/issue-176-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
