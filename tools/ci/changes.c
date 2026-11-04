@@ -22,12 +22,13 @@
 //
 // A push sets code alone and measure to all: its pull request's run measured what it changes. A push given its first-parent
 // change (the nightly mode's, docs/ci.md) is targeted instead: it decides as a pull request on that change, but code is
-// always true, since push's paths-ignore already left out documentation and a push of several commits can bring code
-// that its head's own change doesn't show. `changes_decide` is the
+// always true: every main revision needs full hosted correctness, including documentation-only changes (#1271), and
+// a push of several commits can bring code that its head's own change doesn't show. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
-// --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy)
-// and the hosted test job's shards, its list and N alike (changes_shard_policy). The selector is CI tooling outside the
-// compile path and has no vector path: it reads a few hundred lines and files.
+// --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
+// main's trigger and full hosted scope (changes_main_policy), and the hosted test job's shards, its list and N alike
+// (changes_shard_policy). The selector is CI tooling outside the compile path and has no vector path: it reads a few
+// hundred lines and files.
 //
 // Layout: Text and Arena; reading files; ChangesTables (changes_modules, changes_benchmarks); the workflow's steps
 // (changes_split_steps); a unit's include closure (changes_includes); changes_decide; changes_print; the self-test;
@@ -1250,7 +1251,7 @@ static ChangesResult changes_decide(const ChangesInput* input)
     ChangesResult result = { 0 };
     if (input->push && !input->targeted)
     {
-        // push's paths-ignore leaves out documentation alone.
+        // Every main push tests, including documentation alone; measurement selection is separate (#1271).
         result.code = true;
         result.all = true;
     }
@@ -1973,6 +1974,34 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
     changes_expect(test, result.code && changes_measures(&result, "types") && !result.all, "a targeted push measures its change's benchmarks", (Text){ 0 });
     changes_expect(test, strcmp(changes_measure(&result), changes_measure(&pull)) == 0 && memcmp(result.modules, pull.modules, sizeof(result.modules)) == 0 && memcmp(result.fixed, pull.fixed, sizeof(result.fixed)) == 0, "a targeted push selects what its pull request would", (Text){ 0 });
 
+    // Both measurement modes must test every main revision, including empty and documentation-only changes (#1271).
+    const char* pushed_files[] = {
+        "",
+        "README.md AGENTS.md",
+        "docs/ci.md docs/notes.txt",
+        "src/buster/compiler/c_types.c",
+        "src/buster/compiler/c_checker_test.c",
+        "build.sh CMakeLists.txt cmake/BusterSettings.cmake",
+        ".github/workflows/9700x.yml",
+        "tools/ci/qualification.c",
+    };
+    for (uint32_t i = 0; i < sizeof(pushed_files) / sizeof(pushed_files[0]); i += 1)
+    {
+        for (uint32_t targeted = 0; targeted < 2; targeted += 1)
+        {
+            ChangesInput revision = {
+                .push = true,
+                .targeted = targeted != 0,
+                .files = changes_words(pushed_files[i]),
+                .base_workflow = workflow,
+                .head_workflow = workflow,
+                .root = root,
+            };
+            ChangesResult selected = changes_decide(&revision);
+            changes_expect(test, selected.code, "every main push tests in either measurement mode", text_c(pushed_files[i]));
+        }
+    }
+
     ChangesInput nothing = {
         .base_workflow = workflow,
         .head_workflow = workflow,
@@ -2576,6 +2605,134 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
     }
 }
 
+// Every main push, including documentation alone, runs the full hosted scope (#1271). Keep its unfiltered trigger
+// and per-run concurrency separate from a PR's replaceable queue. The evidence glue tests pin scope=full/hosted=run
+// for pushes; here the workflow must consume those decisions without reducing the matrix or suppressing fuzzing.
+// This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
+static bool changes_main_policy(Text workflow)
+{
+    static const struct
+    {
+        uint32_t job;
+        const char* line;
+    } required[] = {
+        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
+        { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
+        { 1, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
+        { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
+        { 1, "        host_arch: [x86-64, native]" },
+        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}" },
+        { 1, "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}" },
+        { 1, "          ref: ${{ github.sha }}" },
+        { 2, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}" },
+        { 2, "      fail-fast: false" },
+        { 2, "          - entry: frontend" },
+        { 2, "          - entry: elf-override" },
+        { 2, "          - entry: crash-replay-proof" },
+        { 2, "          ref: ${{ github.sha }}" },
+    };
+    bool seen[sizeof(required) / sizeof(required[0])] = { false };
+    bool valid = true;
+    bool push = false;
+    uint32_t pushes = 0;
+    uint32_t branches = 0;
+    uint32_t section = 0;
+    uint32_t job = 3;
+    size_t offset = 0;
+    Text line;
+    while (text_next_line(workflow, &offset, &line))
+    {
+        size_t indent = 0;
+        while (indent < line.length && line.data[indent] == ' ')
+        {
+            indent += 1;
+        }
+        if (indent != line.length && line.data[indent] != '#')
+        {
+            if (indent == 0)
+            {
+                section = text_equal_c(line, "on:") ? 1 : text_equal_c(line, "concurrency:") ? 2 : text_equal_c(line, "jobs:") ? 3 : 0;
+                push = false;
+                job = 3;
+            }
+            else if (section == 1 && indent == 2)
+            {
+                push = text_equal_c(line, "  push:");
+                pushes += push;
+            }
+            else if (section == 1 && push)
+            {
+                // The main push has exactly its branch selector, no paths, paths-ignore or other filter.
+                const bool branch = text_equal_c(line, "    branches: [main]");
+                branches += branch;
+                valid = valid && branch;
+            }
+            else if (section == 3 && indent == 2)
+            {
+                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : 3;
+            }
+            const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
+            for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+            {
+                seen[i] |= current == required[i].job && text_equal_c(line, required[i].line);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+    {
+        valid = valid && seen[i];
+    }
+    return valid && pushes == 1 && branches == 1;
+}
+
+static void changes_test_main_policy(ChangesTest* test, Text workflow)
+{
+    changes_expect(test, changes_main_policy(workflow), "main policy: unfiltered pushes, independent runs and full hosted coverage", (Text){ 0 });
+    static const struct
+    {
+        const char* section;
+        const char* before;
+        const char* after;
+        const char* name;
+    } mutants[] = {
+        { "on:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'\n      - '**.md'", "documentation path exclusion" },
+        { "on:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "source-only path inclusion" },
+        { "on:", "    branches: [main]", "    branches: [release]", "wrong push branch" },
+        { "on:", "  push:", "  pull_request_target:", "missing main push" },
+        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
+        { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: true", "main cancellation" },
+        { "concurrency:", "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "  cancel-in-progress: false", "lost PR cancellation" },
+        { "  test:", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}", "native reuse suppresses hosted tests" },
+        { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
+        { "  test:", "        host_arch: [x86-64, native]", "        host_arch: [native]", "missing baseline architecture" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\"]') }}", "missing memory sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
+        { "  test:", "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}", "          ${{ fromJSON('[]') }}", "missing O1 sanitizer rows" },
+        { "  test:", "          ref: ${{ github.sha }}", "          ref: main", "moving hosted revision" },
+        { "  fuzz:", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "    if: ${{ !cancelled() && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "native reuse suppresses fuzzing" },
+        { "  fuzz:", "      fail-fast: false", "      fail-fast: true", "fuzz campaign cancellation" },
+        { "  fuzz:", "          - entry: frontend", "          - entry: removed", "missing frontend fuzzing" },
+        { "  fuzz:", "          - entry: elf-override", "          - entry: removed", "missing ELF fuzzing" },
+        { "  fuzz:", "          - entry: crash-replay-proof", "          - entry: removed", "missing replay proof" },
+        { "  fuzz:", "          ref: ${{ github.sha }}", "          ref: main", "moving fuzz revision" },
+    };
+    const char* original = text_terminated(workflow);
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        const char* section = strstr(original, mutants[i].section);
+        const char* found = section != NULL ? strstr(section, mutants[i].before) : NULL;
+        Text changed = workflow;
+        if (found != NULL)
+        {
+            const size_t prefix = (size_t)(found - original);
+            const size_t suffix = prefix + strlen(mutants[i].before);
+            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
+                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+        }
+        changes_expect(test, found != NULL && !changes_main_policy(changed), "main policy rejects lost or reduced post-merge coverage", text_c(mutants[i].name));
+    }
+}
+
 // The hosted test job's shards (docs/ci.md): its matrix's `shard: [1, ..., N]`, consecutive from 1, and the same N in the
 // job's name (`shard ${{ matrix.shard }} of N)`), in the run step's `--shard "${{ matrix.shard }}/N"`, and in the O1
 // rows' include entries, shards 1 to N of each architecture. `parallel --shard K/N` deals the inventory to N shards, so a
@@ -2677,6 +2834,7 @@ static int changes_self_test(const char* root)
         changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
         changes_test_oracle_policy(&test, workflow);
+        changes_test_main_policy(&test, workflow);
         changes_test_shard_policy(&test, workflow);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);

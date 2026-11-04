@@ -158,7 +158,14 @@ export GITHUB_OUTPUT="$work/output" GITHUB_STEP_SUMMARY="$work/summary" GITHUB_R
 run_evidence()
 {
     : > "$GITHUB_OUTPUT"
-    (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log"
+    (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log" || return $?
+    # Main's hosted suite is never reused or reduced, including native reuse, missing evidence and API failures.
+    if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
+        expect_line "$GITHUB_OUTPUT" 'scope=full' 'every main push runs the full sanitizer and fuzz scope'
+        expect_line "$GITHUB_OUTPUT" 'hosted=run' 'every main push runs its own hosted suite'
+        expect_line "$GITHUB_OUTPUT" 'hosted_source=' 'PR evidence never replaces main hosted coverage'
+        expect_line "$GITHUB_OUTPUT" 'retired=false' 'nightly mode never retires a main push'
+    fi
 }
 
 # A draft pull request: hosted feedback, no hardware, and no API call.
@@ -176,6 +183,17 @@ expect_line "$GITHUB_OUTPUT" 'retired=true' 'the nightly mode retires the daily 
 GITHUB_EVENT_NAME=schedule GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'retired=false' 'without the nightly mode the daily run runs'
 expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
+
+# Landed merges, documentation-only revisions and direct pushes all get full hosted CI in either nightly mode (#1271).
+# No PR evidence exists yet. Each checkout and GITHUB_SHA must agree, as the workflow's do.
+for revision in "$merge" "$docs" "$head"; do
+    git -C "$history" worktree add -q --detach "$work/main-push" "$revision"
+    for mode in on ''; do
+        GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=$mode run_evidence "$work/main-push"
+        expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'without native evidence a main push qualifies on hardware'
+    done
+    git -C "$history" worktree remove "$work/main-push"
+done
 
 # A push whose pull request's newest run tested the identical tree on the identical first-parent tree.
 tree=$(git -C "$history" rev-parse "$head^{tree}")

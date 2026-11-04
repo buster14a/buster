@@ -1,5 +1,23 @@
 # Hosted correctness, native vector correctness and Zen 5 benchmarks
 
+Every merge and direct push to `main` triggers the full hosted correctness
+suite against that push's exact `github.sha`, including documentation-only
+changes (#1271). It runs both host architectures, every sanitizer configuration
+and shard, the O1 address-sanitizer rows, and all three fuzz campaigns.
+The pre-merge PR matrix, Measurement storage, a no-code exemption and a later
+nightly run do not replace that post-merge coverage.
+
+Main pushes have separate run-id concurrency groups: a later merge cannot
+replace an earlier pending main run. PRs keep their per-PR superseded-run
+cancellation. Hardware jobs still take the shared host lock. Native evidence
+reuse and the nightly measurement window do not reduce main's hosted suite:
+push evidence always reports `scope=full`, `hosted=run` and no hosted source.
+The selector's main-policy mutants and the nightly glue fixtures pin this
+contract; native reuse and nightly benchmark scheduling are otherwise unchanged.
+Both selector push modes force correctness for every file class. The
+qualification self-test rejects a main push with an all-skipped suite: only
+pre-merge PRs can use the no-code exemption.
+
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
 with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`. Both use the current
@@ -258,11 +276,11 @@ Main's first-parent states (#1207) are measured on the 9700X between 04:00 and
 07:00 Europe/Madrid. A branch's internal commits are not states; a merge of
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
-whose first-parent change is documentation alone (push's paths-ignore) needs
-none, and the ledger says so. The cycle's snapshot also needs **full**
-coverage, which adds every benchmark, the isolated samples and the oracle-cache
-audit. Plain coverage, every plain run as pushes measured before the nightly
-mode, satisfies neither.
+whose first-parent change is documentation alone needs no targeted measurements,
+and the ledger says so; its main push still runs full hosted correctness.
+The cycle's snapshot also needs **full** coverage, which adds every benchmark,
+the isolated samples and the oracle-cache audit. Plain coverage, every plain
+run as pushes measured before the nightly mode, satisfies neither.
 
 A state is measured behind its own plain hosted rows (both architectures,
 every shard), the gate a pull request needs before the 9700X. Its sanitizer and
