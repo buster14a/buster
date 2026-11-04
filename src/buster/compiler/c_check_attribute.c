@@ -2173,6 +2173,10 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
     static const char* const unchanged[] = {
         "available_only_in_default_eval_method", "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
         "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
+        // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
+        "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
+        "ns_returns_not_retained", "ns_returns_autoreleased", "os_returns_retained", "os_returns_not_retained",
+        "os_returns_retained_on_zero", "os_returns_retained_on_non_zero",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany") || check_input_attribute_equal(name, "no_caller_saved_registers");
@@ -3612,6 +3616,78 @@ static uint32_t check_input_attribute_excluding_in(CheckInputReader* reader, Str
     return result;
 }
 
+// The retain-ownership attributes (#147): consumed's (cf_, ns_, os_), the returns' (cf_returns_retained and the others) and
+// os_returns_retained_on_zero's and _on_non_zero's, as SemaObjC's handlers take them in C, where no type is an
+// Objective-C object or points to a C++ record: CF's a pointer (a parameter's pointee a pointer, for a returns' one), NS's
+// and OS's nothing. Each warns, at the declaration's first token (`begin`), and is ignored, where its subject is no type
+// it takes: consumed's "X attribute only applies to pointer parameters" (or "Objective-C object"), named as clang's
+// string; the returns' of a function "'X' attribute only applies to functions that return a pointer" (or "an Objective-C
+// object"), of a parameter "... pointer-to-CF-pointer parameters" (OS's "pointer/reference-to-OSObject-pointer"), of
+// another declaration "... functions and methods" (NS's) or "... functions, methods, and parameters"; the out
+// parameters' "... pointer/reference-to-OSObject-pointer parameters". ns_returns_retained is a type's too: a function
+// type's warning at the attribute, "'ns_returns_retained' attribute only applies to functions that return an
+// Objective-C object", and off one "only applies to function types" (check_input_attribute_function_types); a tag's
+// "functions and methods" at its first token.
+static void check_input_attribute_ownership(CheckInputReader* reader, CheckInputAttribute* attribute, uint32_t declaration, TypeId type, uint32_t begin)
+{
+    const String8 name = check_input_attribute_name(reader, attribute->name);
+    const bool cf = check_input_attribute_equal(name, "cf_returns_retained") || check_input_attribute_equal(name, "cf_returns_not_retained");
+    const bool os = check_input_attribute_equal(name, "os_returns_retained") || check_input_attribute_equal(name, "os_returns_not_retained");
+    const bool ns = check_input_attribute_equal(name, "ns_returns_not_retained") || check_input_attribute_equal(name, "ns_returns_autoreleased");
+    const bool retained = check_input_attribute_equal(name, "ns_returns_retained");
+    const bool consumed_cf = check_input_attribute_equal(name, "cf_consumed");
+    const bool consumed = consumed_cf || check_input_attribute_equal(name, "ns_consumed") || check_input_attribute_equal(name, "os_consumed");
+    const bool out = check_input_attribute_equal(name, "os_returns_retained_on_zero") || check_input_attribute_equal(name, "os_returns_retained_on_non_zero");
+    // (A tag's declaration has no type here.)
+    const TypeId bare = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    const bool function = (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) != 0;
+    const bool parameter = (declaration & BUSTER_CHECK_SUBJECT_PARAMETER) != 0;
+    const bool tag = (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0;
+    const bool pointer = type_kind(reader->types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId pointee = pointer ? type_strip_aligned(reader->types, reader->types->types.base[type_index(bare)]) : 0;
+    const TypeId result = function && type_kind(reader->types, bare) == BUSTER_TYPE_KIND_FUNCTION ? type_strip_aligned(reader->types, type_return(reader->types, bare)) : 0;
+    CheckWarningEventKind kind = CHECK_WARNING_EVENT_KIND_COUNT;
+    uint32_t at = begin;
+    if ((cf || os || ns) && function)
+    {
+        kind = cf && type_kind(reader->types, result) == BUSTER_TYPE_KIND_POINTER ? CHECK_WARNING_EVENT_KIND_COUNT :
+               ns ? CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT : CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER;
+    }
+    else if ((cf || os || ns) && parameter)
+    {
+        const bool taken = cf && pointer && type_kind(reader->types, pointee) == BUSTER_TYPE_KIND_POINTER;
+        kind = taken ? CHECK_WARNING_EVENT_KIND_COUNT :
+               os || (!pointer && !cf) ? CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS : CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF;
+    }
+    else if (cf || os || ns)
+    {
+        kind = ns ? CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS : CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS;
+    }
+    else if (retained && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION_LIKE) != 0)
+    {
+        kind = CHECK_WARNING_EVENT_OWNERSHIP_RETAINED;
+        at = attribute->first;
+    }
+    else if (retained && tag)
+    {
+        kind = CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS;
+    }
+    else if (consumed && !(consumed_cf && pointer))
+    {
+        kind = check_input_attribute_equal(name, "ns_consumed") ? CHECK_WARNING_EVENT_CONSUMED_OBJECT : CHECK_WARNING_EVENT_CONSUMED_POINTER;
+    }
+    else if (out)
+    {
+        kind = CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS;
+    }
+    if (kind != CHECK_WARNING_EVENT_KIND_COUNT && at < reader->parser->tokens.count)
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, kind, at, attribute->first + 1);
+        attribute->ignored = true;
+        attribute->subject_ignored = true;
+    }
+}
+
 static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t declaration, TypeId type, uint32_t begin,
                                            uint32_t name)
 {
@@ -3715,6 +3791,12 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_INTERNAL_LINKAGE_LOCAL, name, CHECK_WARNING_COMPLETE_AT_TOKEN, name + 1);
             attribute->ignored = true;
             attribute->subject_ignored = true;
+        }
+        // clang's retain-ownership attributes (#147, SemaObjC's handleXReturnsXRetainedAttr and AddXConsumedAttr), which change
+        // nothing in C: check_input_attribute_ownership.
+        if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
+        {
+            check_input_attribute_ownership(reader, attribute, declaration, type, begin);
         }
         // A GPU kernel's convention off a function (#147): clang's "'X' attribute only applies to functions" error.
         if (valid && kernel && (declaration & BUSTER_CHECK_SUBJECT_FUNCTION) == 0)

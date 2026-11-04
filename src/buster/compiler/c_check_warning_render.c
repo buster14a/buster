@@ -610,6 +610,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNKNOWN_SANITIZER:
         case CHECK_WARNING_EVENT_SANITIZER_GLOBAL:
         case CHECK_WARNING_EVENT_FUNCTIONS_METHODS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT:
+        case CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER:
+        case CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF:
+        case CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS:
+        case CHECK_WARNING_EVENT_OWNERSHIP_RETAINED:
+        case CHECK_WARNING_EVENT_CONSUMED_OBJECT:
+        case CHECK_WARNING_EVENT_CONSUMED_POINTER:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -642,7 +651,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const uint32_t shown = offset <= length ? (piece < length - offset ? piece : length - offset) : 0u;
             static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
             static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
-            result = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ?
+            // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
+            const String8 plain = check_warning_attribute_normalized(name);
+            result = event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETAINED ? "'ns_returns_retained' attribute only applies to functions that return an Objective-C object" :
+                event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT || event->kind == CHECK_WARNING_EVENT_CONSUMED_POINTER ?
+                check_warning_text(scratch, "%.*s attribute only applies to %s parameters", (int)plain.length, plain.pointer,
+                                   event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT ? "Objective-C object" : "pointer") :
+                event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ?
                 check_warning_text(scratch, "%s%s '%.*s' in the 'target' attribute string; 'target' attribute ignored", target_cases[payload->data & 3u],
                                    target_places[(payload->data >> 2) & 3u], (int)shown, argument + (offset <= length ? offset : 0)) :
                 event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER ? check_warning_text(scratch, "unknown sanitizer '%s' ignored", argument) :
@@ -656,7 +671,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                         event->kind == CHECK_WARNING_EVENT_TYPE_POSITION ? "attribute '%.*s%s%.*s' ignored, because it cannot be applied to a type" :
                                         event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS ? "'%.*s%s%.*s' attribute only applies to return values that are pointers" :
                                         event->kind == CHECK_WARNING_EVENT_GCC_VARIADIC ? "GCC requires a function with the '%.*s%s%.*s' attribute to be variadic" :
-                                        event->kind == CHECK_WARNING_EVENT_FUNCTIONS_METHODS ? "'%.*s%s%.*s' attribute only applies to functions and methods" :
+                                        event->kind == CHECK_WARNING_EVENT_FUNCTIONS_METHODS || event->kind == CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS ?
+                                            "'%.*s%s%.*s' attribute only applies to functions and methods" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS ? "'%.*s%s%.*s' attribute only applies to functions, methods, and parameters" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT ?
+                                            "'%.*s%s%.*s' attribute only applies to functions that return an Objective-C object" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER ? "'%.*s%s%.*s' attribute only applies to functions that return a pointer" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF ? "'%.*s%s%.*s' attribute only applies to pointer-to-CF-pointer parameters" :
+                                        event->kind == CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS ?
+                                            "'%.*s%s%.*s' attribute only applies to pointer/reference-to-OSObject-pointer parameters" :
                                         event->kind == CHECK_WARNING_EVENT_RETURN_POINTERS_REFERENCES ?
                                             "'%.*s%s%.*s' attribute only applies to return values that are pointers or references" :
                                         event->kind == CHECK_WARNING_EVENT_GCC_TYPE_ATTRIBUTE ? "GCC does not allow the '%.*s%s%.*s' attribute to be written on a type" :

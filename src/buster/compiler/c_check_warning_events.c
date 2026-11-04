@@ -154,6 +154,18 @@ typedef enum CheckWarningEventKind
     // A function type's attribute on a tag's declaration (#147, check_input_attribute_subjects): "'X' attribute only applies
     // to functions and methods", named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are.
     CHECK_WARNING_EVENT_FUNCTIONS_METHODS,
+    // The retain-ownership attributes' warnings (#147, check_input_attribute_ownership), at the declaration's first token
+    // (ns_returns_retained's of a function type at the attribute), named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are, the
+    // consumed ones' as their names alone.
+    CHECK_WARNING_EVENT_OWNERSHIP_RETURN_OBJECT,
+    CHECK_WARNING_EVENT_OWNERSHIP_RETURN_POINTER,
+    CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_CF,
+    CHECK_WARNING_EVENT_OWNERSHIP_PARAMETER_OS,
+    CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS,
+    CHECK_WARNING_EVENT_OWNERSHIP_FUNCTIONS_PARAMETERS,
+    CHECK_WARNING_EVENT_OWNERSHIP_RETAINED,
+    CHECK_WARNING_EVENT_CONSUMED_OBJECT,
+    CHECK_WARNING_EVENT_CONSUMED_POINTER,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

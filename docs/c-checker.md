@@ -5506,6 +5506,24 @@ arguments against the function. The checker now gives these as clang does.
   argument an index of its function's parameters, with clang's "out of
   bounds" error and its extra information.
 
+  The retain-ownership attributes (`cf_consumed`, `ns_consumed`,
+  `os_consumed`, `cf_returns_retained`, `cf_returns_not_retained`,
+  `ns_returns_retained`, `ns_returns_not_retained`,
+  `ns_returns_autoreleased`, `os_returns_retained`, `os_returns_not_retained`,
+  `os_returns_retained_on_zero`, `os_returns_retained_on_non_zero`) change
+  nothing in C. Their handlers' checks are clang's
+  (`check_input_attribute_ownership`): no C type is an Objective-C object or
+  points to a C++ record, so CF's take a pointer (a parameter's pointee a
+  pointer, for a returns' one) and NS's and OS's nothing; each warns where its
+  subject is no type it takes, at the declaration's first token (a tag's
+  keyword), and is ignored: "cf_consumed attribute only applies to pointer
+  parameters", "'X' attribute only applies to functions that return a
+  pointer", "... pointer-to-CF-pointer parameters", "... functions, methods,
+  and parameters" and the others. `ns_returns_retained` is a function type's
+  too: "'ns_returns_retained' attribute only applies to functions that return
+  an Objective-C object" at the attribute, and "only applies to function
+  types" off one.
+
   Other targets' calling conventions (`aarch64_sve_pcs`,
   `aarch64_vector_pcs`, `m68k_rtd`, `pcs`) are conventions x86-64 hasn't, as
   `stdcall` is: clang's "calling convention is not supported for this target"

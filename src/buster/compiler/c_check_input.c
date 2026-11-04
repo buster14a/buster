@@ -2347,8 +2347,11 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
     {
         const CheckInputAttribute* attribute = attributes->records + i;
         // (A GPU kernel's convention is a declaration's attribute, whose subject's error comes instead.)
+        // (ns_returns_retained, a generic attribute, is a function type's too.)
         const bool function_type = (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !check_input_attribute_kernel(reader, attribute)) ||
-                                   attribute->kind == CHECK_ATTRIBUTE_REGPARM || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword);
+                                   attribute->kind == CHECK_ATTRIBUTE_REGPARM || (attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->standard && !attribute->keyword) ||
+                                   (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword &&
+                                    check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "ns_returns_retained"));
         if (function_type)
         {
             const CheckWarningEvent event =
@@ -2855,7 +2858,8 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     {
         const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION :
                                   BUSTER_CHECK_SUBJECT_STRUCT;
-        valid = check_input_attribute_subjects(reader, own, subjects, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        // (The tag's keyword is its declaration's first token, where some handlers warn.)
+        valid = check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
         // Complete before this declaration: a fixed enum's first declaration completes it with its attributes.
         const bool complete = type_is_complete(reader->types, type) && canonical != declaration;
         for (uint32_t r = 0; valid && kind == BUSTER_TYPE_KIND_UNION && !complete && r < own->count; r += 1)
@@ -4969,7 +4973,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             valid = check_input_read_attributes(reader, &after, end, &frame->attributes);
             // The tag's subjects as clang's attributes name them (#147).
             const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
-            valid = valid && check_input_attribute_subjects(reader, frame->attributes, subjects, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            valid = valid && check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
             check_input_set_attributes_at(reader->output, frame->token, frame->attributes);
             for (uint32_t attribute = 0; valid && frame->attributes != 0 && attribute < frame->attributes->count; attribute += 1)
             {
