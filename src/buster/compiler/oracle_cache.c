@@ -3369,8 +3369,9 @@ typedef enum OracleTake
 
 // A file a take writes: as it was before the take (whether it was there, and if it was, what fstat gave of it, its
 // bytes and SHA-256 of its extended attributes, all through one descriptor), and what the take did to it: whether it is
-// moved aside (oracle_replay_kept), whether the replay changed it, what the replay left there (what fstat gave of the
-// file after it wrote, and how many of the entry's bytes it wrote), and whether that couldn't be undone.
+// moved aside (oracle_replay_kept), and if so whether what the replay moved was another process's file rather than the
+// one the take found; whether the replay changed it; what the replay left (what fstat gave of the file after it wrote
+// it or moved it aside, and how many of the entry's bytes it wrote); and whether that couldn't be undone.
 typedef struct OracleReplay OracleReplay;
 struct OracleReplay
 {
@@ -3379,6 +3380,7 @@ struct OracleReplay
     OracleBuffer bytes;
     OracleKey attributes;
     bool kept;
+    bool foreign;
     bool changed;
     struct stat written;
     uint64_t put;
@@ -3389,12 +3391,12 @@ struct OracleReplay
 // as if their calls had, by bit (step n's is bit n - 1). A step that changes nothing fails before its call, a replay's
 // write or removal after it has changed its file, and a restoration before its call. And what another process does at
 // the take's boundaries: between its preparation and its replay, and as it puts back each file the replay changed,
-// before it does (`removing` false) and, for a file the replay made, between the check that it is the file the replay
-// made, as the replay left it, and its removal (`removing` true).
+// before it does (`acting` false) and, for a file it moved aside or made, between the check of what is under the name
+// it moved it to and the call that acts on that (`acting` true): moving it back, or removing it.
 static uint64_t oracle_replay_faults;
 static uint32_t oracle_replay_steps;
 static void (*oracle_replay_between)(void);
-static void (*oracle_replay_restoring)(uint32_t file, bool removing);
+static void (*oracle_replay_restoring)(uint32_t file, bool acting);
 
 // renameat2's flag that refuses to replace a file the new name has (<linux/fs.h>'s RENAME_NOREPLACE).
 #define BUSTER_ORACLE_RENAME_NOREPLACE 1u
@@ -3453,27 +3455,26 @@ static OracleKey oracle_replay_attributes(int fd)
 }
 
 // Whether the file open as `fd` is as `before` and `bytes` have it: the same inode, with its kind and permissions,
-// owner, size, modification time and bytes (read through `fd`), and if `exact` its status-change time (which a rename
-// of it changes), and if `attributes` its extended attributes. So that another process's change since, one in place in
-// the same inode among them, is found (but for one between this check and the call that follows it, as between a
-// tool's own read of a file and its write).
+// owner, size (`length`), modification time and, if `bytes`, bytes (read through `fd` a chunk at a time into a buffer of
+// its own, compared with `bytes` as they come, so that a large file costs no copy of it), and if `exact` its
+// status-change time (which a rename of it changes, as does any change to it), and if `attributes` its extended
+// attributes. So that another process's change since, one in place in the same inode among them, is found (but for one
+// between this check and the call that follows it, as between a tool's own read of a file and its write).
 static bool oracle_replay_unchanged(int fd, const struct stat* before, const uint8_t* bytes, uint64_t length, bool exact, const OracleKey* attributes)
 {
     struct stat now;
     bool result = fd >= 0 && fstat(fd, &now) == 0 && oracle_replay_same(&now, before) && now.st_mode == before->st_mode && now.st_uid == before->st_uid;
     result = result && now.st_gid == before->st_gid && now.st_size == before->st_size && (uint64_t)now.st_size == length;
     result = result && oracle_replay_time(&now.st_mtim, &before->st_mtim) && (!exact || oracle_replay_time(&now.st_ctim, &before->st_ctim));
-    uint8_t* found = result ? malloc(length + 1) : 0;
-    result = result && found != 0;
     uint64_t done = 0;
-    while (result && done < length)
+    while (result && bytes != 0 && done < length)
     {
-        const ssize_t got = pread(fd, found + done, length - done, (off_t)done);
-        result = got > 0 || (got < 0 && errno == EINTR);
+        uint8_t chunk[65536];
+        const uint64_t wanted = length - done < sizeof(chunk) ? length - done : sizeof(chunk);
+        const ssize_t got = pread(fd, chunk, wanted, (off_t)done);
+        result = (got > 0 && memcmp(chunk, bytes + done, (size_t)got) == 0) || (got < 0 && errno == EINTR);
         done += got > 0 ? (uint64_t)got : 0;
     }
-    result = result && (length == 0 || memcmp(found, bytes, length) == 0);
-    free(found);
     const OracleKey now_attributes = result && attributes != 0 ? oracle_replay_attributes(fd) : (OracleKey){ 0 };
     result = result && (attributes == 0 || memcmp(now_attributes.bytes, attributes->bytes, sizeof(now_attributes.bytes)) == 0);
     return result;
@@ -3534,7 +3535,13 @@ static bool oracle_replay_write(const OracleRun* run, const OracleEntry* entry, 
             const int fd = moved ? open(kept, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
             replay->kept = moved;
             replay->changed = moved;
-            result = gone || oracle_replay_unchanged(fd, &replay->status, replay->bytes.bytes, replay->bytes.length, false, &replay->attributes);
+            if (moved && (fd < 0 || fstat(fd, &replay->written) != 0))
+            {
+                memset(&replay->written, 0, sizeof(replay->written));
+            }
+            const bool found = oracle_replay_unchanged(fd, &replay->status, replay->bytes.bytes, replay->bytes.length, false, &replay->attributes);
+            replay->foreign = moved && !found;
+            result = gone || found;
             if (fd >= 0)
             {
                 close(fd);
@@ -3570,10 +3577,12 @@ static bool oracle_replay_write(const OracleRun* run, const OracleEntry* entry, 
 // checked, but only if it is as the replay left it (else another process has changed it since, whose change the take
 // doesn't undo). A rewritten one's bytes, permissions (whose set-user and set-group bits a write by a process that isn't
 // root takes) and times in place, then its kind and permissions, owner, size, modification time and extended
-// attributes as they were (a file capability a write took, which only root can give back, isn't); a moved one moved
-// back, where nothing has come since; and one it made moved aside, where no other process's file can be in its place,
-// and removed if it is that file as the replay left it (else moved back: another process's left, one the replay made
-// that another has written since, not). False if one can't be, with a line on the errors naming it (and the name a
+// attributes as they were (a file capability a write took, which only root can give back, isn't); a moved one, checked
+// under the name it was moved to to be the file as the take found it, moved back where nothing has come since, and
+// checked again where it is (another process's, put under that name between the check and the move, going back under
+// it); and one it made moved aside, where no other process's file can be in its place, and removed if it is that file
+// as the replay left it, checked through its descriptor after (else moved back: another process's left, one the replay
+// made that another has written since, not). False if one can't be, with a line on the errors naming it (and the name a
 // moved one is kept under, then left). What no call gives back, and what a tool's result mustn't depend on as the cache
 // has it (a file's status-change time, its link count and access time, and its directory's times), may differ.
 static bool oracle_replay_restore(const OracleRun* run, const OracleEntry* entry, OracleReplay* replays, uint64_t take)
@@ -3596,8 +3605,29 @@ static bool oracle_replay_restore(const OracleRun* run, const OracleEntry* entry
         bool restored = !replay->changed;
         if (!restored && replay->kept)
         {
-            restored = named && !oracle_replay_fault() && syscall(SYS_renameat2, AT_FDCWD, kept, AT_FDCWD, path, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
-            replay->kept = !restored;
+            // What the replay moved aside, as it left it (to its status-change time): the file the take found, with its
+            // bytes and attributes, or another process's, which goes back to that process's place.
+            const uint8_t* expected = replay->foreign ? 0 : replay->bytes.bytes;
+            const OracleKey* attributes = replay->foreign ? 0 : &replay->attributes;
+            const uint64_t size = (uint64_t)replay->written.st_size;
+            const int fd = named && !oracle_replay_fault() ? open(kept, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) : -1;
+            const bool checked = replay->written.st_ino != 0 && oracle_replay_unchanged(fd, &replay->written, expected, size, true, attributes);
+            if (checked && oracle_replay_restoring != 0)
+            {
+                oracle_replay_restoring(f, true);
+            }
+            const bool back = checked && syscall(SYS_renameat2, AT_FDCWD, kept, AT_FDCWD, path, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
+            struct stat now;
+            const bool there = back && lstat(path, &now) == 0;
+            const bool same = there && oracle_replay_same(&now, &replay->written);
+            restored = same && oracle_replay_unchanged(fd, &replay->written, expected, size, false, attributes);
+            // Another process's file, put under the name between the check and the move, goes back under it.
+            const bool returned = there && !same && syscall(SYS_renameat2, AT_FDCWD, path, AT_FDCWD, kept, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
+            replay->kept = !back || returned;
+            if (fd >= 0)
+            {
+                close(fd);
+            }
         }
         else if (!restored && replay->present)
         {
@@ -3626,18 +3656,21 @@ static bool oracle_replay_restore(const OracleRun* run, const OracleEntry* entry
             struct stat found;
             const bool made = fd >= 0 && fstat(fd, &found) == 0 && oracle_replay_same(&found, &replay->written);
             const bool left = made && oracle_replay_unchanged(fd, &replay->written, bytes, replay->put, false, 0);
-            if (fd >= 0)
-            {
-                close(fd);
-            }
             if (left && oracle_replay_restoring != 0)
             {
                 oracle_replay_restoring(f, true);
             }
-            const bool removed = left && unlink(kept) == 0;
-            const bool back = moved && !removed && syscall(SYS_renameat2, AT_FDCWD, kept, AT_FDCWD, path, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
-            replay->kept = moved && !removed && !back;
+            // Removed by the name, then checked through the descriptor to have been that file: no other process's put
+            // under the name between the check and the removal (the removal can't then be undone, but the run fails).
+            const bool unlinked = left && unlink(kept) == 0;
+            const bool removed = unlinked && fstat(fd, &found) == 0 && found.st_nlink == 0;
+            const bool back = moved && !unlinked && syscall(SYS_renameat2, AT_FDCWD, kept, AT_FDCWD, path, BUSTER_ORACLE_RENAME_NOREPLACE) == 0;
+            replay->kept = moved && !unlinked && !back;
             restored = gone || removed || (back && !made);
+            if (fd >= 0)
+            {
+                close(fd);
+            }
         }
         replay->lost = !restored;
         if (!restored)

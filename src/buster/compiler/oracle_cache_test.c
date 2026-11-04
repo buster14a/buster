@@ -66,7 +66,8 @@
 //     those whose second is a restoration's failing the run without its tool; and another process's file made, put
 //     over one of the take's, written in place or removed, between its preparation and its replay
 //     (oracle_replay_between) and as it puts back what it changed (oracle_replay_restoring), which the take neither
-//     writes over nor removes;
+//     writes over nor removes, nor moves back as the file it moved aside; and a large one (16 MiB), taken with its peak
+//     memory under 2.7 times one read of its file, no copy of it made for the check;
 //   - listings (the test's program's getdents64, as ls -i lists): a file made anew with the same name and bytes, its
 //     inode another, run again;
 //   - changes (the test's program's mkdir and traced sh's rmdir): mkdir's path, which the run made, there the next
@@ -94,7 +95,9 @@
 #define BUSTER_ORACLE_CACHE_TEST_INCLUDED
 
 #include <dirent.h>
+#include <malloc.h>
 #include <stddef.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -2218,16 +2221,46 @@ static void oracle_test_replay_other(void)
     }
 }
 
-static void oracle_test_replay_restoring(uint32_t file, bool removing)
+// The name in the replay test's directory that the take moved a file to (oracle_replay_kept), into `name`: false if
+// there is none.
+static bool oracle_test_replay_kept_name(char* name, size_t capacity)
+{
+    bool result = false;
+    DIR* listing = opendir(oracle_test_replay_place);
+    for (struct dirent* entry = listing != 0 ? readdir(listing) : 0; !result && entry != 0; entry = readdir(listing))
+    {
+        const size_t length = strlen(entry->d_name);
+        result = length > 6 && strcmp(entry->d_name + length - 6, ".taken") == 0 && length < capacity;
+        if (result)
+        {
+            memcpy(name, entry->d_name, length + 1);
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return result;
+}
+
+static void oracle_test_replay_restoring(uint32_t file, bool acting)
 {
     const uint32_t change = oracle_test_replay_change;
-    if (change == 7 && file == 1 && !removing)
+    char kept[256];
+    if (change == 7 && file == 1 && !acting)
     {
         oracle_test_replay_put("replay-counter", "9\n", true);
     }
-    else if ((change == 8 && file == 2 && !removing) || (change == 9 && file == 2 && removing))
+    else if ((change == 8 && file == 2 && !acting) || (change == 9 && file == 2 && acting))
     {
         oracle_test_replay_put("replay-made", "theirs\n", false);
+    }
+    else if (((change == 10 || change == 11) && file == 0 && !acting) || (change == 12 && file == 0 && acting))
+    {
+        if (oracle_test_replay_kept_name(kept, sizeof(kept)))
+        {
+            oracle_test_replay_put(kept, change == 11 ? "changed\n" : "theirs\n", change == 11);
+        }
     }
 }
 
@@ -2239,7 +2272,9 @@ static void oracle_test_replay_restoring(uint32_t file, bool removing)
 // inodes) where it changed them and put them back, adding one to 1. Of two steps failing, exactly those whose second is
 // a restoration's fail the run without its tool. And another process's file made, put over one of the take's, written in
 // place or removed, between its preparation and its replay or as it puts back what it changed (at the check of a file
-// it made and its removal among them), is never written over or removed by the take.
+// it made and its removal among them), is never written over or removed by the take; nor is the file it moved aside
+// moved back once another process has changed what is under the name it is kept under, even between the check of it
+// and the move.
 static void oracle_test_replays(OracleTest* test)
 {
     OracleCache cache;
@@ -2342,6 +2377,17 @@ static void oracle_test_replays(OracleTest* test)
         other &= oracle_test_replay_reset(directory, true) && oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && replay.ran &&
                  oracle_test_replay_after(directory) && lstat(made, &status) == 0 && status.st_ino == oracle_test_replay_inode && oracle_test_replay_kept(directory, false) == 0;
     }
+    // The file the take moved aside for the entry to remove (the first), changed under the name it is kept under before
+    // its restoration (another file put there, or that one written in place), and another file put there between the
+    // check of it and the move back: none moved back, so that the run fails without its tool.
+    char gone[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(gone, sizeof(gone), "%s/replay-gone", directory);
+    for (uint32_t change = 10; change <= 12; change += 1)
+    {
+        oracle_test_replay_change = change;
+        other &= oracle_test_replay_reset(directory, true) && !oracle_test_replay_run(test, &cache, directory, 1ull << (steps - 1), &replay) && !replay.taken && !replay.ran &&
+                 lstat(gone, &status) != 0 && errno == ENOENT;
+    }
     oracle_replay_between = 0;
     oracle_replay_restoring = 0;
     oracle_test_replay_change = 0;
@@ -2352,6 +2398,112 @@ static void oracle_test_replays(OracleTest* test)
     oracle_test_unlink(directory, "replay-gone");
     oracle_test_unlink(directory, "replay-ran");
     oracle_cache_report(&cache, "test-oracle-cache's replays");
+    oracle_cache_close(&cache);
+}
+
+// A run of `cat replay-big-source > replay-big` in `directory`, replay-big declared, through `cache` (the large replay's,
+// oracle_test_replay_large): whether it ran or took its entry, and whether it took it.
+static bool oracle_test_replay_big(OracleCache* cache, const char* directory, bool* taken)
+{
+    char big[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(big, sizeof(big), "%s/replay-big", directory);
+    char* arguments[] = { "sh", "-c", "cat replay-big-source > replay-big", 0 };
+    const char* files[] = { big };
+    OracleRun run = {
+        .cache = cache,
+        .purpose = "oracle test: a large replay",
+        .arguments = arguments,
+        .directory = directory,
+        .files = files,
+        .file_count = 1,
+    };
+    const bool result = oracle_run(&run);
+    *taken = run.taken;
+    oracle_run_release(&run);
+    return result;
+}
+
+// How much a child process's peak resident memory grows, in KiB, as it takes the large replay's entry (if `take`, with
+// whether it took it into `taken`) or reads its file once: -1 if it can't be told. Mappings stand for large allocations
+// (M_MMAP_THRESHOLD fixed, so that a growing buffer is remapped rather than copied), so that a copy of the file is its
+// size again.
+static int64_t oracle_test_replay_peak(OracleCache* cache, const char* directory, bool take, bool* taken)
+{
+    int ends[2] = { -1, -1 };
+    const pid_t child = pipe(ends) == 0 ? fork() : -1;
+    if (child == 0)
+    {
+        close(ends[0]);
+        mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+        char big[BUSTER_ORACLE_PATH_BYTES + 32];
+        snprintf(big, sizeof(big), "%s/replay-big", directory);
+        struct rusage before;
+        struct rusage after;
+        getrusage(RUSAGE_SELF, &before);
+        bool took = false;
+        OracleBuffer buffer = { 0 };
+        const bool done = take ? oracle_test_replay_big(cache, directory, &took) : oracle_buffer_file(&buffer, big);
+        getrusage(RUSAGE_SELF, &after);
+        free(buffer.bytes);
+        const int64_t report[2] = { done ? (int64_t)(after.ru_maxrss - before.ru_maxrss) : -1, took };
+        const bool written = write(ends[1], report, sizeof(report)) == (ssize_t)sizeof(report);
+        _exit(written ? 0 : 1);
+    }
+    if (ends[1] >= 0)
+    {
+        close(ends[1]);
+    }
+    int64_t report[2] = { -1, 0 };
+    const bool read_whole = child > 0 && read(ends[0], report, sizeof(report)) == (ssize_t)sizeof(report);
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (ends[0] >= 0)
+    {
+        close(ends[0]);
+    }
+    *taken = report[1] != 0;
+    return read_whole && waited ? report[0] : -1;
+}
+
+// A large replay (#1342's third review): a run that writes 16 MiB, taken where its output already is, with those bytes
+// compared through a buffer of the check's own (oracle_replay_unchanged) rather than a copy of the file. The take's peak
+// memory, in a child process, is under 2.7 times one read of the file (the entry's bytes and the take's own of the file
+// it rewrites are two, 2.2 times one read on the owner's machine; a copy of it for the check was a third, 3.2 times), in
+// a build without a sanitizer, whose shadow memory and quarantine count too.
+static void oracle_test_replay_large(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "replay-large");
+    const char* directory = test->runs[0];
+    char source[BUSTER_ORACLE_PATH_BYTES + 32];
+    char big[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(source, sizeof(source), "%s/replay-big-source", directory);
+    snprintf(big, sizeof(big), "%s/replay-big", directory);
+    const uint64_t size = 16u << 20;
+    uint8_t* bytes = malloc(size);
+    for (uint64_t i = 0; bytes != 0 && i < size; i += 1)
+    {
+        bytes[i] = (uint8_t)(i * 131 + (i >> 16));
+    }
+    unlink(big);
+    bool taken = false;
+    const bool first = bytes != 0 && oracle_test_write(source, bytes, size) && oracle_test_replay_big(&cache, directory, &taken) && !taken;
+    const int64_t once = first ? oracle_test_replay_peak(&cache, directory, false, &taken) : -1;
+    const int64_t took = once > 0 ? oracle_test_replay_peak(&cache, directory, true, &taken) : -1;
+    uint64_t length = 0;
+    char* left = taken ? oracle_test_read(big, &length) : 0;
+    const bool right = left != 0 && length == size && memcmp(left, bytes, size) == 0;
+    free(left);
+    free(bytes);
+#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer)
+    const bool bounded = true;
+#else
+    const bool bounded = took >= 0 && took * 10 < once * 27;
+#endif
+    printf("oracle cache: a large take's peak grew by %lld KiB, one read of its file by %lld KiB\n", (long long)took, (long long)once);
+    oracle_test_expect(test, first && taken && right && bounded, "replays: a large output taken without a copy of it for its check");
+    unlink(source);
+    unlink(big);
     oracle_cache_close(&cache);
 }
 
@@ -3088,6 +3240,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_numbers(&test);
         oracle_test_outputs(&test);
         oracle_test_replays(&test);
+        oracle_test_replay_large(&test);
         oracle_test_listings(&test);
         oracle_test_changes(&test);
         oracle_test_unfollowed(&test);
@@ -3124,7 +3277,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
     }
     oracle_epoch_end(epoch);
     static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
-                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",
+                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",      "replays/oracle",      "replay-large/oracle",
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",

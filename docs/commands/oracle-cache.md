@@ -223,7 +223,9 @@ attributes. A file there that isn't a regular one (a directory, a symbolic link
 the replay would write through) isn't taken. Only then does it replay, each
 file only if it is as the take found it (`oracle_replay_unchanged`: the same
 inode, mode, owner, size, modification and status-change times, bytes and
-extended attributes, so that another process's write in place is found too),
+extended attributes, so that another process's write in place is found too;
+the bytes are read a chunk at a time into a buffer of the check's own, so a
+large output costs no second copy of it),
 else that process's change is left to the tool: a file that was there is
 rewritten in place, so it keeps its permissions, owner and links; one that
 wasn't is made with `O_EXCL`; one the entry removes is moved aside with
@@ -238,9 +240,15 @@ rewritten file's bytes, permissions (the set-user and set-group bits a write by
 a process that isn't root takes) and modification time, in the same inode,
 then its mode, owner, size, time and extended attributes checked as they were
 (a file capability a write took, which only root can give back, isn't, so the
-take fails); a moved one moved back where nothing has come since; and a made
-one moved aside the same way, where no other process's file can then be in its
-place, checked, and removed, or moved back if it is another process's. The tool
+take fails); a moved one checked under the name it was moved to (what the
+replay moved there, as it left it, to its status-change time: the file the take
+found, with its bytes and attributes, or another process's), moved back where
+nothing has come since, and checked again where it is (another process's file
+put under that name between the check and the move goes back under it, and the
+run fails); and a made one moved aside the same way, where no other process's
+file can then be in its place, checked, and removed, or moved back if it is
+another process's (and after the removal checked through its descriptor to
+have been that file, so that a removal of another one fails the run). The tool
 then runs on its files as they were, but for what no call gives back and a
 tool's result mustn't depend on here: their status-change times, link counts
 and access times and their directory's times. If putting back fails, the run
@@ -421,9 +429,17 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
   tool run; and another process's change as the take puts back what it changed
   (`oracle_replay_restoring`): the counter written in place before its
   restoration, not written over, the run failing without its tool; a file put
-  over the one the replay made, before its restoration, moved back; and one
-  made where that was, between the check of the file moved aside and its
-  removal, left, the tool writing into each;
+  over the one the replay made, before its restoration, moved back; one made
+  where that was, between the check of the file moved aside and its removal,
+  left, the tool writing into each; and the file the take moved aside for the
+  entry to remove, replaced or written in place under the name it is kept under
+  before its restoration, or replaced there between the check of it and the
+  move back, never moved back as it, the run failing without its tool;
+- a large replay (#1342's third review): a run writing 16 MiB, taken where its
+  output already is; its peak memory, in a child process, under 2.7 times one
+  read of the file (the entry's bytes and the take's own of the file are two,
+  2.2 times; a copy for the check was a third, 3.2 times), in a build without a
+  sanitizer;
 - listings (the test's program's `getdents64`, as `ls -i` lists): a file made
   anew with the same name and bytes, its inode another, run again;
 - changes (the test's program's `mkdir`, and traced sh's `rmdir`): `mkdir`'s
