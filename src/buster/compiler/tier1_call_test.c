@@ -65,6 +65,19 @@ struct Tier1CallFixture
     IrType parameter_type;
     // A call through its first parameter, the helper's address, of the next three, whose second it adds after the call.
     bool indirect;
+    // Two calls through the first two parameters (with `indirect`), past which the last three live (tier1_call_run_fixture).
+    bool run;
+    // Two calls in two blocks, a value live past both (tier1_call_carry_fixture): the second's block's one predecessor
+    // first in layout (TIER1_CALL_CARRY), a join, or a later predecessor.
+    uint32_t carry;
+    // A multi-block fixture's dominator tree, by preorder (IrDominance's enter and leave), which selection needs for a
+    // value read outside its block; `dominated` says the fixture has one.
+    uint32_t dominance_enter[3];
+    uint32_t dominance_leave[3];
+    bool dominated;
+    // A call past which this many computed values live (six or five, else none), which the callee-saved registers take
+    // (tier1_call_callee_fixture).
+    uint32_t callee_values;
     // A function that returns its parameter truncated to this narrow type (I8 or I16, else none), without calls.
     IrType return_type;
     // Divisions, remainders and shifts by a register of the four parameters, without calls, whose operands that live on
@@ -357,8 +370,9 @@ static bool tier1_call_mixed_fixture(Tier1EmitTest* test, Tier1CallFixture* fixt
     return ready;
 }
 
-// One allocatable register makes the I32 call result occupy RAX itself. The node-boundary assertion below checks
-// the call's own normalization before ZEXT's separate 32-bit move can conceal a missing result capture.
+// One allocatable register makes the call result occupy RAX itself. The node-boundary assertion below checks a narrow
+// result's own normalization before ZEXT's separate 32-bit move can conceal a missing result capture, and that an I32
+// result has none: the ZEXT's move is what clears its poisoned upper half.
 static bool tier1_call_narrow_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
 {
     const IrSizes sizes = {
@@ -512,6 +526,197 @@ static bool tier1_call_indirect_fixture(Tier1EmitTest* test, Tier1CallFixture* f
         fixture->arguments = 3;
         fixture->helper_count = 1;
         fixture->indirect = true;
+    }
+    return ready;
+}
+
+// A run of calls (#1116): two calls through the first two parameters, the helpers' addresses, the first of the third
+// parameter and the second of the first's result; then the second's result plus the third, fourth and fifth parameters.
+// Those three live past both calls in their incoming registers, caller-saved ones (a parameter keeps its register over
+// its definition's interval, tier1_emit_cfg_callee), and the second call reads none of them. The CFG consumer stores
+// each once, at the first call, and loads it once, where an addition reads it; the second parameter, the second call's
+// callee, is stored at the first call and loaded before the second.
+static bool tier1_call_run_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+{
+    const IrSizes sizes = {
+        .instruction_count = 11,
+        .block_count = 1,
+        .extra_count = 2,
+        .call_count = 2,
+        .call_type_count = 2,
+        .parameter_count = 5,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 1;
+        function->block_offsets[1] = 11;
+        for (uint32_t parameter = 0; parameter < 5; parameter += 1)
+        {
+            const IrType type = parameter < 2 ? IR_PTR : IR_I64;
+            function->parameter_types[parameter] = (uint8_t)type;
+            tier1_emit_test_node(function, parameter, IR_PARAM, type, parameter, BUSTER_IR_NONE);
+        }
+        function->extra[0] = 2;
+        function->extra[1] = 5;
+        tier1_call_descriptor(function, 0, 0, 1, IR_I64);
+        tier1_emit_test_node(function, 5, IR_CALL_INDIRECT, IR_I64, 0, 0);
+        tier1_call_descriptor(function, 1, 1, 1, IR_I64);
+        tier1_emit_test_node(function, 6, IR_CALL_INDIRECT, IR_I64, 1, 1);
+        tier1_emit_test_node(function, 7, IR_ADD, IR_I64, 6, 2);
+        tier1_emit_test_node(function, 8, IR_ADD, IR_I64, 7, 3);
+        tier1_emit_test_node(function, 9, IR_ADD, IR_I64, 8, 4);
+        tier1_emit_test_node(function, 10, IR_RET, IR_VOID, 9, BUSTER_IR_NONE);
+        fixture->width = 8;
+        fixture->arguments = 1;
+        fixture->helper_count = 2;
+        fixture->indirect = true;
+        fixture->run = true;
+    }
+    return ready;
+}
+
+#define TIER1_CALL_CARRY 1
+#define TIER1_CALL_CARRY_JOIN 2
+#define TIER1_CALL_CARRY_LATER 3
+
+// Two calls through the first two parameters in two blocks (#1116): the first, of the third parameter, in block P, and
+// the second, of the first's result, in block B; then the second's result plus the fourth parameter, which lives past
+// both in its incoming register, a caller-saved one, as the second, P's callee, does past the first. So the first call
+// stores both, P's jump takes them back, and B's call saves the fourth parameter again, as every block starts with no
+// rows (the code's certificate, #939, proves a block from its entry facts, which don't hold a row's value):
+// - TIER1_CALL_CARRY: B is P's one successor and P is B's one predecessor, before it in layout. P's row still holds the
+//   fourth parameter, but B's call stores it again.
+// - TIER1_CALL_CARRY_JOIN: P branches on the first result to B or to an empty block C that jumps to B, so B has two
+//   predecessors.
+// - TIER1_CALL_CARRY_LATER: the entry, with the first call, jumps to P, the last block, which jumps back to B, between
+//   them. B's one predecessor comes after it in layout.
+static bool tier1_call_carry_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture, uint32_t carry)
+{
+    const uint32_t count = carry == TIER1_CALL_CARRY ? 9 : carry == TIER1_CALL_CARRY_JOIN ? 12 : 10;
+    const IrSizes sizes = {
+        .instruction_count = count,
+        .block_count = carry == TIER1_CALL_CARRY ? 2 : 3,
+        .extra_count = 2,
+        .constant_count = 1,
+        .call_count = 2,
+        .call_type_count = 2,
+        .parameter_count = 4,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 1;
+        for (uint32_t parameter = 0; parameter < 4; parameter += 1)
+        {
+            const IrType type = parameter < 2 ? IR_PTR : IR_I64;
+            function->parameter_types[parameter] = (uint8_t)type;
+            tier1_emit_test_node(function, parameter, IR_PARAM, type, parameter, BUSTER_IR_NONE);
+        }
+        function->extra[0] = 2;
+        function->extra[1] = 4;
+        // Each descriptor after its arguments' nodes, whose types it copies.
+        tier1_call_descriptor(function, 0, 0, 1, IR_I64);
+        tier1_emit_test_node(function, 4, IR_CALL_INDIRECT, IR_I64, 0, 0);
+        tier1_call_descriptor(function, 1, 1, 1, IR_I64);
+        // B's nodes: the second call, the addition and the return, from `b`.
+        uint32_t b = 6;
+        if (carry == TIER1_CALL_CARRY)
+        {
+            tier1_emit_test_node(function, 5, IR_BR, IR_VOID, 1, BUSTER_IR_NONE);
+            function->block_offsets[1] = 6;
+            function->block_offsets[2] = 9;
+        }
+        else if (carry == TIER1_CALL_CARRY_JOIN)
+        {
+            function->constants[0].low = 0;
+            tier1_emit_test_node(function, 5, IR_CONST, IR_I64, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 6, IR_ICMP, IR_I1, 4, 5);
+            function->c[6] = IR_NE;
+            tier1_emit_test_node(function, 7, IR_CBR, IR_VOID, 6, 1);
+            function->c[7] = 2;
+            tier1_emit_test_node(function, 8, IR_BR, IR_VOID, 2, BUSTER_IR_NONE);
+            function->block_offsets[1] = 8;
+            function->block_offsets[2] = 9;
+            function->block_offsets[3] = 12;
+            b = 9;
+        }
+        else
+        {
+            tier1_emit_test_node(function, 5, IR_BR, IR_VOID, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 9, IR_BR, IR_VOID, 1, BUSTER_IR_NONE);
+            function->block_offsets[1] = 6;
+            function->block_offsets[2] = 9;
+            function->block_offsets[3] = 10;
+        }
+        tier1_emit_test_node(function, b, IR_CALL_INDIRECT, IR_I64, 1, 1);
+        tier1_emit_test_node(function, b + 1, IR_ADD, IR_I64, b, 3);
+        tier1_emit_test_node(function, b + 2, IR_RET, IR_VOID, b + 1, BUSTER_IR_NONE);
+        // The dominator trees: P over B; P over C and B (B's two predecessors); the entry over P over B.
+        static const uint32_t enter[3][3] = { { 0, 1, 0 }, { 0, 1, 2 }, { 0, 2, 1 } };
+        static const uint32_t leave[3][3] = { { 2, 2, 0 }, { 3, 2, 3 }, { 3, 3, 3 } };
+        memcpy(fixture->dominance_enter, enter[carry - 1], sizeof(fixture->dominance_enter));
+        memcpy(fixture->dominance_leave, leave[carry - 1], sizeof(fixture->dominance_leave));
+        fixture->dominated = true;
+        fixture->width = 8;
+        fixture->arguments = 1;
+        fixture->helper_count = 2;
+        fixture->indirect = true;
+        fixture->carry = carry;
+    }
+    return ready;
+}
+
+// A call through the first parameter, of no arguments, past which `values` values live (six or five), each the second
+// parameter plus its own constant, which the function adds to the call's result (#1116). The CFG consumer's
+// callee-saved preference (tier1_emit_cfg_callee) gives each a callee-saved register: six take all six, rbp among them,
+// where the frame keeps no frame pointer, and five take rbx and r12 to r15 where BUSTER_TIER1_FRAME_KEEP_POINTER makes
+// rbp the frame's.
+static bool tier1_call_callee_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture, uint32_t values)
+{
+    const IrSizes sizes = {
+        .instruction_count = 2 + 3 * values + 2,
+        .block_count = 1,
+        .constant_count = values,
+        .call_count = 1,
+        .parameter_count = 2,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 1;
+        function->block_offsets[1] = (uint32_t)sizes.instruction_count;
+        function->parameter_types[0] = IR_PTR;
+        function->parameter_types[1] = IR_I64;
+        tier1_emit_test_node(function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < values; k += 1)
+        {
+            function->constants[k].low = tier1_call_term(k);
+            tier1_emit_test_node(function, 2 + 2 * k, IR_CONST, IR_I64, k, BUSTER_IR_NONE);
+            tier1_emit_test_node(function, 3 + 2 * k, IR_ADD, IR_I64, 1, 2 + 2 * k);
+        }
+        const uint32_t call = 2 + 2 * values;
+        tier1_call_descriptor(function, 0, 0, 0, IR_I64);
+        tier1_emit_test_node(function, call, IR_CALL_INDIRECT, IR_I64, 0, 0);
+        uint32_t sum = call;
+        for (uint32_t k = 0; k < values; k += 1)
+        {
+            tier1_emit_test_node(function, call + 1 + k, IR_ADD, IR_I64, sum, 3 + 2 * k);
+            sum = call + 1 + k;
+        }
+        tier1_emit_test_node(function, sum + 1, IR_RET, IR_VOID, sum, BUSTER_IR_NONE);
+        fixture->width = 8;
+        fixture->arguments = 0;
+        fixture->helper_count = 1;
+        fixture->indirect = true;
+        fixture->callee_values = values;
     }
     return ready;
 }
@@ -805,6 +1010,35 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
                 expected = (uint32_t)((uint32_t)((int32_t)q0 / (int32_t)q1) + q2 % q1 + (q0 << q3) + (uint32_t)((int32_t)q2 >> q3) + (q0 >> q1) + q0);
             }
         }
+        else if (fixture->carry != 0)
+        {
+            arguments[0] = addresses[0];
+            arguments[1] = addresses[1];
+            passed[0][0] = arguments[2];
+            passed[1][0] = tier1_call_mix(passed[0], 1, 8);
+            counts[0] = 1;
+            counts[1] = 1;
+            expected = tier1_call_mix(passed[1], 1, 8) + arguments[3];
+        }
+        else if (fixture->callee_values != 0)
+        {
+            arguments[0] = addresses[0];
+            expected = tier1_call_mix(passed[0], 0, 8);
+            for (uint32_t k = 0; k < fixture->callee_values; k += 1)
+            {
+                expected += arguments[1] + tier1_call_term(k);
+            }
+        }
+        else if (fixture->run)
+        {
+            arguments[0] = addresses[0];
+            arguments[1] = addresses[1];
+            passed[0][0] = arguments[2];
+            passed[1][0] = tier1_call_mix(passed[0], 1, 8);
+            counts[0] = 1;
+            counts[1] = 1;
+            expected = tier1_call_mix(passed[1], 1, 8) + arguments[2] + arguments[3] + arguments[4];
+        }
         else if (fixture->indirect)
         {
             arguments[0] = addresses[0];
@@ -908,6 +1142,20 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
     }
 }
 
+// The record index of the emitted code's call through r10 number `k` (an indirect call's), or the code's count.
+static uint32_t tier1_call_record(const Tier1EmitResult* emitted, uint32_t k)
+{
+    uint32_t found = emitted->code.count;
+    uint32_t seen = 0;
+    for (uint32_t r = 0; found == emitted->code.count && r < emitted->code.count; r += 1)
+    {
+        const bool call = (emitted->code.records[r].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CALL_RM64;
+        found = call && seen == k ? r : found;
+        seen += call;
+    }
+    return found;
+}
+
 static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixture, bool vector, bool rematerialize, uint32_t frame_flags)
 {
     test->terms = fixture->terms;
@@ -915,8 +1163,17 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
     test->selects = false;
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError selected = tier1_select_plan(&fixture->function, 0, &test->output, &test->scratch, vector, &plan, &node);
+    const IrDominance dominance = {
+        .enter = fixture->dominance_enter,
+        .leave = fixture->dominance_leave,
+        .block_count = fixture->function.block_count,
+    };
+    const Tier1SelectError selected = tier1_select_plan(&fixture->function, fixture->dominated ? &dominance : 0, &test->output, &test->scratch, vector, &plan, &node);
     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "original direct-call IR selects");
+    if (selected != TIER1_SELECT_OK && test->failures < 20)
+    {
+        fprintf(stderr, "  call selection error=%u node=%u\n", selected, node);
+    }
     if (selected == TIER1_SELECT_OK)
     {
         const Tier1EmitOptions options = {
@@ -943,16 +1200,19 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             Tier1CfgCheck check;
             const bool verified = emitted.general ? tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check) : tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation);
             tier1_emit_test_expect(test, verified, "direct-call allocation passes independent interference verification");
+            tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted), "every value a call stores is loaded back before the code leaves its straight-line run");
             if (fixture->narrow_return)
             {
-                // An I32 result's immediate MOV32 self-capture, and a narrow one's zero extension, before any later ZEXT.
+                // A narrow result's zero extension into its canonical storage, the call's own, before the ZEXT. An I32
+                // result has none (#1116): its upper half is unspecified, and the ZEXT's own MOV32 clears it.
                 const IrType narrow = fixture->narrow_type != 0 ? fixture->narrow_type : IR_I32;
                 const uint16_t form = narrow == IR_I8 ? X86_FORM_MOVZX_R32_RM8 : narrow == IR_I16 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
                 const uint32_t capture = emitted.references[0].instruction + 1;
                 const bool within_call = capture < emitted.code.node_first[1] && capture < emitted.code.count;
-                tier1_emit_test_expect(test, within_call && emitted.code.records[capture].form == form &&
-                    emitted.code.records[capture].reg == X86_REGISTER_RAX && emitted.code.records[capture].rm == X86_REGISTER_RAX,
-                    "a narrow result in RAX has its own immediate capture to its canonical storage before any later ZEXT");
+                const bool clears = capture < emitted.code.count && emitted.code.records[capture].form == form && emitted.code.records[capture].reg == X86_REGISTER_RAX &&
+                                    emitted.code.records[capture].rm == X86_REGISTER_RAX;
+                tier1_emit_test_expect(test, narrow == IR_I32 ? !within_call && capture == emitted.code.node_first[1] && clears : within_call && clears,
+                    "a narrow result in RAX has its own immediate capture to its canonical storage, and an I32 one only the ZEXT's move");
             }
             else if (fixture->return_type != 0)
             {
@@ -962,6 +1222,47 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             {
                 tier1_emit_test_expect(test, emitted.general && emitted.call_stores != 0 && emitted.call_stores == emitted.call_loads,
                                        "values live past a division and a shift in their fixed registers are saved around them");
+            }
+            else if (fixture->run || fixture->carry != 0)
+            {
+                // The values that live past both calls are stored at the first (some are, in their incoming caller-saved
+                // registers), and the second stores none of them where its code has the first's rows: the run's one
+                // block. In another block, the carry's, the second call stores again (#1116, #939). Each store is loaded
+                // back.
+                const uint32_t first = tier1_call_record(&emitted, 0);
+                const uint32_t second = tier1_call_record(&emitted, 1);
+                const uint32_t before = tier1_emit_test_save_stores(&emitted, 0, first);
+                const uint32_t between = tier1_emit_test_save_stores(&emitted, first, second);
+                const bool carried = fixture->run;
+                tier1_emit_test_expect(test, emitted.general && second < emitted.code.count && before != 0 && (carried ? between == 0 : between != 0),
+                                       "a call doesn't store again a row its block stored its value into, and stores in another block");
+                if (test->failures < 20 && !(second < emitted.code.count && before != 0 && (carried ? between == 0 : between != 0)))
+                {
+                    fprintf(stderr, "  run=%u carry=%u: stores before the first call %u, between the calls %u\n", fixture->run, fixture->carry, before, between);
+                }
+            }
+            else if (fixture->callee_values != 0)
+            {
+                // Each value takes a callee-saved register, which the frame pushes, and no call-save row (#1116). Without a
+                // frame pointer, six take all six, rbp among them, and five any five. With one, rbp is the frame's (its
+                // own push, not a saved register's), and five take exactly the other five. Six values past those five
+                // would split one, which discards the preference whole (tier1_emit_cfg_callee), so that case only runs:
+                // its registers prove nothing about rbp.
+                const uint32_t rbp = 1u << X86_REGISTER_RBP;
+                const uint32_t others = (1u << X86_REGISTER_RBX) | (1u << X86_REGISTER_R12) | (1u << X86_REGISTER_R13) | (1u << X86_REGISTER_R14) | (1u << X86_REGISTER_R15);
+                const bool pointer = (frame_flags & BUSTER_TIER1_FRAME_KEEP_POINTER) != 0;
+                const uint32_t used = emitted.callee_used;
+                const uint32_t saved = emitted.frame.saved_registers;
+                const bool six = fixture->callee_values == 6;
+                const bool registers = pointer ? six || (used == others && (saved & others) == others && (saved & rbp) == 0) :
+                                       six ? used == (others | rbp) && (saved & used) == used :
+                                             __builtin_popcount(used) == 5 && (used & ~(others | rbp)) == 0 && (saved & used) == used;
+                tier1_emit_test_expect(test, emitted.general && emitted.frame.frame_pointer == pointer && registers && ((pointer && six) || emitted.call_stores == 0),
+                                       "values live past a call take the callee-saved registers the frame leaves: rbp without a frame pointer, the other five with one");
+                if (test->failures < 20 && !registers)
+                {
+                    fprintf(stderr, "  callee values=%u pointer=%u: callee_used=%#x saved=%#x call_stores=%u\n", fixture->callee_values, pointer, used, saved, emitted.call_stores);
+                }
             }
             else if (fixture->indirect)
             {
@@ -1199,8 +1500,9 @@ static void tier1_call_cases(Tier1EmitTest* test)
         arena_pop_to(&test->input, 0);
     }
     // The mixed cycles, the dirty I32, I8 and I16 call results, the I8 and I16 parameters, the indirect call, the I8
-    // and I16 returns, and the 64- and 32-bit divisions and shifts.
-    for (uint32_t shape = 0; shape < 12; shape += 1)
+    // and I16 returns, the 64- and 32-bit divisions and shifts, a run of calls, the three carries, and six and five values
+    // in callee-saved registers.
+    for (uint32_t shape = 0; shape < 18; shape += 1)
     {
         Tier1CallFixture fixture = {
             .narrow_type = shape == 3 ? IR_I8 : shape == 4 ? IR_I16 : 0,
@@ -1210,7 +1512,8 @@ static void tier1_call_cases(Tier1EmitTest* test)
         };
         const bool ready = shape < 2 ? tier1_call_mixed_fixture(test, &fixture, shape != 0) : shape < 5 ? tier1_call_narrow_fixture(test, &fixture) :
                            shape < 7 ? tier1_call_parameter_fixture(test, &fixture) : shape == 7 ? tier1_call_indirect_fixture(test, &fixture) :
-                           shape < 10 ? tier1_call_return_fixture(test, &fixture) : tier1_call_fixed_fixture(test, &fixture);
+                           shape < 10 ? tier1_call_return_fixture(test, &fixture) : shape < 12 ? tier1_call_fixed_fixture(test, &fixture) :
+                           shape == 12 ? tier1_call_run_fixture(test, &fixture) : shape < 16 ? tier1_call_carry_fixture(test, &fixture, shape - 12) : tier1_call_callee_fixture(test, &fixture, shape == 16 ? 6 : 5);
         tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle, dirty narrow return or narrow parameter fixture");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {

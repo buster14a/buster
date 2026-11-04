@@ -840,12 +840,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
         break;
     case TIER1_RULE_COPY:
-        // Only a copy whose narrow source the planner's canonical column certified vanishes in its own register: its
-        // 32-bit storage has zeros past its width (tier1_select_canonical lists the producers, including the entry
-        // MOVZX of a narrow parameter and the result MOVZX of a narrow call). A 32-bit copy of an I32 value keeps its
-        // move: a parameter or call result may arrive with a dirty upper half, and the move is what clears it (the call
-        // tests' hostile callees check this).
-        if (destination != holes->left || (width == 4 && holes->source_width == 0))
+        // A copy in its own register is nothing. A 32-bit value's upper half is unspecified (tier1_select_width), so a
+        // copy of an I32 has nothing to clear. A narrow one's bits past its width are what a narrow source's canonical
+        // column says (tier1_select_canonical), and a 32-bit move wouldn't clear those either.
+        if (destination != holes->left)
         {
             tier1_select_append(&result, tier1_select_move(width, destination, holes->left));
         }
@@ -853,11 +851,15 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_TRUNCATE:
     case TIER1_RULE_ZERO_EXTEND:
     {
-        // Truncations and zero extensions always emit: even in place they must clear the bits past the width.
+        // Zero extensions and narrow truncations always emit: even in place they clear the bits past the width. A
+        // truncation to I32 is a copy, nothing in its own register, since the upper half it would clear is unspecified.
         // Narrow zero extensions never reach this case from the planner; they select COPY above.
         const uint32_t source_width = holes->rule == TIER1_RULE_TRUNCATE ? width : holes->source_width;
         const uint16_t form = source_width == 1 ? X86_FORM_MOVZX_R32_RM8 : source_width == 2 ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOV_R32_RM32;
-        tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
+        if (holes->rule == TIER1_RULE_ZERO_EXTEND || width != 4 || destination != holes->left)
+        {
+            tier1_select_append(&result, tier1_select_register_record(form, destination, holes->left));
+        }
         break;
     }
     case TIER1_RULE_SIGN_EXTEND:
@@ -1677,6 +1679,8 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // logical byte width, except canonical I1 zero-extension reads its 32-bit storage. A zero extension of a canonical
 // I1, I8 or I16 value selects COPY instead, with canonical width and the narrow source width retained; COPY of a narrow
 // source carries that width only when tier1_select_canonical certified it, and any other COPY leaves source_width zero.
+// A COPY's source_width is the plan's record of that certificate, which both paths' plans must agree on; the emitter
+// doesn't read it, since a copy in its own register is nothing at every width (#1116, tier1_select_expand).
 // `fold_count` counts the nodes the pattern computes itself rather than reads (maximal munch's rank): which nodes the
 // code leaves out follows from what the chosen patterns read (tier1_select_plan). For TIER1_RULE_ADDRESS,
 // TIER1_RULE_LOAD, TIER1_RULE_LOAD_ADDRESS, TIER1_RULE_LOAD_OPERAND, TIER1_RULE_STORE, TIER1_RULE_STORE_ADDRESS and a
@@ -1834,7 +1838,10 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
 
 static uint32_t tier1_select_width(uint32_t type)
 {
-    // Narrow SSA values occupy a zero-extended 32-bit register/spill slot; signedness is explicit in IR_SEXT.
+    // Narrow SSA values occupy a zero-extended 32-bit register/spill slot; signedness is explicit in IR_SEXT. An I32's
+    // upper half is unspecified, as System V leaves a parameter's and a result's (#1116): every rule reads an I32 operand
+    // at 32 bits (an address's index is an I64), and a zero extension to I64 always writes its 32-bit move. So no copy,
+    // truncation to I32, call argument or call result clears it.
     return type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 ? 4 : type == IR_I64 || type == IR_PTR ? 8 : 0;
 }
 
@@ -1906,8 +1913,8 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 //   IR_CALL/INDIRECT     a narrow result's MOVZX from RAX (tier1_emit.c)
 //   IR_FPTOSI/FPTOUI     cvtts*2si, then MOVZX_R32_RM8/RM16 (a narrow result's, #141)
 // COPY, BITCAST, ZEXT, SELECT and PHI only move narrow values (MOV, CMOV, edge moves, spill/reload), so they are
-// canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it keeps its clearing
-// move and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
+// canonical when their narrow operands are. Any other producer is left noncanonical: a copy of it is noncanonical too
+// and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
 // probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
 // rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
@@ -2322,6 +2329,60 @@ static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
 
 static bool tier1_select_stack_object(const IrFunction* function, uint32_t slot);
 
+// The type a call's argument without an ABI record may have, and its result's, and whether its arguments match its
+// parameters (all of them, or a variadic call's named ones and more), in a call the selector takes
+// (tier1_select_call_supported). The C driver's refusal report names a refused call's kinds by them and by the ABI's
+// below (check_tier1_call_kinds), so that it follows this boundary as it grows (#1116). A long double argument (#141) is
+// in its stack slots, from its object.
+static bool tier1_select_call_argument(uint32_t type)
+{
+    return type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0 || type == IR_F80;
+}
+
+// A narrow result is zero-extended after the call, and a floating one (#141) comes in xmm0. A long double's (#141) comes
+// in st0, which the CFG consumer stores into the call's object.
+static bool tier1_select_call_result(uint32_t type)
+{
+    return type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0 ||
+           type == IR_F80;
+}
+
+static bool tier1_select_call_arity(const IrCall* call)
+{
+    return call->variadic ? call->parameter_count <= call->argument_count : call->parameter_count == call->argument_count;
+}
+
+// Whether the call-wide part of a call's ABI records is one Tier 1 takes (#789), or the call has none: its result, as
+// parts or through the hidden pointer into the frame object its into operand (c) is the address of, and its outgoing
+// area's bytes.
+static bool tier1_select_call_abi(const IrFunction* function, uint32_t node, const IrCall* call)
+{
+    const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
+    const uint32_t into = function->c[node];
+    const bool object = into != BUSTER_IR_NONE && into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_select_stack_object(function, function->a[into]);
+    return abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (function->type[node] == IR_VOID && object)) &&
+                        abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
+}
+
+// The red zone's staging slots a call's arguments' parts in registers wait in (#789, tier1_emit_staging): 14, the
+// argument registers'.
+#define BUSTER_TIER1_SELECT_STAGING_SLOTS (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS)
+
+// The staging slots an argument's parts in registers take, by an ABI record Tier 1 takes (or none): an eightbyte's one, a
+// whole vector register's its bytes' (#141, tier1_select_part_slots), but a 64-byte one's none, which waits in zmm16 and
+// on (tier1_select_argument_part_slots).
+static uint32_t tier1_select_argument_slots(const IrPassed* record)
+{
+    Tier1SelectPart parts[2];
+    const uint32_t count = record != 0 && record->size != 0 && !tier1_select_location_whole(record->location) ? tier1_select_location_parts(record->location, record->size, parts) : 0;
+    uint32_t slots = 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        slots += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_argument_part_slots(parts[k].bytes) : 0;
+    }
+    return slots;
+}
+
 // This selection boundary intentionally excludes extension/truncation ABI rules for narrow integers. The shared verifier
 // checks descriptor bounds and actual argument types before this helper runs.
 static bool tier1_select_call_supported(const IrFunction* function, uint32_t node)
@@ -2331,40 +2392,23 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
     if (supported)
     {
         const IrCall call = function->calls[function->b[node]];
-        const uint32_t type = function->type[node];
         // A variadic call's unnamed arguments are promoted ones, an F32 among them never: its al counts the vector
-        // registers its arguments take (tier1_emit_call). A narrow result is zero-extended after the call, and a floating
-        // one (#141) comes in xmm0.
-        // A long double's (#141) comes in st0, which the CFG consumer stores into the call's object.
-        const bool result = type == IR_VOID || type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || tier1_select_float_width(type) != 0 || type == IR_F80;
-        supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && (call.variadic ? call.parameter_count <= call.argument_count : call.parameter_count == call.argument_count) && result;
-        // A call with ABI records (#789) passes each argument where its record says: its aggregates' bytes in registers
-        // or in its stack slots, and its aggregate result's into the frame object its into operand (c) is the address of,
-        // as parts or through the hidden pointer (tier1_emit_call).
-        const IrAbiCall* abi = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
-        const uint32_t into = function->c[node];
-        const bool object = into != BUSTER_IR_NONE && into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_select_stack_object(function, function->a[into]);
-        supported &= abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (type == IR_VOID && object)) &&
-                                  abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
-        // The aggregates' parts in registers wait in the red zone's staging slots, 14 of them (#789), a whole vector
-        // register's taking its bytes' (#141, tier1_select_part_slots), but a 64-byte one's, which waits in zmm16 and on
-        // (tier1_select_argument_part_slots).
+        // registers its arguments take (tier1_emit_call). A call with ABI records (#789) passes each argument where its
+        // record says: its aggregates' bytes in registers or in its stack slots, and its aggregate result's into the frame
+        // object its into operand is the address of, as parts or through the hidden pointer (tier1_emit_call).
+        supported = call.argument_count <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS && tier1_select_call_arity(&call) && tier1_select_call_result(function->type[node]) &&
+                    tier1_select_call_abi(function, node, &call);
+        // The aggregates' parts in registers wait in the red zone's staging slots, a 64-byte one in zmm16 and on instead
+        // (tier1_select_argument_slots).
         uint32_t staged = 0;
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = tier1_select_argument_type(function, &call, argument);
             const IrPassed* record = tier1_select_argument_record(function, &call, argument);
-            // A long double (#141) in its stack slots, from its object.
-            supported = record != 0 ? tier1_select_record_supported(record, argument_type)
-                                    : argument_type == IR_I32 || argument_type == IR_I64 || argument_type == IR_PTR || tier1_select_float_width(argument_type) != 0 || argument_type == IR_F80;
-            Tier1SelectPart parts[2];
-            const uint32_t count = supported && record != 0 && record->size != 0 && !tier1_select_location_whole(record->location) ? tier1_select_location_parts(record->location, record->size, parts) : 0;
-            for (uint32_t k = 0; k < count; k += 1)
-            {
-                staged += parts[k].reg != BUSTER_ABI_REGISTER_NONE ? tier1_select_argument_part_slots(parts[k].bytes) : 0;
-            }
+            supported = record != 0 ? tier1_select_record_supported(record, argument_type) : tier1_select_call_argument(argument_type);
+            staged += supported ? tier1_select_argument_slots(record) : 0;
         }
-        supported &= staged <= BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS;
+        supported &= staged <= BUSTER_TIER1_SELECT_STAGING_SLOTS;
     }
     return supported;
 }
@@ -3107,10 +3151,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     {
         base.rule = TIER1_RULE_COPY;
         base.values[0] = a;
-        // A copy of a narrow value can vanish in its own register only when the planner's canonical column certifies
-        // that value's 32-bit storage (tier1_select_canonical: an entry MOVZX for narrow parameters, the result MOVZX
-        // for narrow calls, and the producers' own full-width writes). An I32 source keeps its clearing move because a
-        // parameter or call result may arrive with a dirty upper half.
+        // A copy in its own register is nothing (tier1_select_expand). The plan records a narrow source's width where the
+        // planner's canonical column certifies its 32-bit storage (tier1_select_canonical: an entry MOVZX for narrow
+        // parameters, the result MOVZX for narrow calls, and the producers' own full-width writes), so the copy is as
+        // canonical as its source; the emitter doesn't read it.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         base.source_width = narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0 ? narrow_width : 0;
         base.intrinsic_cost = 1;
@@ -3146,9 +3190,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // A zero extension of a canonical I1, I8 or I16 value is a copy: the source register already holds the
         // destination value with zeros past its width (the planner's canonical column, tier1_select_canonical), and a
         // 32-bit move zeroes the whole 64-bit register. This keeps the second movzx of issue #981's speedtest1 loop out
-        // of the plan on both paths. The copy carries the narrow source width so the emitter can drop it in its own
-        // register; an I32 source keeps its clearing move. For `zext(icmp)` the truth-value candidate below usually wins,
-        // as #140 folds the comparison's own setcc/movzx; this copy covers a comparison the fold leaves alone.
+        // of the plan on both paths. The copy records the narrow source width (plan metadata the emitter doesn't read: a
+        // copy in its own register is nothing); an I32 source's zero extension always writes its move, since its upper
+        // half is unspecified (tier1_select_width).
+        // For `zext(icmp)` the truth-value candidate below usually wins, as #140 folds the comparison's own setcc/movzx;
+        // this copy covers a comparison the fold leaves alone.
         const uint8_t narrow_width = (uint8_t)tier1_select_narrow_width(function->type[a]);
         const bool narrow_copy = op == IR_ZEXT && narrow_width != 0 && forest->canonical != 0 && forest->canonical[a] != 0;
         base.rule = narrow_copy ? TIER1_RULE_COPY : op == IR_TRUNC ? TIER1_RULE_TRUNCATE : op == IR_ZEXT ? TIER1_RULE_ZERO_EXTEND : TIER1_RULE_SIGN_EXTEND;

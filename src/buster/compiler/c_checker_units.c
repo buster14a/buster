@@ -1590,6 +1590,10 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&command->tier1_report->operations[k], lane->functions.tier1_report.operations[k], __ATOMIC_RELAXED);
             __atomic_fetch_add(&command->tier1_report->emission[k], lane->functions.tier1_report.emission[k], __ATOMIC_RELAXED);
         }
+        for (uint32_t k = 0; command->tier1 && command->tier1_report != NULL && k < CHECK_TIER1_CALL_KIND_COUNT; k += 1)
+        {
+            __atomic_fetch_add(&command->tier1_report->calls[k], lane->functions.tier1_report.calls[k], __ATOMIC_RELAXED);
+        }
         if (command->tier1 && command->tier1_report != NULL)
         {
             CheckTier1Report* report = command->tier1_report;
