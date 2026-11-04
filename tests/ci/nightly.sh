@@ -158,7 +158,14 @@ export GITHUB_OUTPUT="$work/output" GITHUB_STEP_SUMMARY="$work/summary" GITHUB_R
 run_evidence()
 {
     : > "$GITHUB_OUTPUT"
-    (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log"
+    (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log" || return $?
+    # Main's hosted suite is never reused or reduced, independently of hardware admission and nightly mode.
+    if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
+        expect_line "$GITHUB_OUTPUT" 'scope=full' 'every main push runs the full sanitizer and fuzz scope'
+        expect_line "$GITHUB_OUTPUT" 'hosted=run' 'every main push runs its own hosted suite'
+        expect_line "$GITHUB_OUTPUT" 'hosted_source=' 'PR evidence never replaces main hosted coverage'
+        expect_line "$GITHUB_OUTPUT" 'retired=false' 'nightly mode never retires a main push'
+    fi
 }
 
 # A draft pull request: hosted feedback, no hardware, and no API call. A ready one's 9700X job measures (it skips
@@ -185,6 +192,17 @@ GITHUB_EVENT_NAME=schedule GITHUB_SHA=$head EVIDENCE_NIGHTLY='' run_evidence "$h
 expect_line "$GITHUB_OUTPUT" 'retired=false' 'without the nightly mode the daily run runs'
 expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
+
+# Landed merges, documentation-only revisions and direct pushes all get full hosted CI in either nightly mode (#1271).
+# Each checkout and GITHUB_SHA must agree, as the workflow's do. Pushes always run their own native correctness (#1272).
+for revision in "$merge" "$docs" "$head"; do
+    git -C "$history" worktree add -q --detach "$work/main-push" "$revision"
+    for mode in on ''; do
+        GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=$mode run_evidence "$work/main-push"
+        expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a main push qualifies on hardware'
+    done
+    git -C "$history" worktree remove "$work/main-push"
+done
 
 # A push to main runs its own native correctness, needing no pull request's native evidence, and reads no API.
 tree=$(git -C "$history" rev-parse "$head^{tree}")
