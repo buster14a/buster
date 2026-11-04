@@ -5,8 +5,14 @@
 # The report's tables from the raw results (run.sh's summarize step first):
 #   tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/results/zen5-9700x:8 > tables.md
 # Each argument is a host's results directory and its dispatch width. UARCH names
-# the uarch tool (build/microarch/uarch by default, built here when missing).
-set -u
+# the uarch tool (build/microarch/uarch by default, built here when missing). The
+# awk programs are POSIX awk (mawk, busybox, gawk --posix). A command that fails,
+# in a pipeline too, fails the report: it is still written, and tables.sh exits 1
+# naming the line.
+set -Eu -o pipefail
+shopt -s nullglob
+failed=0
+trap 'failed=1; echo "tables.sh: line $LINENO failed" >&2' ERR
 export LC_ALL=C
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UARCH=${UARCH:-$here/../../build/microarch/uarch}
@@ -22,6 +28,8 @@ dir() { echo "${1%%:*}"; }
 width() { echo "${1##*:}"; }
 # True when some host's results have FILE.
 any_file() { local h; for h in "${hosts[@]}"; do [[ -f $(dir "$h")/$1 ]] && return 0; done; return 1; }
+# The median of the numbers on stdin, one per line; nothing for none.
+median() { sort -n | awk '{ a[NR] = $1 } END { if (NR > 0) print (NR % 2 ? a[(NR + 1) / 2] : (a[NR / 2] + a[NR / 2 + 1]) / 2) }'; }
 
 if any_file time/time-summary.tsv; then
     echo "## Whole processes (medians of 11 rotated runs; MB/s of sqlite3.c's 9,507,037 source bytes)"
@@ -146,10 +154,10 @@ for h in "${hosts[@]}"; do
     echo "| independent compiles | batch wall ms (median of 4) | MB/s | user ms per compile | system ms per compile | package J per compile |"
     echo "| ---: | ---: | ---: | ---: | ---: | ---: |"
     for k in $(awk -F'\t' 'NR > 1 { print $3 }' "$s/fanout.tsv" | sort -n | uniq); do
-        energy=$(cat "$s"/fanout-energy-"$k".r*.csv 2>/dev/null | awk -F, '$3 ~ /energy-pkg/ { print $1 }' | sort -n | awk '{ a[NR] = $1 } END { print (NR % 2 ? a[(NR + 1) / 2] : (a[NR / 2] + a[NR / 2 + 1]) / 2) }')
-        awk -F'\t' -v k="$k" -v bytes=$SQLITE_BYTES -v energy="$energy" 'NR > 1 && $3 == k { w[++n] = $5; u += $6; s += $7 }
-            END { asort(w); m = n % 2 ? w[(n + 1) / 2] : (w[n / 2] + w[n / 2 + 1]) / 2
-                  printf "| %d | %.1f | %.1f | %.1f | %.1f | %.2f |\n", k, m, k * bytes / m / 1000, u / n / k, s / n / k, energy / k }' "$s/fanout.tsv"
+        energy=$(awk -F, '$3 ~ /energy-pkg/ { print $1 }' /dev/null "$s"/fanout-energy-"$k".r*.csv | median)
+        wall=$(awk -F'\t' -v k="$k" 'NR > 1 && $3 == k { print $5 }' "$s/fanout.tsv" | median)
+        awk -F'\t' -v k="$k" -v bytes=$SQLITE_BYTES -v energy="$energy" -v m="$wall" 'NR > 1 && $3 == k { n += 1; u += $6; s += $7 }
+            END { if (n > 0 && m > 0) printf "| %d | %.1f | %.1f | %.1f | %.1f | %.2f |\n", k, m, k * bytes / m / 1000, u / n / k, s / n / k, energy / k }' "$s/fanout.tsv"
     done
     echo
 done
@@ -234,3 +242,4 @@ for h in "${hosts[@]}"; do
     awk -F'\t' 'NR > 1 { printf "| %s | %s | %.2f | %.2f |\n", $1, $2, $3, $4 }' "$g"
     echo
 done
+exit "$failed"

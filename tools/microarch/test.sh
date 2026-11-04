@@ -28,7 +28,13 @@
 # - a step whose CPU can't be pinned fails;
 # - results/HOST is bound to its inputs: after setup rebuilds the checkout, a
 #   step that measures is refused until the results are moved away, a
-#   build-commit build is added, and results without identity.txt are refused.
+#   build-commit build is added, and results without identity.txt are refused;
+# - a changed host profile or counter groups (TD_WIDTH) refuse the results, and a
+#   done profile of another command (PROFILE_WORKLOAD, PROFILE_RUNS) fails;
+# - tables.sh writes the scaling report with POSIX awk (gawk --posix) and fails
+#   when a command in it fails;
+# - pack.sh archives every raw file, fails when a tar fails or its archive misses
+#   a file, and refuses foreign lock lines in the raw files.
 # uarch.c's own checks are `uarch test`.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -156,7 +162,7 @@ NATIVE=a
 VARIANTS="a b"
 SWEEP_VARIANTS=a
 SELF_VARIANTS=a
-TD_WIDTH=6
+TD_WIDTH=${TD_WIDTH:-6}
 TD_RESYNC=resyncs_or_nc_redirects
 SCALING_LANES=1
 FANOUT_WORKERS=1
@@ -227,6 +233,24 @@ run profiles
 expect '[[ $status -eq 0 ]]' "profiles: the rerun records every profile"
 expect '[[ $(ls "$results"/profiles/a/*.done | wc -l) -eq 10 ]]' "profiles: ten profiles done"
 expect '[[ $(grep -c . "$results/profiles/a/lbr.tsv") -gt 3 ]]' "profiles: the reduced tables have rows"
+table=$(sha256sum < "$results/profiles/a/cycles.txt")
+PROFILE_WORKLOAD=self-syn PROFILE_RUNS=1 run profiles
+expect '[[ $status -ne 0 && $(sha256sum < "$results/profiles/a/cycles.txt") == "$table" ]] && grep -q "cycles.done was recorded by another command" "$results/run.log"' "profiles: a done profile of another workload and run count is refused"
+run profiles
+expect '[[ $status -eq 0 ]]' "profiles: the same configuration resumes"
+
+# The host profile and the counter groups are inputs too.
+reset
+run time
+TD_WIDTH=8 run time
+expect '[[ $status -ne 0 ]] && grep -q "measured with another groups" "$results/run.log"' "time: results of other counter groups (TD_WIDTH) are refused"
+cp "$work/host.sh" "$work/host.sh.saved"
+echo 'SCALING_LANES="1 2"' >> "$work/host.sh"
+run time
+expect '[[ $status -ne 0 ]] && grep -q "measured with another profile" "$results/run.log"' "time: results of another host profile are refused"
+mv -f -- "$work/host.sh.saved" "$work/host.sh"
+run time
+expect '[[ $status -eq 0 ]]' "time: the profile it was measured with resumes"
 
 # Sweep and metrics chunks: a recorded failure isn't skipped as done.
 reset
@@ -300,6 +324,89 @@ expect '[[ $status -ne 0 && $(catalog core-events) == e1 ]]' "env: a failed perf
 reset
 SINGLE_CPU=99999 run time
 expect '[[ $status -ne 0 && ! -f $results/time/time.tsv ]] && grep -q "can'"'"'t pin to CPU" "$results/run.log"' "time: a step that can't pin its CPU fails"
+
+# tables.sh: the scaling report with POSIX awk, and a failed command fails it.
+reset
+printf 'e1\n' > "$work/behaviour/events"
+printf 'm1\n' > "$work/behaviour/metrics"
+run env
+run scaling
+expect '[[ $status -eq 0 && -s $results/scaling/fanout.tsv ]]' "scaling: measures the independent compiles"
+run summarize
+tables() { "$here/tables.sh" "$results:6" > "$work/tables.md" 2> "$work/tables.err"; status=$?; }
+UARCH=$ROOT/uarch tables
+expect '[[ $status -eq 0 ]] && grep -q "^| 1 | " "$work/tables.md"' "tables.sh: the independent compiles' row"
+if command -v gawk > /dev/null; then
+    cp "$work/tables.md" "$work/tables.gnu.md"
+    mkdir -p "$work/posix"
+    printf '#!/bin/sh\nexec gawk --posix "$@"\n' > "$work/posix/awk"
+    chmod +x "$work/posix/awk"
+    UARCH=$ROOT/uarch PATH="$work/posix:$PATH" tables
+    expect '[[ $status -eq 0 ]] && cmp -s "$work/tables.md" "$work/tables.gnu.md"' "tables.sh: POSIX awk writes the same report"
+fi
+printf '#!/bin/sh\nexit 1\n' > "$work/fake/uarch-fails"
+chmod +x "$work/fake/uarch-fails"
+mkdir -p "$results/profiles/a"
+: > "$results/profiles/a/td1.tsv"
+: > "$results/profiles/a/td2.tsv"
+UARCH=$work/fake/uarch-fails tables
+expect '[[ $status -ne 0 ]] && grep -q "tables.sh: line" "$work/tables.err"' "tables.sh: a failed command fails the report"
+rm -rf -- "${results:?}/profiles"
+
+# pack.sh: every raw file in the archive; a failing or lossy tar fails the pack.
+if command -v zstd > /dev/null; then
+    real_tar=$(command -v tar)
+    mkdir -p "$work/faketar"
+    # TAR_BEHAVIOUR: "fail", every archive tar makes fails after its stream;
+    # "fail-raw", only the raw archive (made with --mtime); "drop-raw" and
+    # "drop-summaries", that archive leaves out its last file and succeeds.
+    {
+        echo '#!/usr/bin/env bash'
+        echo "real=$real_tar"
+        cat <<'EOF'
+args=("$@")
+creating=0
+raw=0
+for a in "$@"; do
+    [[ $a == -cf ]] && creating=1
+    [[ $a == --mtime=* ]] && raw=1
+done
+case ${TAR_BEHAVIOUR:-} in
+    fail) if [[ $creating == 1 ]]; then "$real" "$@"; exit 2; fi ;;
+    fail-raw) if [[ $creating == 1 && $raw == 1 ]]; then "$real" "$@"; exit 2; fi ;;
+    drop-raw | drop-summaries)
+        if [[ $creating == 1 && $raw == $([[ $TAR_BEHAVIOUR == drop-raw ]] && echo 1 || echo 0) ]]; then
+            for i in "${!args[@]}"; do
+                if [[ ${args[i]} == -T ]]; then
+                    head -z -n -1 "${args[i + 1]}" > "${args[i + 1]}.short"
+                    args[i + 1]=${args[i + 1]}.short
+                fi
+            done
+        fi ;;
+esac
+exec "$real" "${args[@]}"
+EOF
+    } > "$work/faketar/tar"
+    chmod +x "$work/faketar/tar"
+    pack() { "$here/pack.sh" "$results" "$work/record/$1" > "$work/pack.out" 2>&1; status=$?; }
+    pack good
+    raw=$(cd "$results" && find . -type f \( -path '*/stat/*' -o -path '*/sweep/*' -o -path '*/metrics/*' -o -path '*/logs/*' \) | wc -l)
+    expect '[[ $status -eq 0 && -f $work/record/good/scaling/time.tsv && $raw -gt 0 && $(zstd -dc "$work/record/good/raw.tar.zst" | tar -tf - | wc -l) -eq $raw ]]' "pack: copies the summaries and archives every raw file"
+    TAR_BEHAVIOUR=fail PATH="$work/faketar:$PATH" pack fail
+    expect '[[ $status -ne 0 ]]' "pack: a failing summaries tar fails it"
+    TAR_BEHAVIOUR=fail-raw PATH="$work/faketar:$PATH" pack fail-raw
+    expect '[[ $status -ne 0 ]]' "pack: a failing raw tar fails it, though zstd compresses its stream"
+    TAR_BEHAVIOUR=drop-raw PATH="$work/faketar:$PATH" pack drop-raw
+    expect '[[ $status -ne 0 ]] && grep -q "doesn'"'"'t hold every raw file" "$work/pack.out"' "pack: an archive without every raw file fails it"
+    TAR_BEHAVIOUR=drop-summaries PATH="$work/faketar:$PATH" pack drop-summaries
+    expect '[[ $status -ne 0 ]] && grep -q "wasn'"'"'t copied whole" "$work/pack.out"' "pack: summaries that weren't all copied fail it"
+    log=$(ls "$results"/scaling/logs/*.log | head -1)
+    echo "https://claude.ai/x" >> "$log"
+    pack foreign
+    expect '[[ $status -ne 0 ]] && grep -q "foreign lock lines in .*raw.tar.zst" "$work/pack.out"' "pack: refuses foreign lock lines in the raw files"
+else
+    echo "microarch test.sh: no zstd, pack.sh not checked" >&2
+fi
 
 # summarize reduces what a partial campaign has, and fails when a reducer fails.
 reset

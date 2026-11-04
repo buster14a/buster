@@ -49,8 +49,9 @@
 # when self-main.i.source names the checkout, preprocessor and predefines. A chunk
 # whose recorded entries aren't its catalog's lines fails the step.
 # results/HOST/identity.txt binds the results to their inputs (the builds, the self
-# input, the corpus, the workloads): a step that measures is refused once one of
-# them changed. A run that can't be pinned to its CPUs fails. REPOSITORY names the
+# input, the corpus, the workloads, the host profile, the counter groups): a step
+# that measures is refused once one of them changed, and a done profile of another
+# command (PROFILE_WORKLOAD, PROFILE_RUNS) fails its step. A run that can't be pinned to its CPUs fails. REPOSITORY names the
 # checkout (this one by default). Each step, or each chunk of one, takes the host's
 # lock or core grant itself, for that chunk alone; no step needs another's output
 # except summarize.
@@ -340,18 +341,28 @@ inner_metrics()
 # short functions with their neighbours. perf.data stays in scratch/HOST. The
 # profile is done (NAME.done, written last, through a rename) only when perf record
 # succeeded and every reducer succeeded with rows; otherwise its outputs are
-# removed, the step fails, and a rerun records it again.
+# removed, the step fails, and a rerun records it again. NAME.done holds the perf
+# record command, one argument per line, then perf.data's size: a done profile is
+# skipped only for the same command, and one of another (its events, the workload,
+# PROFILE_WORKLOAD or PROFILE_RUNS changed) fails the step until it is moved away.
 profile_one()
 {
     local name=${1:?a profile name} v=${2:?a variant}; shift 2
     local dir="$OUT/profiles/$v" data="$SCRATCH/profile-$v-$name.data" status=0 output
     mkdir -p "$dir"
-    [[ -f $dir/$name.done ]] && return 0
     workload "$v" "${PROFILE_WORKLOAD:-sq-c}"
-    local loop="" runs=${PROFILE_RUNS:-8}
+    local loop="" runs=${PROFILE_RUNS:-8} command key
     printf -v loop '%q ' "${WL[@]}"
-    perf record -q -o "$data" "$@" -- bash -c "for ((i = 0; i < $runs; i++)); do $loop > /dev/null 2>&1 || exit 1; done" \
-        > "$dir/$name.record.log" 2>&1 || status=1
+    command=(perf record -q -o "$data" "$@" -- bash -c "for ((i = 0; i < $runs; i++)); do $loop > /dev/null 2>&1 || exit 1; done")
+    key=$(printf '%s\n' "${command[@]}")
+    if [[ -f $dir/$name.done ]]; then
+        if [[ $(sed '$d' "$dir/$name.done") == "$key" ]]; then
+            return 0
+        fi
+        log "profile $v $name: $name.done was recorded by another command: move the profile away to record this one"
+        return 1
+    fi
+    "${command[@]}" > "$dir/$name.record.log" 2>&1 || status=1
     echo "status $status" >> "$dir/$name.record.log"
     local outputs=("$dir/$name.header.txt")
     if [[ $status -eq 0 ]]; then
@@ -388,7 +399,7 @@ profile_one()
         done
     fi
     if [[ $status -eq 0 ]]; then
-        { stat -c %s "$data" > "$dir/$name.done.tmp" && mv -- "$dir/$name.done.tmp" "$dir/$name.done"; } || status=1
+        { { printf '%s\n' "$key" && stat -c 'bytes %s' "$data"; } > "$dir/$name.done.tmp" && mv -- "$dir/$name.done.tmp" "$dir/$name.done"; } || status=1
     else
         log "profile $v $name failed; see $dir/$name.record.log"
         for output in "${outputs[@]}"; do
@@ -815,18 +826,24 @@ step_metrics()
 }
 
 # The inputs results/HOST is measured with, one "NAME SHA-256" line each: every
-# build in bin/, the self input and its predefines, the corpus's manifest, and the
-# workloads' command lines (workloads.sh).
+# build in bin/, the self input and its predefines, the corpus's manifest, the
+# workloads' command lines (workloads.sh), the host profile (its CPUs, widths and
+# event names), and the counter groups as this run expands them (TD_WIDTH and
+# TD_RESYNC in them). The CPUs a hold grants aren't an input: on a shared host
+# they differ between runs, and each is pinned.
 campaign_inputs()
 {
-    local file name hash
-    for file in bin/compiler-* self-main.i predefines-znver5.h corpus/MANIFESTS.sha256 "$here/workloads.sh"; do
+    local file name hash group
+    for file in bin/compiler-* self-main.i predefines-znver5.h corpus/MANIFESTS.sha256 "$here/workloads.sh" "$profile"; do
         [[ -f $file && $file != *.commit ]] || continue
         name=${file##*/}
         [[ $file == corpus/* ]] && name=corpus
+        [[ $file == "$profile" ]] && name=profile
         hash=$(sha256sum < "$file") || return 1
         echo "$name ${hash%% *}"
     done
+    hash=$(for group in $COUNTER_GROUPS; do group_spec "$group"; done | sha256sum) || return 1
+    echo "groups ${hash%% *}"
 }
 
 # Records are reused by their names alone, so results/HOST/identity.txt binds the

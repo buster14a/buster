@@ -55,12 +55,15 @@ traffic. It changes no host setting and needs no root. It needs
   - **Inputs.** Records are reused by their names alone, so
     `results/HOST/identity.txt` binds the results to the inputs they were
     measured with: the SHA-256 of every build in `bin/`, `self-main.i`, the
-    predefines, the corpus's `MANIFESTS.sha256` and `workloads.sh`. Every step
-    except `setup`, `build-commit` and `summarize` checks it first, and is
-    refused once a recorded input changed (a rebuilt checkout, another corpus or
-    workload options). Move the results away to measure the new inputs. A build
-    first seen, such as a `build-commit` one, is added. Results with no
-    `identity.txt` (from before it) are refused too.
+    predefines, the corpus's `MANIFESTS.sha256`, `workloads.sh`, the host
+    profile, and the counter groups as the run expands them (with `TD_WIDTH` and
+    `TD_RESYNC`). Every step except `setup`, `build-commit` and `summarize`
+    checks it first, and is refused once a recorded input changed (a rebuilt
+    checkout, another corpus, workload options or host profile). Move the results
+    away to measure the new inputs. A build first seen, such as a `build-commit`
+    one, is added. Results with no `identity.txt` (from before it) are refused
+    too. The CPUs a hold grants aren't an input: on a shared host they differ
+    between runs, and every run is pinned to one of them.
   - **Catalogs.** `env` writes perf's lists of core events and metrics as
     `env/core-events.txt` and `env/metrics.txt`. The sweep's and the metrics'
     results are numbered by those lines, so a catalog is frozen once a result uses
@@ -81,9 +84,13 @@ traffic. It changes no host setting and needs no root. It needs
   - the compiler's own `main.c` (`self-syn`, a `.i`);
   - musl's 1,355 sources on N lanes (`musl-syn`);
   - tcc as the reference compiler (`tcc-c`).
-- `tables.sh` writes the report's tables from one or more hosts' results.
-  `inline-split.sh` splits IBS samples by inlined function or by line.
-  `pack.sh` copies a host's results into a buster-performance record.
+- `tables.sh` writes the report's tables from one or more hosts' results, in
+  POSIX awk (mawk, busybox, `gawk --posix`). A command that fails, in a pipeline
+  too, makes it exit 1 naming the line. `inline-split.sh` splits IBS samples by
+  inlined function or by line. `pack.sh` copies a host's results into a
+  buster-performance record. It fails when any producer of its archives fails,
+  and checks the copied summaries and `raw.tar.zst` against the lists of files
+  they must hold.
 
 Check the tool and the driver before a campaign. `test.sh` runs `run.sh` on fake
 compilers, a fake perf, a fake tcc and a two-commit fake checkout. It checks:
@@ -107,7 +114,13 @@ compilers, a fake perf, a fake tcc and a two-commit fake checkout. It checks:
 - that a step whose CPU can't be pinned fails;
 - that after `setup` rebuilds the checkout, a step that measures the old results
   is refused until they are moved away, that a `build-commit` build is added to
-  the inputs, and that results without `identity.txt` are refused.
+  the inputs, and that results without `identity.txt` are refused;
+- that a changed host profile or `TD_WIDTH` refuses the results, and that a
+  done profile of another `PROFILE_WORKLOAD` and `PROFILE_RUNS` fails;
+- `tables.sh`'s scaling report under `gawk --posix`, and its failure when a
+  command fails;
+- that `pack.sh` archives every raw file, fails when a `tar` fails or its output
+  misses a file, and refuses foreign lock lines in the raw files.
 
 ```sh
 mkdir -p build/microarch
@@ -176,7 +189,7 @@ tools/microarch/tables.sh build/microarch/results/zen4-7940hs:6 build/microarch/
 | `groups`, `groups-self` | six perf stat groups of at most five counters: user and kernel cycles and instructions; top-down level 1; level 2 (with the frontend stall at `cmask` = width and microcoded ops); branches; frontend; memory | 5 / 2 per build and workload |
 | `sweep` | every core event, user and kernel, each in one group with `cycles:u` and `instructions:u`, with a one-event fallback | 2 |
 | `metrics` | every perf metric, one `perf stat -M` each | 2 |
-| `profiles`, `profiles-same` | leader-sampled groups (`{...}:S`, 50,021-cycle period) reduced per function; IBS ops with data source and latency, all and L3 misses only; LBR mispredicts by site; cycles with the kernel; musl's cycles; the microcode group. A profile is done (`NAME.done`, written last) only when perf record and its reducers succeeded with rows; a failed one is removed and recorded again on the next run | 8 compiles each |
+| `profiles`, `profiles-same` | leader-sampled groups (`{...}:S`, 50,021-cycle period) reduced per function; IBS ops with data source and latency, all and L3 misses only; LBR mispredicts by site; cycles with the kernel; musl's cycles; the microcode group. A profile is done (`NAME.done`, written last, holding its perf record command) only when perf record and its reducers succeeded with rows; a failed one is removed and recorded again on the next run, and a done one of another command (`PROFILE_WORKLOAD`, `PROFILE_RUNS`, events) fails the step | 8 compiles each |
 | `profile-self` | IBS ops of `self-syn`, by function and by `check_common_evaluated`'s lines | 1 |
 | `scaling` | `sq-c` and `musl-syn` on 1..N lanes; K independent compiles on K cores with package energy | 5 / 2 / 4 rounds |
 | `energy` | package and per-core energy, APERF/MPERF | 10 compiles per build |
