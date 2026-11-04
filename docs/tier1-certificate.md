@@ -537,7 +537,13 @@ The decoding:
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
   register and frame byte its records write (by their effects) killed, its
-  definition written where its interval starts. A call's sequence is checked
+  definition written where its interval starts. A register the records give
+  back as they found it isn't killed (`tier1_cert_emitted_kept`): the first
+  record copies it whole (a 64-bit `mov`) into another register, the last
+  copies it back, and no record between writes the copy, leaves the node or
+  calls, by its effects, in a node that makes no call. The compare-exchange
+  (#1059) keeps rax so in r11 around its `lock cmpxchg`, and the allocation may
+  keep a value in rax across it. A call's sequence is checked
   against the IR (its target's reference, `al`, its result's extension), its
   arguments read in their ABI registers and outgoing slots (a value passed
   twice at each of its locations), then every register the SysV ABI lets the
