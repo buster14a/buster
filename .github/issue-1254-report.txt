@@ -1,222 +1,348 @@
-2026-11-04T15:25:25.0448388Z [36;1m  head=$(git rev-parse FETCH_HEAD)[0m
-2026-11-04T15:25:25.0449335Z [36;1m  test "$(git rev-parse "$head^{tree}")" = "$tree"[0m
-2026-11-04T15:25:25.0450219Z [36;1melse[0m
-2026-11-04T15:25:25.0450930Z [36;1m  git config user.name 'github-actions[bot]'[0m
-2026-11-04T15:25:25.0452149Z [36;1m  git config user.email '41898282+github-actions[bot]@users.noreply.github.com'[0m
-2026-11-04T15:25:25.0453505Z [36;1m  cat > "$RUNNER_TEMP/commit-message" <<'MESSAGE'[0m
-2026-11-04T15:25:25.0454691Z [36;1mFix malformed numeric constant diagnostics in conditional directives[0m
-2026-11-04T15:25:25.0455745Z [36;1m[0m
-2026-11-04T15:25:25.0456633Z [36;1mReuse the checker's cold classifier, share splice-aware character locations,[0m
-2026-11-04T15:25:25.0458076Z [36;1mand retain preprocessor-specific floating and overflow refusals. Add 25[0m
-2026-11-04T15:25:25.0459438Z [36;1mfixed diagnostic fixtures with optional full Clang comparisons.[0m
-2026-11-04T15:25:25.0460454Z [36;1m[0m
-2026-11-04T15:25:25.0460993Z [36;1mFixes #1254.[0m
-2026-11-04T15:25:25.0461587Z [36;1m[0m
-2026-11-04T15:25:25.0462706Z [36;1mAgent session: ChatGPT issue #1254 session (private session URL unavailable)[0m
-2026-11-04T15:25:25.0463868Z [36;1mModel: OpenAI / GPT-6 Astra Pro[0m
-2026-11-04T15:25:25.0464605Z [36;1m[0m
-2026-11-04T15:25:25.0465360Z [36;1mSigned-off-by: David Gonzalez Martin <davidgmbb@gmail.com>[0m
-2026-11-04T15:25:25.0466300Z [36;1mMESSAGE[0m
-2026-11-04T15:25:25.0467159Z [36;1m  head=$(git commit-tree "$tree" -p "$base" < "$RUNNER_TEMP/commit-message")[0m
-2026-11-04T15:25:25.0468288Z [36;1m  git push origin "$head:refs/heads/$branch"[0m
-2026-11-04T15:25:25.0469074Z [36;1mfi[0m
-2026-11-04T15:25:25.0469632Z [36;1mgit checkout --detach "$head"[0m
-2026-11-04T15:25:25.0470392Z [36;1mgit show -s --format=fuller HEAD[0m
-2026-11-04T15:25:25.0471222Z [36;1mprintf 'head=%s\n' "$head" >> "$GITHUB_OUTPUT"[0m
-2026-11-04T15:25:25.0472322Z [36;1mprintf 'Clean fix commit: `%s`\n' "$head" >> "$GITHUB_STEP_SUMMARY"[0m
-2026-11-04T15:25:25.0520272Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
-2026-11-04T15:25:25.0521164Z env:
-2026-11-04T15:25:27.5738122Z commit 68790c466ad31b55b497382b93c7e795a55aade0
-2026-11-04T15:25:27.5738688Z Author:     github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
-2026-11-04T15:25:27.5739124Z AuthorDate: Wed Nov 4 15:25:26 2026 +0000
-2026-11-04T15:25:27.5739510Z Commit:     github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
-2026-11-04T15:25:27.5739940Z CommitDate: Wed Nov 4 15:25:26 2026 +0000
-2026-11-04T15:25:27.5740112Z 
-2026-11-04T15:25:27.5740278Z     Fix malformed numeric constant diagnostics in conditional directives
-2026-11-04T15:25:27.5740498Z     
-2026-11-04T15:25:27.5740684Z     Reuse the checker's cold classifier, share splice-aware character locations,
-2026-11-04T15:25:27.5740974Z     and retain preprocessor-specific floating and overflow refusals. Add 25
-2026-11-04T15:25:27.5741242Z     fixed diagnostic fixtures with optional full Clang comparisons.
-2026-11-04T15:25:27.5741467Z     
-2026-11-04T15:25:27.5741584Z     Fixes #1254.
-2026-11-04T15:25:27.5741703Z     
-2026-11-04T15:25:27.5741882Z     Agent session: ChatGPT issue #1254 session (private session URL unavailable)
-2026-11-04T15:25:27.5742404Z     Model: OpenAI / GPT-6 Astra Pro
-2026-11-04T15:25:27.5742722Z     
-2026-11-04T15:25:27.5742957Z     Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
-2026-11-04T15:25:27.5793688Z ##[group]Run bash tools/ci/setup-hosted.sh
-2026-11-04T15:25:27.5793898Z [36;1mbash tools/ci/setup-hosted.sh[0m
-2026-11-04T15:25:27.5837957Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
-2026-11-04T15:25:27.5897633Z env:
-2026-11-04T15:25:27.5897781Z   BUSTER_HOST_ARCH: x86-64
-2026-11-04T15:25:27.5898003Z   BUSTER_DEBUG_INFO: 0
-2026-11-04T15:25:27.5898136Z ##[endgroup]
-2026-11-04T15:25:27.6613928Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
-2026-11-04T15:25:27.6943514Z Hit:2 http://azure.archive.ubuntu.com/ubuntu resolute InRelease
-2026-11-04T15:25:27.6968608Z Get:3 http://azure.archive.ubuntu.com/ubuntu resolute-updates InRelease [137 kB]
-2026-11-04T15:27:11.4916036Z /tmp/buster-pp-test-jsVDFN/cases-31/case.c:1:21: error: unterminated /* comment
-2026-11-04T15:27:11.4916237Z /tmp/buster-pp-test-jsVDFN/cases-31/case.c:1:21: error: unterminated /* comment
-2026-11-04T15:27:11.4916436Z /tmp/buster-pp-test-jsVDFN/cases-31/case.c:1:21: error: unterminated /* comment
-2026-11-04T15:27:11.4916625Z /tmp/buster-pp-test-jsVDFN/cases-31/case.c:1:21: error: unterminated /* comment
-2026-11-04T15:27:11.4916719Z     1 | #include <dir/*x.h> /* unclosed
-2026-11-04T15:27:11.4916800Z       |                     ^
-2026-11-04T15:27:11.4916884Z 1 error generated.
-2026-11-04T15:27:11.4916964Z cases: 0 of 390 fail
-2026-11-04T15:27:11.4917662Z system levels: 389 units by their runs and their history alike, 1 whose runs can't say (the first: line markers: a system include ends while collecting arguments (as a compile runs it)); 20 tokens at a system level, 5 made by macros
-2026-11-04T15:27:11.5096674Z case retention: the parts' files go, and stay with --keep
-2026-11-04T15:27:11.5097771Z clang reference: version comparison and mismatch reporting as expected
-2026-11-04T15:27:12.7621310Z <command line>:1:9: warning: '__GCC_ASM_FLAG_OUTPUTS__' macro redefined
-2026-11-04T15:27:12.7621747Z <built-in>:69:9: note: previous definition is here
-2026-11-04T15:27:12.7669986Z <command line>:1:9: warning: '__GCC_ASM_FLAG_OUTPUTS__' macro redefined
-2026-11-04T15:27:12.7670331Z /tmp/buster-pp-test-jsVDFN/asm-flag-predefines.h:1:9: note: previous definition is here
-2026-11-04T15:27:12.7716349Z <command line>:1:9: warning: '__GCC_ASM_FLAG_OUTPUTS__' macro redefined
-2026-11-04T15:27:12.7716596Z <built-in>:69:9: note: previous definition is here
-2026-11-04T15:27:12.7765361Z <command line>:1:9: warning: '__GCC_ASM_FLAG_OUTPUTS__' macro redefined
-2026-11-04T15:27:12.7765715Z /tmp/buster-pp-test-jsVDFN/asm-flag-predefines.h:1:9: note: previous definition is here
-2026-11-04T15:27:31.0604329Z test processes: 0 of 25 cases fail (output, a part's output lost, the parent's lost, a failed part, 9 shares, 12 grants)
-2026-11-04T15:27:31.0604835Z system levels: 0 of 5 cases written by hand differ
-2026-11-04T15:27:31.0605129Z macro batches: 522 boundary calls and long literal/optional runs: agree
-2026-11-04T15:27:31.0605536Z macro parameter index: pass (guarded small views, sparse ids, first ordinals, misses and failed growth)
-2026-11-04T15:27:31.0605986Z many macro parameters: pass (boundaries, maximum, operators and diagnostic order) (Clang oracle)
-2026-11-04T15:27:31.0606329Z semantic pragmas: 6 source-point cases, pass
-2026-11-04T15:27:31.0606593Z timestamp errors: 0 of 40 invalid-epoch and file-mtime cases fail
-2026-11-04T15:27:31.0606903Z timestamps: each file's modification time, and SOURCE_DATE_EPOCH's
-2026-11-04T15:27:31.0607236Z source feature modes, attributes and guarded intrinsic/fortify names: as expected
-2026-11-04T15:27:31.0607680Z feature answers and 436 catalog names: as expected (source acceptance by default, clang's independent oracle mode)
-2026-11-04T15:27:31.0608071Z asm flag predefine: as expected
-2026-11-04T15:27:31.0608445Z predefines target: as expected (x86_target.c's features, its six profiles, -m switches, other CPUs and -mtune)
-2026-11-04T15:27:31.0608893Z predefines: -m options refused though clang takes them, and those taken: as expected
-2026-11-04T15:27:31.0609227Z history diagnostics: 0 of 51 fail (Clang oracle)
-2026-11-04T15:27:31.0609520Z history runs: pass (201 lengths, split copies, scalar/vector queries, guard page)
-2026-11-04T15:27:31.0609933Z history copies: pass (66 lengths, distinct buffers and same-buffer overlaps, scalar/vector)
-2026-11-04T15:27:31.0610316Z history lifetimes: pass (redefinition, repeated parameters, retained generated inputs, builtins, recording control)
-2026-11-04T15:27:31.0610758Z history growth: pass (all eight initial slices, repeated arguments, generated sources)
-2026-11-04T15:27:31.0611075Z diagnostic buffers: 135 cases, pass (exact bytes, growth, unavailable scratch and ordering)
-2026-11-04T15:27:31.0616411Z printer lines: 130 prints, pass (jumps of 1 to 12 lines, includes, #line, invocations over lines, splices before line starts, every place in a chunk)
-2026-11-04T15:27:31.0616906Z system warning options: 9 cases, 0 failures
-2026-11-04T15:27:31.0617141Z system warning policy: 0 failures in 160 runs (Clang oracle)
-2026-11-04T15:27:31.0617414Z pragma origins: 0 of 5 fail (scalar/vector, Clang first file/line)
-2026-11-04T15:27:31.0617745Z embed text: 1204 checks, 0 failures
-2026-11-04T15:27:31.0617922Z embed lookups: 0 of 2 fail
-2026-11-04T15:27:31.0618175Z lookup accounting: as expected (file and metadata attempts, unit/shared caches, scalar/vector and timing off)
-2026-11-04T15:27:31.0618777Z final copy accounting: as expected (captures excluded, direct objects, empty output, scalar/vector and timing off)
-2026-11-04T15:27:31.0619102Z trailing splices: 0 of 22 runs fail
-2026-11-04T15:27:31.0619440Z scalar reference: as expected (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)
-2026-11-04T15:27:31.0620117Z windows: 0 of 240 sources differ (1798 windowed preparations, 1502335 tokens); the windows' cut: 0 of 119625 checks fail; the directives' places: 0 of 976 checks fail
-2026-11-04T15:27:31.0620542Z line ends: 0 of 2892217 checks fail in 11 files
-2026-11-04T15:27:31.0620934Z windows: 0 of 24 sources differ as units (93 windowed units; 127851 __LINE__s in the scalar twins' outputs)
-2026-11-04T15:27:31.0621346Z directive tables: 0 of 68 random sources and nests differ from the oracle (762527 tokens, 311302 directives, 1597 notes, 0 guards)
-2026-11-04T15:27:31.0621758Z directive structure separator at mantissa end differs:
-2026-11-04T15:27:31.0621925Z ours:
-2026-11-04T15:27:31.0622303Z /tmp/buster-pp-test-jsVDFN/structure.c:1:6: error: token is not a valid binary operator in a preprocessor subexpression
-2026-11-04T15:27:31.0622914Z clang:
-2026-11-04T15:27:31.0623291Z /tmp/buster-pp-test-jsVDFN/structure.c:1:6: warning: missing terminating ' character
-2026-11-04T15:27:32.1045412Z In file included from /tmp/buster-pp-test-jsVDFN/guard.c:1:
-2026-11-04T15:27:32.1046073Z /tmp/buster-pp-test-jsVDFN/g.h:1:11: warning: extra tokens at end of #ifndef directive
-2026-11-04T15:27:32.1046503Z /tmp/buster-pp-test-jsVDFN/g.h:4:8: warning: extra tokens at end of #endif directive
-2026-11-04T15:27:32.1058353Z In file included from /tmp/buster-pp-test-jsVDFN/guard.c:1:
-2026-11-04T15:27:32.1058696Z /tmp/buster-pp-test-jsVDFN/g.h:1:11: warning: extra tokens at end of #ifndef directive
-2026-11-04T15:27:32.1058993Z /tmp/buster-pp-test-jsVDFN/g.h:4:8: warning: extra tokens at end of #endif directive
-2026-11-04T15:27:42.8920234Z /tmp/buster-pp-test-jsVDFN/case.c:3:244: error: too few arguments provided to function-like macro invocation
-2026-11-04T15:27:42.8920812Z /tmp/buster-pp-test-jsVDFN/case.c:2:9: note: macro 'B' defined here
-2026-11-04T15:27:42.8933196Z /tmp/buster-pp-test-jsVDFN/case.c:3:244: error: too few arguments provided to function-like macro invocation
-2026-11-04T15:27:42.8933776Z /tmp/buster-pp-test-jsVDFN/case.c:2:9: note: macro 'B' defined here
-2026-11-04T15:27:42.8948805Z /tmp/buster-pp-test-jsVDFN/case.c:3:244: error: too few arguments provided to function-like macro invocation
-2026-11-04T15:27:42.8949518Z /tmp/buster-pp-test-jsVDFN/case.c:2:9: note: macro 'B' defined here
-2026-11-04T15:27:42.8962883Z /tmp/buster-pp-test-jsVDFN/case.c:3:244: error: too few arguments provided to function-like macro invocation
-2026-11-04T15:27:42.9046516Z /tmp/buster-pp-test-jsVDFN/case.c:2:9: note: macro 'B' defined here
-2026-11-04T15:27:42.9059874Z /tmp/buster-pp-test-jsVDFN/case.c:3:245: error: too many arguments provided to function-like macro invocation
-2026-11-04T15:27:42.9060255Z /tmp/buster-pp-test-jsVDFN/case.c:2:9: note: macro 'B' defined here
-2026-11-04T15:27:42.9073998Z /tmp/buster-pp-test-jsVDFN/case.c:3:245: error: too many arguments provided to function-like macro invocation
-2026-11-04T15:27:42.9074605Z /tmp/buster-pp-test-jsVDFN/case.c:2:9: note: macro 'B' defined here
-2026-11-04T15:27:43.5680336Z clang: warning: argument unused during compilation: '-fno-zvector' [-Wunused-command-line-argument]
-2026-11-04T15:27:43.5962291Z clang: warning: argument unused during compilation: '-mno-zvector' [-Wunused-command-line-argument]
-2026-11-04T15:27:43.6246284Z clang: warning: argument unused during compilation: '-fzvector' [-Wunused-command-line-argument]
-2026-11-04T15:27:44.7489165Z /tmp/buster-pp-test-jsVDFN/structure.c:1:6: error: token is not a valid binary operator in a preprocessor subexpression
-2026-11-04T15:27:44.7489498Z 
-2026-11-04T15:27:44.7489613Z directive structure: 1 of 51 fixtures differ from clang's diagnostics
-2026-11-04T15:27:44.7489863Z diagnostic text: 0 of 7 fixtures differ from clang's diagnostics
-2026-11-04T15:27:44.7490105Z raw string diagnostics: 0 of 14 fixtures differ from clang's diagnostics
-2026-11-04T15:27:44.7490334Z diagnostic recovery capacity: 0 of 6 kernel runs differ
-2026-11-04T15:27:44.7490533Z diagnostic recovery predefines origin: preserved
-2026-11-04T15:27:44.7490744Z definitions: 0 of 10 fixtures differ from clang's diagnostics
-2026-11-04T15:27:44.7491002Z include guards: 0 of 20 fixtures differ (outputs and skips by guards against clang's)
-2026-11-04T15:27:44.7491237Z location space: 2 of 2 runs out where expected
-2026-11-04T15:27:44.7491452Z location option: 5 of 5 command checks pass, clang without them
-2026-11-04T15:27:44.7491754Z preprocessor determinism: 390 fixtures, 1/2/3/8 lanes, both kernels/orders, ID seed 153: pass
-2026-11-04T15:27:44.7492003Z dollar printing: 0 of 16 cases fail
-2026-11-04T15:27:44.7492219Z raw query private views: pass (fresh, cold shared and warm shared caches, both kernels)
-2026-11-04T15:27:44.7492654Z opaque recovery: pass (8/9/64/65/257 queries and direct repairs, macro snapshots, both kernels)
-2026-11-04T15:27:44.7492987Z opaque recovery failure guards: pass (allocation, data indexes, progress)
-2026-11-04T15:27:44.7493212Z named UCNs: 0 of 4 cases fail (Clang oracle)
-2026-11-04T15:27:44.7493432Z named UCNs: 40000 in one identifier (vectorized kernels): 40000 errors in 0.016 s
-2026-11-04T15:27:44.7493699Z named UCNs: 40000 in one identifier (scalar kernels): 40000 errors in 0.011 s
-2026-11-04T15:27:44.7493959Z named UCNs: 0 of 42 places at chunks', words' and windows' edges fail (126 runs)
-2026-11-04T15:27:44.7494185Z prelude failures: pass (7 faults and controls)
-2026-11-04T15:27:44.7494410Z direct argument failures: pass (origins' growth, the arguments' room, control)
-2026-11-04T15:27:44.7494739Z nested arguments: pass (depths through 8000, linear raw storage, token limits, both kernels and histories)
-2026-11-04T15:27:44.7495141Z argument links: pass (independent pairing, protected tails, stack reuse, allocation failure, both kernels)
-2026-11-04T15:27:44.7495418Z argument slice semantics: pass (13 fixtures)
-2026-11-04T15:27:44.7495741Z option sets: 0 of 70 refused or taken wrongly, 0 of 29 refused ones change nothing in clang's -E and 0 of 41 taken ones differ from clang's
-2026-11-04T15:27:44.7496098Z predefines: 0 of 26 option sets differ from clang -dM
-2026-11-04T15:27:54.1655130Z error: invalid integral value 'bogus' in '-Obogus'
-2026-11-04T15:27:54.1662789Z error: invalid value '4.2.1.5' in '-fgnuc-version=4.2.1.5'
-2026-11-04T15:27:54.1671227Z error: unsupported argument 'tiny' to option '-mcmodel=' for target 'x86_64-unknown-linux-gnu'
-2026-11-04T15:27:54.1680141Z error: unsupported argument 'bogus' to option '-mapx-features='
-2026-11-04T15:27:54.1684095Z error: unsupported argument 'all' to option '-fsanitize='
-2026-11-04T15:27:54.1684871Z error: unsupported argument 'bogus' to option '-fno-sanitize='
-2026-11-04T15:27:54.1685669Z error: invalid argument '-fsanitize=pointer-compare' only allowed with '-fsanitize=address'
-2026-11-04T15:27:54.1686196Z error: invalid argument '-fsanitize=cfi' only allowed with '-flto'
-2026-11-04T15:27:54.1686598Z error: invalid argument '-fsanitize=cfi' only allowed with '-fvisibility='
-2026-11-04T15:27:54.1687002Z error: invalid argument '-fsanitize=cfi' only allowed with '-flto'
-2026-11-04T15:27:54.1687392Z error: invalid value 'bogus' in '-fvisibility=bogus'
-2026-11-04T15:27:54.1687801Z error: invalid argument '-fsanitize=kcfi' not allowed with '-fsanitize=cfi'
-2026-11-04T15:27:54.1690076Z error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=object-size'
-2026-11-04T15:27:54.1690754Z error: unsupported argument 'bogus' to option '-fsanitize-coverage='
-2026-11-04T15:27:54.1691242Z error: unsupported argument 'bogus' to option '-fsanitize-ignore-for-ubsan-feature='
-2026-11-04T15:27:54.1693665Z error: unsupported option '-gcoff'
-2026-11-04T15:27:54.1697390Z error: invalid integral value 'bogus' in '-Obogus'
-2026-11-04T15:27:58.8919703Z error: unsupported argument 'bogus' to option '-fsanitize='
-2026-11-04T15:27:58.8921576Z error: invalid value '-1' in '-mregparm=-1'
-2026-11-04T15:27:58.8922012Z error: invalid argument '-fsanitize=alloc-token' not allowed with '-fsanitize=kernel-hwaddress'
-2026-11-04T15:27:58.8924534Z error: invalid value '8' in '-malign-branch-boundary=8'
-2026-11-04T15:27:58.8924786Z error: invalid value 'bogus' in '-fveclib=bogus'
-2026-11-04T15:27:58.8927411Z error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=object-size'
-2026-11-04T15:28:00.9098223Z clang: warning: argument unused during compilation: '-fno-zvector' [-Wunused-command-line-argument]
-2026-11-04T15:28:02.8186874Z clang: warning: argument unused during compilation: '-mexecute-only' [-Wunused-command-line-argument]
-2026-11-04T15:28:02.9285537Z clang: warning: the object size sanitizer has no effect at -O0, but is explicitly enabled: -fsanitize=object-size [-Winvalid-command-line-argument]
-2026-11-04T15:28:03.5328081Z clang: warning: argument unused during compilation: '-fsanitize-coverage=trace-pc-guard' [-Wunused-command-line-argument]
-2026-11-04T15:28:05.6836576Z headers: 0 of 20 files differ from clang with --buster-headers, as test-preprocessor compares files (18475 tokens): buster's and clang's headers after an -isystem directory's, and under links whose names clang escapes (0 differ); __has_include with the flag alone, with -nobuiltininc and with -nostdinc; and clang's resource directory and buster's given again in 13 ways (0 differ)
-2026-11-04T15:28:05.6837528Z clang command: 305 arguments to clang, all of them read
-2026-11-04T15:28:05.6838223Z headers: 0 of 176 header, mode and hosting sets differ from clang's; our preprocessor differs from clang on 0 of 16 modes with them; 0 of 32 units among the C library's and clang's other headers differ; 0 of 3 runs with -nobuiltininc, -nostdinc and neither find other headers than clang; quoted names beside clang's headers are found where they should be
-2026-11-04T15:28:05.6839239Z predefines tables: 117 features, 79 CPUs and 105 -mtune names, 0 differences from clang's
-2026-11-04T15:28:05.6839589Z predefines: 0 of 547 option sets differ from clang -dM (slice 1 of 4 of 2186 sets, 400 random from seed 1)
-2026-11-04T15:28:05.6839938Z predefines: 0 of 547 option sets differ from clang -dM (slice 2 of 4 of 2186 sets, 400 random from seed 1)
-2026-11-04T15:28:05.6840281Z predefines: 0 of 546 option sets differ from clang -dM (slice 3 of 4 of 2186 sets, 400 random from seed 1)
-2026-11-04T15:28:05.6840718Z predefines: 0 of 546 option sets differ from clang -dM (slice 4 of 4 of 2186 sets, 400 random from seed 1)
-2026-11-04T15:28:05.6841017Z predefines: -dM and __FLT_EVAL_METHOD__, 0 of 7 differ from clang's
-2026-11-04T15:28:05.6841271Z predefines: target attributes' features, 0 of 2384 differ from clang's
-2026-11-04T15:28:05.6841577Z keywords: 0 of 11 modes and 0 of 25 -f option sets differ from clang's __is_identifier (776 names)
-2026-11-04T15:28:05.6841891Z features: 0 of 11 modes differ from clang's __has_feature and __has_extension (251 names)
-2026-11-04T15:28:05.6842190Z feature options: 0 of 54 sanitizer and target option sets differ from clang's answers
-2026-11-04T15:28:05.6842820Z builtin targets: 64175 answers in 17 configurations, 55182 of implemented builtins (37273 available, 1954 constant where clang's are), as clang's; 3271 gates' facts as clang's table: pass
-2026-11-04T15:28:05.6843333Z clang reference: expected clang 23.1.4, found 23.1.5
-2026-11-04T15:28:05.6843743Z builtin targets: 64175 answers in 17 configurations, 55182 of implemented builtins (37273 available, 1954 constant where clang's are), as clang's; 3271 gates' facts as clang's table: pass
-2026-11-04T15:28:05.6844312Z builtin targets: 22 answers skipped, as the found clang's library builtin table differs from the reference 23.1.4's (2 plain names: strlcat, strlcpy)
-2026-11-04T15:28:05.6844667Z builtin targets under a fake clang 23.1.5: pass
-2026-11-04T15:28:05.6879233Z ##[error]Process completed with exit code 1.
-2026-11-04T15:28:05.6983341Z Post job cleanup.
-2026-11-04T15:28:05.7537084Z [command]/usr/bin/git version
-2026-11-04T15:28:05.7573397Z git version 2.56.0
-2026-11-04T15:28:05.7601760Z Temporarily overriding HOME='/home/runner/work/_temp/428262c0-20fa-40e0-8b8b-d007248931a8' before making global git config changes
-2026-11-04T15:28:05.7602394Z Adding repository directory to the temporary git global config as a safe directory
-2026-11-04T15:28:05.7602874Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
-2026-11-04T15:28:05.7635460Z Removing SSH command configuration
-2026-11-04T15:28:05.7639807Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
-2026-11-04T15:28:05.7696465Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
-2026-11-04T15:28:05.7960787Z Removing HTTP extra header
-2026-11-04T15:28:05.7968892Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
-2026-11-04T15:28:05.8001968Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
-2026-11-04T15:28:05.8243386Z Removing includeIf entries pointing to credentials config files
-2026-11-04T15:28:05.8249077Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
-2026-11-04T15:28:05.8270815Z includeif.gitdir:/home/runner/work/buster/buster/.git.path
+Validated commit: 18343e7d4b45e2f39c98cad6a290578d09fadffb
+
+build=0
+preprocessor=0
+checker=1
+
+
+=== build ===
+[35/44] Building C object CMakeFiles/buster_tier1_frame_benchmark.dir/Release/src/buster/compiler/tier1_frame_benchmark.c.o
+[36/44] Building C object CMakeFiles/buster_lane_benchmark.dir/Release/src/buster/compiler/lane_benchmark.c.o
+[37/44] Building C object CMakeFiles/buster_floors_benchmark.dir/Release/src/buster/compiler/floors_benchmark.c.o
+[38/44] Building C object CMakeFiles/buster_dataflow_benchmark.dir/Release/src/buster/compiler/dataflow_benchmark.c.o
+[39/44] Building C object CMakeFiles/buster_c_builtin_benchmark.dir/Release/src/buster/compiler/c_builtin_benchmark.c.o
+[40/44] Building C object CMakeFiles/buster_emission_metadata_test.dir/Release/src/buster/compiler/emission_metadata_test.c.o
+[41/44] Building C object CMakeFiles/buster_tier1_model_measure.dir/Release/src/buster/compiler/tier1_model_measure.c.o
+[42/44] Building C object CMakeFiles/buster_main_unit_assembler.dir/Release/src/buster/compiler/main_unit_assembler.c.o
+[43/44] Linking C executable Release/compiler.link
+[44/44] Baking and checking compiler_link's executable
+build.sh: Release: 42 units compiled, the build took 120.1 s; the longest: main_unit_checker.c 103.0 s, main_unit_backend.c 82.2 s, main_unit_frontend.c 46.9 s
+build.sh: Release: build/cmake/x86-64-g0/Release/compiler, published as build/compiler
+
+=== preprocessor ===
+o option '-fsanitize='
+error: unsupported argument 'all' to option '-fsanitize='
+error: invalid value '' in '-mpad-max-prefix-size='
+error: invalid argument '-fsanitize-coverage=func' not allowed with '-fsanitize-coverage=bb'
+error: unknown target CPU 'mips3'
+error: invalid value 'bogus' in '-fvisibility=bogus'
+error: invalid argument 'mretpoline' not allowed with 'mseses'
+error: invalid argument 'mretpoline' not allowed with 'mlvi-cfi'
+error: unknown or unsupported option '-mindirect-branch=thunk' for x86-64 Linux
+error: invalid argument '-fsanitize=kcfi' not allowed with '-mpure-code'
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mseses'
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mlvi-cfi'
+error: unsupported argument 'bogus' to option '-mapx-features='
+error: invalid value '' in '-mregparm='
+error: invalid value '-16' in '-mstack-alignment=-16'
+error: unknown target CPU 'mips32r2'
+error: unknown target CPU 'mips64r3'
+error: unknown or unsupported option '-mrtd' for x86-64 Linux
+error: unsupported argument 'bogus' to option '-ffp-model='
+error: invalid value '-2147483649' in '-mstack-protector-guard-offset=-2147483649'
+error: invalid value '+32' in '-malign-branch-boundary=+32'
+error: invalid value '08' in '-mlarge-data-threshold=08'
+error: invalid argument '-fsanitize=address' not allowed with '-fsanitize=thread'
+error: unknown target CPU 'bogus'
+error: unsupported option '-mabi=' for target 'x86_64-unknown-linux-gnu'
+error: the 'sse' unit is not supported with this instruction set
+error: unsupported argument 'all' to option '-fsanitize='
+error: unsupported argument 'Address' to option '-fsanitize='
+error: unsupported option '-fsanitize=memtag' for target 'x86_64-unknown-linux-gnu'
+error: invalid argument '-fsanitize=cfi' only allowed with '-fvisibility='
+error: unsupported argument 'bogus' to option '-flto='
+error: invalid argument '-fsanitize=function' only allowed with '-mcmodel=small'
+error: unsupported argument 'bogus' to option '-fno-sanitize-coverage='
+error: unsupported option '-gxcoff'
+error: invalid value 'bogus' in '-std=bogus'
+error: invalid value 'a.b' in '-mstack-protector-guard-symbol=a.b'
+error: invalid value 'bogus' in '-mtls-dialect=bogus'
+error: unknown or unsupported option '-mno-bogus' for x86-64 Linux
+error: unknown or unsupported option '-mbig-endian' for x86-64 Linux
+error: unknown target CPU 'mips5'
+error: unknown target CPU 'mips2'
+error: unknown target CPU 'mips32'
+error: unknown target CPU 'mips32r6'
+error: unknown target CPU 'mips64r5'
+error: invalid argument '-fsanitize=address' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=safe-stack' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=alloc-token' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=kernel-hwaddress' not allowed with '-fsanitize=kernel-address'
+error: invalid argument '-fsanitize=kernel-address' not allowed with '-fsanitize=leak'
+error: invalid argument '-fsanitize=kernel-hwaddress' not allowed with '-fsanitize=hwaddress'
+error: invalid argument '-fsanitize=kernel-hwaddress' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=kernel-hwaddress' not allowed with '-fsanitize=safe-stack'
+error: invalid argument '-fsanitize=alloc-token' not allowed with '-fsanitize=kernel-hwaddress'
+error: invalid argument '-fsanitize=kernel-memory' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=type' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=cfi' only allowed with '-fvisibility='
+error: invalid value 'bogus' in '-fcf-protection=bogus'
+error: unknown target CPU 'mips3'
+error: invalid value 'sysreg' in '-mstack-protector-guard=sysreg'
+error: invalid value '4.2.1.5' in '-fgnuc-version=4.2.1.5'
+error: unknown target CPU 'mips64'
+error: unsupported argument 'bogus' to option '-mapx-features='
+error: invalid value '-0' in '-mstack-alignment=-0'
+error: invalid value 'all,return' in '-mharden-sls=all,return'
+error: invalid value 'divf,div' in '-mrecip=divf,div'
+error: unknown target CPU 'mips1'
+error: unknown FP unit 'both'
+error: invalid argument '-fsanitize=address' not allowed with '-fsanitize=thread'
+error: unsupported argument 'bogus' to option '-fno-sanitize='
+error: unsupported argument 'bogus' to option '-fsanitize-coverage='
+error: invalid value 'thunk' in '-mfunction-return=thunk'
+error: unsupported argument 'bogus' to option '-fsanitize='
+error: unknown target CPU 'mips32r6'
+error: unsupported argument 'bogus' to option '-mapx-features='
+error: unknown or unsupported option '-msmall-data-limit=8' for x86-64 Linux
+error: unsupported argument 'all' to option '-fsanitize='
+error: unknown or unsupported option '-mavx512' for x86-64 Linux
+error: unknown target CPU 'mips2'
+error: unknown or unsupported option '-mrtd' for x86-64 Linux
+error: invalid value 'jcc+jmp' in '-malign-branch=jcc+jmp'
+error: invalid argument 'mspeculative-load-hardening' not allowed with 'mseses'
+error: unknown target CPU 'i686'
+error: unknown or unsupported option '-mnop-mcount' for x86-64 Linux
+error: invalid argument 'mspeculative-load-hardening' not allowed with 'mseses'
+error: invalid argument 'mspeculative-load-hardening' not allowed with 'mlvi-cfi'
+error: invalid value '' in '-mprefer-vector-width='
+error: unknown target CPU 'mips64'
+error: unsupported argument 'bogus' to option '-flto='
+error: invalid value '' in '-mlarge-data-threshold='
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mseses'
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mlvi-cfi'
+error: unknown target CPU 'mips64r6'
+error: invalid value '0x' in '-mstack-probe-size=0x'
+error: invalid argument '-fsanitize=pointer-compare' only allowed with '-fsanitize=address'
+error: invalid value 'bogus' in '-mlarge-data-threshold=bogus'
+error: the '387' unit is not supported with this instruction set
+error: unknown target CPU 'bogus'
+error: unsupported argument 'bogus' to option '-ffp-model='
+error: invalid value 'bogus' in '-fcf-protection=bogus'
+error: unknown target CPU 'bogus'
+error: unknown FP unit 'both'
+error: invalid argument '-fsanitize=thread' not allowed with '-fsanitize=memory'
+error: unsupported argument 'all' to option '-fsanitize='
+error: unsupported option '-fsanitize=memtag' for target 'x86_64-unknown-linux-gnu'
+error: unsupported option '-fsanitize=objc-cast' for target 'x86_64-unknown-linux-gnu'
+error: invalid argument '-fsanitize=cfi-icall' only allowed with '-flto'
+error: invalid argument '-fsanitize=cfi-mfcall' not allowed with '-fsanitize-cfi-cross-dso'
+error: invalid argument '-fsanitize=function' not allowed with '-mexecute-only'
+error: unsupported option '-gstabs'
+error: unsupported option '-gvms'
+error: unsupported option '-fsanitize=memtag' for target 'x86_64-unknown-linux-gnu'
+error: unsupported option '-mabi=' for target 'x86_64-unknown-linux-gnu'
+error: invalid value '1abc' in '-mstack-protector-guard-symbol=1abc'
+error: invalid value 'bogus' in '-mtls-dialect=bogus'
+error: unknown or unsupported option '-mavx512' for x86-64 Linux
+error: unknown or unsupported option '-m68000' for x86-64 Linux
+error: unknown or unsupported option '-mrtd' for x86-64 Linux
+error: unknown target CPU 'mips32r6'
+error: unknown or unsupported option '-marm' for x86-64 Linux
+error: unknown target CPU 'mips3'
+error: unknown target CPU 'mips32r2'
+error: unknown target CPU 'mips64'
+error: unknown target CPU 'mips64r6'
+error: invalid argument '-fsanitize=kernel-hwaddress' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=hwaddress' not allowed with '-fsanitize=kernel-address'
+error: invalid argument '-fsanitize=kernel-memory' not allowed with '-fsanitize=kernel-address'
+error: invalid argument '-fsanitize=type' not allowed with '-fsanitize=kernel-address'
+error: invalid argument '-fsanitize=kernel-memory' not allowed with '-fsanitize=hwaddress'
+error: invalid argument '-fsanitize=kernel-hwaddress' not allowed with '-fsanitize=leak'
+error: invalid argument '-fsanitize=thread' not allowed with '-fsanitize=memory'
+error: invalid argument '-fsanitize=scudo' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=safe-stack' not allowed with '-fsanitize=memory'
+error: invalid argument '-fsanitize=alloc-token' not allowed with '-fsanitize=memory'
+error: unsupported argument 'bogus' to option '-fsanitize-ignore-for-ubsan-feature='
+error: invalid value '!all' in '-mrecip=!all'
+error: unknown target CPU 'mips64r2'
+error: unknown target CPU 'mips64r5'
+error: invalid argument '-fsanitize=address' not allowed with '-fsanitize=thread'
+error: unsupported argument 'bogus' to option '-ffp-eval-method='
+error: unsupported argument 'bogus' to option '-mapx-features='
+error: invalid value 'bogus' in '-mrecip=bogus'
+error: invalid value '08' in '-mstack-alignment=08'
+error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=object-size'
+error: unsupported option '-gxcoff'
+error: unsupported argument 'bogus' to option '-fsanitize-coverage='
+error: invalid value 'bogus' in '-malign-branch=bogus'
+error: unsupported option '-gstabs+'
+error: invalid value '' in '-mstack-protector-guard-symbol='
+error: invalid value 'bogus' in '-masm=bogus'
+error: invalid value 'all,return' in '-mharden-sls=all,return'
+error: unknown target CPU 'mips32r6'
+error: unsupported option '-mabi=' for target 'x86_64-unknown-linux-gnu'
+error: unsupported argument 'bogus' to option '-ffp-model='
+error: unknown target CPU 'mips64'
+error: the '387' unit is not supported with this instruction set
+error: invalid value 'bogus' in '-masm=bogus'
+error: unsupported argument 'bogus' to option '-ffp-model='
+error: invalid argument '-fsanitize=cfi-icall' only allowed with '-flto'
+error: unsupported argument 'bogus' to option '-ffp-eval-method='
+error: unknown or unsupported option '-mavx512f2' for x86-64 Linux
+error: invalid argument '-fsanitize=cfi' only allowed with '-flto'
+error: invalid argument '-fsanitize=cfi' only allowed with '-fvisibility='
+error: unknown target CPU 'mips32r5'
+error: invalid value '4294967296' in '-malign-branch-boundary=4294967296'
+error: invalid value 'a.b' in '-mstack-protector-guard-symbol=a.b'
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mseses'
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mlvi-cfi'
+error: unknown or unsupported option '-mnop-mcount' for x86-64 Linux
+error: invalid value '-1' in '-mpad-max-prefix-size=-1'
+error: invalid value '-16' in '-mstack-alignment=-16'
+error: invalid argument '-fsanitize=cfi' only allowed with '-flto'
+error: invalid argument '-fsanitize=cfi' only allowed with '-fvisibility='
+error: invalid value 'all,return' in '-mharden-sls=all,return'
+error: unsupported argument 'bogus' to option '-ffp-eval-method='
+error: unknown target CPU 'i686'
+error: the '387' unit is not supported with this instruction set
+error: invalid argument '-fsanitize=address' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=kernel-address' not allowed with '-fsanitize=address'
+error: unsupported argument 'bogus' to option '-fsanitize='
+error: unsupported option '-fsanitize=memtag-stack' for target 'x86_64-unknown-linux-gnu'
+error: invalid argument '-fsanitize=vptr' not allowed with '-fno-rtti'
+error: invalid argument '-fsanitize=kcfi' not allowed with '-mpure-code'
+error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=object-size'
+error: invalid argument '-fsanitize-coverage=func' not allowed with '-fsanitize-coverage=bb'
+error: unsupported option '-gstabs+'
+error: unsupported option '-gtoggle'
+error: invalid value 'es' in '-mstack-protector-guard-reg=es'
+error: invalid value '' in '-mtls-dialect='
+error: unknown or unsupported option '-mavx512f2' for x86-64 Linux
+error: unknown or unsupported option '-mfpu=neon' for x86-64 Linux
+error: unknown or unsupported option '-mnop-mcount' for x86-64 Linux
+error: the '387' unit is not supported with this instruction set
+error: unknown or unsupported option '-msmall-data-limit=8' for x86-64 Linux
+error: unknown target CPU 'mips4'
+error: unknown target CPU 'mips32r3'
+error: unknown target CPU 'mips64r2'
+error: invalid argument '-fsanitize=hwaddress' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=kernel-memory' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=type' not allowed with '-fsanitize=address'
+error: invalid argument '-fsanitize=kernel-address' not allowed with '-fsanitize=memory'
+error: invalid argument '-fsanitize=scudo' not allowed with '-fsanitize=kernel-address'
+error: invalid argument '-fsanitize=hwaddress' not allowed with '-fsanitize=memory'
+error: invalid argument '-fsanitize=scudo' not allowed with '-fsanitize=hwaddress'
+error: invalid argument '-fsanitize=safe-stack' not allowed with '-fsanitize=thread'
+error: invalid argument '-fsanitize=leak' not allowed with '-fsanitize=memory'
+error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=memory'
+error: invalid argument '-fsanitize=kernel-memory' not allowed with '-fsanitize=leak'
+error: unsupported option '-fsanitize=objc-cast' for target 'x86_64-unknown-linux-gnu'
+error: invalid value 'all:22' in '-mrecip=all:22'
+error: unknown or unsupported option '-mbogus' for x86-64 Linux
+error: unknown target CPU 'mips3'
+error: invalid value '4294967296' in '-mpad-max-prefix-size=4294967296'
+error: the '387' unit is not supported with this instruction set
+error: invalid value 'none,divf' in '-mrecip=none,divf'
+error: invalid value '!' in '-mrecip=!'
+error: invalid value 'bogus' in '-mtls-dialect=bogus'
+error: unsupported option '-gxcoff'
+error: invalid argument '-fsanitize=pointer-compare' only allowed with '-fsanitize=address'
+error: invalid value '0x10' in '-mstack-alignment=0x10'
+error: unsupported argument 'bogus' to option '-fno-sanitize-coverage='
+error: invalid value 'divh,div' in '-mrecip=divh,div'
+error: invalid argument '-fsanitize=cfi' only allowed with '-flto'
+error: invalid argument '-fsanitize=cfi' only allowed with '-fvisibility='
+error: unknown or unsupported option '-mrtd' for x86-64 Linux
+error: invalid integral value 'bogus' in '-Obogus'
+error: the '387' unit is not supported with this instruction set
+error: unknown target CPU 'mips64r3'
+error: invalid value '48' in '-malign-branch-boundary=48'
+error: invalid value 'divf,div' in '-mrecip=divf,div'
+error: unsupported option '-gxcoff'
+error: invalid argument 'mretpoline-external-thunk' not allowed with 'mlvi-cfi'
+error: invalid value '2147483648' in '-mstack-protector-guard-offset=2147483648'
+error: unsupported argument 'bogus' to option '-ffp-model='
+error: invalid value 'bogus' in '-mtls-dialect=bogus'
+error: unsupported argument 'bogus' to option '-ffp-eval-method='
+error: unknown or unsupported option '-msmall-data-limit=8' for x86-64 Linux
+error: unsupported option '-gstabs'
+error: invalid value '!all' in '-mrecip=!all'
+error: unsupported option '-fsanitize=memtag' for target 'x86_64-unknown-linux-gnu'
+error: invalid value ':1' in '-mrecip=:1'
+error: unknown or unsupported option '-mbig-endian' for x86-64 Linux
+error: unsupported option '-gvms'
+error: unsupported argument 'bogus' to option '-fopenmp='
+error: unsupported option '-gstabs+'
+error: unknown or unsupported option '-mnop-mcount' for x86-64 Linux
+error: unsupported argument 'bogus' to option '-fsanitize='
+error: invalid value '-1' in '-mregparm=-1'
+error: invalid argument '-fsanitize=alloc-token' not allowed with '-fsanitize=kernel-hwaddress'
+error: invalid value '8' in '-malign-branch-boundary=8'
+error: invalid value 'bogus' in '-fveclib=bogus'
+error: invalid argument '-fsanitize=realtime' not allowed with '-fsanitize=object-size'
+clang: warning: argument unused during compilation: '-fno-zvector' [-Wunused-command-line-argument]
+clang: warning: argument unused during compilation: '-mexecute-only' [-Wunused-command-line-argument]
+clang: warning: the object size sanitizer has no effect at -O0, but is explicitly enabled: -fsanitize=object-size [-Winvalid-command-line-argument]
+clang: warning: argument unused during compilation: '-fsanitize-coverage=trace-pc-guard' [-Wunused-command-line-argument]
+headers: 0 of 20 files differ from clang with --buster-headers, as test-preprocessor compares files (18475 tokens): buster's and clang's headers after an -isystem directory's, and under links whose names clang escapes (0 differ); __has_include with the flag alone, with -nobuiltininc and with -nostdinc; and clang's resource directory and buster's given again in 13 ways (0 differ)
+predefines: 0 of 546 option sets differ from clang -dM (slice 3 of 4 of 2186 sets, 400 random from seed 1)
+predefines: 0 of 546 option sets differ from clang -dM (slice 4 of 4 of 2186 sets, 400 random from seed 1)
+predefines: -dM and __FLT_EVAL_METHOD__, 0 of 7 differ from clang's
+predefines: target attributes' features, 0 of 2384 differ from clang's
+keywords: 0 of 11 modes and 0 of 25 -f option sets differ from clang's __is_identifier (776 names)
+features: 0 of 11 modes differ from clang's __has_feature and __has_extension (251 names)
+feature options: 0 of 54 sanitizer and target option sets differ from clang's answers
+builtin targets: 64175 answers in 17 configurations, 55182 of implemented builtins (37273 available, 1954 constant where clang's are), as clang's; 3271 gates' facts as clang's table: pass
+clang reference: expected clang 23.1.4, found 23.1.5
+builtin targets: 64175 answers in 17 configurations, 55182 of implemented builtins (37273 available, 1954 constant where clang's are), as clang's; 3271 gates' facts as clang's table: pass
+builtin targets: 22 answers skipped, as the found clang's library builtin table differs from the reference 23.1.4's (2 plain names: strlcat, strlcpy)
+builtin targets under a fake clang 23.1.5: pass
+
+=== checker-driver ===
+test-checker: unknown attributes -Werror=unknown-attributes, vector: status -1 (clang 1), lines
+(clang
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:1:22: error: unknown attribute 'invented_semantics' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:2:22: error: unknown attribute '__invented__' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:3:3: error: unknown attribute 'invented::aligned' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:4:3: error: unknown attribute 'aligned' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:5:3: error: unknown attribute 'gnu::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:6:3: error: unknown attribute 'gnu::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:7:3: error: unknown attribute 'clang::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:8:3: error: unknown attribute 'clang::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:9:22: error: unknown attribute 'externally_visible' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:10:22: error: unknown attribute 'optimize' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:11:31: error: unknown attribute 'access' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:12:3: error: unknown attribute 'unsequenced' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:13:33: error: unknown attribute 'invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:13:47: error: unknown attribute 'gnu::invented2' ignored [-Werror,-Wunknown-attri
+test-checker: unknown attributes -Werror=unknown-attributes, scalar: status -1 (clang 1), lines
+(clang
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:1:22: error: unknown attribute 'invented_semantics' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:2:22: error: unknown attribute '__invented__' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:3:3: error: unknown attribute 'invented::aligned' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:4:3: error: unknown attribute 'aligned' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:5:3: error: unknown attribute 'gnu::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:6:3: error: unknown attribute 'gnu::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:7:3: error: unknown attribute 'clang::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:8:3: error: unknown attribute 'clang::invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:9:22: error: unknown attribute 'externally_visible' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:10:22: error: unknown attribute 'optimize' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:11:31: error: unknown attribute 'access' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:12:3: error: unknown attribute 'unsequenced' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:13:33: error: unknown attribute 'invented' ignored [-Werror,-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/unknown-attributes.c:13:47: error: unknown attribute 'gnu::invented2' ignored [-Werror,-Wunknown-attri
+test-checker: unknown attributes -w, vector: status -1 (clang 0), lines
+(clang
+)
+test-checker: unknown attributes -w, scalar: status -1 (clang 0), lines
+(clang
+)
+test-checker: attributed statement 0, vector: status -1 (clang 1), lines
+(clang
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-0.c:2:7: error: 'gnu::aligned' attribute cannot be applied to a statement
+)
+test-checker: attributed statement 0, scalar: status -1 (clang 1), lines
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:3:7: warning: unknown attribute 'invented' ignored [-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:3:18: error: redefinition of label 'a'
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:2:18: note: previous definition is here
+)
+test-checker: attributed statement 7, scalar: status -1 (clang 1), lines
+(clang
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:2:7: warning: unknown attribute 'invented' ignored [-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:3:7: warning: unknown attribute 'invented' ignored [-Wunknown-attributes]
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:3:18: error: redefinition of label 'a'
+/tmp/buster-checker-driver-8XEj5o/attributed-statement-7.c:2:18: note: previous definition is here
+)
+checker-driver: 43378 checks, 412 failures
