@@ -28,10 +28,10 @@ jobs:
         shell: bash
     env:
       BUSTER_HOST_ARCH: znver5
-      # Main at #1224's merge base, and #1224's head, which merges it: the head's tree is the base's and the pull
+      # Main at #1224's landing base, and #1224's head, which merges it: the head's tree is the base's and the pull
       # request's changes.
-      BASE_SHA: e98426b2a230e0bc9083b5be9d520d7c8e0f172b
-      HEAD_SHA: 1ed9666b7c2a9f9a34a6b21294e1cee637611707
+      BASE_SHA: 2fef25b02f083de14dbd2fff6ff4f5e61da4abb2
+      HEAD_SHA: 1f1294b08e6dc73e38ba895da4a9b0d74b303cac
       SHIFTS: 0 704 1408 2048 2752 3456
     steps:
       - name: Verify benchmark host
