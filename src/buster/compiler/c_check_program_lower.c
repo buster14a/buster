@@ -816,9 +816,6 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
-    // #1048's experiment, temporary (#1235): BUSTER_LOWER_EXPERIMENT's variants. Bit 128 leaves out the vector path's leaf
-    // path (check_lower_value); bit 2048 is the preparation's (the runtimes' names matched in the locals' pass).
-    uint32_t experiment;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.locals).
@@ -10411,7 +10408,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 // A standalone VALUE task takes the expansion: #1205 sent it to #624's leaf path (check_lower_value), and two
                 // 9700X runs showed no improvement in sqlite3.c's lowering (docs/c-lowering.md's "VALUE tasks on the leaf path").
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool simple = !value_node && (writer->experiment & 128) == 0 && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
+                const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
                                     check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
                 const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
                 const bool batched = !value_node && !plain && !simple && writer->fragments && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track &&
@@ -12288,40 +12285,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         const uint32_t declaring_count = check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
-        shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
-        uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
-        for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
-        {
-            const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
-            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
-                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
-            if (library != CBUILTIN_LIBRARY_COUNT)
-            {
-                const uint32_t runtime = check_lower_library_runtime(library);
-                called[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
-            }
-        }
-        IdentId identifiers[CHECK_LOWER_RUNTIMES];
-        uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
-        uint32_t spelled = 0;
-        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
-        {
-            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
-            {
-                const char* name = check_lower_runtime_names[r];
-                const uint32_t length = (uint32_t)strlen(name);
-                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
-                identifiers[spelled] = identifier;
-                spelled_runtimes[spelled] = (uint16_t)r;
-                spelled += identifier != 0;
-            }
-        }
-        // #1048's experiment, temporary (#1235, bit 2048): the runtimes' names matched in the locals' first pass over the
-        // declaring tokens, on the vector path, rather than in a pass of their own (check_lower_declared_runtimes).
-        const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-        const bool merged = experiment != NULL && (strtoul(experiment, NULL, 10) & 2048) != 0 && !BUSTER_SCALAR_PATH(scalar) && spelled != 0 &&
-                            program->parser != NULL;
-        const IdentId* token_names = merged ? program->parser->tokens.names : NULL;
         // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
         // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
         for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -12341,27 +12304,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
             const uint32_t token = declaring[d];
-            if (merged)
-            {
-                // check_lower_declared_runtimes' test of the token, in its order.
-                const uint32_t object = input->objects[token];
-                const IdentId name = token_names[token];
-                if (name != 0 && input->declarations[token] == token && check_input_linkage(input->declaration_bits, token) == 2 && object != 0 && object < program->object_count)
-                {
-                    bool any = false;
-                    for (uint32_t r = 0; r < spelled; r += 1)
-                    {
-                        any |= identifiers[r] == name;
-                    }
-                    for (uint32_t r = 0; any && r < spelled; r += 1)
-                    {
-                        if (identifiers[r] == name && shared->declared_runtimes[spelled_runtimes[r]] == 0)
-                        {
-                            shared->declared_runtimes[spelled_runtimes[r]] = program->object_symbols[object];
-                        }
-                    }
-                }
-            }
             const uint32_t opening = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
             const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
             const uint32_t b = candidate < program->body_count && program->bodies[candidate].opening == opening ? candidate : BUSTER_CHECK_NONE;
@@ -12417,7 +12359,35 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         // lowering's own functions' and those of the library builtins the unit calls (#148), of which the ones the unit
         // spells are listed, `spelled` of them, and one pass over the declarations, which only such a unit takes, matches
         // each declaration's name with them.
-        if (spelled != 0 && !merged)
+        shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
+        uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
+        for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
+        {
+            const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
+            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
+                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+            if (library != CBUILTIN_LIBRARY_COUNT)
+            {
+                const uint32_t runtime = check_lower_library_runtime(library);
+                called[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
+            }
+        }
+        IdentId identifiers[CHECK_LOWER_RUNTIMES];
+        uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
+        uint32_t spelled = 0;
+        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
+        {
+            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
+            {
+                const char* name = check_lower_runtime_names[r];
+                const uint32_t length = (uint32_t)strlen(name);
+                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
+                identifiers[spelled] = identifier;
+                spelled_runtimes[spelled] = (uint16_t)r;
+                spelled += identifier != 0;
+            }
+        }
+        if (spelled != 0)
         {
             check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, spelled_runtimes, spelled, shared->declared_runtimes,
                                           BUSTER_SCALAR_PATH(scalar));
@@ -12566,8 +12536,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         writer->templates = valid;
     }
     writer->template_check = shared->template_check;
-    const char* experiment = getenv("BUSTER_LOWER_EXPERIMENT");
-    writer->experiment = experiment != NULL ? (uint32_t)strtoul(experiment, NULL, 10) : 0;
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
