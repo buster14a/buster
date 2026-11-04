@@ -492,23 +492,6 @@ struct CheckInputPackedMember
     bool implicit_conversions;
     bool suppressed;
 };
-// A struct's or union's member that a deprecated or unavailable attribute marks (#147): its index in the type table's
-// members, its declaration's name, the attribute's first token (the deprecated note's place) and its message's string
-// (BUSTER_CHECK_WARNING_NO_SOURCE for none). Its uses are check_input_member_uses'.
-typedef struct CheckInputMarkedMember CheckInputMarkedMember;
-struct CheckInputMarkedMember
-{
-    uint32_t member;
-    uint32_t name;
-    uint32_t attribute;
-    uint32_t message;
-    bool unavailable;
-};
-// A token's availability context (CheckInput.availability_contexts, #147): in a deprecated or an unavailable function's
-// body or declaration's initializer, where clang's ShouldDiagnoseAvailabilityInContext drops a use's diagnostic (a
-// deprecated context a deprecated use's, an unavailable one either's).
-#define BUSTER_CHECK_CONTEXT_DEPRECATED 0x01
-#define BUSTER_CHECK_CONTEXT_UNAVAILABLE 0x02
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
 typedef struct CheckInputSections CheckInputSections;
@@ -10773,6 +10756,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             if (reader.deprecated_attributes && complete_translation_unit && !input->resource)
             {
                 check_input_deprecated_uses(&reader);
+                // The initializers' walk reads the marks through the graph (#147, check_init_member_use).
+                input->graph.marked_members = input->marked_members;
+                input->graph.marked_member_count = input->marked_member_count;
+                input->graph.availability_contexts = input->availability_contexts;
             }
             for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)
             {

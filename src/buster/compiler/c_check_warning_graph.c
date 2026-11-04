@@ -121,22 +121,6 @@ static bool check_warning_graph_null_candidate(const CheckGraph* graph, const Ch
     return result;
 }
 
-// The marked member (CheckInput.marked_members, ascending by index) of the type table's member `member`, or null.
-static const CheckInputMarkedMember* check_input_marked_member(const CheckInput* input, uint32_t member)
-{
-    uint32_t low = 0;
-    uint32_t high = input->marked_member_count;
-    while (low < high)
-    {
-        const uint32_t middle = low + (high - low) / 2;
-        const bool before = input->marked_members[middle].member < member;
-        low = before ? middle + 1 : low;
-        high = before ? high : middle;
-    }
-    const CheckInputMarkedMember* result = low < input->marked_member_count && input->marked_members[low].member == member ? input->marked_members + low : NULL;
-    return result;
-}
-
 // clang's diagnostics of a use of a member that a deprecated or unavailable attribute marks (#147, DiagnoseUseOfDecl's of
 // a member expression): at the name of each `.` or `->` whose member is one, "'x' is deprecated"
 // (-Wdeprecated-declarations), with the attribute's message after a colon and a note at the attribute, or the error
@@ -169,10 +153,10 @@ static void check_input_member_uses(CheckInputReader* reader, const CheckStream*
             uint32_t qualifiers = 0;
             const uint32_t member = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ?
                                     type_lookup_member(types, record, graph->members[node], &offset, &qualifiers) : 0;
-            const CheckInputMarkedMember* marked = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN ? check_input_marked_member(input, member) : NULL;
+            const CheckInputMarkedMember* marked = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN ?
+                                                   check_marked_member(input->marked_members, input->marked_member_count, member) : NULL;
             const uint8_t context = input->availability_contexts != NULL ? input->availability_contexts[name] : 0;
-            const bool dropped = marked != NULL && ((context & BUSTER_CHECK_CONTEXT_UNAVAILABLE) != 0 ||
-                                                    (!marked->unavailable && (context & BUSTER_CHECK_CONTEXT_DEPRECATED) != 0));
+            const bool dropped = marked != NULL && check_marked_dropped(marked, context);
             if (marked != NULL && !dropped && marked->unavailable)
             {
                 const uint32_t before = reader->output->report_count;

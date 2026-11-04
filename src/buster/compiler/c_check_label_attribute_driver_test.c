@@ -899,6 +899,15 @@ static void check_test_driver_unknown_attributes(CheckTest* test, const char* cl
         "struct S { int u __attribute__((unavailable)); };\n__attribute__((unavailable)) int k(struct S *p) { return p->u; }\n",
         "struct S { int x __attribute__((deprecated)), y __attribute__((deprecated(\"y\"))); } s;\n"
         "struct T { struct S in; } t;\nint k(void) { return s.x + t.in.y + __builtin_offsetof(struct S, x); }\n",
+        // Initializers' uses (check_init_member_use): a designator's member, a value's member by its position at each level
+        // of elided braces, through an anonymous member and a union's first; none in a deprecated declaration's.
+        "struct S { int x __attribute__((deprecated(\"m\"))); int y; struct { int z __attribute__((deprecated)); }; };\n"
+        "struct S a = { 1, 2, 3 };\nstruct S b = { .x = 1, .z = 2 };\n"
+        "struct T { struct S in; int w __attribute__((deprecated)); } c = { 1, 2, 3, 4 }, d = { { 1 }, 5 }, e = { .in.x = 1, .w = 2 };\n"
+        "int f(void) { struct S l = { 0 }; return ((struct S){ .y = 1, 2 }).y + l.y; }\n"
+        "__attribute__((deprecated)) struct S g = { 1 };\n"
+        "union U { int a [[deprecated]]; float b; } u = { 1 }, v = { .b = 1 };\n"
+        "struct S h[2] = { [1].x = 1, [0] = { 2 } };\n",
     };
     for (uint32_t s = 0; written && expected_lines != NULL && actual_lines != NULL && s < BUSTER_ARRAY_LENGTH(statements); s += 1)
     {

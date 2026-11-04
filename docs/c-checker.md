@@ -5594,7 +5594,11 @@ arguments against the function. The checker now gives these as clang does.
   a deprecated or unavailable function's body, and a deprecated or
   unavailable declaration's declarator and initializer; a deprecated context
   drops a deprecated member's use, and an unavailable one either's.
-  `offsetof`'s member designator is no use, as in clang.
+  `offsetof`'s member designator is no use, as in clang. An initializer's
+  uses are the initializers' walk's (`check_init_member_use`, through
+  `CheckGraph.marked_members`): a designator's member, at its name, and a
+  member a value takes by its position, at the value's first token, at each
+  level of elided braces, as SemaInit's `DiagnoseUseOfDecl` has them.
 - **Attributes without a rule** (`check_input_attribute_generic`). An
   attribute clang knows that the checker has no rule for is taken by its facts:
   - one clang ignores everywhere (`bounded`) is ignored without a word;
@@ -6018,11 +6022,10 @@ arguments against the function. The checker now gives these as clang does.
   - When a GNU attribute of a declaration and a calling convention keyword
     on another type share the specifiers, the two warnings come in the
     attributes' order. Clang gives the type's first.
-  - A deprecated or unavailable member's use gets no diagnostic where it
-    isn't a checked `.` or `->`: a designator (`.x = 1`), an initializer
-    that a member takes by its position (clang's warning is at it), and an
-    access the reader's evaluator reads alone (`typeof`'s operand, an array
-    bound at file scope). Nor does an overloadable function's call that
+  - A deprecated or unavailable member's use gets no diagnostic where the
+    reader's evaluator alone reads the access (`typeof`'s operand, an array
+    bound at file scope), and an unavailable member's in an initializer gets
+    no error (a designator's, or a value's by its position). Nor does an overloadable function's call that
     resolves to a deprecated overload, which clang warns of (it doesn't at an
     address taken through the overload set, and neither does the checker).
   - A body checked on a lane doesn't warn of attributes after a definition, nor
