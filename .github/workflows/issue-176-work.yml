@@ -18,23 +18,23 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ github.sha }}
-      - name: Apply checked F80 fixture corrections on the session branch
+      - name: Apply checked typed indirect-call support on the session branch
         id: apply
         shell: bash
         run: |
           set -euo pipefail
-          if test -f .github/issue-176-v5.patch.b64; then
-              base64 --decode .github/issue-176-v5.patch.b64 | gzip --decompress > "$RUNNER_TEMP/issue-176-v5.patch"
-              printf '%s  %s\n' a9433a149db5d9e4f755c84739a01307675841c3139f0a6b519fbb2c07cb9e80 "$RUNNER_TEMP/issue-176-v5.patch" | sha256sum --check
-              git apply --check "$RUNNER_TEMP/issue-176-v5.patch"
-              git apply "$RUNNER_TEMP/issue-176-v5.patch"
+          if test -f .github/issue-176-v6.patch.b64; then
+              base64 --decode .github/issue-176-v6.patch.b64 | gzip --decompress > "$RUNNER_TEMP/issue-176-v6.patch"
+              printf '%s  %s\n' 95eb0d78bcb7fce0fab903b028bbb39e8a2156b8002ebd93a404363ac13ce6dd "$RUNNER_TEMP/issue-176-v6.patch" | sha256sum --check
+              git apply --check "$RUNNER_TEMP/issue-176-v6.patch"
+              git apply "$RUNNER_TEMP/issue-176-v6.patch"
               git diff --check
-              git add src/buster/compiler/interpreter_wide_test.c
-              git rm .github/issue-176-v5.patch.b64
+              git add docs/ir-tools.md src/buster/compiler/interpreter.c src/buster/compiler/interpreter_wide_test.c
+              git rm .github/issue-176-v6.patch.b64
               git config user.name 'David Gonzalez Martin'
               git config user.email 'davidgmbb@gmail.com'
               sh .githooks/enable-sign-off.sh --maintainer-session
-              git commit -m 'test(interpreter): correct F80 fixture stack effects' -m 'Use the value-preserving global store before returning and the consuming local store before checking a byte through its address.' -m 'Original project code authored for the maintainer by OpenAI / GPT-6 Astra Pro. This ChatGPT environment exposes neither a private session URL nor a session identifier.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+              git commit -m 'feat(interpreter): resolve checked typed indirect calls' -m 'Consume the callee below its arguments and resolve only stable interpreted-function tokens or explicitly registered native addresses. Add wide interpreted/native, unknown-target, class/stack-shape and zero-argument void regressions. This lets the original generated x87 programs run without rewriting their call inputs.' -m 'Original project code authored for the maintainer by OpenAI / GPT-6 Astra Pro. This ChatGPT environment exposes neither a private session URL nor a session identifier.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
               test "$(git ls-remote origin refs/heads/chatgpt/176-typed-oracle-continuation | cut -f1)" = "$GITHUB_SHA"
               git push origin HEAD:refs/heads/chatgpt/176-typed-oracle-continuation
           fi
