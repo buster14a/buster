@@ -643,9 +643,7 @@ static inline __attribute__((always_inline)) void check_stream_value_to(const Ch
     uint8_t* bytes = (uint8_t*)destination;
     if (whole != NULL)
     {
-        const uint8_t* source = (const uint8_t*)whole;
-        _mm512_storeu_si512(bytes, _mm512_loadu_si512(source));
-        _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_loadu_si256((const __m256i*)(source + 64)));
+        check_value_copy(destination, whole);
     }
     else
     {
@@ -1606,7 +1604,7 @@ static inline __attribute__((always_inline)) void check_graph_action(const Check
     }
     if (action->op == CHECK_OP_VALUE)
     {
-        action->operands[0] = *check_graph_leaf_of(graph, node);
+        check_value_copy(&action->operands[0], check_graph_leaf_of(graph, node));
     }
     if (check_graph_has_arguments(action->op) && graph->argument_counts != 0)
     {
@@ -2610,11 +2608,13 @@ static inline __attribute__((always_inline)) bool check_graph_discard_taken(cons
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per discard.
 static inline __attribute__((always_inline)) void check_graph_discard(TypeTable* types, CheckStream* stream, uint32_t node, CheckValue* value)
 {
+    // The cast converts its operand, then takes it as its value: here the value is converted where the record holds it,
+    // the same bytes without a copy after the conversion's narrow stores.
     CheckActionResult result;
     memset(&result, 0, sizeof(result));
     result.conversions[0].type = value->type;
-    check_action_conversion(types, value, BUSTER_TYPE_VOID, BUSTER_CHECK_CONVERT_CAST, &result.conversions[0], node);
-    result.value = *value;
+    check_value_copy(&result.value, value);
+    check_action_conversion(types, &result.value, BUSTER_TYPE_VOID, BUSTER_CHECK_CONVERT_CAST, &result.conversions[0], node);
     check_action_cast_provenance(&result.value, false, false, false, true, true);
     result.value.flags = check_value_source_flags(CHECK_OP_CAST, result.value.flags);
     check_graph_store(stream, node, &result);

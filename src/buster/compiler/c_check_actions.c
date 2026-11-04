@@ -130,6 +130,26 @@ struct CheckValue
     uint32_t object_bit_offset;
 };
 
+_Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, object) == 64, "check_value_copy copies a value as its first 64 bytes and its last 32");
+
+// `source` copied whole into `destination` as two halves, its first 64 bytes and its last 32, by one load and one store
+// each on the vector path. A value the hot path copies (an action's operands, check_stream_value_to's) is written this way
+// and read back this way, so that every load takes its data from one store: Zen 5's code copies 96 bytes by two
+// overlapping 64-byte loads, of which the second spans both halves' stores, which no store can forward (#1050). The scalar
+// path is the assignment.
+// Always inlined (#880), as profile-guided builds do; hot callers: check_stream_value_to and check_action_operand_value.
+static inline __attribute__((always_inline)) void check_value_copy(CheckValue* destination, const CheckValue* source)
+{
+#if BUSTER_HOST_VECTOR
+    uint8_t* bytes = (uint8_t*)destination;
+    const uint8_t* from = (const uint8_t*)source;
+    _mm512_storeu_si512(bytes, _mm512_loadu_si512(from));
+    _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_loadu_si256((const __m256i*)(from + 64)));
+#else
+    *destination = *source;
+#endif
+}
+
 // A value's two x87 payloads as their ten meaningful bytes, the significand and the sign and exponent, copied as
 // integer storage: an x87 load and store of one is microcoded, and the six pad bytes needn't be read (#879). The
 // helper zeroes the destination's pad bytes itself, so its padding is deterministic whatever its caller left there.
@@ -929,7 +949,8 @@ static void check_action_conversion(const TypeTable* table, CheckValue* value, T
 // it: a call's argument takes its call's (check_action_call), with no action of its own to copy the argument into (#1050).
 static CheckValue check_action_operand_value(TypeTable* table, const CheckAction* action, const CheckValue* operand, CheckActionResult* result, uint32_t index)
 {
-    CheckValue value = *operand;
+    CheckValue value;
+    check_value_copy(&value, operand);
     CheckConversion* conversion = &result->conversions[index];
     conversion->type = value.type;
     const TypeId plain = type_strip_aligned(table, value.type);
