@@ -1132,15 +1132,15 @@ static String8 runtime_section(String8 bytes, const char* name)
 }
 
 // The names the direct path's linker defines (BUSTER_LINK_SOURCE_LINKER) when something refers to one, as lld does when
-// no object defines it, each with its supported output kinds (a bit per RuntimeKind). For executables, GNU ld and lld
-// define them there:
+// no object defines it, each with its supported output kinds (a bit per RuntimeKind). The executable bounds follow
+// GNU ld and lld, with GNU ld's additional __etext alias; shared-library admission is unchanged:
 //   - every kind: the bounds of the init and fini arrays, which step 4's executables define, and the GOT's
 //     _GLOBAL_OFFSET_TABLE_, which GNU as names in an object with a GOT reference;
 //   - the PIEs and a shared library: .dynamic's address (_DYNAMIC, through which libc.a's member that relocates a static
 //     PIE finds it);
-//   - every executable (dynamic PIE, static executable and static PIE): the ELF header's address (__ehdr_start, through which libc.a's startup finds
-//     the program headers) and the image's start; the preinit array's bounds; and the ends of the text, the data and
-//     the image. These bounds also belong to a dynamic executable; shared-library admission is unchanged here;
+//   - every executable (dynamic PIE, static executable and static PIE): the ELF header's address (__ehdr_start,
+//     through which libc.a's startup finds the program headers) and the image's start; the preinit array's bounds;
+//     the ends of the text and the file-backed data; the start of .bss; and the end of the image;
 //   - a static executable alone: its IRELATIVE relocations' bounds (__rela_iplt_start and __rela_iplt_end, which
 //     libc.a's startup applies for its IFUNCs). A static PIE's are in .rela.dyn, which its startup applies with the
 //     others, and libc.a's weak references to the bounds bind to nothing, as GNU ld and lld leave them.

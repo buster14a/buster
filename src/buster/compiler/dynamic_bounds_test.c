@@ -3,7 +3,8 @@
 
 // #1255: dynamic_test.c includes this after its image readers and lane helpers. The fixture takes every image-bound
 // address at runtime; the expected output comes from the ELF headers, not the writer's symbol-value implementation.
-// With --cross-check, GNU ld and lld link and run the same object and satisfy the same section/segment rules.
+// With --cross-check, GNU ld and lld run the same fixture against those rules. GNU ld checks all twelve names;
+// lld omits __etext, a GNU alias it does not define. The direct linker still checks all twelve in every write.
 
 static const char* const dynamic_bounds_names[] = {
     "__ehdr_start",
@@ -31,7 +32,11 @@ static const char dynamic_bounds_source[] =
     "int main(void)\n"
     "{\n"
     "    char* addresses[] = { __ehdr_start, __executable_start, __preinit_array_start, __preinit_array_end,\n"
-    "                          _etext, etext, __etext, _edata, edata, __bss_start, _end, end };\n"
+    "                          _etext, etext,\n"
+    "#if !BUSTER_DYNAMIC_BOUNDS_NO_ETEXT_ALIAS\n"
+    "                          __etext,\n"
+    "#endif\n"
+    "                          _edata, edata, __bss_start, _end, end };\n"
     "    for (unsigned int i = 0; i < sizeof(addresses) / sizeof(addresses[0]); i += 1)\n"
     "    {\n"
     "        printf(\"%llu\\n\", (unsigned long long)((uintptr_t)addresses[i] - (uintptr_t)__ehdr_start));\n"
@@ -89,17 +94,50 @@ static bool dynamic_bounds_values(DynamicTestTally* tally, String8 file, uint64_
     return valid;
 }
 
-static uint64_t dynamic_bounds_output(const uint64_t* values, uint8_t* output, uint64_t capacity)
+static uint64_t dynamic_bounds_output(const uint64_t* values, uint8_t* output, uint64_t capacity, bool text_alias)
 {
     uint64_t length = 0;
     bool valid = true;
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(dynamic_bounds_names); i += 1)
     {
-        const int written = snprintf((char*)output + length, capacity - length, "%llu\n", (unsigned long long)values[i]);
-        valid = written >= 0 && (uint64_t)written < capacity - length;
-        length += valid ? (uint64_t)written : 0;
+        if (text_alias || strcmp(dynamic_bounds_names[i], "__etext") != 0)
+        {
+            const int written = snprintf((char*)output + length, capacity - length, "%llu\n", (unsigned long long)values[i]);
+            valid = written >= 0 && (uint64_t)written < capacity - length;
+            length += valid ? (uint64_t)written : 0;
+        }
     }
     return valid ? length : 0;
+}
+
+// Every write needs its own expected addresses: replacing RELR with RELA changes the layout. Compare both the
+// binding's references and the running program with that file's headers, including the exact and RELA-only writes.
+static void dynamic_bounds_check(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, const char* path, bool relr,
+                                 uint64_t index)
+{
+    uint64_t values[BUSTER_ARRAY_LENGTH(dynamic_bounds_names)] = { 0 };
+    uint8_t expected[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+    const bool valid = dynamic_bounds_values(tally, file, values);
+    const uint64_t length = valid ? dynamic_bounds_output(values, expected, sizeof(expected), true) : 0;
+    if (valid)
+    {
+        dynamic_test_structure(tally, link, bind, runtime, file, relr, index);
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(dynamic_bounds_names); n += 1)
+        {
+            bool found = false;
+            for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+            {
+                if (executable_named(link, symbol, dynamic_bounds_names[n]))
+                {
+                    const bool resolved = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER && link->symbols.reference[symbol] == values[n];
+                    dynamic_test_expect(tally, resolved, dynamic_bounds_names[n], symbol);
+                    found = true;
+                }
+            }
+            dynamic_test_expect(tally, found, dynamic_bounds_names[n], n);
+        }
+    }
+    dynamic_test_expect(tally, valid && length != 0 && executable_test_runs(path, expected, length), "the direct PIE runs with every bound at its ELF address", index);
 }
 
 // The kind mask is independently specified here. In particular, adding dynamic executables must not classify them as
@@ -162,33 +200,35 @@ static bool dynamic_test_image_bounds(const ExecutableTestDirectory* directory, 
     ExecutableResult result = { 0 };
     String8 file = { 0 };
     const bool wrote = linked && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, "image bounds", &result, &file, directory->id_order, scratch.arena);
-    uint64_t values[BUSTER_ARRAY_LENGTH(dynamic_bounds_names)] = { 0 };
-    uint8_t expected[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
-    const bool valid = wrote && dynamic_bounds_values(&tally, file, values);
-    const uint64_t length = valid ? dynamic_bounds_output(values, expected, sizeof(expected)) : 0;
-    if (valid)
+    if (wrote)
     {
-        dynamic_test_structure(&tally, &bound.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), 0);
-        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(dynamic_bounds_names); n += 1)
+        dynamic_bounds_check(&tally, &bound.link, &bound.bind, runtime, file, path.pointer, dynamic_test_relr_supported(runtime), 0);
+    }
+    const uint8_t* saved = wrote ? executable_test_save(&bound.link, scratch.arena) : 0;
+    dynamic_test_expect(&tally, saved != 0, "room for the fixture's unpatched bytes", 0);
+    static const uint32_t variant_lanes[] = { 1, 8, 1 };
+    for (uint32_t w = 0; saved != 0 && w < BUSTER_ARRAY_LENGTH(variant_lanes); w += 1)
+    {
+        executable_test_restore(&bound.link, saved);
+        DynamicTestWrite write = {
+            .exact = w < 2,
+            .rela_only = w == 2,
+        };
+        ExecutableResult variant = { 0 };
+        const bool written = executable_test_reset(&bound.link, path.pointer) &&
+                             dynamic_test_write_with(&write, &bound.link, &bound.bind, runtime, path, variant_lanes[w], &variant);
+        dynamic_test_expect(&tally, written && (!write.rela_only || variant.relr_words == 0), "the exact or RELA-only write succeeds", w);
+        const String8 bytes = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+        executable_test_restore(&bound.link, saved);
+        if (written)
         {
-            bool found = false;
-            for (SymbolId symbol = 1; symbol < bound.link.symbols.count; symbol += 1)
-            {
-                if (executable_named(&bound.link, symbol, dynamic_bounds_names[n]))
-                {
-                    const bool resolved = bound.link.symbols.source[symbol] == BUSTER_LINK_SOURCE_LINKER && bound.link.symbols.reference[symbol] == values[n];
-                    dynamic_test_expect(&tally, resolved, dynamic_bounds_names[n], symbol);
-                    found = true;
-                }
-            }
-            dynamic_test_expect(&tally, found, dynamic_bounds_names[n], n);
-        }
-        if (length != 0)
-        {
-            dynamic_test_variants(&tally, &bound.link, &bound.bind, runtime, path, file, expected, length, 0, 0, 0);
+            const bool identical = bytes.length == file.length && memcmp(bytes.pointer, file.pointer, file.length) == 0;
+            dynamic_test_expect(&tally, !write.exact || identical, "the exact twins write the same file", variant_lanes[w]);
+            dynamic_bounds_check(&tally, &bound.link, &bound.bind, runtime, bytes, path.pointer, !write.rela_only && dynamic_test_relr_supported(runtime), w + 1);
         }
     }
-    dynamic_test_expect(&tally, valid && length != 0 && executable_test_runs(path.pointer, expected, length), "the direct PIE runs with every bound at its ELF address", 0);
+    uint64_t values[BUSTER_ARRAY_LENGTH(dynamic_bounds_names)] = { 0 };
+    uint8_t expected[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
     static const char* const linkers[] = {
         "-fuse-ld=bfd",
         "-fuse-ld=lld",
@@ -196,12 +236,13 @@ static bool dynamic_test_image_bounds(const ExecutableTestDirectory* directory, 
     for (uint32_t l = 0; cross_check && compiled && l < BUSTER_ARRAY_LENGTH(linkers); l += 1)
     {
         snprintf(reference_path, sizeof(reference_path), "%s/image-bounds-reference-%u", directory->path, l);
-        char* reference[] = { "cc", "-pie", (char*)linkers[l], "-o", reference_path, object_path, 0 };
-        const bool referenced = object_test_run(reference, out, err) == 0;
+        char* gnu[] = { "cc", "-pie", (char*)linkers[l], "-o", reference_path, object_path, 0 };
+        char* lld[] = { "cc", "-O2", "-fPIE", "-DBUSTER_DYNAMIC_BOUNDS_NO_ETEXT_ALIAS=1", "-pie", (char*)linkers[l], "-o", reference_path, source_path, 0 };
+        const bool referenced = object_test_run(l == 0 ? gnu : lld, out, err) == 0;
         dynamic_test_expect(&tally, referenced, linkers[l], l);
         const String8 reference_file = referenced ? object_test_read_file(scratch.arena, reference_path) : (String8){ 0 };
         const bool reference_valid = referenced && dynamic_bounds_values(&tally, reference_file, values);
-        const uint64_t reference_length = reference_valid ? dynamic_bounds_output(values, expected, sizeof(expected)) : 0;
+        const uint64_t reference_length = reference_valid ? dynamic_bounds_output(values, expected, sizeof(expected), l == 0) : 0;
         const bool ran = reference_valid && reference_length != 0 && executable_test_runs(reference_path, expected, reference_length);
         dynamic_test_expect(&tally, ran, "the reference PIE runs with the same ELF-bound rules", l);
         if (!directory->keep)

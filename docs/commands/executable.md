@@ -523,8 +523,12 @@ aligned, nonempty BSS, so the data end, BSS start and image end cannot be
 confused. It checks every resolved address against the output ELF headers
 and runs the executable to verify the relocated addresses. The ordinary
 lane-count, poisoned-scratch, exact-twin and RELR-disabled checks apply.
-With `--cross-check`, GNU ld and lld link the same object and their running
-executables must satisfy the same ELF-bound rules for their own layouts.
+Each write computes its expectations from its own headers: disabling RELR
+can move the sections. With `--cross-check`, GNU ld links the same object and
+lld compiles the same fixture without `__etext`, which it does not define.
+GNU ld and every direct write check all twelve names; lld checks its eleven
+built-in names. Their running executables must satisfy the same ELF-bound
+rules for their own layouts.
 Kind-mask checks retain static-runtime selection, shared-library admission
 and the static executable's exclusive IPLT bounds.
 
