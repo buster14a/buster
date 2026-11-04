@@ -6,43 +6,90 @@ on:
       - .github/workflows/issue-1254-validation.yml
 permissions:
   contents: write
-  actions: read
 concurrency:
   group: issue-1254-focused-validation
   cancel-in-progress: true
 jobs:
-  evidence:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - name: Check out isolated validation branch
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      - name: Extract focused failure evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
+    timeout-minutes: 30
+    defaults:
+      run:
         shell: bash
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - name: Check out clean fix branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: fix/1254-conditional-number-diagnostics
+      - name: Correct the numeric-token separator fixture
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, re, subprocess
-          url = 'https://api.github.com/repos/buster14a/buster/actions/jobs/126670148991/logs'
-          download = subprocess.run(['curl', '--fail', '--silent', '--show-error', '--location', '--max-time', '60', '-H', 'Authorization: Bearer ' + os.environ['GH_TOKEN'], url], capture_output=True, text=True)
-          if download.returncode:
-              raise RuntimeError(download.stderr)
-          lines = download.stdout.splitlines()
-          selected = set()
-          for i, line in enumerate(lines):
-              if re.search(r'differ|mismatch|expected numeric|fixture|invalid octal|significand', line, re.I):
-                  selected.update(range(max(0, i - 10), min(len(lines), i + 18)))
-          report = '\n'.join(lines[i] for i in sorted(selected))
-          if len(report) > 28000:
-              report = report[-28000:]
-          with open('.github/issue-1254-report.txt', 'w') as output:
-              output.write(report + '\n')
+          from pathlib import Path
+          path = Path('src/buster/compiler/c_preprocessor_directives_test.c')
+          text = path.read_text()
+          old = '.source = "#if 1\'.0\\n#endif\\n",'
+          new = '.source = "#if 1\'e2\\n#endif\\n",'
+          if old in text:
+              assert text.count(old) == 1
+              path.write_text(text.replace(old, new))
+          else:
+              assert new in text
+          PY
+          git diff --check
+          if ! git diff --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add src/buster/compiler/c_preprocessor_directives_test.c
+            git commit -m 'Use a single preprocessing number for the trailing separator regression' -m "1'.0 splits before the quote; 1'e2 exercises the intended end-of-digit-sequence diagnostic." -m 'Agent session: ChatGPT issue #1254 session (private session URL unavailable)' -m 'Model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+            git push origin HEAD:refs/heads/fix/1254-conditional-number-diagnostics
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/validated-sha"
+      - name: Install pinned hosted Clang and build tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build and run independent focused suites
+        id: tests
+        run: |
+          set +e
+          ./build.sh --jobs 4 > "$RUNNER_TEMP/build.log" 2>&1
+          build=$?
+          ./build/compiler test-preprocessor --clang --fuzz 0 --count 64 > "$RUNNER_TEMP/preprocessor.log" 2>&1
+          preprocessor=$?
+          ./build/compiler test-checker-driver > "$RUNNER_TEMP/checker-driver.log" 2>&1
+          checker=$?
+          set -e
+          printf 'build=%s\npreprocessor=%s\nchecker=%s\n' "$build" "$preprocessor" "$checker" > "$RUNNER_TEMP/test-status"
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          sections = ['Validated commit: ' + (root / 'validated-sha').read_text().strip(), (root / 'test-status').read_text()]
+          for name in ['build', 'preprocessor', 'checker-driver']:
+              lines = (root / (name + '.log')).read_text(errors='replace').splitlines()
+              selected = set(range(max(0, len(lines) - 12), len(lines)))
+              for i, line in enumerate(lines):
+                  if re.search(r'differs:|expected numeric|fixtures differ|unit tests|FAIL|fatal error:|error: unknown', line):
+                      selected.update(range(max(0, i - 2), min(len(lines), i + 12)))
+              excerpt = '\n'.join(lines[i] for i in sorted(selected))[-18000:]
+              sections.append('=== ' + name + ' ===\n' + excerpt)
+          report = '\n\n'.join(sections) + '\n'
+          (root / 'validation-report.txt').write_text(report)
           print(report)
           PY
+          test "$build" = 0 && test "$preprocessor" = 0 && test "$checker" = 0
+      - name: Publish bounded validation report outside the PR branch
+        if: always() && steps.tests.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin work/1254-numeric-diagnostics-validation
+          git worktree add --detach "$RUNNER_TEMP/evidence" FETCH_HEAD
+          cp "$RUNNER_TEMP/validation-report.txt" "$RUNNER_TEMP/evidence/.github/issue-1254-report.txt"
+          cd "$RUNNER_TEMP/evidence"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .github/issue-1254-report.txt
-          git commit -m 'Record focused issue 1254 validation evidence' -m 'Agent session: ChatGPT issue #1254 session (private session URL unavailable)' -m 'Model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
+          git commit -m 'Record focused numeric diagnostic validation results' -m 'Agent session: ChatGPT issue #1254 session (private session URL unavailable)' -m 'Model: OpenAI / GPT-6 Astra Pro' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
           git push origin HEAD:refs/heads/work/1254-numeric-diagnostics-validation
