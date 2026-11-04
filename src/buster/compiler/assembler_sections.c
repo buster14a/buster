@@ -227,7 +227,9 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
 static bool asm_object_declares(const AsmSymbol* symbol)
 {
     const bool weak = (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
-    return symbol->link != 0 && !symbol->defined && !symbol->absolute && !symbol->alias && symbol->common == 0 && !symbol->internal && (!weak || symbol->used);
+    // A section's name (`.long .debug_abbrev`, as clang's DWARF writes it) is the section's own symbol, not undefined.
+    return symbol->link != 0 && !symbol->defined && !symbol->section_start && !symbol->absolute && !symbol->alias && symbol->common == 0 && !symbol->internal &&
+           (!weak || symbol->used);
 }
 
 static void asm_object_options(AsmParser* parser)
@@ -255,7 +257,8 @@ static void asm_object_options(AsmParser* parser)
             const AsmSymbol* symbol = &parser->symbols[i];
             if (symbol->link != 0 && (symbol->flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL)
             {
-                temporary[symbol->link] = symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0);
+                // A section's name too: its references are the section symbol's, as GNU as writes no other (#1115).
+                temporary[symbol->link] = symbol->internal || symbol->section_start || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0);
             }
         }
         parser->result.object_options = (ObjectOptions){

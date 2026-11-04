@@ -181,6 +181,12 @@ static const char asm_test_undefined_fixture[] =
     ".protected protected_undefined\n.internal internal_undefined\n.size sized_undefined, 4\n.type typed_undefined, @function\n"
     ".local local_undefined\n.set chain_b, chain_a\n.set chain_a, ext13 + 4\n.data\n.long ext14 - ext14\n.quad alias1+4\n.quad chain_b\n";
 
+// A section's name as a symbol (clang's DWARF writes `.long .debug_abbrev`), which GNU as writes as that section's
+// symbol, not an undefined one, and of no symbol of its own: as data, with an addend, and RIP-relative.
+static const char asm_test_section_name_fixture[] =
+    ".section .foo,\"a\",@progbits\n.byte 1\n.section .bar,\"a\",@progbits\n.quad .foo\n.long .foo+1\n.text\nleaq .foo(%rip), %rax\n"
+    ".section .debug_abbrev,\"\",@progbits\n.byte 0\n.section .debug_aranges,\"\",@progbits\n.long .debug_abbrev\n";
+
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
 {
     static const struct
@@ -197,6 +203,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_alias_fixture, X86_ARCH_BASELINE },
         { asm_test_jump_fixture, X86_ARCH_BASELINE },
         { asm_test_undefined_fixture, X86_ARCH_BASELINE },
+        { asm_test_section_name_fixture, X86_ARCH_BASELINE },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
