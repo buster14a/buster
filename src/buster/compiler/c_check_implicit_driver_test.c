@@ -443,6 +443,17 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int g(int x) { (x == 1); return 0; }\n"
         "int h(int x) { (void)x; return 0; }\n"
         "int i(int x) { x + 1; return 0; }\n";
+    // A GNU statement expression's last statement is its value: unused only where the statement expression is.
+    static const char statement_expressions[] =
+        "int a(int x) { return ({ x; }); }\n"
+        "int b(int x) { return ({ x, 1; }); }\n"
+        "void c(int x) { ({ x; }); }\n"
+        "int d(int x) { return ({ x; x + 1; }); }\n"
+        "int e(int x) { int n = ({ if (x) x++; x; }); return n; }\n"
+        "void f(int x) { (void)({ x; }); }\n"
+        "int g(int x) { return ({ int y = x; ({ y; }); }) + ({ x; }); }\n"
+        // A variable length array's sizeof, which evaluates its operand through a comma of the reader's own.
+        "int h(int x) { int a[x + 1]; int n = 0; n += 1 + (int)sizeof a; return n + (int)sizeof(int[x]); }\n";
     static const char return_stack[] =
         "int *a(void) { int x[3]; return &x[0]; }\n"
         "struct S { int m; };\n"
@@ -779,6 +790,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { array_shapes, { "-Wall", NULL, NULL, NULL } },
         { unused_chains, { "-Wall", NULL, NULL, NULL } },
         { unused_values, { "-Wall", NULL, NULL, NULL } },
+        { statement_expressions, { "-Wall", NULL, NULL, NULL } },
         { return_stack, { "-Wall", NULL, NULL, NULL } },
         { generic_selection, { "-Wall", NULL, NULL, NULL } },
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
