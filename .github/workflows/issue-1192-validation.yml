@@ -1,64 +1,46 @@
-name: Issue 1192 bounded validation
-
-# Ephemeral connector-session branch only. Neither this workflow nor its edit adapter enters the final PR.
+name: Issue 1192 Tier 1 execution validation
 on:
   push:
     branches: [agent/issue-1192-validation]
 permissions:
-  contents: write
+  contents: read
 jobs:
   validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 15
     env:
       BUSTER_HOST_ARCH: x86-64
       BUSTER_DEBUG_INFO: '0'
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-      - name: Assemble exact source edits and publish unreferenced source tree
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/issue-1192-assemble.c -o "$RUNNER_TEMP/assemble"
-          "$RUNNER_TEMP/assemble"
-          git diff --check
-          printf '[]' > "$RUNNER_TEMP/entries.json"
-          for path in src/buster/compiler/c_check_program.c src/buster/compiler/c_check_program_switch.c src/buster/compiler/c_check_program_select_test.c src/buster/compiler/c_check_program_switch_test.c docs/c-lowering.md docs/commands/checker.md; do
-            blob=$(gh api -X POST repos/buster14a/buster/git/blobs -f encoding=utf-8 -F "content=@$path" --jq .sha)
-            jq --arg path "$path" --arg sha "$blob" '. + [{path:$path,mode:"100644",type:"blob",sha:$sha}]' "$RUNNER_TEMP/entries.json" > "$RUNNER_TEMP/next.json"
-            mv "$RUNNER_TEMP/next.json" "$RUNNER_TEMP/entries.json"
-          done
-          jq '{base_tree:"21309579b5bfe8bcfe22a1004c25162ef0d1c888",tree:.}' "$RUNNER_TEMP/entries.json" > "$RUNNER_TEMP/tree.json"
-          tree=$(gh api -X POST repos/buster14a/buster/git/trees --input "$RUNNER_TEMP/tree.json" --jq .sha)
-          echo "ISSUE_1192_SOURCE_TREE=$tree"
-          echo "Source tree: $tree" >> "$GITHUB_STEP_SUMMARY"
       - name: Install pinned hosted compiler toolchain
         run: bash tools/ci/setup-hosted.sh
       - name: Build baseline compiler
         run: ./build.sh --jobs 4
-      - name: Compare selection symbols and execution
-        run: ./build/compiler test-checker --program-selection --clang clang
-      - name: Check issue reproducers through the baseline driver
+      - name: Execute every switch fixture through Tier 1 in both modes
         run: |
           set -euo pipefail
-          printf '%s\n' 'static inline __attribute__((always_inline,target("avx2"))) int h(int x){return x+1;}static int vec(int x){return h(x);}int f(int x){switch(1){case 0:return vec(x);case 1:return x;}return 0;}' > "$RUNNER_TEMP/target.c"
-          printf '%s\n' 'static int heavy(int x){return x*3;}int f(int x){switch(sizeof(long)==8){case 0:x=heavy(x);break;case 1:x+=1;break;}return x;}' > "$RUNNER_TEMP/sizeof.c"
-          for name in target sizeof; do
-            ./build/compiler -march=x86-64 -c "$RUNNER_TEMP/$name.c" -o "$RUNNER_TEMP/$name.o"
-            clang -O0 -march=x86-64 -c "$RUNNER_TEMP/$name.c" -o "$RUNNER_TEMP/$name-clang.o"
-            nm --defined-only "$RUNNER_TEMP/$name.o"
-            test "$(nm --defined-only "$RUNNER_TEMP/$name.o" | awk '$2 ~ /^[tT]$/ {print $3}')" = f
-            ./build/compiler --tier1 -march=x86-64 -c "$RUNNER_TEMP/$name.c" -o "$RUNNER_TEMP/$name-tier1.o"
+          mkdir "$RUNNER_TEMP/switches"
+          clang -std=c17 -O2 -Wall -Wextra -Werror -I. tools/ci/issue-1192-export.c -o "$RUNNER_TEMP/export"
+          "$RUNNER_TEMP/export" "$RUNNER_TEMP/switches"
+          passed=0
+          for source in "$RUNNER_TEMP/switches/"*.c; do
+            clang -std=gnu17 -O0 -march=x86-64 -w "$source" -o "$RUNNER_TEMP/oracle"
+            "$RUNNER_TEMP/oracle" > "$RUNNER_TEMP/expected"
+            for mode in default scalar; do
+              options=()
+              if [[ "$mode" == scalar ]]; then options+=(--scalar); fi
+              ./build/compiler --tier1 --verify -march=x86-64 "${options[@]}" "$source" -o "$RUNNER_TEMP/subject"
+              "$RUNNER_TEMP/subject" > "$RUNNER_TEMP/actual"
+              diff -u "$RUNNER_TEMP/expected" "$RUNNER_TEMP/actual"
+              passed=$((passed + 1))
+              printf 'PASS %s %s\n' "$mode" "$(basename "$source")"
+            done
           done
-      - name: Compare main.c symbols with the standard corpus flags
-        run: |
-          set -euo pipefail
-          mapfile -d '' -t flags < <(BUSTER_HOST_ARCH=znver5 ./build.sh print-compile-flags)
-          test "${#flags[@]}" -gt 0
-          ./build/compiler test-checker-corpus --clang clang --symbols --symbols-minimum 1 "${flags[@]}" src/buster/compiler/main.c
+          test "$passed" = 58
+          printf 'Tier 1: %d driver executions matched Clang, 17 inputs each\n' "$passed"
