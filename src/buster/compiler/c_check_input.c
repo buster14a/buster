@@ -311,6 +311,19 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
 typedef struct CheckInput CheckInput;
+typedef struct CheckInputEnumValue CheckInputEnumValue;
+struct CheckInputEnumValue
+{
+    uint32_t token;
+    unsigned __int128 value;
+};
+typedef struct CheckInputEnumDefinition CheckInputEnumDefinition;
+struct CheckInputEnumDefinition
+{
+    TypeId type;
+    uint32_t open;
+    uint32_t close;
+};
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
 struct CheckInputLiteralTable
 {
@@ -471,6 +484,12 @@ struct CheckInput
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
+    // The unit's enumerator declarations, in source order: their names' tokens and ICE values.
+    CheckInputEnumValue* enum_values;
+    uint32_t enum_value_count;
+    // Each enum tag definition's type and brace range, so a selector finds its own tag rather than a name search.
+    CheckInputEnumDefinition* enum_definitions;
+    uint32_t enum_definition_count;
     uint8_t* function_flags;
     // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
     // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
@@ -9616,6 +9635,79 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
             input->resource |= !valid;
+        }
+        if (valid && input->declaration_kinds != NULL)
+        {
+            uint32_t enum_count = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                enum_count += input->declaration_kinds[token] == C_BINDING_ENUMERATOR;
+            }
+            if (enum_count != 0)
+            {
+                CheckInputEnumValue* values = arena_push_array(arena, enum_count, sizeof(CheckInputEnumValue), _Alignof(CheckInputEnumValue));
+                valid = values != NULL;
+                for (uint32_t token = 0, at = 0; valid && token < count; token += 1)
+                {
+                    if (input->declaration_kinds[token] == C_BINDING_ENUMERATOR)
+                    {
+                        values[at++] = (CheckInputEnumValue){ .token = token, .value = reader.enum_values[token] };
+                    }
+                }
+                input->enum_values = values;
+                input->enum_value_count = valid ? enum_count : 0;
+                input->resource |= !valid;
+            }
+        }
+        if (valid)
+        {
+            uint32_t definition_count = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const TypeId tag = reader.tag_types[token];
+                if (tag != 0 && reader.tag_ends[token] != 0 && type_kind(types, type_unqualified(tag)) == BUSTER_TYPE_KIND_ENUM)
+                {
+                    const uint32_t end = reader.tag_ends[token] < count ? reader.tag_ends[token] : count;
+                    for (uint32_t at = token + 1; at < end; at += 1)
+                    {
+                        if (parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
+                        {
+                            definition_count += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (definition_count != 0)
+            {
+                CheckInputEnumDefinition* definitions = arena_push_array(arena, definition_count, sizeof(CheckInputEnumDefinition),
+                                                                          _Alignof(CheckInputEnumDefinition));
+                valid = definitions != NULL;
+                uint32_t at_definition = 0;
+                for (uint32_t token = 0; valid && token < count; token += 1)
+                {
+                    const TypeId tag = reader.tag_types[token];
+                    if (tag != 0 && reader.tag_ends[token] != 0 && type_kind(types, type_unqualified(tag)) == BUSTER_TYPE_KIND_ENUM)
+                    {
+                        const uint32_t end = reader.tag_ends[token] < count ? reader.tag_ends[token] : count;
+                        for (uint32_t at = token + 1; at < end; at += 1)
+                        {
+                            if (parser->tokens.kinds[at] == PARSE_KIND_L_BRACE)
+                            {
+                                definitions[at_definition++] = (CheckInputEnumDefinition){
+                                    .type = tag,
+                                    .open = at,
+                                    .close = parser->tree.parents[at],
+                                };
+                                break;
+                            }
+                        }
+                    }
+                }
+                input->enum_definitions = definitions;
+                input->enum_definition_count = valid ? definition_count : 0;
+                input->resource |= !valid;
+            }
         }
     }
     else

@@ -384,6 +384,7 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 #include "c_check_warning_render.c"
 #include "c_check_literal_diagnostic.c"
+#include "c_check_common_warnings.c"
 
 static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
 
@@ -494,7 +495,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
         if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
         {
             valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count &&
-                    event->payload.data == CHECK_WARNING_EXCESS_INITIALIZERS;
+                    (event->payload.data & 0xffff) == CHECK_WARNING_EXCESS_INITIALIZERS;
             if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
             {
                 const CheckWarningSeverity severity = check_diagnostic_severity(input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS);
@@ -504,7 +505,17 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity >= CHECK_WARNING_ERROR ? (source_error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
-                    pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s", check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS));
+                    const TypeId object = event->payload.first_type != 0 ? type_unqualified(type_strip_aligned(types, event->payload.first_type)) : 0;
+                    const uint8_t object_kind = object != 0 ? type_kind(types, object) : 0;
+                    const char* subject = object_kind == BUSTER_TYPE_KIND_ARRAY || object_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? "array" :
+                                          object_kind == BUSTER_TYPE_KIND_STRUCT ? "struct" :
+                                          object_kind == BUSTER_TYPE_KIND_UNION ? "union" : "scalar";
+                    const bool string = (event->payload.data & CHECK_INIT_EXCESS_STRING) != 0;
+                    const char* message = string ? "initializer-string for char array is too long" :
+                                          object != 0 ? check_warning_text(scratch, "excess elements in %s initializer", subject) :
+                                          check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS);
+                    pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s [-W%sexcess-initializers]",
+                                          message, severity >= CHECK_WARNING_ERROR ? "error," : "");
                     valid = !pp->diagnostic_collection_failed;
                 }
             }
@@ -625,13 +636,16 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
         if (body->return_warning != 0 && token < parser->tokens.count &&
             (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)))
         {
+            // The body's analysis boundary: the queued diagnostics' boundary is the `}` lookahead, and the
+            // return warning's RETURN phase keeps it after them, before the uninit SEMANTICs.
             const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
             const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
             if (severity != CHECK_WARNING_IGNORE && (uint64_t)publication * 4 + PP_DIAGNOSTIC_RETURN < first_error)
             {
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN, "non-void function does not return a value%s [%s-Wreturn-type]",
+                pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN,
+                                   "non-void function does not return a value%s [%s-Wreturn-type]",
                                    body->return_warning == 2 ? " in all control paths" : "",
                                    check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
             }
@@ -867,6 +881,43 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
+static const char* check_driver_pointer_sign_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                     const TypeTable* types, CheckWarningSpelling* spell, uint32_t token, Arena* scratch)
+{
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const char* result = "converts between pointers to integer types with different sign";
+    if (stream != NULL && types != NULL && node < stream->count && stream->graph != NULL && stream->graph->ops[node] == CHECK_OP_ASSIGN)
+    {
+        const uint32_t left = stream->graph->operand0[node];
+        const uint32_t right = stream->graph->operand1[node];
+        const String8 left_name = left < stream->count ?
+                                  check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, left), 0) : (String8){ 0 };
+        const String8 right_name = right < stream->count ?
+                                   check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, right), 0) : (String8){ 0 };
+        if (left_name.length != 0 && right_name.length != 0)
+        {
+            result = check_warning_text(scratch, "assigning to %.*s from %.*s converts between pointers to integer types with different sign",
+                                        (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
+        }
+    }
+    return result;
+}
+
+// A legacy warning's command-line and source policy: the same sparse group mapping the event warnings use, so
+// -Wno-NAME, -Werror=NAME and -Wno-everything reach the dense warning bits too.
+static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
+{
+    const uint32_t index = check_diagnostic_warning_index(warning);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, index, default_ignored, false);
+    CheckWarningSeverity severity = command.quiet ? CHECK_WARNING_IGNORE :
+        check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, index, command.severity);
+    if (severity != CHECK_WARNING_IGNORE && !command.system_headers && check_graph_system_token(&input->graph, token))
+    {
+        severity = CHECK_WARNING_IGNORE;
+    }
+    return severity;
+}
+
 static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
                                   const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
@@ -875,6 +926,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
     const uint64_t mark = scratch->length;
     const bool scalar = parser->options.scalar;
     const uint32_t count = parser->tokens.count;
+    CheckWarningSpelling spell = { 0 };
     // Every token key is at most count, so all of its possible radix digits are known without gather-loop state.
     const uint32_t varying = count != 0 ? UINT32_MAX >> __builtin_clz(count) : 0;
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
@@ -1123,14 +1175,25 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             {
                 const uint32_t warning_flag = flags & (0u - flags);
                 const bool ignored = (enabled & warning_flag) == 0;
-                const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning_flag, ignored);
+                const CheckWarningSeverity severity = check_driver_legacy_severity(pp, input, token, warning_flag, ignored);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                     PPDiagnosticPhase phase = PP_DIAGNOSTIC_SEMANTIC;
                     const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag, publication_end, original, &phase);
-                    pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase, "%s", check_diagnostic_message(warning_flag));
+                    const uint32_t index = check_diagnostic_warning_index(warning_flag);
+                    const char* option = index < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[index].option : NULL;
+                    const bool promoted = severity >= CHECK_WARNING_ERROR;
+                    const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) :
+                                         promoted ? " [-Werror]" : "";
+                    if (suffix != NULL)
+                    {
+                        const char* message = warning_flag == CHECK_WARNING_POINTER_SIGN ?
+                                              check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                                              check_diagnostic_message(warning_flag);
+                        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase, "%s%s", message, suffix);
+                    }
                 }
                 flags &= flags - 1;
             }
@@ -3360,6 +3423,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
                         .scalar = scalar,
+                        .return_warnings = !quiet && return_warning,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                         .asm_helpers = lanes != NULL && lanes->tier1,
@@ -3407,6 +3471,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, parser, pp, &program, baseline, quiet);
+                        if (!quiet)
+                        {
+                            check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, scratch);
+                        }
                     }
                     result = pp->errors != 0 ? 1 : result;
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);

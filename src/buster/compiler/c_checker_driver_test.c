@@ -3816,11 +3816,12 @@ struct CheckTestDriverWarning
 };
 
 static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                             const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
+                                             const TypeTable* types, const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                              const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t count = parser->tokens.count;
+    CheckWarningSpelling spell = { 0 };
     const bool reports = input->report_count != 0 || (stream != 0 && stream->report_count != 0) || extra_count != 0;
     uint64_t* first = reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : NULL;
     const bool show_warnings = !quiet;
@@ -3913,12 +3914,23 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             {
                 const uint32_t warning = flags & (0u - flags);
                 const bool ignored = (warnings[token].enabled & warning) == 0;
-                const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning, ignored);
+                const CheckWarningSeverity severity = check_driver_legacy_severity(pp, input, token, warning, ignored);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                    pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning));
+                    const uint32_t index = check_diagnostic_warning_index(warning);
+                    const char* option = index < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[index].option : NULL;
+                    const bool promoted = severity >= CHECK_WARNING_ERROR;
+                    const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) :
+                                         promoted ? " [-Werror]" : "";
+                    const char* message = warning == CHECK_WARNING_POINTER_SIGN ?
+                                          check_driver_pointer_sign_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                                          check_diagnostic_message(warning);
+                    if (suffix != NULL)
+                    {
+                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s%s", message, suffix);
+                    }
                 }
                 flags &= flags - 1;
             }
@@ -4214,8 +4226,8 @@ static void check_test_driver_reports(CheckTest* test)
                 pp.options.diagnostics = memory;
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
-                                    (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                    (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, &types.table, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, &types.table, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {
@@ -6977,6 +6989,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_implicit(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_common_warnings(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

@@ -958,6 +958,17 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_
     va_end(arguments);
 }
 
+// `pp_diagnose_output_location` for callers holding a phase and a varargs-free message: a source location inside a
+// token's spelling (not its start) publishes where `position` sorts it, keeping the token's own origin history.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_diagnose_output_location_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location,
+                                                                                                          uint32_t position, PPDiagnosticPhase phase, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_location(pp, severity, token, location, position, phase, NULL, 0, format, arguments);
+    va_end(arguments);
+}
+
 // Notes share the primary's visibility, completion, error budget and fatal cutoff. Their output-token locations
 // retain their own macro histories, while collection owns the complete note span and all message bytes. Every
 // descriptor must name an existing output token and a non-NULL message; callers supply an immutable bounded span.
@@ -966,5 +977,14 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_
     va_list arguments;
     va_start(arguments, format);
     pp_diagnose_output_arguments(pp, severity, token, position, PP_DIAGNOSTIC_SEMANTIC, notes, note_count, format, arguments);
+    va_end(arguments);
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_diagnose_output_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase,
+                                                                                                        const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_arguments(pp, severity, token, position, phase, notes, note_count, format, arguments);
     va_end(arguments);
 }
