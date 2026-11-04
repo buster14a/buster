@@ -54,6 +54,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
     {
         case CHECK_INPUT_UNSUPPORTED: result = "construct is not yet supported by the type checker"; break;
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
+        case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
@@ -433,6 +434,7 @@ static const char* check_driver_initializer_message(CheckInitStatus status)
     const char* result = "invalid initializer";
     switch (status)
     {
+        case CHECK_INIT_MEMBER: result = "field designator does not refer to any field in the record type"; break;
         case CHECK_INIT_NON_CONSTANT: result = "initializer is not a constant expression"; break;
         case CHECK_INIT_UNSUPPORTED: result = "initializer construct is not supported"; break;
         case CHECK_INIT_RESOURCE: result = "initializer checking capacity exhausted"; break;
@@ -583,6 +585,18 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 #include "c_check_warning_render.c"
 #include "c_check_literal_diagnostic.c"
 #include "c_check_common_warnings.c"
+
+// Initializer failures retain the actual selected record, not merely the root declaration's type. The same
+// payload reaches here from early array inference and from final/damaged-unit initializer planning.
+static const char* check_driver_initializer_field_message(const Parser* parser, Preprocessor* pp, const CheckInput* input,
+                                                         const TypeTable* types, TypeId type, uint32_t token, Arena* scratch)
+{
+    CheckWarningSpelling spell = { 0 };
+    const String8 printed = check_driver_warning_type(parser, pp, input, types, &spell, scratch, type, 0);
+    const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : 0;
+    return printed.length != 0 ? check_warning_text(scratch, "field designator '%.*s' does not refer to any field in type %.*s",
+        (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)printed.length, printed.pointer) : NULL;
+}
 
 static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_t token, uint32_t source, uint32_t publication, Arena* scratch);
 
@@ -1666,6 +1680,14 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "value returned by '__builtin_counted_by_ref' cannot be used in %s expression",
                                                       detail == 0 ? "an array subscript" : "a binary");
                             }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_INITIALIZER_MEMBER)
+                        {
+                            const uint64_t type_mark = scratch->length;
+                            const char* text = check_driver_initializer_field_message(parser, pp, input, types, input->reports[index].type, token, scratch);
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s",
+                                                  text != NULL ? text : "initializer checking capacity exhausted");
+                            arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && kind >= CHECK_INPUT_COUNTED_UNION && kind <= CHECK_INPUT_COUNTED_PAREN)
                         {
@@ -3901,13 +3923,18 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         else if (!diagnosed && initializers.status != CHECK_INIT_OK)
                         {
                             earlier.status = initializers.status;
+                            earlier.failed_type = initializers.failed_type;
                             earlier.token = initializers.token;
                             earlier.completion = initializers.completion;
                         }
                         if ((diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
                             (!diagnosed && initializers.status != CHECK_INIT_OK))
                         {
-                            additional[additional_count++] = (CheckDriverDiagnostic){ earlier.token, check_driver_initializer_message(earlier.status), earlier.token, earlier.completion };
+                            const char* message = earlier.status == CHECK_INIT_MEMBER ?
+                                check_driver_initializer_field_message(checking, checking_pp, &input, &types, earlier.failed_type, earlier.token, output_arena) :
+                                check_driver_initializer_message(earlier.status);
+                            additional[additional_count++] = (CheckDriverDiagnostic){ earlier.token,
+                                message != NULL ? message : "initializer checking capacity exhausted", earlier.token, earlier.completion };
                         }
                         if (diagnosed)
                         {

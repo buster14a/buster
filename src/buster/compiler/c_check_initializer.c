@@ -37,6 +37,7 @@ typedef enum CheckInitStatus
 {
     CHECK_INIT_OK,
     CHECK_INIT_INVALID,
+    CHECK_INIT_MEMBER,
     CHECK_INIT_CHECK_FAILED,
     CHECK_INIT_NON_CONSTANT,
     CHECK_INIT_UNSUPPORTED,
@@ -70,6 +71,7 @@ struct CheckInitializer
     uint32_t count;
     CheckInitStatus status;
     uint32_t failed_token;
+    TypeId failed_type; // The record named by CHECK_INIT_MEMBER; zero for other failures.
     uint32_t warning_count;
     uint32_t warning_token;
 };
@@ -82,7 +84,7 @@ static __attribute__((unused)) bool check_initializer_run(TypeTable* types, cons
 static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* types, const Parser* parser, const InternTable* identifiers, TypeId type,
                                           uint32_t begin, uint32_t end, const uint64_t* designator_indices, const uint8_t* designator_valid,
                                           const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
-                                          uint32_t* failed_token, CheckInitStatus* status);
+                                          uint32_t* failed_token, CheckInitStatus* status, TypeId* failed_type);
 
 static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const CheckInitPart* part, uint64_t* bits);
 static CheckInitStatus check_initializer_live_writes(const TypeTable* types, const CheckInitializer* initialized, Arena* scratch, uint8_t** selected);
@@ -241,6 +243,14 @@ struct CheckInitWalker
     Arena* scratch;
     CheckInitializer* result;
 };
+
+// GNU's obsolete `member: value` is a field designator, not an identifier expression or a conditional colon.
+// The parser gives its colon the same assignment role as a modern designator's `=`. Keep source tokens intact.
+static bool check_init_old_style_designator(const Parser* parser, uint32_t token, uint32_t end)
+{
+    return token < end && end - token > 1 && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+           parser->tokens.kinds[token + 1] == PARSE_KIND_COLON && parser->tree.roles[token + 1] == PARSE_ROLE_ASSIGN;
+}
 
 static bool check_init_aggregate(const TypeTable* types, TypeId type)
 {
@@ -832,7 +842,8 @@ static void check_init_repeat(CheckInitWalker* walker, uint32_t* position, bool*
             const uint8_t kind = walker->parser->tokens.kinds[*position];
             const uint8_t next = *position + 1 < walker->parser->tokens.count ? walker->parser->tokens.kinds[*position + 1] : PARSE_KIND_COMMA;
             if (implicit && (kind == PARSE_KIND_R_BRACE ||
-                (kind == PARSE_KIND_COMMA && (next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_PERIOD))))
+                (kind == PARSE_KIND_COMMA && (next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_PERIOD ||
+                 check_init_old_style_designator(walker->parser, *position + 1, walker->parser->tokens.count)))))
             {
                 walker->depth = repeat->target_depth;
                 check_init_advance(walker);
@@ -885,6 +896,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
 {
     const Parser* parser = walker->parser;
     uint32_t token = *position;
+    const bool old_style = check_init_old_style_designator(parser, token, end);
     while (walker->depth > 1 && !walker->frames[walker->depth - 1].braced)
     {
         walker->depth -= 1;
@@ -1000,16 +1012,18 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                 token = close + 1;
             }
         }
-        else if (parser->tokens.kinds[token] == PARSE_KIND_PERIOD)
+        else if (parser->tokens.kinds[token] == PARSE_KIND_PERIOD || old_style)
         {
-            if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || token + 1 >= end ||
-                parser->tokens.kinds[token + 1] != PARSE_KIND_IDENTIFIER)
+            const uint32_t name_token = token + !old_style;
+            const TypeId field_type = frame->type;
+            if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || name_token >= end ||
+                parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
             {
                 check_init_fail(walker, CHECK_INIT_INVALID, token);
             }
             else
             {
-                const uint32_t name = parser->tokens.names[token + 1];
+                const uint32_t name = parser->tokens.names[name_token];
                 bool found = false;
                 while (!found && walker->result->status == CHECK_INIT_OK)
                 {
@@ -1039,7 +1053,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                     }
                     if (member == 0)
                     {
-                        check_init_fail(walker, CHECK_INIT_INVALID, token);
+                        check_init_fail(walker, CHECK_INIT_MEMBER, name_token);
+                        walker->result->failed_type = field_type;
                     }
                     else
                     {
@@ -1060,7 +1075,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                         }
                     }
                 }
-                token += 2;
+                token += old_style ? 1 : 2;
             }
         }
         else
@@ -1098,7 +1113,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     {
         // GNU's obsolete `[index] value` (and `[first ... last] value`): a designation of one array designator may
         // leave out its `=`, as clang (ext_gnu_missing_equal_designator) and GCC take it; the parser refused the rest.
-        const bool equal = token < end && parser->tokens.kinds[token] == PARSE_KIND_EQUAL;
+        const bool equal = token < end && (parser->tokens.kinds[token] == PARSE_KIND_EQUAL ||
+                                           (old_style && parser->tokens.kinds[token] == PARSE_KIND_COLON));
         const bool gnu = token < end && designators == 1 && parser->tokens.kinds[*position] == PARSE_KIND_L_SQUARE;
         if (!equal && !gnu)
         {
@@ -2290,7 +2306,8 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
         }
         else
         {
-            const bool designated = kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE;
+            const bool designated = kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE ||
+                                    check_init_old_style_designator(walker->parser, token, end);
             if (designated)
             {
                 check_init_designate(walker, &token, end);
@@ -2674,7 +2691,7 @@ static __attribute__((unused)) bool check_initializer_source(TypeTable* types, c
 static bool check_initializer_infer_array(TypeTable* types, const Parser* parser, const InternTable* identifiers, TypeId type, uint32_t begin,
                                           uint32_t end, const uint64_t* designator_indices, const uint8_t* designator_valid,
                                           const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
-                                          uint32_t* failed_token, CheckInitStatus* status)
+                                          uint32_t* failed_token, CheckInitStatus* status, TypeId* failed_type)
 {
     CheckInitializer result = {
         .type = type,
@@ -2706,6 +2723,7 @@ static bool check_initializer_infer_array(TypeTable* types, const Parser* parser
     }
     *completed = valid ? result.type : 0;
     *failed_token = result.failed_token;
+    *failed_type = result.failed_type;
     if (status != 0)
     {
         *status = result.status;

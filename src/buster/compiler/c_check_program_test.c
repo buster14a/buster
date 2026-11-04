@@ -2127,6 +2127,17 @@ static void check_test_program_initializer_facts(CheckTest* test)
 static void check_test_program_initializers(CheckTest* test, const char* clang)
 {
     check_test_program_initializer_facts(test);
+    check_test_program_source(test,
+        "struct P{int x,y,z;};int tested(int n){int calls=0;"
+        "struct P p={x:++calls,.x=n,y:5,6};"
+        "struct S{int a[2];struct P p;} s={p:{z:n,x:3},a:{n,7}};"
+        "union U{int x;long y;} u={y:n};"
+        "struct P rows[]={{y:n,x:2},{z:9}};"
+        "int bad=calls|(p.x!=n)|(p.y!=5)|(p.z!=6)|(s.a[0]!=n)|(s.a[1]!=7)|"
+        "(s.p.x!=3)|(s.p.y!=0)|(s.p.z!=n)|(u.y!=n)|(sizeof(rows)!=24)|"
+        "(rows[0].x!=2)|(rows[0].y!=n)|(rows[1].x!=0)|(rows[1].z!=9);"
+        "return bad?123456:n;}", "automatic-old-style-field-designators", clang);
+
     const uint32_t sizes[] = { 127, 128, 129, 135, 136, 137, 257, 512, 2049, 8193, 32769 };
     char* source = malloc(40000);
     check_test_expect(test, source != NULL, "large automatic initializer fixture allocation");
