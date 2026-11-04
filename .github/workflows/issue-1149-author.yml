@@ -9,30 +9,53 @@ jobs:
   author:
     if: github.repository_id == '1421805693'
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 25
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '0'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
-      - name: Inspect frame layout and apply the exact reviewed patch when present
+      - name: Apply and commit the exact branch-local patch
+        if: hashFiles('.github/issue-1149.patch') != ''
         shell: bash
         run: |
           set -euo pipefail
-          awk '/^static .*tier0_layout_frame\(/ { printing = 1 } printing { print } printing && /^}/ { printing = 0 }' src/buster/compiler/tier0.c
-          if test -f .github/issue-1149.patch; then
-            git apply --check --recount .github/issue-1149.patch
-            git apply --recount .github/issue-1149.patch
-            git diff --check
-            git diff --stat
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add -- src/buster/compiler docs
-            git -c core.hooksPath=/dev/null commit -m 'fix: carry emission CFA offsets beyond signed 32 bits' -m 'Restore the fixed imm32 frame range through events, rows and verification, with compile-only boundary regressions for #1149.' -m 'Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>'
-            git push origin HEAD:refs/heads/astra/1149-wide-cfa
-          fi
-          git archive --format=tar HEAD > "$RUNNER_TEMP/issue-1149-source.tar"
+          base64 --decode .github/issue-1149.patch | gzip -dc > "$RUNNER_TEMP/issue-1149.patch"
+          git apply --check --index "$RUNNER_TEMP/issue-1149.patch"
+          git apply --index "$RUNNER_TEMP/issue-1149.patch"
+          git diff --cached --check
+          git diff --cached --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          sh .githooks/enable-sign-off.sh --maintainer-session
+          git commit -m 'fix: carry emission CFA offsets beyond signed 32 bits' -m 'Restore the fixed imm32 frame range through events, rows and verification, with compile-only boundary regressions for #1149.'
+          git log -1 --format=fuller
+          git push origin HEAD:refs/heads/astra/1149-wide-cfa
+      - name: Install the existing hosted test toolchain
+        if: hashFiles('.github/issue-1149.patch') != ''
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build and run focused correctness tests
+        if: hashFiles('.github/issue-1149.patch') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh --config Release
+          compiler=$(./build.sh print-output --config Release)
+          "$compiler" test-emission-metadata
+          "$compiler" test-emitted-code --count 8 --cross-check
+          "$compiler" test-unwind --cross-check
+          "$compiler" test-tier1-frame
+          "$compiler" test-tier1-frame-execution
+          clang -std=c17 -O1 -g -march=x86-64 -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all -Isrc tests/emission-metadata/test.c -o "$RUNNER_TEMP/emission-metadata-sanitized"
+          "$RUNNER_TEMP/emission-metadata-sanitized"
+      - name: Export the exact resulting source
+        if: always()
+        run: git archive --format=tar HEAD > "$RUNNER_TEMP/issue-1149-source.tar"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
           name: issue-1149-source
           path: ${{ runner.temp }}/issue-1149-source.tar
