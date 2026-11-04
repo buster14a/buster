@@ -197,7 +197,7 @@ static inline __attribute__((always_inline)) void check_literal_integer(const ui
     uint64_t value = 0;
     uint32_t digits = 0;
     bool valid = length != 0;
-    bool previous_digit = true;
+    bool previous_digit = false;
     while (position < length)
     {
         const uint8_t c = bytes[position];
