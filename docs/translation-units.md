@@ -413,7 +413,11 @@ So a units lane does four things:
   memory with the rest of the address space, as it frees a command of one
   file's. Before a link it releases it as the others do, so that the link's
   peak stays the units': kept through synth's link by one lane, it took the
-  peak from 328 MB to 386.
+  peak from 328 MB to 386. The run counts the lanes still taking units
+  itself (`CheckUnitsRun`'s `taking`), apart from the board's count, which
+  gates the help: the board's allocation may fail on several lanes, and each
+  lane read none still taking units from a missing board, so each one took
+  itself for the last and left its memory to the exit (#1165's review).
 
 ## The link
 
@@ -682,8 +686,12 @@ driver as a process, in a directory of its own:
 - **A few large units** (#777): a unit of 800 functions beside a small one's
   `main`, with `-c` by 8 lanes and `--shared-parts` (a test option: a sharing
   emission pauses after each part it takes itself, and the command reports how
-  many parts the other lanes took), each object its own alone, the six lanes
-  without a unit having taken parts of the large one's; and linked by
+  many parts the other lanes took and how many lanes left their memory to the
+  exit), each object its own alone, the six lanes without a unit having taken
+  parts of the large one's and one lane alone leaving its memory to the exit;
+  again without the board (`BUSTER_TEST_NO_UNITS_BOARD`, a test hook that
+  stands for its allocation failing), with no part shared and still one lane
+  alone leaving its memory; and linked, where no lane leaves it, by
   `--lanes` 1, by 8 and by the scalar path on 8, the same bytes, a program
   whose sum is the test's.
 - **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8

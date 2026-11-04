@@ -341,6 +341,10 @@ struct CheckTier1Counts
     uint32_t open_frames;
     uint32_t return_tails;
     uint32_t red_zones;
+    // With --verify (#939), whether its code passed the certificate decoded from its records, or was left uncertified
+    // for a shape the decoding doesn't take yet (Tier1EmitResult.code_reason).
+    uint32_t code_certified;
+    uint32_t code_uncertified;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -369,6 +373,8 @@ struct CheckTier1Report
     uint64_t open_frames;
     uint64_t return_tails;
     uint64_t red_zones;
+    uint64_t code_certified;
+    uint64_t code_uncertified;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
@@ -3492,6 +3498,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.open_frames += compiled ? counts->open_frames : 0;
         lanes->tier1_report.return_tails += compiled ? counts->return_tails : 0;
         lanes->tier1_report.red_zones += compiled ? counts->red_zones : 0;
+        lanes->tier1_report.code_certified += compiled ? counts->code_certified : 0;
+        lanes->tier1_report.code_uncertified += compiled ? counts->code_uncertified : 0;
     }
     if (!valid)
     {
