@@ -93,12 +93,29 @@ immediates. AT&T extension spellings (`movzbl`, `movzwl`, `movsbl`, `movsbq`,
 `movslq`, and their other source/destination widths) check both widths, and so
 does LEA's suffix, which sizes only its destination. `cbtw/cwtl/cltq/cwtd/cltd/cqto`
 name the corresponding sign-extension instructions, and GNU as's other AT&T
-names are taken too: `stosl`, `insl` and the other dword string instructions,
+names are taken too: `stosl`, `insl` and the other dword string instructions
+(also with GNU as's explicit operands, below),
 `iret` and `sysret` (and their `l` spellings), the far returns `lret`, `lretw`,
 `lretl` and `lretq`, and the x87's 16-bit environment and state forms
 `fnsaves`, `fnstenvs`, `frstors` and the others. Intel's `movsx` of a
 doubleword source is `movsxd`, as GNU as reads it (`movsx r8, r8d`), and a shift
 or rotate of one operand shifts by 1 (`shrl %ecx`, `shr ecx`), the D1 form.
+
+A string instruction takes GNU as's explicit operands too (#1115: clang's
+`rep;movsq (%rsi), %es:(%rdi)` and `rep;stosb %al, %es:(%rdi)`, and Intel's
+`rep movsb es:[rdi], [rsi]`, `asm_string_operands`): RSI's memory, of any
+segment, as the source; RDI's, of ES or none, as the destination; the
+accumulator and DX's port (`%dx` or `(%dx)`) where the instruction has them, in
+AT&T's order or Intel's reverse. They give an unsuffixed mnemonic its size (`stos
+%eax, %es:(%rdi)` is `stosl`, `lods eax, dword ptr [rsi]` is `lodsd`) and must
+agree with a suffix's. As GNU as does, the source's segment but DS's and 0x67
+for ESI and EDI are written before the instruction's own prefixes, which inline
+assembly's records can't hold (its unit is assembled whole). Operands of another
+shape are left to the instruction's forms (SSE's `movsd` and `cmpsd`). A
+destination of another segment, a register of another size, mixed address sizes
+and Intel's operands without a size are refused, as GNU as refuses them; so,
+deliberately, are AT&T's without a size and RDI's memory as the source, where
+GNU as only warns.
 
 #1115 added what GCC's and Clang's ordinary `-S` output needs beyond that:
 
@@ -218,7 +235,11 @@ others, which Zen 4 lacks beside AVX512-VNNI) comes after the EVEX one, as GNU a
 picks it without `{vex}`. Then it takes the shortest, and of two as short, an
 immediate's sign-extended imm8 form before the accumulator's, as GNU as picks
 them (#1115: `cmpw $120, %ax` is `66 83 f8 78`, not `66 3d 78 00`): AX's 16-bit
-forms, whose imm16 makes them as long. An exchange of two general
+forms, whose imm16 makes them as long; and SSE2's and AVX's `movq` between
+memory and an XMM register in its own form (`F3 0F 7E`, `66 0F D6`), not the
+general register's, which takes memory too (#1115: clang's `vmovq %xmm1,
+(%r14,%rcx)` is `c4 c1 79 d6`, as long as `c4 c1 f9 7e`). AVX-512's EVEX `vmovq`
+takes the general register's form, as GNU as does. An exchange of two general
 registers with the accumulator first swaps its operands, so that `xchg rax, rcx`
 takes the accumulator's one-byte form (`48 91`), as GNU as encodes it; `xchg
 eax, eax` takes 87's form, since 90 is NOP, which keeps RAX's upper half, and
@@ -263,7 +284,7 @@ Directives:
 | Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T` flags, `@progbits`/`@nobits`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
-| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (with an optional fill byte) |
+| Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
 | Alignment | `.align`/`.balign` with power-of-two byte alignment, `.p2align`; optional byte fill and maximum skip (0 is none); `.nops` writes NOPs of a given length |
 | Metadata | `.file "name"`, `.ident`, `.addrsig`, `.addrsig_sym`; numbered DWARF `.file` and `.loc`, which make GNU as's line table (below); LLVM's `.prefalign` is accepted but adds no alignment |
 | Unwind | `.cfi_startproc [simple]`, `.cfi_endproc`, CFA/register/offset rules, state save/restore, escapes, return column and signal-frame metadata |

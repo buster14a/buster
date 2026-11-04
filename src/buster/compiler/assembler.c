@@ -2226,6 +2226,173 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
     }
 }
 
+// A string instruction's explicit operand (#1115): memory of RSI or RDI (or ESI or EDI) alone, with a segment or not;
+// the accumulator; or DX, or AT&T's `(%dx)`, for a port. Its width is a register's, or Intel's `ptr`'s.
+typedef struct AsmStringOperand AsmStringOperand;
+struct AsmStringOperand
+{
+    uint8_t kind;
+    uint8_t segment;
+    uint8_t width;
+    bool destination;
+    bool narrow;
+};
+
+#define ASM_STRING_NONE 0
+#define ASM_STRING_MEMORY 1
+#define ASM_STRING_ACCUMULATOR 2
+#define ASM_STRING_PORT 3
+
+static AsmStringOperand asm_string_operand(const AsmParser* parser, uint32_t at, uint32_t end)
+{
+    static const char* const segments[] = { "es", "cs", "ss", "ds", "fs", "gs" };
+    static const uint8_t overrides[] = { 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65 };
+    static const char* const accumulators[] = { "al", "ax", "eax", "rax" };
+    static const char* const sizes[] = { "byte", "word", "dword", "qword" };
+    const bool intel = parser->options.intel;
+    AsmStringOperand result = { 0 };
+    for (uint32_t i = 0; intel && at + 1 < end && asm_is_case(parser, at + 1, "ptr") && i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
+    {
+        result.width = asm_is_case(parser, at, sizes[i]) ? (uint8_t)(1u << i) : result.width;
+    }
+    at += result.width != 0 ? 2 : 0;
+    const uint32_t named = at + (!intel && at < end && parser->tokens[at].kind == '%' ? 1 : 0);
+    for (uint32_t i = 0; named + 1 < end && parser->tokens[named + 1].kind == ':' && (intel || named != at) && i < BUSTER_ARRAY_LENGTH(segments); i += 1)
+    {
+        result.segment = asm_is_case(parser, named, segments[i]) ? overrides[i] : result.segment;
+    }
+    at = result.segment != 0 ? named + 2 : at;
+    const uint32_t reg = at + (intel ? 0 : 1);
+    if (result.segment == 0 && reg + 1 == end && (intel || parser->tokens[at].kind == '%'))
+    {
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accumulators); i += 1)
+        {
+            if (asm_is_case(parser, reg, accumulators[i]))
+            {
+                result.kind = ASM_STRING_ACCUMULATOR;
+                result.width = (uint8_t)(1u << i);
+            }
+        }
+        result.kind = asm_is_case(parser, reg, "dx") ? ASM_STRING_PORT : result.kind;
+    }
+    else if (at < end && parser->tokens[at].kind == (intel ? '[' : '('))
+    {
+        const uint32_t base = at + (intel ? 1 : 2);
+        const bool shaped = base + 2 == end && parser->tokens[end - 1].kind == (intel ? ']' : ')') && (intel || parser->tokens[at + 1].kind == '%');
+        const bool source = shaped && (asm_is_case(parser, base, "rsi") || asm_is_case(parser, base, "esi"));
+        const bool destination = shaped && (asm_is_case(parser, base, "rdi") || asm_is_case(parser, base, "edi"));
+        result.kind = source || destination ? ASM_STRING_MEMORY : !intel && shaped && result.segment == 0 && asm_is_case(parser, base, "dx") ? ASM_STRING_PORT : ASM_STRING_NONE;
+        result.destination = destination;
+        result.narrow = (source || destination) && asm_token_text(parser, base).pointer[0] != 'r' && asm_token_text(parser, base).pointer[0] != 'R';
+    }
+    return result;
+}
+
+// A string instruction's explicit operands, as GNU as takes them (#1115: clang's `rep;movsq (%rsi), %es:(%rdi)` and
+// `rep stosb es:[rdi], al`): RSI's memory, of any segment, as the source; RDI's, of ES alone, as the destination; the
+// accumulator and DX's port, each where the instruction has it (AT&T's order, Intel's the reverse). They name its
+// size where the mnemonic doesn't (`stos %eax, %es:(%rdi)` is stosl) and must agree with it. GNU as then writes the
+// source's segment but DS's, and 0x67 for ESI and EDI, before the instruction's own prefixes: `prefixes` takes those
+// bytes. Operands of another shape (SSE's movsd and cmpsd) are left to the instruction's own forms.
+static uint32_t asm_string_operands(AsmParser* parser, String8* name, uint32_t end, uint8_t* prefixes)
+{
+    static const char* const bases[] = { "movs", "cmps", "stos", "lods", "scas", "ins", "outs" };
+    // What each takes, in AT&T's order: S the source's memory, D the destination's, A the accumulator, P a port.
+    static const char* const shapes[] = { "SD", "DS", "AD", "SA", "DA", "PD", "SP" };
+    uint64_t space = 0;
+    for (uint64_t i = 0; i < name->length; i += 1)
+    {
+        space = name->pointer[i] == ' ' ? i + 1 : space;
+    }
+    const String8 bare = { .pointer = name->pointer + space, .length = name->length - space };
+    uint32_t base = BUSTER_ARRAY_LENGTH(bases);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bases); i += 1)
+    {
+        const uint64_t length = strlen(bases[i]);
+        base = base == BUSTER_ARRAY_LENGTH(bases) && (bare.length == length || bare.length == length + 1) && memcmp(bare.pointer, bases[i], length) == 0 ? i : base;
+    }
+    const uint64_t base_length = base < BUSTER_ARRAY_LENGTH(bases) ? strlen(bases[base]) : 0;
+    const char written = base_length != 0 && bare.length == base_length + 1 ? bare.pointer[base_length] : 0;
+    const char suffix = written == 'l' && !parser->options.intel ? 'd' : written;
+    uint32_t comma = end;
+    uint32_t commas = 0;
+    uint32_t depth = 0;
+    for (uint32_t i = parser->at; base_length != 0 && i < end; i += 1)
+    {
+        const uint16_t kind = parser->tokens[i].kind;
+        depth += kind == '(' || kind == '[';
+        depth -= (kind == ')' || kind == ']') && depth != 0;
+        comma = kind == ',' && depth == 0 && commas++ == 0 ? i : comma;
+    }
+    uint32_t count = 0;
+    const bool sized = written == 0 || suffix == 'b' || suffix == 'w' || suffix == 'd' || (suffix == 'q' && base < 5);
+    if (base_length != 0 && sized && commas == 1 && parser->at < comma && comma + 1 < end)
+    {
+        AsmStringOperand operands[2] = { asm_string_operand(parser, parser->at, comma), asm_string_operand(parser, comma + 1, end) };
+        if (parser->options.intel)
+        {
+            const AsmStringOperand first = operands[0];
+            operands[0] = operands[1];
+            operands[1] = first;
+        }
+        bool shaped = true;
+        uint8_t width = suffix == 'b' ? 1 : suffix == 'w' ? 2 : suffix == 'd' ? 4 : suffix == 'q' ? 8 : 0;
+        bool agree = true;
+        bool narrow = false;
+        bool wide = false;
+        uint8_t segment = 0;
+        bool destination_segment = true;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            const char shape = shapes[base][i];
+            const AsmStringOperand* operand = &operands[i];
+            shaped &= shape == 'S' ? operand->kind == ASM_STRING_MEMORY && !operand->destination : shape == 'D' ? operand->kind == ASM_STRING_MEMORY && operand->destination :
+                      shape == 'A' ? operand->kind == ASM_STRING_ACCUMULATOR : operand->kind == ASM_STRING_PORT;
+            agree &= operand->width == 0 || width == 0 || operand->width == width;
+            width = width == 0 ? operand->width : width;
+            narrow |= operand->kind == ASM_STRING_MEMORY && operand->narrow;
+            wide |= operand->kind == ASM_STRING_MEMORY && !operand->narrow;
+            segment = shape == 'S' && operand->segment != 0x3e ? operand->segment : segment;
+            destination_segment &= shape != 'D' || operand->segment == 0 || operand->segment == 0x26;
+        }
+        if (shaped)
+        {
+            const char size = width == 1 ? 'b' : width == 2 ? 'w' : width == 4 ? 'd' : width == 8 && base < 5 ? 'q' : 0;
+            char* spelling = arena_push(parser->arena, space + base_length + 1, 1);
+            if (!destination_segment)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "a string instruction's destination must use the ES segment");
+            }
+            else if (!agree || size == 0)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, size == 0 ? "a string instruction's operands give no size, nor does its mnemonic"
+                                                                             : "a string instruction's operands and mnemonic disagree on its size");
+            }
+            else if (narrow && wide)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "a string instruction's operands mix address sizes");
+            }
+            else if (spelling == 0)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "arena exhausted");
+            }
+            else
+            {
+                memcpy(spelling, name->pointer, space);
+                memcpy(spelling + space, bases[base], base_length);
+                spelling[space + base_length] = size;
+                *name = (String8){ .pointer = spelling, .length = space + base_length + 1 };
+                prefixes[count] = segment;
+                count += segment != 0;
+                prefixes[count] = 0x67;
+                count += narrow;
+                parser->at = end;
+            }
+        }
+    }
+    return count;
+}
+
 // GNU as's compare-predicate names (#1115): cmpPss, cmpPsd, cmpPps and cmpPpd for SSE's eight predicates, vcmpP... for
 // AVX's 32 (and the aliases of the first eight), and AVX-512's vpcmpP{b,w,d,q} and vpcmpPu{b,w,d,q} for its eight, each
 // the instruction without the predicate and the predicate's number as its immediate: clang writes `cmpltsd %xmm2,
@@ -2321,6 +2488,8 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         asm_prefixed_mnemonic(parser, name, end);
         asm_string_mnemonic(parser, name, end);
         instruction->written = asm_token_text(parser, parser->at - 1);
+        uint8_t string_prefixes[2];
+        const uint32_t string_prefix_count = asm_string_operands(parser, name, end, string_prefixes);
         const int32_t predicate = asm_compare_predicate(name);
         uint32_t width = 0;
         uint32_t source_width = 0;
@@ -2478,8 +2647,29 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
             exchanged[1] = operand;
             instruction->expressions[1] = expression;
         }
-        // GNU as gives an instruction the row a `.loc` left waiting (#1115).
+        // GNU as gives an instruction the row a `.loc` left waiting (#1115), before its prefixes.
         asm_line_instruction(parser, location);
+        if (string_prefix_count != 0 && parser->code)
+        {
+            // Code that another function's records hold has no bytes but its records': its caller assembles it whole.
+            parser->directive = true;
+            asm_fail(parser, location, "inline assembly's string instruction operands that need a prefix are its unit's");
+        }
+        else if (string_prefix_count != 0 && parser->result.error == 0)
+        {
+            const uint32_t prefix = asm_fragment(parser, ASM_BYTES, location);
+            uint8_t* bytes = arena_push(parser->arena, string_prefix_count, 1);
+            if (bytes == 0)
+            {
+                asm_fail(parser, location, "arena exhausted");
+            }
+            else if (parser->result.error == 0)
+            {
+                memcpy(bytes, string_prefixes, string_prefix_count);
+                parser->fragments[prefix].bytes = bytes;
+                parser->fragments[prefix].size = string_prefix_count;
+            }
+        }
         instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
         parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
         parser->sections[parser->section].data = false;
@@ -3190,8 +3380,9 @@ static void asm_directive(AsmParser* parser, uint32_t end)
              asm_is(parser, token, ".align") || asm_is(parser, token, ".balign") || asm_is(parser, token, ".p2align"))
     {
         const bool nops = asm_is(parser, token, ".nops");
-        const bool skip = asm_is(parser, token, ".skip") || asm_is(parser, token, ".space");
-        const bool align = !asm_is(parser, token, ".zero") && !skip && !nops;
+        // GNU as's .zero is its .space, of an optional fill too: clang writes `.zero 16,63` for a vector of 63s (#1115).
+        const bool skip = asm_is(parser, token, ".skip") || asm_is(parser, token, ".space") || asm_is(parser, token, ".zero");
+        const bool align = !skip && !nops;
         __int128 value = asm_absolute(parser, end);
         if (asm_is(parser, token, ".p2align"))
         {

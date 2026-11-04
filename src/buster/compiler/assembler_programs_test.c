@@ -188,6 +188,25 @@ static const char asm_test_section_name_fixture[] =
     ".section .foo,\"a\",@progbits\n.byte 1\n.section .bar,\"a\",@progbits\n.quad .foo\n.long .foo+1\n.text\nleaq .foo(%rip), %rax\n"
     ".section .debug_abbrev,\"\",@progbits\n.byte 0\n.section .debug_aranges,\"\",@progbits\n.long .debug_abbrev\n";
 
+// String instructions' explicit operands, as GNU as takes them (#1115: clang's `rep;movsq (%rsi), %es:(%rdi)`, and
+// Intel's `rep movsb es:[rdi], [rsi]`): each instruction's in both syntaxes, a source's segment (DS's as none), 32-bit
+// addresses, sizes from a register or `ptr`, with rep and a rep statement, and SSE's movsd beside them; and .zero's
+// fill (clang's `.zero 16,63`).
+static const char asm_test_string_fixture[] =
+    ".text\nstrings:\nmovsq (%rsi), %es:(%rdi)\nmovsq %ds:(%rsi), %es:(%rdi)\nmovsq %fs:(%rsi), %es:(%rdi)\nmovsq (%esi), %es:(%edi)\n"
+    "stos %eax, %es:(%rdi)\nstosl %eax, (%rdi)\nlods (%rsi), %ax\nlodsb %fs:(%rsi), %al\nscasq %es:(%rdi), %rax\ncmpsl %es:(%rdi), (%rsi)\n"
+    "insb (%dx), %es:(%rdi)\ninsl %dx, %es:(%rdi)\noutsw %gs:(%rsi), (%dx)\nrep movsq %fs:(%rsi), %es:(%rdi)\nrep movsq %fs:(%esi), %es:(%edi)\n"
+    "rep stosw %ax, %es:(%edi)\nrepne scasb %es:(%rdi), %al\nrep;movsb (%rsi), %es:(%rdi)\nrep;stosb %al, %es:(%rdi)\nmovsb %cs:(%rsi), %es:(%rdi)\n"
+    "movsb %es:(%rsi), %es:(%rdi)\nmovsb %ss:(%rsi), (%rdi)\nmovsd %xmm0, %xmm1\nmovsd (%rsi), %xmm1\n.intel_syntax noprefix\n"
+    "rep movsb es:[rdi], [rsi]\nrep stosb es:[rdi], al\nmovs qword ptr es:[rdi], qword ptr fs:[rsi]\nlods eax, dword ptr [rsi]\n"
+    "cmps byte ptr [rsi], byte ptr es:[rdi]\nscasb al, byte ptr es:[rdi]\nmovsd dword ptr es:[rdi], dword ptr [rsi]\noutsb dx, byte ptr [rsi]\n"
+    "movsd xmm0, qword ptr [rsi]\n.att_syntax prefix\n.data\n.zero 16,63\n.zero 3\n.zero 2,0x90\n";
+// AVX's vmovq between memory and an XMM register in its own form where VEX's three bytes make the general register's
+// as long (#1115), and AVX-512's in the general register's, as GNU as chooses them.
+static const char asm_test_vmovq_fixture[] =
+    ".text\nvmovq_forms:\nvmovq %xmm1, (%r14,%rcx)\nvmovq (%r13,%rax), %xmm1\nvmovq %xmm9, (%rax)\nvmovq (%rax), %xmm9\nvmovq %xmm1, (%rax)\nvmovq %rax, %xmm9\n"
+    "vmovq %xmm9, %r10\nvmovq %xmm9, %xmm2\nvmovq %xmm17, (%r14)\nvmovq (%r14), %xmm17\n.intel_syntax noprefix\nvmovq qword ptr [r14+rcx], xmm1\n";
+
 // GNU as's line table of `.file` and `.loc` (#1115), compared byte for byte: DWARF 5's tables with MD5s and each way
 // a file names its directory; each row's file, column, discriminator, isa, is_stmt, basic_block, prologue_end and
 // epilogue_begin; line advances in and out of a special opcode's range, address advances by special opcode,
@@ -250,6 +269,8 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_line_empty_fixture, X86_ARCH_BASELINE },
         { asm_test_line_files_fixture, X86_ARCH_BASELINE },
         { asm_test_line_label_fixture, X86_ARCH_BASELINE },
+        { asm_test_string_fixture, X86_ARCH_BASELINE },
+        { asm_test_vmovq_fixture, X86_ARCH_V4 },
     };
     asm_test_relax_programs(test, directory, cross_check);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(accepted); i += 1)
@@ -282,7 +303,10 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     // unassigned file, `view 0` where the view isn't 0, a numeric view but 0, is_stmt but 0 or 1, an unknown `.loc`
     // option, a file slot named again for another file, an MD5 within 64 bits, a view of a defined symbol; and,
     // deliberately, rows without a .debug_info, where GNU as writes its own DWARF, and a DWARF 5 table without `.file
-    // 0`'s directory, where GNU as takes its working directory.
+    // 0`'s directory, where GNU as takes its working directory. Of string instructions' operands: a destination of
+    // another segment than ES, a register of another size than the suffix's, mixed address sizes, Intel's without a
+    // size, and, deliberately, AT&T's without one (where GNU as warns and takes 32 bits) and RDI's memory as the source
+    // (where it warns and takes the instruction's own).
     static const char* const rejected[] = {
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",
@@ -314,6 +338,12 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         ".file 1 \"x.c\"\n.text\nl: nop\n.loc 1 1 0 view l\n",
         ".file 0 \"/d\" \"x.c\"\n.text\n.loc 0 1 0\nnop\n",
         ".file 0 \"x.c\"\n.text\n.loc 0 1 0\nnop\n.section .debug_info,\"\",@progbits\n.long 0\n",
+        ".text\nmovsq (%rsi), %ds:(%rdi)\n",
+        ".text\nstosb %ax, %es:(%rdi)\n",
+        ".text\nmovsq (%esi), %es:(%rdi)\n",
+        ".intel_syntax noprefix\nmovs es:[rdi], [rsi]\n",
+        ".text\nmovs (%rsi), %es:(%rdi)\n",
+        ".text\nmovsq (%rdi), %es:(%rsi)\n",
         ".section .rodata.str8.8,\"aMS\",@progbits,8\n.quad 0\n",
         "fadd %st(8)\n",
         "fld %st(x)\n",

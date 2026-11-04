@@ -887,10 +887,13 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 // repeat that validation merely to get this length; no record changes between the two boundaries.
                 const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
                 // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
-                // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too.
+                // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too;
+                // and so AVX's vmovq where both need VEX's three bytes (#1115: clang's `vmovq %xmm1, (%r14,%rcx)` is
+                // C4 C1 79 D6, not C4 C1 F9 7E). AVX-512's EVEX vmovq takes the general register's, as GNU as does.
                 const uint32_t chosen = (uint32_t)(x86_form_description(result.instruction.form) - x86_form_descriptions);
                 const uint32_t number = (uint32_t)(x86_form_description(instruction.form) - x86_form_descriptions);
-                const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
+                const bool movq = ((chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X)) ||
+                                  ((chosen == X86_FORM_VMOVQ_X_RM64 || chosen == X86_FORM_VMOVQ_RM64_X) && (number == X86_FORM_VMOVQ_X_XM64 || number == X86_FORM_VMOVQ_XM64_X));
                 // And an immediate that fits a sign-extended byte in its imm8 form, not the accumulator's (#1115:
                 // `cmpw $120, %ax` is 66 83 F8 78, not 66 3D 78 00), where the two are as long: AX's 16-bit forms.
                 const bool accumulator = result.found && x86_form_descriptions[chosen].syntax == X86_SYNTAX_ACC_IMM && x86_form_descriptions[number].syntax != X86_SYNTAX_ACC_IMM;
